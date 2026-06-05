@@ -1,6 +1,3 @@
-// app/(public)/faq/page.tsx
-// 公開ページのよくある質問ページ
-
 import { ChevronDown } from "lucide-react";//下矢印アイコン
 import { PageTitle } from "@/components/public/PageTitle";
 import {
@@ -10,14 +7,23 @@ import {
 } from "@/constants/faq";
 import { findPublishedFaqs } from "@/lib/repositories/faq";
 
+// 【追加】FAQデータの正しい構造を型として定義（anyを排除）
+type FaqItem = {
+  id: string;
+  category: string;
+  question: string;
+  answer: string;
+};
+
 export const dynamic = "force-dynamic";
 
 export default async function FaqPage() {
   const faqs = await findPublishedFaqs();
 
-  //バラバラのFAQデータをカテゴリごとに分けて表示しやすい形に作り変える関数
+  // バラバラのFAQデータをカテゴリごとに分けて表示しやすい形に作り変える関数
   const faqsByCategory = FAQ_CATEGORY_ORDER.map((category) => {
-    const items = faqs.filter((faq) => faq.category === category);//FAQの中から、同じカテゴリーのものだけを抽出してitems(のちのQ&A)にする
+    // 【修正ポイント】anyを使わず、上で作った FaqItem 型を割り当てる
+    const items = faqs.filter((faq: FaqItem) => faq.category === category);
 
     return {
       category,
@@ -89,11 +95,11 @@ export default async function FaqPage() {
         ))}
 
         <a
-        href="#top"
-        className="fixed bottom-5 right-4 z-20 rounded-full border border-green-800 bg-white/95 px-4 py-2 text-xs font-bold text-green-800 shadow-lg transition hover:bg-green-50 sm:bottom-8 sm:right-8 sm:text-sm"
-      >
-        ▲ページ上部へ
-      </a>
+          href="#top"
+          className="fixed bottom-5 right-4 z-20 rounded-full border border-green-800 bg-white/95 px-4 py-2 text-xs font-bold text-green-800 shadow-lg transition hover:bg-green-50 sm:bottom-8 sm:right-8 sm:text-sm"
+        >
+          ▲ページ上部へ
+        </a>
       </div>
     </div>
   );
