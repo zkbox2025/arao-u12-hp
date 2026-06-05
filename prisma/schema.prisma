@@ -74,6 +74,19 @@ model Faq {
   sortOrder Int           @default(0) // 自動で番号をふって並び替えできるようにする
 }
 
+//送信用スパム対策
+model FormSubmissionLog {
+  id          String   @id @default(uuid())
+  createdAt   DateTime @default(now())
+
+  formType    FormType
+  ipHash      String?
+  emailHash   String?
+  userAgent   String?
+  result      SubmissionResult
+  reason      String?
+}
+
 enum Type {
   OBSERVATION //見学
   TRIAL //体験
@@ -118,4 +131,14 @@ enum FaqCategory {
   PARENT
   FEE
   JOIN
+}
+
+enum FormType {
+  CONTACT
+  SESSION_APPLICATION
+}
+
+enum SubmissionResult {
+  ALLOWED
+  BLOCKED
 }

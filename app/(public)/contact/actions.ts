@@ -5,9 +5,11 @@
 
 import { redirect } from "next/navigation";
 import { prisma } from "@/src/infrastructure/prisma/client";
-import { sendAdminContactNotification } from "@/lib/mail/contact-mail";
+import { sendAdminContactNotification , sendContactAutoReply } from "@/lib/mail/contact-mail";
 import { contactSchema } from "@/lib/validations/contact";
 import type { ActionState } from "@/types/action-state";
+
+
 
 type ContactField =
   | "name"
@@ -100,11 +102,26 @@ export async function submitContactAction(
     },
   });
 
+  //DB保存後に管理者への通知メールを自動で送る
   try {
     await sendAdminContactNotification(savedContact);
   } catch (error) {
     console.error("管理者通知メールの送信に失敗しました", error);
   }
+
+  //DB保存後に送信者へ確認メールを自動で送る
+try {
+  await sendContactAutoReply({
+    name: savedContact.name,
+    nameKana: savedContact.nameKana,
+    email: savedContact.email,
+    content: savedContact.content,
+  });
+} catch (error) {
+  console.error("送信者確認メールの送信に失敗しました", error);
+}
+
+
 
   redirect("/contact?submitted=success#top");
 }

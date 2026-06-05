@@ -470,3 +470,81 @@ isOpen
 ・閉じるボタンやドロワー本体には、必要に応じて event.stopPropagation() を入れる。
 ・スマホ実機確認前には rm -rf .next、開発サーバー再起動、必要に応じてシークレットモードで確認する。
 ・デバッグが終わったら、ClientCheck、TapCheck、FixedClickTest、RawDomTapTest、NativeClickTest、FullScreenTapTest などは必ず削除する。
+
+
+
+### [2026-06-05] [Vercelデプロイ時のPrisma型定義エラー修正]
+
+【影響範囲】
+発生環境：本番環境（Vercel デプロイ時）
+
+緊急度：高（MVPv1のリリース・デプロイがブロックされるため）
+
+
+【症状】
+何が起きたか：
+GitHubへコードをプッシュした際、Vercelのビルドプロセスで `@prisma/client` から `FaqCategory` がエクスポートされていないというTypeScriptの型エラーが発生し、デプロイが失敗した。
+
+期待していた動作：
+ローカル環境と同様に、データベースのスキーマ変更（`FaqCategory` の追加）が認識され、エラーなくビルドおよびデプロイが完了すること。
+
+
+【再現手順】
+1. `schema.prisma` に `model Faq` および列挙型 `FaqCategory` を新しく定義・追加する。
+
+2. 対象の型（`FaqCategory`）を定数ファイル等で `import type { FaqCategory } from "@prisma/client"` として読み込む。
+
+3. `git push` を実行し、Vercel側で自動ビルドを走らせる。
+
+
+【エラーメッセージ / ログ】
+・型エラー: モジュール '"@prisma/client"' にはエクスポートされたメンバー 'FaqCategory' がありません。
+
+・import type { FaqCategory } from "@prisma/client" ;
+
+・Next.jsビルドワーカーがコード1、シグナルnullで終了しました。
+
+・エラー: コマンド「npm run build」が終了コード1で終了しました
+
+
+【切り分けメモ（どこが怪しいか）】
+・ローカル環境では `npx prisma generate` を明示的に実行していたため、問題なくビルド（`npm run build`）が通る状態だった。
+
+・Vercel（リモート環境）側でのみ型が見つからないと言われるため、Vercelのビルド時に最新の `schema.prisma` から `@prisma/client` の型を再生成する処理が実行されていない可能性が高い。
+
+
+【原因（Root Cause）】
+・Vercelの標準設定では、ビルドコマンド（`next build`）の前に自動でPrismaの型生成（`prisma generate`）が行われない。
+
+・そのため、Vercel内の古い `@prisma/client` を参照してしまい、新しく追加した独自型（`FaqCategory`）を認識できずにコンパイルエラーとなっていた。
+
+
+【結論】
+・本番環境（Vercel）がデータベース設計図の最新の変更内容を認識できていないことが原因。
+
+
+【解決策（Fix）】
+・`package.json` の `scripts` 領域にある `build` コマンドを修正し、Next.jsのビルドが走る直前に必ずPrismaの型を生成するように変更した。
+
+```json
+"scripts": {
+  "build": "prisma generate && next build"
+}
+```
+
+
+【確認（動作検証）】
+・ローカル環境にて `npm run build` を実行し、`Generated Prisma Client` が出力されたのちに `✓ Compiled successfully` となり、正常に静的ページが生成されることを確認。
+
+・修正内容をGitHub（`mvp-v1` / `main` ブランチ）にプッシュし、Vercel側でもエラーを出さずにデプロイ（緑色のReadyマーク）が成功することを確認。
+
+
+【よくある落とし穴】
+・「ローカル（自分のPC）で動いているから、本番環境でもそのまま動くはず」と思い込んでしまうこと。
+
+・Prismaなどのツールは、スキーマを変更した後に「型を再生成するコマンド」をそれぞれの環境で実行させる必要がある。
+
+
+【再発防止（Prevention）】
+・今後データベースのスキーマ（`schema.prisma`）を変更・追加した際も、今回の修正によってVercel側で毎回自動的に最新の型定義が生成されるようになったため、根本的な再発防止策は完了。
+
