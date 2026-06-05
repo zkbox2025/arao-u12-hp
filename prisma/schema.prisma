@@ -1,13 +1,121 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
-  output   = "../app/generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
+}
+
+//体験/見学申し込み
+model SessionApplication {
+  id             String            @id @default(uuid())
+  createdAt      DateTime          @default(now())
+  type           Type // 参加内容（必須）
+  childName      String // 子供の名前（必須）
+  childNameKana  String // 子供の名前カナ（必須）
+  childGrade     Grade // 学年（必須 / 幼児、小1〜小6）
+  experience     ExperienceYears // 経験年数（必須）
+  preferredDate1 DateTime          @db.Date // 第一希望日 (必須)
+  preferredDate2 DateTime?         @db.Date // 第二希望日（任意）
+  email          String // メールアドレス（必須）
+  phone          String? // 電話番号（任意）
+  status         ApplicationStatus @default(PENDING) // 初期値は参加待ち
+  adminMemo      String? // 管理者メモ
+  updatedAt      DateTime          @updatedAt // ステータス変更・メモ編集日時
+}
+
+//問い合わせ
+model Contact {
+  id            String        @id @default(uuid())
+  createdAt     DateTime      @default(now())
+  name          String // 名前（必須）
+  nameKana      String // 名前カナ（必須）
+  email         String // メールアドレス（必須）
+  phone         String? // 電話番号（任意）
+  content       String // 問い合わせ内容
+  status        ContactStatus @default(PENDING) // 初期値は未回答
+  adminMemo     String? // 管理者メモ
+  updatedAt     DateTime      @updatedAt // ステータス変更・メモ編集日時
+}
+
+//文章ブロック管理画面用
+model PageContent {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  pageKey   String // どのページか（例: "TOP", "ABOUT", "POLICY", "FLOW"）
+  blockKey  String // どのパーツ（場所）か（例: "CLUB_NAME"）
+  content   String   @db.Text // 編集する文章そのもの（テキストのみ）
+  imageUrl  String? // 画像URL（MVP v1ではここに固定のダミーURLを入れる）
+
+  @@unique([pageKey, blockKey]) // 1ページ内に、同じブロックが重複しないように
+}
+
+//練習場所・時間変更画面用（お知らせ）
+model Notice {
+  id        String        @id @default(uuid())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  title     String
+  content   String        @db.Text
+  status    ContentStatus @default(DRAFT)
+  eventDate DateTime?     @db.Date // MVPv1.5にてカレンダー入力仕様。それまでは手入力
+}
+
+//よくある質問用
+model Faq {
+  id        String        @id @default(uuid())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  category  FaqCategory   @default(TARGET)
+  question  String        @db.Text
+  answer    String        @db.Text
+  status    ContentStatus @default(DRAFT)
+  sortOrder Int           @default(0) // 自動で番号をふって並び替えできるようにする
+}
+
+enum Type {
+  OBSERVATION //見学
+  TRIAL //体験
+}
+
+enum Grade {
+  YOUJI // 幼児
+  ELEMENTARY_1
+  ELEMENTARY_2
+  ELEMENTARY_3
+  ELEMENTARY_4
+  ELEMENTARY_5
+  ELEMENTARY_6
+}
+
+enum ExperienceYears {
+  NONE
+  LESS_THAN_1YEAR
+  YEARS_1_OR_MORE
+}
+
+enum ApplicationStatus {
+  PENDING
+  ATTENDED
+  CANCELED
+}
+
+enum ContactStatus {
+  PENDING
+  REPLIED
+}
+
+enum ContentStatus {
+  DRAFT
+  PUBLISHED
+}
+
+enum FaqCategory {
+  TARGET
+  PRACTICE
+  ACTIVITY
+  PARENT
+  FEE
+  JOIN
 }

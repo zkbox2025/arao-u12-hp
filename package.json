@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "db:seed:local": "dotenv -e .env.local -- prisma db seed"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",
@@ -15,25 +16,36 @@
     "@supabase/supabase-js": "^2.106.2",
     "clsx": "^2.1.1",
     "date-fns": "^4.3.0",
-    "lucide-react": "^1.16.0",
+    "lucide-react": "^1.17.0",
     "next": "16.2.6",
+    "pg": "^8.21.0",
     "prisma": "^7.8.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-hook-form": "^7.76.1",
+    "react-icons": "^5.6.0",
     "resend": "^6.12.4",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@prisma/adapter-pg": "^7.8.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv-cli": "^11.0.0",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
     "supabase": "^2.101.0",
     "tailwindcss": "^4",
+    "tsx": "^4.22.4",
     "typescript": "^5"
   }
+    
+  
 }
+
+
+
