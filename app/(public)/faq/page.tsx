@@ -1,3 +1,6 @@
+//app/(public)/faq/page.tsx
+//公開ページのよくある質問ページ
+
 import { ChevronDown } from "lucide-react";
 import { PageTitle } from "@/components/public/PageTitle";
 import {
@@ -24,7 +27,7 @@ type FaqCategorySection = {
 export const dynamic = "force-dynamic";
 
 export default async function FaqPage() {
-  const faqs = await findPublishedFaqs();
+const faqs: FaqItem[] = await findPublishedFaqs();
 
   const faqsByCategory: FaqCategorySection[] = FAQ_CATEGORY_ORDER.map(
     (category) => {
