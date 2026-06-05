@@ -1,4 +1,4 @@
-import { ChevronDown } from "lucide-react";//下矢印アイコン
+import { ChevronDown } from "lucide-react";
 import { PageTitle } from "@/components/public/PageTitle";
 import {
   FAQ_CATEGORY_LABELS,
@@ -7,7 +7,6 @@ import {
 } from "@/constants/faq";
 import { findPublishedFaqs } from "@/lib/repositories/faq";
 
-// 【追加】FAQデータの正しい構造を型として定義（anyを排除）
 type FaqItem = {
   id: string;
   category: string;
@@ -15,23 +14,32 @@ type FaqItem = {
   answer: string;
 };
 
+type FaqCategorySection = {
+  category: (typeof FAQ_CATEGORY_ORDER)[number];
+  label: string;
+  navLabel: string[];
+  items: FaqItem[];
+};
+
 export const dynamic = "force-dynamic";
 
 export default async function FaqPage() {
   const faqs = await findPublishedFaqs();
 
-  // バラバラのFAQデータをカテゴリごとに分けて表示しやすい形に作り変える関数
-  const faqsByCategory = FAQ_CATEGORY_ORDER.map((category) => {
-    // 【修正ポイント】anyを使わず、上で作った FaqItem 型を割り当てる
-    const items = faqs.filter((faq: FaqItem) => faq.category === category);
+  const faqsByCategory: FaqCategorySection[] = FAQ_CATEGORY_ORDER.map(
+    (category) => {
+      const items: FaqItem[] = faqs.filter(
+        (faq) => faq.category === category
+      );
 
-    return {
-      category,
-      label: FAQ_CATEGORY_LABELS[category],
-      navLabel: FAQ_CATEGORY_NAV_LABELS[category],
-      items,
-    };
-  });
+      return {
+        category,
+        label: FAQ_CATEGORY_LABELS[category],
+        navLabel: FAQ_CATEGORY_NAV_LABELS[category],
+        items,
+      };
+    }
+  );
 
   return (
     <div>
@@ -45,8 +53,9 @@ export default async function FaqPage() {
                 href={`#faq-${category.category.toLowerCase()}`}
                 className="flex min-h-24 flex-col items-center justify-center border border-neutral-800 bg-white px-2 py-4 text-center text-xs font-bold text-neutral-900 transition hover:bg-green-50 hover:text-green-800 sm:text-sm"
               >
-                <span>{category.navLabel[0]}</span>
-                <span>{category.navLabel[1]}</span>
+                {category.navLabel.map((label) => (
+    <span key={label}>{label}</span>
+  ))}
                 <span className="mt-3 h-px w-10 bg-neutral-800" />
                 <ChevronDown className="mt-2 h-5 w-5" aria-hidden="true" />
               </a>
@@ -74,7 +83,7 @@ export default async function FaqPage() {
               </p>
             ) : (
               <div className="divide-y divide-dashed divide-neutral-300">
-                {category.items.map((faq) => (
+                {category.items.map((faq: FaqItem) => (
                   <article key={faq.id} className="py-6">
                     <h3 className="font-bold leading-8 text-neutral-900">
                       <span className="mr-1 font-black text-green-700">
