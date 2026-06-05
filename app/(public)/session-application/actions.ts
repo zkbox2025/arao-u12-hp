@@ -5,9 +5,11 @@
 
 import { redirect } from "next/navigation";
 import { prisma } from "@/src/infrastructure/prisma/client";
-import { sendAdminSessionApplicationNotification } from "@/lib/mail/session-application-mail";
+import { sendAdminSessionApplicationNotification , sendSessionApplicationAutoReply } from "@/lib/mail/session-application-mail";
 import { sessionApplicationSchema } from "@/lib/validations/session-application";
 import type { ActionState } from "@/types/action-state";
+
+
 
 type SessionApplicationField =
   | "type"
@@ -121,11 +123,29 @@ export async function submitSessionApplicationAction(
     },
   });
 
+    //DB保存後に管理者への通知メールを自動で送る
   try {
     await sendAdminSessionApplicationNotification(savedApplication);
   } catch (error) {
     console.error("管理者通知メールの送信に失敗しました", error);
   }
+
+//DB保存後に送信者へ確認メールを自動で送る
+  try {
+  await sendSessionApplicationAutoReply({
+    type: savedApplication.type,
+    childName: savedApplication.childName,
+    childNameKana: savedApplication.childNameKana,
+    childGrade: savedApplication.childGrade,
+    experience: savedApplication.experience,
+    preferredDate1: savedApplication.preferredDate1.toISOString(),
+    preferredDate2: savedApplication.preferredDate2?.toISOString(),
+    email: savedApplication.email,
+    phone: savedApplication.phone,
+  });
+} catch (error) {
+  console.error("送信者確認メールの送信に失敗しました", error);
+}
 
   redirect("/session-application?submitted=success#top");
 }

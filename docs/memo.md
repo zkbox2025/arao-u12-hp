@@ -229,3 +229,6 @@ npx next dev --hostname 192.168.210.198 --port 3000」
 ◯　Next.jsのクライアント遷移で前の状態が残っており、遷移先のページ内の中途半端なところに遷移する場合は、明示的にページの一番上に戻ってと指示すればOK。
 例）redirect("/contact?submitted=success#top");
 ※#topはハッシュフラグメントと言ってページ内のどこにスクロールするか（ブラウザの制御用）のもので、クエリパラメータ（?submitted=success）とは明確に区別される。そのため、遷移先のconst isSubmitted = params.submitted === "success";はそのままでいい。
+
+
+◯

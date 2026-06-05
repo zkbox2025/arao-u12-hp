@@ -30,6 +30,7 @@ function formatDate(date: Date | null) {
   return date.toLocaleDateString("ja-JP");
 }
 
+//管理者への体験/見学申し込み通知メール関数
 export async function sendAdminSessionApplicationNotification(
   application: SessionApplication
 ) {
@@ -72,5 +73,63 @@ ${application.phone || "未入力"}
 ■ 受信日時
 ${application.createdAt.toLocaleString("ja-JP")}
     `.trim(),
+  });
+}
+
+//送信者への自動返信確認メール関数
+type SessionApplicationAutoReplyInput = {
+  type: "TRIAL" | "OBSERVATION";
+  childName: string;
+  childNameKana: string;
+  childGrade: string;
+  experience: string;
+  preferredDate1: string;
+  preferredDate2?: string | null;
+  email: string;
+  phone?: string | null;
+};
+
+function formatType(type: "TRIAL" | "OBSERVATION") {
+  return type === "TRIAL" ? "体験" : "見学";
+}
+
+export async function sendSessionApplicationAutoReply(
+  input: SessionApplicationAutoReplyInput
+) {
+  const from = process.env.MAIL_FROM;
+
+  if (!from) {
+    throw new Error("MAIL_FROM is not defined");
+  }
+
+  return resend.emails.send({
+    from,
+    to: input.email,
+    subject: "【受付】体験/見学のお申し込みを承りました",
+    text: `${input.childName} 様の保護者様
+
+この度は体験/見学にお申し込みいただき、誠にありがとうございます。
+お申し込みが完了いたしましたので、当日はどうぞお気をつけてお越しください。
+
+【当日のお持ち物について】
+・体験でお申し込みの場合：
+体育館シューズ（バッシュ等）、飲み物、運動着上下、タオルをご持参ください。
+
+・見学でお申し込みの場合：
+特にお持ちいただくものはございません。
+
+【お申し込み内容の控え】
+■ ご希望の参加内容：${formatType(input.type)}
+■ お子様のお名前：${input.childName}（${input.childNameKana}）
+■ 現在の学年：${input.childGrade}
+■ 経験年数：${input.experience}
+■ 第一希望日：${input.preferredDate1}
+■ 第二希望日：${input.preferredDate2 || "未入力"}
+■ メールアドレス：${input.email}
+■ 電話番号：${input.phone || "未入力"}
+
+※ご都合が悪くなった場合や、日時の変更をご希望される場合は、チーム公式LINEよりメッセージをお送りください。
+
+［ARAO U-12 BASKETBALL CLUB］`,
   });
 }
