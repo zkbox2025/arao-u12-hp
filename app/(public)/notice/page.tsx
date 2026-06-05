@@ -6,12 +6,19 @@ import { PageTitle } from "@/components/public/PageTitle";
 import { findPublishedNotices } from "@/lib/repositories/notice";
 import { formatDate } from "@/lib/utils/date";//日付を日本語表記にフォーマットするためのユーティリティ関数
 
+
+type NoticeItem = {
+  id: string;
+  title: string;
+  updatedAt: Date;
+};
+
 //この画面は、アクセスされるたびに毎回新しく作り直してね！という命令(動的レンダリングモードにする)
 //Next.jsは、通常、あらかじめ作った画面のデータを保存（キャッシュ）して使い回そうとするが、ブログ形式の練習スケ変更（Notice）の一覧ページでは、常に最新の情報を表示したいので、アクセスされるたびに毎回新しく作り直すようにする。
 export const dynamic = "force-dynamic";
 
 export default async function NoticePage() {
-  const notices = await findPublishedNotices();
+  const notices: NoticeItem[] = await findPublishedNotices();
 
   return (
     <div>
