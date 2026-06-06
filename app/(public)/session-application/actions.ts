@@ -8,7 +8,10 @@ import { prisma } from "@/src/infrastructure/prisma/client";
 import { sendAdminSessionApplicationNotification , sendSessionApplicationAutoReply } from "@/lib/mail/session-application-mail";
 import { sessionApplicationSchema } from "@/lib/validations/session-application";
 import type { ActionState } from "@/types/action-state";
-
+import { getRequestMeta } from "@/lib/security/request";
+import { checkFormRateLimit } from "@/lib/security/rate-limit";
+import { saveSubmissionLog } from "@/lib/security/submission-log";
+import { isHoneypotFilled, isTooFastSubmit } from "@/lib/security/form-spam";
 
 
 type SessionApplicationField =
@@ -96,6 +99,28 @@ export async function submitSessionApplicationAction(
     agreed: formData.get("agreed") === "on" ? "on" : "",
   };
 
+
+  //ボット判定専用関数に入れてチェック
+  if (isHoneypotFilled(formData)) {//もしif (true)なら、以下のリターンを返して終了
+  return {
+    ok: false,
+    message: "送信に失敗しました。",
+    errors: {},
+    values,
+  };
+}
+
+//送信速度判定関数に入れてチェック
+if (isTooFastSubmit(formData.get("formStartedAt"))) {//もしif (true)なら、以下のリターンを返して終了
+  return {
+    ok: false,
+    message: "入力内容をご確認のうえ、もう一度送信してください。",
+    errors: {},
+    values,
+  };
+}
+
+
   const parsed = sessionApplicationSchema.safeParse(rawData);
 
   if (!parsed.success) {
@@ -106,6 +131,48 @@ export async function submitSessionApplicationAction(
       values,
     };
   }
+
+  //「同じ体験/見学申し込み内容」として見るため、phone は入れない
+const sessionApplicationContentForRateLimit = [
+  parsed.data.type,
+  parsed.data.childName,
+  parsed.data.childNameKana,
+  parsed.data.childGrade,
+  parsed.data.experience,
+  parsed.data.preferredDate1,
+  parsed.data.preferredDate2 ?? "",
+].join("|");
+
+  //１分間もしくは1時間に一定数の送信回数を超えるとエラーを投げる処理
+const { ip, userAgent } = await getRequestMeta();
+
+const rateLimit = await checkFormRateLimit({
+  formType: "SESSION_APPLICATION",
+  ip,
+  email: parsed.data.email,
+  content: sessionApplicationContentForRateLimit,
+});
+
+if (!rateLimit.allowed) {
+  await saveSubmissionLog({
+    formType: "SESSION_APPLICATION",
+    ipHash: rateLimit.ipHash,
+    emailHash: rateLimit.emailHash,
+    contentHash: rateLimit.contentHash,
+    userAgent,
+    result: "BLOCKED",
+    reason: rateLimit.reason ?? "UNKNOWN",
+  });
+
+  return {
+    ok: false,
+    message:
+      "短時間に複数回送信されています。少し時間をおいてから再度お試しください。",
+    errors: {},
+    values,
+  };
+}
+
 
   const savedApplication = await prisma.sessionApplication.create({
     data: {
@@ -123,6 +190,22 @@ export async function submitSessionApplicationAction(
     },
   });
 
+
+ //送信回数を記録する（エラーだと次の通知メールに行かないのでtry/catchにする）
+try {
+  await saveSubmissionLog({
+    formType: "SESSION_APPLICATION",
+    ipHash: rateLimit.ipHash,
+    emailHash: rateLimit.emailHash,
+    contentHash: rateLimit.contentHash,
+    userAgent,
+    result: "ALLOWED",
+    reason: null,
+  });
+} catch (error) {
+  console.error("送信ログの保存に失敗しました", error);
+}
+
     //DB保存後に管理者への通知メールを自動で送る
   try {
     await sendAdminSessionApplicationNotification(savedApplication);
@@ -138,8 +221,8 @@ export async function submitSessionApplicationAction(
     childNameKana: savedApplication.childNameKana,
     childGrade: savedApplication.childGrade,
     experience: savedApplication.experience,
-    preferredDate1: savedApplication.preferredDate1.toISOString(),
-    preferredDate2: savedApplication.preferredDate2?.toISOString(),
+    preferredDate1: savedApplication.preferredDate1,
+    preferredDate2: savedApplication.preferredDate2,
     email: savedApplication.email,
     phone: savedApplication.phone,
   });

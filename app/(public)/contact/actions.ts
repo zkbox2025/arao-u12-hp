@@ -8,7 +8,10 @@ import { prisma } from "@/src/infrastructure/prisma/client";
 import { sendAdminContactNotification , sendContactAutoReply } from "@/lib/mail/contact-mail";
 import { contactSchema } from "@/lib/validations/contact";
 import type { ActionState } from "@/types/action-state";
-
+import { getRequestMeta } from "@/lib/security/request";
+import { checkFormRateLimit } from "@/lib/security/rate-limit";
+import { saveSubmissionLog } from "@/lib/security/submission-log";
+import { isHoneypotFilled, isTooFastSubmit } from "@/lib/security/form-spam";
 
 
 type ContactField =
@@ -81,6 +84,26 @@ export async function submitContactAction(
     agreed: formData.get("agreed") === "on" ? "on" : "",
   };
 
+  //ボット判定専用関数に入れてチェック
+  if (isHoneypotFilled(formData)) {//もしif (true)なら、以下のリターンを返して終了
+  return {
+    ok: false,
+    message: "送信に失敗しました。",
+    errors: {},
+    values,
+  };
+}
+
+//送信速度判定関数に入れてチェック
+if (isTooFastSubmit(formData.get("formStartedAt"))) {//もしif (true)なら、以下のリターンを返して終了
+  return {
+    ok: false,
+    message: "入力内容をご確認のうえ、もう一度送信してください。",
+    errors: {},
+    values,
+  };
+}
+
   const parsed = contactSchema.safeParse(rawData);
 
   if (!parsed.success) {
@@ -92,6 +115,39 @@ export async function submitContactAction(
     };
   }
 
+  //１分間もしくは1時間に一定数の送信回数を超えるとエラーを投げる処理
+const { ip, userAgent } = await getRequestMeta();
+
+const rateLimit = await checkFormRateLimit({
+  formType: "CONTACT",
+  ip,
+  email: parsed.data.email,
+  content: parsed.data.content,
+});
+
+if (!rateLimit.allowed) {
+  await saveSubmissionLog({
+    formType: "CONTACT",
+    ipHash: rateLimit.ipHash,
+    emailHash: rateLimit.emailHash,
+    contentHash: rateLimit.contentHash,
+    userAgent,
+    result: "BLOCKED",
+    reason: rateLimit.reason ?? "UNKNOWN",
+  });
+
+  return {
+    ok: false,
+    message:
+      "短時間に複数回送信されています。少し時間をおいてから再度お試しください。",
+    errors: {},
+    values,
+  };
+}
+
+
+
+
   const savedContact = await prisma.contact.create({
     data: {
       name: parsed.data.name,
@@ -101,6 +157,21 @@ export async function submitContactAction(
       content: parsed.data.content,
     },
   });
+
+  //送信回数を記録する（エラーだと次の通知メールに行かないのでtry/catchにする）
+try {
+  await saveSubmissionLog({
+    formType: "CONTACT",
+    ipHash: rateLimit.ipHash,
+    emailHash: rateLimit.emailHash,
+    contentHash: rateLimit.contentHash,
+    userAgent,
+    result: "ALLOWED",
+    reason: null,
+  });
+} catch (error) {
+  console.error("送信ログの保存に失敗しました", error);
+}
 
   //DB保存後に管理者への通知メールを自動で送る
   try {

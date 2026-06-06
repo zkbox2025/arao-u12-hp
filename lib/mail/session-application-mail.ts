@@ -25,6 +25,9 @@ const experienceLabel = {
   YEARS_1_OR_MORE: "1年以上",
 } as const;
 
+type ChildGrade = keyof typeof gradeLabel;
+type Experience = keyof typeof experienceLabel;
+
 function formatDate(date: Date | null) {
   if (!date) return "未入力";
   return date.toLocaleDateString("ja-JP");
@@ -81,10 +84,10 @@ type SessionApplicationAutoReplyInput = {
   type: "TRIAL" | "OBSERVATION";
   childName: string;
   childNameKana: string;
-  childGrade: string;
-  experience: string;
-  preferredDate1: string;
-  preferredDate2?: string | null;
+  childGrade: ChildGrade;
+  experience: Experience;
+  preferredDate1: Date;
+  preferredDate2: Date | null;
   email: string;
   phone?: string | null;
 };
@@ -121,10 +124,10 @@ export async function sendSessionApplicationAutoReply(
 【お申し込み内容の控え】
 ■ ご希望の参加内容：${formatType(input.type)}
 ■ お子様のお名前：${input.childName}（${input.childNameKana}）
-■ 現在の学年：${input.childGrade}
-■ 経験年数：${input.experience}
-■ 第一希望日：${input.preferredDate1}
-■ 第二希望日：${input.preferredDate2 || "未入力"}
+■ 現在の学年：${gradeLabel[input.childGrade]}
+■ 経験年数：${experienceLabel[input.experience]}
+■ 第一希望日：${formatDate(input.preferredDate1)}
+■ 第二希望日：${formatDate(input.preferredDate2)}
 ■ メールアドレス：${input.email}
 ■ 電話番号：${input.phone || "未入力"}
 

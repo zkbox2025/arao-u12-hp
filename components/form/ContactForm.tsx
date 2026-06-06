@@ -9,6 +9,7 @@ import type { ActionState } from "@/types/action-state";
 import { FormField } from "./FormField";
 import { PrivacyPolicyModal } from "./PrivacyPolicyModal";
 import { SubmitButton } from "./SubmitButton";
+import { SpamProtectionFields } from "./SpamProtectionFields";//スパム対策用のボット判定するための透明トラップ
 
 const initialState: ActionState = {
   ok: false,
@@ -43,6 +44,8 @@ function ContactFormInner({ state, formAction }: ContactFormInnerProps) {
   return (
     <>
       <form action={formAction} className="mt-8 space-y-6">
+        <SpamProtectionFields />
+        
         {state.message ? (
           <div className="rounded-lg bg-red-50 p-4 text-sm font-bold text-red-700">
             {state.message}
