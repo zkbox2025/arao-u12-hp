@@ -19,7 +19,7 @@ model FormSubmissionLog {
   createdAt   DateTime @default(now())
 
   formType    FormType
-  ipHash      String? //誰が（どのネット環境から）フォームを送信したかを識別する（IPアドレスの特定。個人情報なのでHash（復元できない文字列）を使う）
+  ipHash      String? //誰が（どのネット環境から）フォームを送信したかを識別する（IPアドレス（ネット上の住所）の特定。個人情報なのでHash（復元できない文字列）を使う）
   emailHash   String? //入力されたメールアドレスを暗号化して特定する
   userAgent   String? //送信に使われたブラウザや端末情報を特定する
   result      SubmissionResult

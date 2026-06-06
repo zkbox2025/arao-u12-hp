@@ -82,9 +82,14 @@ model FormSubmissionLog {
   formType    FormType
   ipHash      String?
   emailHash   String?
+  contentHash String?
   userAgent   String?
   result      SubmissionResult
   reason      String?
+
+  @@index([formType, ipHash, createdAt])
+  @@index([formType, emailHash, createdAt])
+  @@index([formType, emailHash, contentHash, createdAt])
 }
 
 enum Type {

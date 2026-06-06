@@ -1,4 +1,4 @@
-//lib/validations/session-application.ts
+// lib/validations/session-application.ts
 // 体験/見学申し込みフォームのバリデーションスキーマ
 
 import { z } from "zod";//バリデーションするための道具
@@ -67,16 +67,23 @@ export const sessionApplicationSchema = z
     email: z
       .string()
       .trim()
+      .max(255, "メールアドレスは255文字以内で入力してください")
       .pipe(z.email({ error: "メールアドレスの形式が正しくありません" })),
 
     emailConfirm: z
       .string()
       .trim()
-      .pipe(z.email({ error: "確認用メールアドレスの形式が正しくありません" })),
+      .max(255, "確認用メールアドレスは255文字以内で入力してください")
+      .pipe(
+        z.email({
+          error: "確認用メールアドレスの形式が正しくありません",
+        })
+      ),
 
     phone: z
       .string()
       .trim()
+      .max(20, "電話番号は20文字以内で入力してください")
       .optional()
       .refine(
         (value) => !value || /^[0-9+\-\s()]+$/.test(value),
@@ -84,8 +91,8 @@ export const sessionApplicationSchema = z
       ),
 
     agreed: z.unknown().refine((value) => value === "on", {
-  message: "プライバシーポリシーに同意してください",
-}),
+      message: "プライバシーポリシーに同意してください",
+    }),
   })
   .refine((data) => data.email === data.emailConfirm, {
     path: ["emailConfirm"],
