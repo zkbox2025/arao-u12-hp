@@ -1,5 +1,5 @@
 //lib/mail/resend.ts
-//
+//外部のメール送信機能であるResendに繋ぐ窓口
 
 import { Resend } from "resend";
 

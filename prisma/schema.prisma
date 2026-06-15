@@ -47,6 +47,7 @@ model PageContent {
   blockKey  String // どのパーツ（場所）か（例: "CLUB_NAME"）
   content   String   @db.Text // 編集する文章そのもの（テキストのみ）
   imageUrl  String? // 画像URL（MVP v1ではここに固定のダミーURLを入れる）
+  imageAlt  String?
 
   @@unique([pageKey, blockKey]) // 1ページ内に、同じブロックが重複しないように
 }
@@ -90,6 +91,13 @@ model FormSubmissionLog {
   @@index([formType, ipHash, createdAt])
   @@index([formType, emailHash, createdAt])
   @@index([formType, emailHash, contentHash, createdAt])
+}
+
+model FormNotificationSetting {
+  formType  FormType @id
+  emails    String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 enum Type {

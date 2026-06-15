@@ -252,4 +252,199 @@ npx next dev --hostname 192.168.210.198 --port 3000」
 ※#topはハッシュフラグメントと言ってページ内のどこにスクロールするか（ブラウザの制御用）のもので、クエリパラメータ（?submitted=success）とは明確に区別される。そのため、遷移先のconst isSubmitted = params.submitted === "success";はそのままでいい。
 
 
-◯
+◯updateSession と createClient の違い（動く場所とタイミング）
+この2つの関数は、Next.jsのシステム内において「動くステージ」と「実行されるタイミング」が明確に分かれています。
+1. updateSession（ミドルウェア）動く場所：
+ページが実際に表示される「前」の特殊な通り道（ミドルウェア層）動くタイミング：ユーザーがURLをクリックして画面が切り替わる瞬間に、Next.jsによって自動的に1回だけ実行されます。画面を作る前に、裏側でログイン期限の延長処理（セッション更新）だけをサッと済ませる全自動のガードマンのような存在です。
+
+2. createClient（サーバーコンポーネント・サーバーアクション等）動く場所：
+ページが表示される「中」の通常のプログラム内部（アプリケーション層）動くタイミング：画面に文字やデータを表示するとき、あるいはユーザーが「ログインボタン」を押したときなど、開発者がコードの中で直接呼び出したタイミングで実行されます。Supabaseからデータを取得したり、ログイン命令を出したりするための、手元の万能な道具箱のような存在です。
+
+◯ミドルウェアの「無限リダイレクト」について
+※今回の実装では未ログイン判定はページ側でrequireAdmin関数で行う。ミドルウェアは「クッキーを最新に保つ」ことだけに注力しているのでこれには当てはまらない（ミドルウェアが未ログイン判定を行う場合、リダイレクト先をログインページにした上でログインページもログインが必要としたら無限リダイレクトになるという危険性をこれからのべる）
+
+危ないのは、middleware 側にこういう処理を入れた場合（未ログイン判定を入れた場合）です。
+
+if (!user) {
+  return NextResponse.redirect(new URL("/admin/login", request.url));
+}
+
+この状態で matcher がこれだとします。
+
+export const config = {
+  matcher: ["/admin/:path*"],//adminから始まる全てのURLで行う
+};
+
+すると /admin/login も middleware の対象になります。
+
+流れはこうです。
+
+/admin/dashboard にアクセス
+↓
+middleware が未ログイン判定
+↓
+/admin/login にリダイレクト
+↓
+/admin/login にアクセス
+↓
+でも /admin/login も middleware 対象
+↓
+middleware が未ログイン判定
+↓
+また /admin/login にリダイレクト
+↓
+無限ループ
+
+つまり、ログインページに行きたいのに、ログインページ自身も「未ログイン禁止」扱いされるのが問題です。
+
+
+◯Next.jsでは、フォルダ名に丸カッコがついた (dashboard)（ルートグループ）はURLから完全に無視（省略）される
+
+◯ <Icon size={18} aria-hidden="true" />
+「目が見えない方が使う『画面読み上げソフト（スクリーンリーダー）』に対して、このアイコンを無視（非表示に）してください」と指示する設定
+
+
+◯過去に書いたメモ（defaultMemo）が最初から6行分の高さで表示されており、改行しながら新しく書き直して保存できる、綺麗な見た目の入力欄
+ <textarea
+        name="adminMemo"
+        rows={6}
+        defaultValue={defaultMemo}
+        className="w-full rounded-lg border border-neutral-300 px-4 py-3"
+      />
+
+      
+
+◯FAQの編集フォームで${faqId}を使う理由
+・「label と textarea を正しく連動させるため」
+・「画面内でのIDの重複（バグ）を防ぐため（クリックしたらクリックした質問と回答を編集できるようにするため）」
+
+<div>
+        <label
+          htmlFor={`edit-question-${faqId}`}
+          className="block text-sm font-bold text-neutral-900"
+        >
+          質問
+        </label>
+        <textarea
+          id={`edit-question-${faqId}`}
+          name="question"
+          rows={3}
+          defaultValue={defaultQuestion}
+          className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
+        />
+      </div>
+
+      <div>
+        <label
+          htmlFor={`edit-answer-${faqId}`}
+          className="block text-sm font-bold text-neutral-900"
+        >
+          回答
+        </label>
+        <textarea
+          id={`edit-answer-${faqId}`}
+          name="answer"
+          rows={6}
+          defaultValue={defaultAnswer}
+          className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
+        />
+      </div>
+
+
+◯Prisma７より、seedする際の設定が変わった。
+Prisma 6まではpackage.jsonに以下を書き加えなければならなかったが、
+
+//package.json
+{
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  }
+}
+
+Prisma７よりprisma.config.ts管理になった。
+以下、実装例。
+
+//prisma.config.ts
+
+import "dotenv/config";
+import { defineConfig } from "prisma/config";
+
+export default defineConfig({
+  schema: "prisma/schema.prisma",
+  migrations: {
+    path: "prisma/migrations",
+    seed: "tsx prisma/seed.ts",　　　　　　　　　　//←※（書き加えること）
+  },
+  datasource: {
+    url: process.env["DATABASE_URL"],
+  },
+});
+
+
+◯プルダウン選択の表示について
+（以下return）
+<select
+※ここからはプルダウンを動かした時の挙動について
+          id="pageKey"
+          value={selectedPageKey}
+          onChange={(event) => {
+            const nextPageKey = event.target.value as PageContentPageKey;
+            const nextBlockKey = getFirstBlockKey(nextPageKey);
+
+            moveTo({
+              pageKey: nextPageKey,
+              blockKey: nextBlockKey,
+            });
+          }}
+          className="mt-2 w-full rounded-lg border border-neutral-300 bg-white px-4 py-3"
+        >
+※ここからは表示についてのコード
+          {PAGE_CONTENT_PAGE_KEYS.map((pageKey) => (
+            <option key={pageKey} value={pageKey}>
+              {PAGE_CONTENT_DEFINITIONS[pageKey].label}
+            </option>
+          ))}
+        </select>
+    
+
+◯ユーザーには見せる必要はないけど、フォーム送信の際に、「どのページのどのパーツなのか」を入力値と一緒に送るために
+以下のように明記する
+    <form action={formAction} className="space-y-6">
+      <input type="hidden" name="pageKey" value={pageKey} />
+      <input type="hidden" name="blockKey" value={blockKey} />
+      ・・・
+
+
+
+◯\nは改行
+例）fallback: "ARAO U-12\nBASKETBALL CLUB",
+表示：
+ARAO U-12
+BASKETBALL CLUB
+
+◯fallback：空欄だった場合のデフォルト文言
+
+
+◯satori時の実装型との変更点について
+ToastMessageではURLを触らない
+↓
+Server Actionのredirect URLに toastId を付ける
+↓
+ToastMessageのkeyに toastId を入れる
+↓
+同じページ・同じパーツを連続保存しても毎回トーストが出る
+↓
+router.replaceとの競合がなくなる
+
+◯key はコンポーネントに渡される通常の props ではなく、React が内部で使う特別な属性。
+React は key を見て、前回と同じコンポーネントとして扱うか、別のコンポーネントとして作り直すかを判断する。key の値が変わると、そのコンポーネントは再マウントされる。再マウントされると useState や useActionState などの内部状態が初期化される。
+また、input や select や textarea で defaultValue / defaultChecked を使っている場合、defaultValue は基本的に「最初に表示されたとき」だけ反映される。
+そのため、エラー時に state.values が返ってきても、すでに表示済みのフォームが同じコンポーネントとして残っていると、defaultValue が再反映されず、古い初期値のまま見えることがある。
+このような場合に、state.values の内容や toastId などを key に含めて key を変えると、React がフォームを別物として再マウントする。
+その結果、defaultValue / defaultChecked がもう一度読み込まれ、エラー時に返ってきた state.values の入力内容をフォームへ再表示しやすくなる。つまり key を変える効果は、「入力値を直接渡すこと」ではなく、「コンポーネントを作り直して、defaultValue を再適用させること」。
+フォーム送信後に入力欄・選択項目・エラー状態をリセットしたい場合や、逆にエラー時に返ってきた state.values を defaultValue として確実に反映したい場合に有効。
+
+◯liffの流れについて再度復習すること。ワンタップで処理完了：申し込み通知をラインでタップした瞬間にラインの中で申し込み管理画面が開き、そのまま「承認」や「返信」の操作ができるように実装する。
+
+◯スムーズスクロールの部分をコード理解する
+

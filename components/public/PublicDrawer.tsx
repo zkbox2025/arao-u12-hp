@@ -67,7 +67,7 @@ export function PublicDrawer({ isOpen, onClose }: PublicDrawerProps) {
               {publicNavigationItems.map((item) => (
                 <li key={item.href}>
                   <Link
-                    href={item.href}
+                    href={`${item.href}#top`}
                     onClick={onClose}
                     className="block rounded-lg px-3 py-3 text-base font-medium text-neutral-800 transition hover:bg-green-50 hover:text-green-800"
                   >

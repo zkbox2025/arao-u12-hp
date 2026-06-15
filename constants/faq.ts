@@ -1,8 +1,27 @@
-//constants/faq.ts
-//FAQのカテゴリラベルと順番を定義づる関数
+// constants/faq.ts
+// FAQのカテゴリラベルと順番を定義するファイル
+
+import type { ContentStatus, FaqCategory } from "@prisma/client";
 
 
-import type { FaqCategory } from "@prisma/client";
+//FAQのカテゴリーの型定義
+export const FAQ_CATEGORIES = [
+  { value: "TARGET", label: "入会対象について" },
+  { value: "PRACTICE", label: "練習について" },
+  { value: "ACTIVITY", label: "活動内容について" },
+  { value: "PARENT", label: "保護者向け" },
+  { value: "FEE", label: "費用・月謝について" },
+  { value: "JOIN", label: "入会について" },
+] as const satisfies readonly {
+  value: FaqCategory;
+  label: string;
+}[];
+
+export type FaqCategoryValue = (typeof FAQ_CATEGORIES)[number]["value"];
+
+export const FAQ_CATEGORY_ORDER: FaqCategory[] = FAQ_CATEGORIES.map(
+  (category) => category.value
+);
 
 export const FAQ_CATEGORY_LABELS: Record<FaqCategory, string> = {
   TARGET: "入会対象について",
@@ -22,11 +41,16 @@ export const FAQ_CATEGORY_NAV_LABELS: Record<FaqCategory, string[]> = {
   JOIN: ["入会", "について"],
 };
 
-export const FAQ_CATEGORY_ORDER: FaqCategory[] = [
-  "TARGET",
-  "PRACTICE",
-  "ACTIVITY",
-  "PARENT",
-  "FEE",
-  "JOIN",
-];
+
+//FAQのステータスの型定義
+export const FAQ_STATUS_FILTERS = [
+  { value: "PUBLISHED", label: "公開中" },
+  { value: "DRAFT", label: "下書き" },
+  { value: "ALL", label: "全件" },
+] as const satisfies readonly {
+  value: ContentStatus | "ALL";
+  label: string;
+}[];
+
+export type FaqStatusFilterValue =
+  (typeof FAQ_STATUS_FILTERS)[number]["value"];

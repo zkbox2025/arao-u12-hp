@@ -1,5 +1,5 @@
-//app/(public)/faq/page.tsx
-//公開ページのよくある質問ページ
+// app/(public)/faq/page.tsx
+// 公開ページのよくある質問ページ
 
 import { ChevronDown } from "lucide-react";
 import { PageTitle } from "@/components/public/PageTitle";
@@ -9,6 +9,11 @@ import {
   FAQ_CATEGORY_ORDER,
 } from "@/constants/faq";
 import { findPublishedFaqs } from "@/lib/repositories/faq";
+import {
+  findPageContentsByPageKey,
+  getContentText,
+  toContentMap,
+} from "@/lib/repositories/page-content";
 
 type FaqItem = {
   id: string;
@@ -27,7 +32,19 @@ type FaqCategorySection = {
 export const dynamic = "force-dynamic";
 
 export default async function FaqPage() {
-const faqs: FaqItem[] = await findPublishedFaqs();
+  const [faqs, contents] = await Promise.all([
+    findPublishedFaqs(),
+    findPageContentsByPageKey("FAQ"),
+  ]);
+
+  const contentMap = toContentMap(contents);
+
+  const leadBody = getContentText({
+    contentMap,
+    blockKey: "LEAD_BODY",
+    fallback:
+      "入会前の疑問をわかりやすくまとめています。\n気になる点がある方は、こちらをご覧ください。",
+  });
 
   const faqsByCategory: FaqCategorySection[] = FAQ_CATEGORY_ORDER.map(
     (category) => {
@@ -48,6 +65,10 @@ const faqs: FaqItem[] = await findPublishedFaqs();
     <div>
       <PageTitle title="よくある質問" />
 
+      <p className="whitespace-pre-wrap leading-8 text-neutral-700">
+        {leadBody}
+      </p>
+
       <nav aria-label="FAQカテゴリメニュー" className="mb-10 pt-6">
         <ul className="grid grid-cols-3 gap-3 sm:grid-cols-6">
           {faqsByCategory.map((category) => (
@@ -57,8 +78,9 @@ const faqs: FaqItem[] = await findPublishedFaqs();
                 className="flex min-h-24 flex-col items-center justify-center border border-neutral-800 bg-white px-2 py-4 text-center text-xs font-bold text-neutral-900 transition hover:bg-green-50 hover:text-green-800 sm:text-sm"
               >
                 {category.navLabel.map((label) => (
-    <span key={label}>{label}</span>
-  ))}
+                  <span key={label}>{label}</span>
+                ))}
+
                 <span className="mt-3 h-px w-10 bg-neutral-800" />
                 <ChevronDown className="mt-2 h-5 w-5" aria-hidden="true" />
               </a>

@@ -548,3 +548,534 @@ GitHubへコードをプッシュした際、Vercelのビルドプロセスで `
 【再発防止（Prevention）】
 ・今後データベースのスキーマ（`schema.prisma`）を変更・追加した際も、今回の修正によってVercel側で毎回自動的に最新の型定義が生成されるようになったため、根本的な再発防止策は完了。
 
+
+
+###[2026-06-09] [ToastMessageの削除完了メッセージだけ表示されない]
+
+【影響範囲】
+発生環境：
+Next.js 管理画面 FAQ管理ページ `/admin/faq`
+
+緊急度：
+中  
+FAQ削除自体は成功していたが、管理者に削除完了が伝わらず、操作完了の確認がしづらくなるため。
+
+【症状】
+何が起きたか：
+FAQ削除後、URLは `/admin/faq?category=TARGET&status=PUBLISHED&deleted=1#top` になっていたが、「削除しました。」のトーストメッセージが表示されなかった。
+
+一方で、「保存しました。」や「並び順を保存しました。」のトーストは表示されていた。
+
+また、削除後に表示されたURLをブラウザへ直接入力し直すと、「削除しました。」のトーストは正常に表示された。
+
+期待していた動作：
+FAQ削除後、`deleted=1` のサーチパラムスを検知し、画面上部に「削除しました。」のトーストメッセージが3秒間表示される。
+
+【再現手順】
+1. `/admin/faq?category=TARGET&status=PUBLISHED` を開く。
+2. FAQカードの操作メニューから削除を実行する。
+3. `/admin/faq?category=TARGET&status=PUBLISHED&deleted=1#top` にリダイレクトされるが、「削除しました。」のトーストが表示されない。
+
+【エラーメッセージ / ログ】
+・コンソール上の明確な実行時エラーはなし。
+・URLには `deleted=1` が付与されていた。
+・`ToastMessage` の表示条件である `toastMessage` 自体は作られている可能性が高かった。
+
+【切り分けメモ（どこが怪しいか）】
+・`deleteFaq` のDB削除処理は成功していた。
+・リダイレクト後のURLにも `deleted=1` が付いていた。
+・`page.tsx` 側の `params.deleted === "1"` の判定も直接URL入力時には機能していた。
+・直接URL入力では表示されるため、Server ActionやsearchParamsの問題ではなさそう。
+・削除直後だけ表示されないため、Client Componentである `ToastMessage` の再表示制御が怪しいと判断。
+
+【原因（Root Cause）】
+・`ToastMessage` コンポーネントがReact上で再利用され、内部stateの `isVisible` が `false` のまま残っていたため。
+
+・`ToastMessage` は3秒後に以下の処理で非表示になる。
+
+```tsx
+setIsVisible(false);
+
+・その後、削除処理によって toastMessage が「削除しました。」に変わっても、Reactが同じ ToastMessage コンポーネントとして再利用したため、useState(true) が再実行されなかった。
+
+・結果として、内部stateは false のままとなり、以下の条件により何も表示されなかった。
+
+if (!isVisible) return null;
+
+【結論】
+・削除処理やURL生成は正しく動いていた。
+・原因は ToastMessage の再マウントが発生せず、非表示状態のstateが再利用されていたこと。
+・Reactの key を使って、トーストメッセージが変わったタイミングでコンポーネントを作り直す必要があった。
+
+【解決策（Fix）】
+・ToastMessage に key を付与し、メッセージが変わったら別コンポーネントとして再生成されるようにした。
+
+修正前：
+
+{toastMessage ? <ToastMessage message={toastMessage} /> : null}
+
+修正後：
+
+{toastMessage ? (
+  <ToastMessage key={toastMessage} message={toastMessage} />
+) : null}
+
+・これにより、toastMessage が「削除しました。」に変わったとき、ToastMessage が新しく作り直され、useState(true) が再度有効になった。
+
+【確認（動作検証）】
+・FAQ削除後、URLが /admin/faq?category=TARGET&status=PUBLISHED&deleted=1#top になることを確認。
+・削除直後に「削除しました。」のトーストが表示されることを確認。
+・「保存しました。」も引き続き表示されることを確認。
+・「並び順を保存しました。」も引き続き表示されることを確認。
+・トーストが3秒後に消えることを確認。
+
+【よくある落とし穴】
+・URLやsearchParamsが正しくても、Client Component内部のstateが再利用されて表示されないことがある。
+・useState(true) はコンポーネントが新しくマウントされたときだけ初期化される。
+・同じコンポーネントとしてReactに再利用されると、前回のstateが残る。
+・useEffect 内で setIsVisible(true) を直接呼んで対応しようとすると、React Compiler / ESLintで警告が出る場合がある。
+
+
+【再発防止（Prevention）】
+・トーストやモーダルのように「表示ごとに状態を初期化したいコンポーネント」には、必要に応じて key を付ける。
+・URLパラメータによって表示内容が変わるClient Componentでは、messageやsearchParams由来の値を key に含める。
+・トーストの表示/非表示stateは、表示メッセージの切り替わりとReactの再マウント挙動を意識して設計する。
+・今後、同じように「URLは正しいのに表示だけ出ない」場合は、Server ActionではなくClient Componentのstate再利用を疑う。
+
+
+
+[2026-06-10] [Next.js App RouterでのURLハッシュ重複バグ]
+【影響範囲】
+発生環境：ローカル開発環境 / ステージング環境（Next.js App Router 導入環境）
+緊急度：低（画面遷移やURLの見栄えに関する不具合のため）
+
+【症状】
+何が起きたか：特定のページ遷移（または同一ページ内のパラメータ更新）時、URLの末尾に #top#top とハッシュ（#）が重複して付与されてしまう現象が発生した。期待していた動作：遷移後のURL末尾が、重複のないきれいな状態（例：...#top）になること。
+
+【再現手順】
+現在のURLにすでに #top が付いている状態で、moveTo 関数を実行する。router.push にオブジェクト形式などの不適切な形式、または特定の文字列結合でパスを渡す。ブラウザのURL欄が #top#top に変化する。
+
+【エラーメッセージ / ログ】
+・特になし（構文エラーではなく、ルーターの挙動によるURL文字列の不正結合）。
+※オブジェクト形式（{ pathname, query, hash }）を試した際は、TypeScriptより以下の型エラーが出力された：
+型 '{ pathname: string; query: ...; hash: string; }' の引数を型 'string' のパラメーターに割り当てることはできません。
+
+【切り分けメモ（どこが怪しいか）】
+・new URLSearchParams() でクエリは一から生成しているため、クエリ自体の重複ではない。
+・router.push に渡す手前の文字列構築、あるいは Next.js のルーターが現在のハッシュを保持したまま後ろに結合してしまっている可能性が怪しい。
+
+【原因（Root Cause）】
+・Next.js の App Router (next/navigation) において、router.push は引数に「文字列」しか受け付けない仕様である。
+・移行期や検証段階で旧仕様（Pages Router）のオブジェクト形式を混ぜてしまったり、現在のハッシュ状態をクリアせずに文字列を直接渡したため、ルーター側でハッシュのクレンジングが正しく行われず、#top#top と重複して結合されてしまった。
+
+【結論】
+・App Router の仕様に則り、パラメータとハッシュ（#top）を1つのクリーンな文字列（targetUrl）として完全に組み立ててから router.push() に渡す必要がある。
+
+【解決策（Fix）】
+・URL文字列を事前に完全な形で構築し、router.push に一括で渡す実装に変更した。
+typescriptconst params = new URLSearchParams();
+params.set("pageKey", pageKey);
+params.set("blockKey", blockKey);
+
+// 1つのきれいな文字列として組み立てる（#topは常に1つになる）
+const targetUrl = `/admin/pagecontent?${params.toString()}#top`;
+
+router.push(targetUrl);
+コードは注意してご使用ください。
+
+【確認（動作検証）】
+・修正後のコードを実行し、元のURL状態に関わらず、遷移後のURL末尾が正しく #top（重複なし）になることを確認。型エラーも解消された。
+
+【よくある落とし穴】
+・Next.js の Pages Router（旧） と App Router（新） の仕様混同。Pages Router の router.push は { pathname, query, hash } のオブジェクトを受け付けたが、App Router では string のみしか受け付けないため、同様のオブジェクトを渡すと型エラーになる。
+
+【再発防止（Prevention）】
+・App Router 環境において URL パラメータやハッシュを操作して遷移する場合は、オブジェクト形式を使わず、必ず URLSearchParams やテンプレートリテラルを用いて「1つの完成されたURL文字列」を作ってから router.push に渡すコーディングルールを徹底する。
+【重要】：そのまま router.push() に流し込んだときの Next.js 側の処理のタイミングやバグが起きるため、一度 targetUrl という固定の変数に文字列を確定させてから渡したほうが確実。
+もしくは  return `/admin/pagecontent?${params.toString()}#top`;のようにリターンで一度確定させてから返すと他と競合しない。
+
+
+
+
+
+###[2026-06-10] [PageContentEditorFormで保存後・選択変更後に本文が更新されない]
+
+【影響範囲】
+発生環境：
+Next.js 管理画面 サイト内文章設定ページ `/admin/pagecontent`
+
+緊急度：
+中
+DB保存自体は成功していたが、管理画面上では保存済み本文や選択中パーツの本文が正しく表示されず、管理者が「保存できていない」と誤認する可能性があったため。
+
+【症状】
+何が起きたか：
+サイト内文章設定ページで本文を入力して保存すると、DBには正常に上書き保存され、保存後のURLにも遷移し、トーストも表示された。
+
+しかし、保存後の画面上では、textareaに保存した本文が表示されなかった。
+
+また、保存後にプルダウンで別のページ・別のパーツを選択しても、textareaの本文が選択先の内容に切り替わらず、前の内容が残ったままになることがあった。
+
+期待していた動作：
+保存後はDBに保存された最新の本文がtextareaに表示される。
+
+また、プルダウンでページやパーツを変更した場合は、選択した `pageKey` / `blockKey` に対応する本文がtextareaへ自動で表示される。
+
+【再現手順】
+
+1. `/admin/pagecontent` を開く。
+2. 任意のページ・パーツを選択し、本文を入力して保存する。
+3. 保存後、URLは `saved=1` 付きになり、トーストも表示されるが、textareaに保存済み本文が表示されない。
+4. さらにプルダウンで別のページ・パーツを選択しても、textareaの表示内容が正しく切り替わらない。
+
+【エラーメッセージ / ログ】
+・コンソール上の明確なエラーはなし。
+・Server Actionは正常に実行されていた。
+・DBの `PageContent` レコードも正常に更新されていた。
+・保存後URLにも `saved=1` が付与され、トーストも表示されていた。
+
+【切り分けメモ（どこが怪しいか）】
+・DB保存は成功していたため、`updatePageContent` の `upsert` 処理は問題なさそう。
+・保存後のredirectも成功していたため、Server Actionの完了処理も問題なさそう。
+・`page.tsx` 側で `findAdminPageContent` によりDBからデータ取得できている可能性が高かった。
+・問題は、取得した `defaultContent` が `PageContentEditorForm` 内のtextarea表示に反映されていないこと。
+・特に `textarea` に `defaultValue` を使っていたため、Reactの再マウント挙動が怪しいと判断。
+
+【原因（Root Cause）】
+・`PageContentEditorForm` がReact上で同じコンポーネントとして再利用されていたため。
+
+・`textarea` の `defaultValue` は、コンポーネントが最初にマウントされた時点の値だけを初期値として使う。
+
+・そのため、親コンポーネントから渡される `defaultContent` が保存後やプルダウン変更後に変わっても、既にマウント済みのtextareaの表示値は自動では更新されなかった。
+
+・つまり、DBから最新データは取得できていたが、Client Component側のフォームが再初期化されず、古いtextarea表示が残っていた。
+
+【結論】
+・Server Action、DB保存、redirect、toast表示は正常だった。
+・原因は、`defaultValue` を使ったフォームコンポーネントが再マウントされず、初期値が更新されなかったこと。
+・ページ・パーツ・更新日時が変わったタイミングで `PageContentEditorForm` を作り直す必要があった。
+
+【解決策（Fix）】
+・`PageContentEditorForm` に `key` を付与し、選択中のページ・パーツ・更新日時が変わったらフォーム全体を再マウントするようにした。
+
+修正前：
+
+```tsx
+<PageContentEditorForm
+  pageKey={selectedPageKey}
+  blockKey={selectedBlockKey}
+  defaultContent={pageContent?.content ?? ""}
+  defaultImageUrl={pageContent?.imageUrl ?? ""}
+  defaultImageAlt={pageContent?.imageAlt ?? ""}
+/>
+```
+
+修正後：
+
+```tsx
+<PageContentEditorForm
+  key={`${selectedPageKey}-${selectedBlockKey}-${pageContent?.updatedAt?.toISOString() ?? ""}`}
+  pageKey={selectedPageKey}
+  blockKey={selectedBlockKey}
+  defaultContent={pageContent?.content ?? ""}
+  defaultImageUrl={pageContent?.imageUrl ?? ""}
+  defaultImageAlt={pageContent?.imageAlt ?? ""}
+/>
+```
+
+・`selectedPageKey` が変わった場合、別ページのフォームとして再マウントされる。
+・`selectedBlockKey` が変わった場合、別パーツのフォームとして再マウントされる。
+・`pageContent.updatedAt` が変わった場合、保存後の最新データとして再マウントされる。
+※PageContentEditorForm の key が変わった時に、
+Reactが古いフォームを破棄して新しいフォームとして再マウントする。
+
+その再マウント時に、textarea / input の defaultValue が改めて読み込まれる。
+
+【確認（動作検証）】
+・本文を入力して保存すると、DBに保存されることを確認。
+・保存後、`saved=1` 付きURLに遷移し、「保存しました。」のトーストが表示されることを確認。
+・保存後のtextareaに、保存した本文が表示されることを確認。
+・プルダウンで別ページを選択すると、そのページの最初のパーツ内容に切り替わることを確認。
+・プルダウンで別パーツを選択すると、そのパーツの本文に切り替わることを確認。
+・画像URL、画像altも同様に切り替わることを確認。
+
+【よくある落とし穴】
+・`defaultValue` はpropsが変わっても自動更新されない。
+・`defaultValue` は「初期値」であり、「常に同期される値」ではない。
+・同じClient ComponentとしてReactに再利用されると、フォーム内部の表示状態が残る。
+・DB取得やServer Actionが正しくても、フォーム表示だけ古いままになることがある。
+・保存後にDBの値を表示したい場合、フォームを再マウントさせるか、controlled componentとして `value` と `onChange` で管理する必要がある。
+
+【再発防止（Prevention）】
+・`defaultValue` を使うフォームで、選択対象やDBデータが変わる画面では、必要に応じて `key` を付ける。
+・フォームの初期値が `pageKey` / `blockKey` / `updatedAt` に依存する場合、それらを `key` に含める。
+・保存後にDBから再取得した値を表示したいフォームでは、Reactの再マウントが必要かを確認する。
+・「DBは更新されているのに画面の入力欄だけ変わらない」場合は、`defaultValue` とコンポーネント再利用を疑う。
+・フォームの用途に応じて、以下を使い分ける。
+
+* 入力中の値をReact stateで常に管理したい場合：`value` + `onChange`
+* 初期値だけ入れて通常のフォームとして扱いたい場合：`defaultValue` + 必要に応じて `key`
+
+つまり、以下の通り
+PageContentEditorForm は textarea / input に defaultValue を使っている。
+
+defaultValue は「初回表示時の初期値」として使われるだけで、
+その後 props の defaultContent が変わっても自動では入力欄に反映されない。
+
+そのため、ページ選択・パーツ選択・保存後の updatedAt が変わったタイミングで
+PageContentEditorForm に key を付けてフォームごと作り直す。
+
+フォームが作り直されることで、
+textarea / input の defaultValue がもう一度読み込まれ、
+DBから取得した最新の本文・画像URL・alt が表示される。
+
+
+
+###[2026-06-13] [PageContent画像アップロード後、管理画面プレビュー・公開ページ画像が表示されない]
+
+【影響範囲】
+発生環境：
+ローカル開発環境  
+Next.js 開発サーバー：`http://192.168.210.188:3000`  
+Supabase Local Storage：`http://127.0.0.1:54321` / `http://192.168.210.188:54321`  
+対象画面：
+- `/admin/pagecontent`
+- `/explore`
+
+緊急度：
+中  
+管理画面で画像保存はできていたが、スマホ確認や公開ページ表示で画像が見えず、運用確認に支障が出る状態。
+
+【症状】
+何が起きたか：
+サイト内文章設定で画像をアップロードすると、DBには `imageUrl` が保存され、PCでは画像URLを直接開くと画像が表示された。  
+しかし、管理画面の画像プレビューでは `alt` の「設定中の画像」だけが表示されることがあった。  
+また、公開トップページ `/explore` の画像枠にも画像が表示されず、代替表示または `?` のような表示になった。
+
+期待していた動作：
+画像をアップロード後、管理画面の「現在の画像プレビュー」に画像が表示される。  
+さらに、公開ページ `/explore` の該当セクションにもアップロード済み画像が表示される。
+
+【再現手順】
+1. PCで `http://192.168.210.188:3000/admin/pagecontent` にアクセスする。
+2. `TOP` の任意ブロックに画像をアップロードして保存する。
+3. 管理画面の画像プレビュー、またはスマホの `http://192.168.210.188:3000/admin/pagecontent...` で表示確認する。
+4. 公開ページ `http://192.168.210.188:3000/explore` を確認する。
+5. 画像URLが `http://127.0.0.1:54321/...` のままだと、スマホ側で画像が表示されない。
+
+【エラーメッセージ / ログ】
+・明確なConsole Errorではなく、画像読み込み失敗時に `alt` の「設定中の画像」が表示された。  
+・画像URLを直接開くとPCでは表示できた。  
+・スマホでは `127.0.0.1` のURLを参照している場合、画像が表示されなかった。
+
+【切り分けメモ（どこが怪しいか）】
+・Supabase Storageへのアップロード自体は成功しているか？  
+→ `http://127.0.0.1:54321/storage/v1/object/public/...` をPCで直接開くと画像が表示されたため、保存自体は成功。
+
+・スマホからStorageにアクセスできるか？  
+→ `http://192.168.210.188:54321/storage/v1/object/public/...` をスマホで直接開くと画像が表示されたため、ネットワーク的には到達可能。
+
+・DBに保存されている `imageUrl` が何になっているか？  
+→ `http://127.0.0.1:54321/...` のままだった。スマホから見ると `127.0.0.1` はスマホ自身を指すため表示できない。
+
+・公開ページで画像を読んでいるブロックキーは正しいか？  
+→ `/explore` では `ABOUT_SUMMARY_BODY.imageUrl` を参照していたが、画像を `ABOUT_SUMMARY_TITLE` に保存していた場合、公開ページには表示されない。
+
+【原因（Root Cause）】
+・Supabase Local の `getPublicUrl()` が `http://127.0.0.1:54321/...` を返しており、そのURLをそのままDBに保存していた。  
+・PCでは `127.0.0.1` がPC自身なので表示できるが、スマホでは `127.0.0.1` がスマホ自身を指すため、PC上のSupabase Storageにアクセスできなかった。  
+・また、公開トップページ `/explore` 側では、画像を表示するために参照しているブロックキーと、管理画面で画像を保存したブロックキーが一致していないケースがあった。
+
+【結論】
+・画像アップロード処理自体は成功していた。  
+・問題は、ローカルSupabaseの公開URLがスマホから参照できない `127.0.0.1` のままDBに保存されていたこと。  
+・公開ページに画像が出ない問題は、URL問題に加えて、画像を保存したブロックキーと公開ページで参照しているブロックキーの不一致も原因になり得る。
+
+【解決策（Fix）】
+・`actions.ts` の `uploadPageContentImage()` で、Supabaseから取得した公開URLをDB保存前にローカルLAN用URLへ変換した。
+
+```ts
+function normalizeLocalSupabasePublicUrl(publicUrl: string) {
+  return publicUrl
+    .replace("http://127.0.0.1:54321", "http://192.168.210.188:54321")
+    .replace("http://localhost:54321", "http://192.168.210.188:54321");
+}
+const { data } = supabase.storage
+  .from(PAGE_CONTENT_IMAGE_BUCKET)
+  .getPublicUrl(filePath);
+
+return normalizeLocalSupabasePublicUrl(data.publicUrl);
+
+・すでにDBに保存済みの 127.0.0.1 の画像URLは自動では変わらないため、一度画像を削除して再アップロードした。
+・公開ページで画像を表示する場合は、画像を保存するブロックキーと、公開ページ側で参照するブロックキーを揃える必要がある。
+例：現在の /explore では以下を参照している。
+
+imageUrl: contentMap.ABOUT_SUMMARY_BODY?.imageUrl,
+imageAlt: contentMap.ABOUT_SUMMARY_BODY?.imageAlt,
+
+そのため、チーム紹介セクションに画像を出したい場合は、管理画面で ABOUT_SUMMARY_BODY 側に画像を保存する。
+
+・ローカルSupabase画像を next/image で表示する場合、必要に応じて unoptimized を付ける。
+
+<Image
+  src={imageUrl}
+  alt={imageAlt || title}
+  fill
+  unoptimized
+  className="object-cover"
+/>
+
+【確認（動作検証）】
+・PCで http://127.0.0.1:54321/storage/v1/object/public/... を直接開き、画像が表示されることを確認。
+・スマホで http://192.168.210.188:54321/storage/v1/object/public/... を直接開き、画像が表示されることを確認。
+・画像削除後、再アップロードしてDBに保存される imageUrl が http://192.168.210.188:54321/... になることを確認。
+・PCの管理画面 http://192.168.210.188:3000/admin/pagecontent... で画像プレビューが表示されることを確認。
+・スマホの管理画面でも画像プレビューが表示されることを確認。
+・公開ページ /explore で、該当ブロックに保存した画像が表示されることを確認。
+
+【よくある落とし穴】
+・127.0.0.1 はアクセス元自身を指す。PCではPC、スマホではスマホ自身になる。
+・getPublicUrl() で返るURLをそのままDBに保存すると、スマホ確認で画像が表示されないことがある。
+・replace() 修正後も、すでにDBに保存済みのURLは自動では変わらない。再アップロードまたはDB更新が必要。
+・next.config.ts の remotePatterns を修正したら、Next.js devサーバーの再起動が必要。
+・画像を保存したブロックキーと、公開ページ側で参照しているブロックキーが違うと、保存できていても公開ページには表示されない。
+・input type="file" に保存済み画像をデフォルトセットすることはできない。保存済み画像はプレビューとして表示する。
+
+【再発防止（Prevention）】
+・ローカルSupabaseの公開URLはDB保存前に必ず normalizeLocalSupabasePublicUrl() を通す。
+・画像URLを保存後、管理画面に実際の imageUrl を表示して、127.0.0.1 になっていないか確認できるようにする。
+・公開ページで画像を使うブロックキーをルール化する。例：TOPの各要約画像は *_SUMMARY_BODY に保存する。
+・本番運用では、ローカルURLではなく本番Supabaseの https://...supabase.co のURLを使う。
+・画像表示確認はPCだけでなく、スマホ実機でも行う。
+・next.config.ts に本番Supabase、ローカルSupabase、LAN IPの remotePatterns を入れておく。
+
+
+今回の大事な学びは、**「画像保存は成功しているのに表示されない場合、URLのホスト名と参照しているブロックキーをまず見る」** です。
+
+
+
+
+###[2026-06-15] [ngrok経由でNext.js開発環境を開くとClient Componentが正常に動作しない]
+
+【影響範囲】
+発生環境：
+ローカル開発環境
+Next.js dev server
+ngrok経由の外部公開URL
+`https://xxxxx.ngrok-free.dev`
+
+緊急度：
+中
+LIFF検証前の外部URL確認ができないが、本番ビルドでは回避可能。
+
+【症状】
+何が起きたか：
+ngrokで発行したURLからサイトを開くと、通常ページの一部機能が正常に動作しなかった。
+
+具体的には以下が発生した。
+
+・ヘッダーのドロワーメニューを押しても開かない
+・体験/見学申し込みフォームで必須項目を入力しても送信ボタンが押せない
+・お問い合わせフォームも正常に動作しない
+
+一方で、LAN内URLである `http://192.168.xxx.xxx:3000` では同じ不具合は発生しなかった。
+
+期待していた動作：
+ngrok URLからアクセスしても、通常のローカル確認時と同じように以下が動作すること。
+
+・ヘッダーのドロワーメニューが開く
+・体験/見学申し込みフォームが入力後に送信できる
+・お問い合わせフォームが正常に送信できる
+
+【再現手順】
+
+1. Next.jsを開発モードで起動する
+   `npx next dev --hostname 0.0.0.0 --port 3000`
+
+2. ngrokを起動する
+   `ngrok http 3000`
+
+3. ngrokで発行されたURLから通常ページを開く
+   例：
+   `https://xxxxx.ngrok-free.dev/explore`
+   `https://xxxxx.ngrok-free.dev/session-application`
+   `https://xxxxx.ngrok-free.dev/contact`
+
+4. ドロワーメニューやフォーム操作を確認する
+
+【エラーメッセージ / ログ】
+・ブラウザConsoleに以下のエラーが出ていた。
+
+`WebSocket connection to 'wss://xxxxx.ngrok-free.dev/_next/webpack-hmr?id=...' failed:`
+
+【切り分けメモ（どこが怪しいか）】
+・LIFF関連ページだけでなく、通常ページでも不具合が出ていた
+・`/admin/liff` に入る前の `/explore` や `/session-application` でも動作不良が発生
+・LAN内URLでは正常に動作していた
+・ngrok URL経由のみで発生していた
+・Consoleに `/_next/webpack-hmr` のWebSocket接続失敗が出ていた
+・そのため、LIFF設定ではなく `next dev + ngrok` の開発用WebSocket/HMR周りが原因と判断した
+
+【原因（Root Cause）】
+・`next dev` は開発用に Hot Module Replacement、通称HMR、のWebSocket通信を使用する
+・ngrok経由では `wss://xxxxx.ngrok-free.dev/_next/webpack-hmr` への接続が失敗していた
+・その影響で、Next.jsの開発用クライアント処理が正常に動かず、Client Componentの挙動に問題が出た可能性が高い
+・結果として、ドロワーやフォームの状態制御など、ブラウザ側JavaScriptに依存する機能が正常に動作しなかった
+
+【結論】
+・今回の不具合はLIFF実装そのものが原因ではない
+・ngrok経由で `next dev` を使った場合の開発用HMR WebSocket接続失敗が原因
+・LIFF検証や外部URL検証では、`next dev` ではなく本番ビルド後の `next start` を使う方が安定する
+
+【解決策（Fix）】
+・開発サーバーではなく、本番ビルドで起動してngrokに接続する
+
+実行手順：
+
+1. 本番ビルドする
+   `npm run build`
+
+2. 本番モードで起動する
+   `npx next start -H 0.0.0.0 -p 3000`
+
+3. 別ターミナルでngrokを起動する
+   `ngrok http 3000 --host-header=localhost:3000`
+
+4. 発行されたngrok URLで通常ページを確認する
+
+【確認（動作検証）】
+・以下の手順で確認した。
+
+1. `npm run build` を実行
+2. `npx next start -H 0.0.0.0 -p 3000` を実行
+3. `ngrok http 3000 --host-header=localhost:3000` を実行
+4. ngrok URLから通常ページを確認
+
+確認結果：
+
+・ヘッダーのドロワーが正常に開いた
+・体験/見学申し込みフォームで必須項目入力後、送信ボタンが押せるようになった
+・お問い合わせフォームも正常に動作した
+
+このため、`next start + ngrok` では問題が解消することを確認済み。
+
+【よくある落とし穴】
+・LIFFの設定ミスと勘違いしやすい
+・しかし、LIFFに入る前の通常ページでも壊れている場合は、まずngrok/Next.js側を疑う
+・`next dev` は開発用HMR WebSocketを使うため、ngrok経由だと不安定になることがある
+・`allowedDevOrigins` を設定しても、HMR WebSocketの問題が完全に解決しない場合がある
+・`NEXT_PUBLIC_` 系の環境変数を変更した場合、本番ビルドでは再度 `npm run build` が必要
+
+【再発防止（Prevention）】
+・LIFFやLINE連携の外部URL検証では、原則として以下の構成を使う。
+
+`npm run build`
+↓
+`npx next start -H 0.0.0.0 -p 3000`
+↓
+`ngrok http 3000 --host-header=localhost:3000`
+
+・ngrok URLで不具合が出た場合は、まずConsoleの `/_next/webpack-hmr` エラーを確認する
+・通常ページがngrokで正常に動くことを確認してから、LIFF設定確認に進む
+・LIFFのEndpoint URLや環境変数を変更した場合は、本番ビルドをやり直す
+・ローカル開発中の見た目確認は `next dev`、LINE/LIFF/ngrok確認は `next start` と使い分ける

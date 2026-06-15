@@ -1,12 +1,14 @@
-//app/(public)/explore/page.tsx
-//公開ページのトップページ(仮)
-
 // app/(public)/explore/page.tsx
 // 公開ページのトップページ
 
 import Link from "next/link";
+import Image from "next/image";
 import { ChevronDown } from "lucide-react";
-
+import {
+  findPageContentsByPageKey,
+  getContentText,
+  toContentMap,
+} from "@/lib/repositories/page-content";
 
 const topNavItems = [
   {
@@ -31,97 +33,155 @@ const topNavItems = [
   },
 ] as const;
 
-const summarySections = [
-  {
-    id: "about-summary",
-    title: "チーム紹介",
-    heading:
-      "荒尾から、次のステージへ。個性を伸ばし、可能性を広げるミニバスチーム",
-    body: "荒尾市を拠点に活動する、ミニバスケットボールチームです。全国大会・九州大会へと子どもたちを導いた経験のあるコーチが在籍しています。",
-    href: "/about#top",
-    imageLabel: "ABOUT",
-  },
-  {
-    id: "policy-summary",
-    title: "指導方針",
-    heading: "本気で挑み、一生の強さを掴む。全国を知る指導が、ここにある",
-    body: "ただ楽しむだけでなく、一歩踏み込んだ「勝負の世界」を経験します。勝つために努力し、仲間と切磋琢磨する中で、困難に立ち向かう強い心を育成します。",
-    href: "/policy#top",
-    imageLabel: "POLICY",
-  },
-  {
-    id: "summary-summary",
-    title: "活動概要",
-    heading: "幼児から小6まで、男女問わず大歓迎！",
-    body: "活動場所は荒尾市内の体育館。対象は幼児、小1〜小6の男女です。火曜・水曜・木曜・金曜の夕方、および土日のいずれかに活動しています。",
-    href: "/summary#top",
-    imageLabel: "SUMMARY",
-  },
-  {
-    id: "flow-summary",
-    title: "体験/見学の流れ",
-    heading: "体験・見学はすべて無料！2ステップで簡単にご参加いただけます。",
-    body: "フォームからご希望の日程を選んで簡単お申し込み。当日は動きやすい服装とシューズを持って直接体育館へお越しください。見学の方は手ぶらでOKです。",
-    href: "/flow#top",
-    imageLabel: "FLOW",
-  },
-  {
-    id: "faq-summary",
-    title: "よくある質問",
-    heading: "入会前の不安や疑問を、わかりやすくまとめています。",
-    body: "対象学年、練習日、費用、保護者の関わり方など、入会前によくいただく質問をまとめています。気になる点がある方は、まずはこちらをご覧ください。",
-    href: "/faq#top",
-    imageLabel: "FAQ",
-  },
-] as const;
+export default async function ExplorePage() {
+  const contents = await findPageContentsByPageKey("TOP");
+  const contentMap = toContentMap(contents);
 
-export default function ExplorePage() {
+  const summarySections = [
+    {
+      id: "about-summary",
+      title: "チーム紹介",
+      heading: getContentText({
+        contentMap,
+        blockKey: "ABOUT_SUMMARY_TITLE",
+        fallback:
+          "全国・九州大会へ導いた本気の指導がここにある",
+      }),
+      body: getContentText({
+        contentMap,
+        blockKey: "ABOUT_SUMMARY_BODY",
+        fallback:
+          "私たちは、熊本県荒尾市を拠点としたミニバスケットボールチームです。\n全国大会や九州大会へと子どもたちを導いた実績のあるコーチが在籍しております。",
+      }),
+      href: "/about#top",
+      imageLabel: "ABOUT",
+      imageUrl: contentMap.ABOUT_SUMMARY_BODY?.imageUrl,
+      imageAlt: contentMap.ABOUT_SUMMARY_BODY?.imageAlt,
+    },
+    {
+      id: "policy-summary",
+      title: "指導方針",
+      heading: getContentText({
+        contentMap,
+        blockKey: "POLICY_SUMMARY_TITLE",
+        fallback:
+          "生涯の財産となる「心」を育てる",
+      }),
+      body: getContentText({
+        contentMap,
+        blockKey: "POLICY_SUMMARY_BODY",
+        fallback:
+          "技術の習得だけではなく、生涯の財産となる諦めない心を育てること。それが私たちの理念です。",
+      }),
+      href: "/policy#top",
+      imageLabel: "POLICY",
+      imageUrl: contentMap.POLICY_SUMMARY_BODY?.imageUrl,
+      imageAlt: contentMap.POLICY_SUMMARY_BODY?.imageAlt,
+    },
+    {
+      id: "summary-summary",
+      title: "活動概要",
+      heading: getContentText({
+        contentMap,
+        blockKey: "SUMMARY_SUMMARY_TITLE",
+        fallback: "幼児から小6まで！\n男女問わず大歓迎！",
+      }),
+      body: getContentText({
+        contentMap,
+        blockKey: "SUMMARY_SUMMARY_BODY",
+        fallback:
+          "活動場所は、荒尾市内の体育館。対象は、幼児〜小６の男女です（※女子および幼児は教室生として参加になります）\n火曜・水曜・木曜・金曜の夕方、および土日のいずれかに活動しています。",
+      }),
+      href: "/summary#top",
+      imageLabel: "SUMMARY",
+      imageUrl: contentMap.SUMMARY_SUMMARY_BODY?.imageUrl,
+      imageAlt: contentMap.SUMMARY_SUMMARY_BODY?.imageAlt,
+    },
+    {
+      id: "flow-summary",
+      title: "体験/見学の流れ",
+      heading: getContentText({
+        contentMap,
+        blockKey: "FLOW_SUMMARY_TITLE",
+        fallback:
+          "体験・見学はすべて無料！2ステップで簡単にご参加いただけます。",
+      }),
+      body: getContentText({
+        contentMap,
+        blockKey: "FLOW_SUMMARY_BODY",
+        fallback:
+          "フォームからご希望の日程を選んで簡単お申し込み。当日は動きやすい服装とシューズを持って直接体育館へお越しください。見学の方は手ぶらでOKです。",
+      }),
+      href: "/flow#top",
+      imageLabel: "FLOW",
+      imageUrl: contentMap.FLOW_SUMMARY_BODY?.imageUrl,
+      imageAlt: contentMap.FLOW_SUMMARY_BODY?.imageAlt,
+    },
+    {
+  id: "faq-summary",
+  title: "よくある質問",
+  heading: getContentText({
+    contentMap,
+    blockKey: "FAQ_SUMMARY_TITLE",
+    fallback: "入会前の不安や疑問を、わかりやすくまとめています。",
+  }),
+  body: getContentText({
+    contentMap,
+    blockKey: "FAQ_SUMMARY_BODY",
+    fallback:
+      "対象学年、練習日、費用、保護者の関わり方など、入会前によくいただく質問をまとめています。気になる点がある方は、まずはこちらをご覧ください。",
+  }),
+  href: "/faq#top",
+  imageLabel: "FAQ",
+  imageUrl: contentMap.FAQ_SUMMARY_BODY?.imageUrl,
+  imageAlt: contentMap.FAQ_SUMMARY_BODY?.imageAlt,
+},
+  ];
+
   return (
     <div className="relative">
-        {/* ページ内リンクメニュー */}
-        <section
-          aria-labelledby="top-menu-title"
-          className="border-b border-neutral-300 pb-8 pt-6 sm:pb-10 sm:pt-8"
-        >
-          <h1 id="top-menu-title" className="sr-only">
-            ARAO U-12 BASKETBALL CLUB トップページ
-          </h1>
+      <section
+        aria-labelledby="top-menu-title"
+        className="border-b border-neutral-300 pb-8 pt-6 sm:pb-10 sm:pt-8"
+      >
+        <h1 id="top-menu-title" className="sr-only">
+          ARAO U-12 BASKETBALL CLUB トップページ
+        </h1>
 
-          <nav aria-label="トップページ内メニュー">
-            <ul className="grid grid-cols-3 gap-3 sm:grid-cols-5 sm:gap-4">
-              {topNavItems.map((item) => (
-                <li key={item.href}>
-                  <a
-                    href={item.href}
-                    className="flex min-h-24 flex-col items-center justify-center border border-neutral-800 bg-white px-2 py-4 text-center text-sm font-bold text-neutral-900 transition hover:bg-green-50 hover:text-green-800 sm:min-h-28 sm:text-base"
-                  >
-                    <span>{item.label}</span>
-                    <span className="mt-3 h-px w-10 bg-neutral-800" />
-                    <ChevronDown className="mt-2 h-5 w-5" aria-hidden="true" />
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </nav>
-        </section>
+        <nav aria-label="トップページ内メニュー">
+          <ul className="grid grid-cols-3 gap-3 sm:grid-cols-5 sm:gap-4">
+            {topNavItems.map((item) => (
+              <li key={item.href}>
+                <a
+                  href={item.href}
+                  className="flex min-h-24 flex-col items-center justify-center border border-neutral-800 bg-white px-2 py-4 text-center text-sm font-bold text-neutral-900 transition hover:bg-green-50 hover:text-green-800 sm:min-h-28 sm:text-base"
+                >
+                  <span>{item.label}</span>
+                  <span className="mt-3 h-px w-10 bg-neutral-800" />
+                  <ChevronDown className="mt-2 h-5 w-5" aria-hidden="true" />
+                </a>
+              </li>
+            ))}
+          </ul>
+        </nav>
+      </section>
 
-        {/* サマリーセクション */}
-        <div className="divide-y divide-neutral-300">
-          {summarySections.map((section) => (
-            <TopSummarySection
-              key={section.id}
-              id={section.id}
-              title={section.title}
-              heading={section.heading}
-              body={section.body}
-              href={section.href}
-              imageLabel={section.imageLabel}
-            />
-          ))}
-        </div>
-      
+      <div className="divide-y divide-neutral-300">
+        {summarySections.map((section) => (
+          <TopSummarySection
+            key={section.id}
+            id={section.id}
+            title={section.title}
+            heading={section.heading}
+            body={section.body}
+            href={section.href}
+            imageLabel={section.imageLabel}
+            imageUrl={section.imageUrl}
+            imageAlt={section.imageAlt}
+          />
+        ))}
+      </div>
 
-      {/* ページ上部へ戻る固定ボタン */}
       <a
         href="#top"
         className="fixed bottom-5 right-4 z-20 rounded-full border border-green-800 bg-white/95 px-4 py-2 text-xs font-bold text-green-800 shadow-lg transition hover:bg-green-50 sm:bottom-8 sm:right-8 sm:text-sm"
@@ -139,6 +199,8 @@ type TopSummarySectionProps = {
   body: string;
   href: string;
   imageLabel: string;
+  imageUrl?: string | null;
+  imageAlt?: string | null;
 };
 
 function TopSummarySection({
@@ -148,6 +210,8 @@ function TopSummarySection({
   body,
   href,
   imageLabel,
+  imageUrl,
+  imageAlt,
 }: TopSummarySectionProps) {
   return (
     <section id={id} className="scroll-section py-10 sm:py-14">
@@ -156,19 +220,32 @@ function TopSummarySection({
           {title}
         </h2>
 
-        {/* 仮画像エリア：あとでImageに差し替える */}
-        <div className="flex aspect-video w-full items-center justify-center border border-neutral-300 bg-neutral-100">
-          <span className="text-sm font-bold tracking-[0.3em] text-neutral-400">
-            {imageLabel}
-          </span>
-        </div>
+        {imageUrl ? (
+          <div className="relative aspect-video w-full overflow-hidden border border-neutral-300 bg-neutral-100">
+            <Image
+              src={imageUrl}
+              alt={imageAlt || title}
+              fill
+              unoptimized
+              className="object-cover"
+            />
+          </div>
+        ) : (
+          <div className="flex aspect-video w-full items-center justify-center border border-neutral-300 bg-neutral-100">
+            <span className="text-sm font-bold tracking-[0.3em] text-neutral-400">
+              {imageLabel}
+            </span>
+          </div>
+        )}
 
         <div className="space-y-4">
-          <h3 className="text-xl font-black leading-relaxed text-neutral-900 sm:text-2xl">
+          <h3 className="whitespace-pre-wrap text-xl font-black leading-relaxed text-neutral-900 sm:text-2xl">
             {heading}
           </h3>
 
-          <p className="leading-8 text-neutral-700">{body}</p>
+          <p className="whitespace-pre-wrap leading-8 text-neutral-700">
+            {body}
+          </p>
         </div>
 
         <div className="flex justify-end">

@@ -4,13 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "prisma generate && next build", 
+    "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
     "db:seed:local": "dotenv -e .env.local -- prisma db seed"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",
+    "@line/liff": "^2.29.0",
     "@prisma/client": "^7.8.0",
     "@supabase/ssr": "^0.10.3",
     "@supabase/supabase-js": "^2.106.2",
@@ -43,9 +44,4 @@
     "tsx": "^4.22.4",
     "typescript": "^5"
   }
-    
-  
 }
-
-
-

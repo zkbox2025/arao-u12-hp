@@ -2,11 +2,13 @@
 //データベースにテスト用データを自動で投入する（シード注入する）ためのプログラムファイル
 //PUBLISHED（公開済み）２件とDRAFT（下書き）１件の合計３件の練習スケ変更データを投入する
 //FAQの公開済み7件・下書き1件の合計8件を投入する
+//PageContent初期データ投入
 
 //ローカルDBに流し込む際のコマンド：npm run db:seed:local
 
 import "dotenv/config";
 import { prisma } from "@/src/infrastructure/prisma/client";
+import { PAGE_CONTENT_DEFINITIONS } from "@/constants/page-content";
 
 
 async function main() {
@@ -192,6 +194,30 @@ for (const faq of faqSamples) {
   });
 }
 
+// PageContent初期データ投入
+//PAGE_CONTENT_DEFINITIONSを全て取り出す
+  for (const [pageKey, page] of Object.entries(PAGE_CONTENT_DEFINITIONS)) {
+    for (const blockKey of Object.keys(page.blocks)) {
+
+      //DBのページコンテントへアップサート（なければ新規作成、あれば何もしない）
+      await prisma.pageContent.upsert({
+        where: {
+          pageKey_blockKey: {
+            pageKey,
+            blockKey,
+          },
+        },
+        update: {},
+        create: {
+          pageKey,
+          blockKey,
+          content: "",
+        },
+      });
+    }
+  }
+
+
 
   console.log("Seed completed.");//シードデータの投入が完了したことをコンソールに表示
 }
@@ -204,3 +230,6 @@ main()
   .finally(async () => {//成功でもエラーでも最終的に行う処理は以下の通り
     await prisma.$disconnect();//DBとの接続を完全に切断して終了する
   });
+
+
+

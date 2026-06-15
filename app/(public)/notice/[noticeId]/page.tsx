@@ -28,9 +28,10 @@ export default async function NoticeDetailPage({
   return (
     <article className="pt-5 sm:pt-6">
       <header className="border-y-2 border-neutral-800 py-5">
-        <h1 className="text-2xl font-black leading-relaxed text-neutral-900">
-          {notice.title}
-        </h1>
+        <h1 className="text-[22px] font-black leading-10 text-neutral-900">
+  {notice.title}
+</h1>
+
 
         <p className="mt-3 text-sm text-neutral-500">
           更新日：{formatJapaneseDate(notice.updatedAt)}
@@ -38,14 +39,16 @@ export default async function NoticeDetailPage({
       </header>
 
       <div className="border-b border-neutral-300 py-8">
-        <div className="whitespace-pre-wrap leading-8 text-neutral-700">
-          {notice.content}
-        </div>
+       <div className="whitespace-pre-wrap text-lg leading-9 text-neutral-800">
+  {notice.content}
+</div>
+
+
       </div>
 
       <div className="mb-16 mt-8 flex flex-col items-start gap-3 sm:mb-20">
         <Link
-          href="/summary"
+          href="/summary#top"
           className="inline-flex w-fit items-center justify-center rounded-full bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
         >
           通常の練習スケジュールはこちら

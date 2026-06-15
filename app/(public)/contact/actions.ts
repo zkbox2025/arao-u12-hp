@@ -12,6 +12,7 @@ import { getRequestMeta } from "@/lib/security/request";
 import { checkFormRateLimit } from "@/lib/security/rate-limit";
 import { saveSubmissionLog } from "@/lib/security/submission-log";
 import { isHoneypotFilled, isTooFastSubmit } from "@/lib/security/form-spam";
+import { sendLineContactNotification } from "@/lib/line/admin-line-notifications";
 
 
 type ContactField =
@@ -27,6 +28,8 @@ function getStringValue(formData: FormData, key: string) {
   const value = formData.get(key);
   return typeof value === "string" ? value : "";
 }
+
+
 
 
 //検品後のエラー内容を各テキストボックスに割り振る関数(path:項目名（今回は階層は一つのみ）、message:エラーメッセージ)
@@ -146,8 +149,6 @@ if (!rateLimit.allowed) {
 }
 
 
-
-
   const savedContact = await prisma.contact.create({
     data: {
       name: parsed.data.name,
@@ -173,26 +174,36 @@ try {
   console.error("送信ログの保存に失敗しました", error);
 }
 
-  //DB保存後に管理者への通知メールを自動で送る
-  try {
-    await sendAdminContactNotification(savedContact);
-  } catch (error) {
-    console.error("管理者通知メールの送信に失敗しました", error);
-  }
 
-  //DB保存後に送信者へ確認メールを自動で送る
-try {
-  await sendContactAutoReply({
+//以下、通知処理（並列化することで短時間で通知送信する）
+//DB保存後に管理者への通知メールを自動で送る
+const notificationResults = await Promise.allSettled([
+  sendAdminContactNotification(savedContact),
+
+    //DB保存後に送信者へ確認メールを自動で送る
+  sendContactAutoReply({
     name: savedContact.name,
     nameKana: savedContact.nameKana,
     email: savedContact.email,
     content: savedContact.content,
-  });
-} catch (error) {
-  console.error("送信者確認メールの送信に失敗しました", error);
+  }),
+
+    //DB保存後に管理者へライン通知を自動で送る
+  sendLineContactNotification(savedContact),
+]);
+
+notificationResults.forEach((result, index) => {
+  if (result.status === "rejected") {
+    const labels = [
+      "お問い合わせの管理者通知メール",
+      "お問い合わせの自動返信メール",
+      "お問い合わせのLINE通知",
+    ];
+
+    console.error(`${labels[index]}に失敗しました`, result.reason);
+  }
+});
+
+redirect("/contact?submitted=success#top");
 }
 
-
-
-  redirect("/contact?submitted=success#top");
-}

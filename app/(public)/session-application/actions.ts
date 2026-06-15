@@ -12,6 +12,7 @@ import { getRequestMeta } from "@/lib/security/request";
 import { checkFormRateLimit } from "@/lib/security/rate-limit";
 import { saveSubmissionLog } from "@/lib/security/submission-log";
 import { isHoneypotFilled, isTooFastSubmit } from "@/lib/security/form-spam";
+import { sendLineSessionApplicationNotification } from "@/lib/line/admin-line-notifications";
 
 
 type SessionApplicationField =
@@ -31,6 +32,7 @@ function getStringValue(formData: FormData, key: string) {
   const value = formData.get(key);//FormDataから値を取得する
   return typeof value === "string" ? value : "";//値が文字列であればそのまま返し、そうでなければ空文字を返す（フォームの値は基本的に文字列だが、念のため型を確認している）
 }
+
 
 
 //検品後のエラー内容を各テキストボックスに割り振る関数(path:項目名（今回は階層は一つのみ）、message:エラーメッセージ)
@@ -206,16 +208,14 @@ try {
   console.error("送信ログの保存に失敗しました", error);
 }
 
-    //DB保存後に管理者への通知メールを自動で送る
-  try {
-    await sendAdminSessionApplicationNotification(savedApplication);
-  } catch (error) {
-    console.error("管理者通知メールの送信に失敗しました", error);
-  }
 
-//DB保存後に送信者へ確認メールを自動で送る
-  try {
-  await sendSessionApplicationAutoReply({
+//以下、通知処理（並列化することで短時間で通知送信する）
+//DB保存後に管理者への通知メールを自動で送る
+const notificationResults = await Promise.allSettled([
+  sendAdminSessionApplicationNotification(savedApplication),
+
+      //DB保存後に送信者へ確認メールを自動で送る
+  sendSessionApplicationAutoReply({
     type: savedApplication.type,
     childName: savedApplication.childName,
     childNameKana: savedApplication.childNameKana,
@@ -225,10 +225,24 @@ try {
     preferredDate2: savedApplication.preferredDate2,
     email: savedApplication.email,
     phone: savedApplication.phone,
-  });
-} catch (error) {
-  console.error("送信者確認メールの送信に失敗しました", error);
-}
+  }),
 
-  redirect("/session-application?submitted=success#top");
+      //DB保存後に管理者へライン通知を自動で送る
+  sendLineSessionApplicationNotification(savedApplication),
+]);
+
+notificationResults.forEach((result, index) => {//通知処理の送信結果をチェックする（結果、番号）
+
+  if (result.status === "rejected") {//もし送信失敗した場合（rejected）、以下のエラーログを出力する
+    const labels = [
+      "体験/見学申し込みの管理者通知メール",
+      "体験/見学申し込みの自動返信メール",
+      "体験/見学申し込みのLINE通知",
+    ];
+
+    console.error(`${labels[index]}に失敗しました`, result.reason);
+  }
+});
+
+redirect("/session-application?submitted=success#top");
 }

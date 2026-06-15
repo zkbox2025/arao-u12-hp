@@ -36,4 +36,32 @@ enum SubmissionResult {
   BLOCKED
 }
 
+◯管理者ページのログインアカウントの作成方法
+Supabase Dashboard
+→ Authentication
+→ Users
+→ Add user
+→ コーチ/開発者のメールアドレスを登録
 
+
+◯スマホでチェックするときのターミナルで起動方法
+npx next dev --hostname 192.168.210.188 --port 3000
+※数値の確認方法：ipconfig getifaddr en0
+URL＝http://192.168.210.188:3000
+
+
+【Ngrokの場合の立ち上げる時のコマンド】
+
+1. 本番ビルドする
+   `npm run build`
+
+2. 本番モードで起動する
+   `npx next start -H 0.0.0.0 -p 3000`
+
+3. 別ターミナルでngrokを起動する
+   `ngrok http 3000 --host-header=localhost:3000`
+
+4. 発行されたngrok URLで通常ページを確認する
+
+URLは以下の通り
+https://talia-noncrinoid-fructuously.ngrok-free.dev
