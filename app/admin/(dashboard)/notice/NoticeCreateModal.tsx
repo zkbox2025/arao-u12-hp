@@ -1,5 +1,5 @@
 // app/admin/(dashboard)/notice/NoticeCreateModal.tsx
-// Notice新規作成モーダル（ボタン自体も実装済み）
+// Notice新規作成モーダル
 
 "use client";
 
@@ -13,12 +13,12 @@ export function NoticeCreateModal() {
   return (
     <>
       <button
-  type="button"
-  onClick={() => setIsOpen(true)}
-  className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
->
-  新規作成
-</button>
+        type="button"
+        onClick={() => setIsOpen(true)}
+        className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
+      >
+        新規作成
+      </button>
 
       <BaseModal
         isOpen={isOpen}

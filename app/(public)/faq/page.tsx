@@ -1,13 +1,16 @@
 // app/(public)/faq/page.tsx
 // 公開ページのよくある質問ページ
 
+import type { FaqCategory } from "@/types/prisma";
 import { ChevronDown } from "lucide-react";
 import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
 import {
   FAQ_CATEGORY_LABELS,
   FAQ_CATEGORY_NAV_LABELS,
   FAQ_CATEGORY_ORDER,
 } from "@/constants/faq";
+import { definePageContentBlockKeys } from "@/lib/page-content/typed-block-keys";
 import { findPublishedFaqs } from "@/lib/repositories/faq";
 import {
   findPageContentsByPageKey,
@@ -15,9 +18,15 @@ import {
   toContentMap,
 } from "@/lib/repositories/page-content";
 
+const FAQ_PAGE_KEY = "FAQ" as const;
+
+const FAQ_BLOCK_KEYS = definePageContentBlockKeys(FAQ_PAGE_KEY, {
+  leadBody: "LEAD_BODY",
+});
+
 type FaqItem = {
   id: string;
-  category: string;
+  category: FaqCategory;
   question: string;
   answer: string;
 };
@@ -34,16 +43,18 @@ export const dynamic = "force-dynamic";
 export default async function FaqPage() {
   const [faqs, contents] = await Promise.all([
     findPublishedFaqs(),
-    findPageContentsByPageKey("FAQ"),
+    findPageContentsByPageKey(FAQ_PAGE_KEY),
   ]);
 
   const contentMap = toContentMap(contents);
 
   const leadBody = getContentText({
     contentMap,
-    blockKey: "LEAD_BODY",
-    fallback:
-      "入会前の疑問をわかりやすくまとめています。\n気になる点がある方は、こちらをご覧ください。",
+    blockKey: FAQ_BLOCK_KEYS.leadBody,
+    fallback: getPageContentFallback({
+      pageKey: FAQ_PAGE_KEY,
+      blockKey: FAQ_BLOCK_KEYS.leadBody,
+    }),
   });
 
   const faqsByCategory: FaqCategorySection[] = FAQ_CATEGORY_ORDER.map(
@@ -108,7 +119,7 @@ export default async function FaqPage() {
               </p>
             ) : (
               <div className="divide-y divide-dashed divide-neutral-300">
-                {category.items.map((faq: FaqItem) => (
+                {category.items.map((faq) => (
                   <article key={faq.id} className="py-6">
                     <h3 className="font-bold leading-8 text-neutral-900">
                       <span className="mr-1 font-black text-green-700">

@@ -6,13 +6,16 @@ import { notFound } from "next/navigation";
 import { findPublishedNoticeById } from "@/lib/repositories/notice";
 import { formatJapaneseDate } from "@/lib/utils/date";
 
-export const dynamic = "force-dynamic";
+
 
 type NoticeDetailPageProps = {
   params: Promise<{
     noticeId: string;
   }>;
 };
+
+export const dynamic = "force-dynamic";
+
 
 export default async function NoticeDetailPage({
   params,
@@ -55,7 +58,7 @@ export default async function NoticeDetailPage({
         </Link>
 
         <Link
-          href="/notice"
+          href="/notice#top"
           className="inline-flex w-fit items-center justify-center rounded-full border border-neutral-800 px-5 py-3 text-sm font-bold text-neutral-900 transition hover:bg-neutral-900 hover:text-white"
         >
           一覧へ戻る

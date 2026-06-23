@@ -7,13 +7,14 @@ import { useState } from "react";
 import { BaseModal } from "@/components/admin/modal/BaseModal";
 import { FAQ_CATEGORY_LABELS, type FaqCategoryValue } from "@/constants/faq";
 import { FaqEditForm } from "./FaqEditForm";
+import type { ContentStatus } from "@/types/prisma";
 
 type FaqEditModalProps = {
   faqId: string;
   category: FaqCategoryValue;
   question: string;
   answer: string;
-  status: "DRAFT" | "PUBLISHED";
+  status: ContentStatus;
 };
 
 export function FaqEditModal({

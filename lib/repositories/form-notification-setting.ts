@@ -1,7 +1,7 @@
 // lib/repositories/form-notification-setting.ts
 // フォーム通知先メール設定の取得処理
 
-import type { FormType } from "@prisma/client";
+import type { FormType } from "@/types/prisma";
 import { prisma } from "@/src/infrastructure/prisma/client";
 
 //DBからメール通知設定されたデータをすべて取得する関数

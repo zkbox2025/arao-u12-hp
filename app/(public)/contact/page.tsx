@@ -4,11 +4,20 @@
 import { ContactForm } from "@/components/form/ContactForm";
 import { ThanksModal } from "@/components/form/ThanksModal";
 import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
+import { definePageContentBlockKeys } from "@/lib/page-content/typed-block-keys";
 import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
+
+const CONTACT_PAGE_KEY = "CONTACT" as const;
+
+const CONTACT_BLOCK_KEYS = definePageContentBlockKeys(CONTACT_PAGE_KEY, {
+  leadBody: "LEAD_BODY",
+  thanksMessage: "THANKS_MESSAGE",
+});
 
 type ContactPageProps = {
   searchParams: Promise<{
@@ -16,25 +25,31 @@ type ContactPageProps = {
   }>;
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function ContactPage({ searchParams }: ContactPageProps) {
   const params = await searchParams;
   const isSubmitted = params.submitted === "success";
 
-  const contents = await findPageContentsByPageKey("CONTACT");
+  const contents = await findPageContentsByPageKey(CONTACT_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
   const leadBody = getContentText({
     contentMap,
-    blockKey: "LEAD_BODY",
-    fallback:
-      "ARAO U-12 BASKETBALL CLUBへのお問い合わせはこちらからお願いします。\n下記のフォームに必要事項をご記入ください。",
+    blockKey: CONTACT_BLOCK_KEYS.leadBody,
+    fallback: getPageContentFallback({
+      pageKey: CONTACT_PAGE_KEY,
+      blockKey: CONTACT_BLOCK_KEYS.leadBody,
+    }),
   });
 
   const thanksMessage = getContentText({
     contentMap,
-    blockKey: "THANKS_MESSAGE",
-    fallback:
-      "送信が完了いたしました。\n内容を確認の上、担当者よりメールにて改めてご連絡いたします。\n今しばらくお待ちいただけますようお願いいたします。",
+    blockKey: CONTACT_BLOCK_KEYS.thanksMessage,
+    fallback: getPageContentFallback({
+      pageKey: CONTACT_PAGE_KEY,
+      blockKey: CONTACT_BLOCK_KEYS.thanksMessage,
+    }),
   });
 
   return (

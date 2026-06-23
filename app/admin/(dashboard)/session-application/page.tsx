@@ -2,19 +2,16 @@
 // 体験/見学申し込み管理一覧ページ
 
 import Link from "next/link";
-import { format } from "date-fns";
 import { findAdminSessionApplications } from "@/lib/repositories/admin-session-application";
 import {
-  APPLICATION_STATUS_LABELS,
   GRADE_LABELS,
   SESSION_TYPE_LABELS,
 } from "@/constants/adminLabels";
+import { SessionApplicationStatusBadge } from "@/components/admin/status/SessionApplicationStatusBadge";
 import { AdminPageHeader } from "@/components/admin/AdminPageHeader";//アイコン付きタイトル
+import { formatAdminDate } from "@/lib/utils/date";
+import { truncateText } from "@/lib/utils/text";
 
-// もし文章が長すぎたら10文字に切り詰めて最後に...をつける
-function truncateText(text: string, maxLength = 10) {
-  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
-}
 
 export default async function AdminSessionApplicationPage() {
   const applications = await findAdminSessionApplications({ take: 15 });
@@ -56,7 +53,7 @@ export default async function AdminSessionApplicationPage() {
           <tr key={application.id} className="transition hover:bg-green-50">
             <td className="whitespace-nowrap px-5 py-4 align-middle">
               <Link href={detailHref} className="block text-neutral-800">
-                {format(application.createdAt, "yyyy/MM/dd")}
+                {formatAdminDate(application.createdAt)}
               </Link>
             </td>
 
@@ -80,23 +77,13 @@ export default async function AdminSessionApplicationPage() {
 
             <td className="whitespace-nowrap px-5 py-4 align-middle">
               <Link href={detailHref} className="block text-neutral-800">
-                {format(application.preferredDate1, "yyyy/MM/dd")}
+                {formatAdminDate(application.preferredDate1)}
               </Link>
             </td>
 
             <td className="whitespace-nowrap px-5 py-4 align-middle">
               <Link href={detailHref} className="block">
-                <span
-                  className={
-                   application.status === "PENDING"
-  ? "inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700"
-  : application.status === "ATTENDED"
-    ? "inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700"
-    : "inline-flex rounded-full bg-neutral-100 px-3 py-1 text-xs font-bold text-neutral-700"
-                  }
-                >
-                  {APPLICATION_STATUS_LABELS[application.status]}
-                </span>
+                <SessionApplicationStatusBadge status={application.status} />
               </Link>
             </td>
           </tr>

@@ -3,32 +3,54 @@
 
 import { PageTitle } from "@/components/public/PageTitle";
 import {
+  definePageContentBlockKeys,
+} from "@/lib/page-content/typed-block-keys";
+import { getPageContentFallback } from "@/constants/page-content";
+import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
 
+const ABOUT_PAGE_KEY = "ABOUT" as const;
+
+const ABOUT_BLOCK_KEYS = definePageContentBlockKeys(ABOUT_PAGE_KEY, {
+  teamName: "TEAM_NAME",
+  conceptTitle: "CONCEPT_TITLE",
+  mainBody: "MAIN_BODY",
+});
+
+export const dynamic = "force-dynamic";
+
 export default async function AboutPage() {
-  const contents = await findPageContentsByPageKey("ABOUT");
+  const contents = await findPageContentsByPageKey(ABOUT_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
   const teamName = getContentText({
     contentMap,
-    blockKey: "TEAM_NAME",
-    fallback: "ARAO U-12\nBASKETBALL CLUB",
+    blockKey: ABOUT_BLOCK_KEYS.teamName,
+    fallback: getPageContentFallback({
+      pageKey: ABOUT_PAGE_KEY,
+      blockKey: ABOUT_BLOCK_KEYS.teamName,
+    }),
   });
 
   const conceptTitle = getContentText({
     contentMap,
-    blockKey: "CONCEPT_TITLE",
-    fallback: "ARAO U-12とは-",
+    blockKey: ABOUT_BLOCK_KEYS.conceptTitle,
+    fallback: getPageContentFallback({
+      pageKey: ABOUT_PAGE_KEY,
+      blockKey: ABOUT_BLOCK_KEYS.conceptTitle,
+    }),
   });
 
   const mainBody = getContentText({
     contentMap,
-    blockKey: "MAIN_BODY",
-    fallback:
-      "私たちは、熊本県荒尾市を拠点に活動しているミニバスケットボールチームです。\n全国大会や九州大会への出場へと子どもたちを導いた実績のあるコーチ陣が在籍しており、日々練習を行っています。\nバスケの楽しさを存分に味わいながら、技術の向上はもちろん、一人ひとりの成長に合わせた丁寧な指導を行っています。",
+    blockKey: ABOUT_BLOCK_KEYS.mainBody,
+    fallback: getPageContentFallback({
+      pageKey: ABOUT_PAGE_KEY,
+      blockKey: ABOUT_BLOCK_KEYS.mainBody,
+    }),
   });
 
   return (

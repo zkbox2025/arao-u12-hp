@@ -5,15 +5,12 @@
 
 import { useActionState } from "react";
 import { updateSessionApplicationMemo } from "./actions";
+import { ADMIN_MEMO_MAX_LENGTH } from "@/constants/adminMemo";
+import type { SessionApplicationMemoActionState } from "@/types/action-state";
 
 type SessionApplicationMemoFormProps = {
   sessionApplicationId: string;
   defaultMemo: string;
-};
-
-const initialState = {
-  error: "",
-  success: "",
 };
 
 export function SessionApplicationMemoForm({
@@ -25,19 +22,22 @@ export function SessionApplicationMemoForm({
     sessionApplicationId
   );
 
+  const initialState: SessionApplicationMemoActionState = {
+    error: "",
+    values: {
+      adminMemo: defaultMemo,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updateMemoWithId,
     initialState
   );
 
+  const currentMemo = state.values?.adminMemo ?? defaultMemo;
+
   return (
     <form action={formAction} className="space-y-4">
-      {state.success ? (
-        <p className="rounded-lg bg-green-50 p-3 text-sm font-bold text-green-700">
-          {state.success}
-        </p>
-      ) : null}
-
       {state.error ? (
         <p className="rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">
           {state.error}
@@ -45,9 +45,11 @@ export function SessionApplicationMemoForm({
       ) : null}
 
       <textarea
+        key={`session-application-adminMemo-${currentMemo}`}
         name="adminMemo"
         rows={6}
-        defaultValue={defaultMemo}
+        defaultValue={currentMemo}
+        maxLength={ADMIN_MEMO_MAX_LENGTH}
         className="w-full rounded-lg border border-neutral-300 px-4 py-3"
       />
 

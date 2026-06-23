@@ -1,20 +1,25 @@
 // lib/mail/session-application-mail.ts
 // 体験/見学申し込みフォームからの通知メール送信処理
 
-import type { SessionApplication } from "@prisma/client";
+import type {
+  SessionApplication,
+  SessionType,
+  Grade,
+  ExperienceYears,
+} from "@/types/prisma";
 import { findPageContentByKey } from "@/lib/repositories/page-content";
 import { mailFrom, resend } from "./resend";
-import { GRADE_LABELS, EXPERIENCE_LABELS, SESSION_TYPE_LABELS } from"@/constants/adminLabels"
+import {
+  GRADE_LABELS,
+  EXPERIENCE_LABELS,
+  SESSION_TYPE_LABELS,
+} from "@/constants/adminLabels";
 import { getNotificationRecipients } from "./notification-recipients";
-
-
-type ChildGrade = keyof typeof GRADE_LABELS;
-type Experience = keyof typeof EXPERIENCE_LABELS;
-
-function formatDate(date: Date | null) {
-  if (!date) return "未入力";
-  return date.toLocaleDateString("ja-JP");
-}
+import { getPageContentFallback } from "@/constants/page-content";
+import {
+  formatAdminDateOrFallback,
+  formatAdminDateTime,
+} from "@/lib/utils/date";
 
 // 管理者への体験/見学申し込み通知メール関数
 export async function sendAdminSessionApplicationNotification(
@@ -23,7 +28,9 @@ export async function sendAdminSessionApplicationNotification(
   const recipients = await getNotificationRecipients("SESSION_APPLICATION");
 
   if (recipients.length === 0) {
-    console.warn("体験/見学申し込み通知先メールが未設定のため、管理者通知をスキップしました");
+    console.warn(
+      "体験/見学申し込み通知先メールが未設定のため、管理者通知をスキップしました"
+    );
     return;
   }
 
@@ -47,10 +54,10 @@ ${GRADE_LABELS[application.childGrade]}
 ${EXPERIENCE_LABELS[application.experience]}
 
 ■ 第一希望日
-${formatDate(application.preferredDate1)}
+${formatAdminDateOrFallback(application.preferredDate1)}
 
 ■ 第二希望日
-${formatDate(application.preferredDate2)}
+${formatAdminDateOrFallback(application.preferredDate2)}
 
 ■ メールアドレス
 ${application.email}
@@ -59,50 +66,23 @@ ${application.email}
 ${application.phone || "未入力"}
 
 ■ 受信日時
-${application.createdAt.toLocaleString("ja-JP")}
+${formatAdminDateTime(application.createdAt)}
     `.trim(),
   });
 }
 
 // 送信者への自動返信確認メール関数
 type SessionApplicationAutoReplyInput = {
-  type: "TRIAL" | "OBSERVATION";
+  type: SessionType;
   childName: string;
   childNameKana: string;
-  childGrade: ChildGrade;
-  experience: Experience;
+  childGrade: Grade;
+  experience: ExperienceYears;
   preferredDate1: Date;
   preferredDate2: Date | null;
   email: string;
   phone?: string | null;
 };
-
-const SESSION_APPLICATION_AUTO_REPLY_FALLBACK_TEMPLATE = 
-`{{childName}} 様の保護者様
-
-この度は体験/見学にお申し込みいただき、誠にありがとうございます。
-お申し込みが完了いたしましたので、当日はどうぞお気をつけてお越しください。
-
-【当日のお持ち物について】
-・体験でお申し込みの場合：
-体育館シューズ（バッシュ等）、飲み物、運動着上下、タオルをご持参ください。
-
-・見学でお申し込みの場合：
-特にお持ちいただくものはございません。
-
-【お申し込み内容の控え】
-■ ご希望の参加内容：{{type}}
-■ お子様のお名前：{{childName}}（{{childNameKana}}）
-■ 現在の学年：{{childGrade}}
-■ 経験年数：{{experience}}
-■ 第一希望日：{{preferredDate1}}
-■ 第二希望日：{{preferredDate2}}
-■ メールアドレス：{{email}}
-■ 電話番号：{{phone}}
-
-※ご都合が悪くなった場合や、日時の変更をご希望される場合は、チーム公式LINEよりメッセージをお送りください。
-
-［ARAO U-12 BASKETBALL CLUB］`;
 
 function applySessionApplicationAutoReplyTemplate({
   template,
@@ -117,8 +97,8 @@ function applySessionApplicationAutoReplyTemplate({
     .replaceAll("{{childNameKana}}", input.childNameKana)
     .replaceAll("{{childGrade}}", GRADE_LABELS[input.childGrade])
     .replaceAll("{{experience}}", EXPERIENCE_LABELS[input.experience])
-    .replaceAll("{{preferredDate1}}", formatDate(input.preferredDate1))
-    .replaceAll("{{preferredDate2}}", formatDate(input.preferredDate2))
+    .replaceAll("{{preferredDate1}}", formatAdminDateOrFallback(input.preferredDate1))
+    .replaceAll("{{preferredDate2}}", formatAdminDateOrFallback(input.preferredDate2))
     .replaceAll("{{email}}", input.email)
     .replaceAll("{{phone}}", input.phone || "未入力");
 }
@@ -130,15 +110,21 @@ export async function sendSessionApplicationAutoReply(
     throw new Error("MAIL_FROM is not defined");
   }
 
+  const pageKey = "SESSION_APPLICATION" as const;
+  const blockKey = "AUTO_REPLY_BODY" as const;
+
   const pageContent = await findPageContentByKey({
-    pageKey: "SESSION_APPLICATION",
-    blockKey: "AUTO_REPLY_BODY",
+    pageKey,
+    blockKey,
   });
 
   const template =
     pageContent?.content && pageContent.content.trim()
       ? pageContent.content
-      : SESSION_APPLICATION_AUTO_REPLY_FALLBACK_TEMPLATE;
+      : getPageContentFallback({
+          pageKey,
+          blockKey,
+        });
 
   const text = applySessionApplicationAutoReplyTemplate({
     template,

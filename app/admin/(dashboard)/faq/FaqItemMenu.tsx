@@ -11,13 +11,14 @@ import type {
 } from "@/constants/faq";
 import { FaqEditModal } from "./FaqEditModal";
 import { FaqDeleteButton } from "./FaqDeleteButton";
+import type { ContentStatus } from "@/types/prisma";
 
 type FaqItemMenuProps = {
   faqId: string;
   category: FaqCategoryValue;
   question: string;
   answer: string;
-  status: "DRAFT" | "PUBLISHED";
+  status: ContentStatus;
   statusFilter: FaqStatusFilterValue;
 };
 

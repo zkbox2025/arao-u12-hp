@@ -6,17 +6,20 @@
 import { useState } from "react";
 import { BaseModal } from "@/components/admin/modal/BaseModal";
 import { NoticeEditForm } from "./NoticeEditForm";
+import type { ContentStatus } from "@/types/prisma";
 
 type NoticeEditModalProps = {
   noticeId: string;
   defaultTitle: string;
   defaultContent: string;
+  defaultStatus: ContentStatus;
 };
 
 export function NoticeEditModal({
   noticeId,
   defaultTitle,
   defaultContent,
+  defaultStatus,
 }: NoticeEditModalProps) {
   const [isOpen, setIsOpen] = useState(false);
 
@@ -39,6 +42,7 @@ export function NoticeEditModal({
           noticeId={noticeId}
           defaultTitle={defaultTitle}
           defaultContent={defaultContent}
+          defaultStatus={defaultStatus}
           onCancel={() => setIsOpen(false)}
         />
       </BaseModal>

@@ -1,55 +1,85 @@
 // app/(public)/flow/page.tsx
 // 公開ページの体験/見学の流れページ
 
-import { PageTitle } from "@/components/public/PageTitle";
 import Link from "next/link";
+import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
+import { definePageContentBlockKeys } from "@/lib/page-content/typed-block-keys";
 import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
 
+const FLOW_PAGE_KEY = "FLOW" as const;
+
+const FLOW_BLOCK_KEYS = definePageContentBlockKeys(FLOW_PAGE_KEY, {
+  importantNoticeBody: "IMPORTANT_NOTICE_BODY",
+  step1Heading: "STEP1_HEADING",
+  step1Body: "STEP1_BODY",
+  step2Heading: "STEP2_HEADING",
+  step2Body: "STEP2_BODY",
+  belongingsBody: "BELONGINGS_BODY",
+});
+
+export const dynamic = "force-dynamic";
+
 export default async function FlowPage() {
-  const contents = await findPageContentsByPageKey("FLOW");
+  const contents = await findPageContentsByPageKey(FLOW_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
   const importantNoticeBody = getContentText({
     contentMap,
-    blockKey: "IMPORTANT_NOTICE_BODY",
-    fallback:
-      "【重要】体験/見学にお越しいただく方へ：直近の練習時間・場所の変更はこちらをご覧ください",
+    blockKey: FLOW_BLOCK_KEYS.importantNoticeBody,
+    fallback: getPageContentFallback({
+      pageKey: FLOW_PAGE_KEY,
+      blockKey: FLOW_BLOCK_KEYS.importantNoticeBody,
+    }),
   });
 
   const step1Heading = getContentText({
     contentMap,
-    blockKey: "STEP1_HEADING",
-    fallback: "体験/見学のお申し込み",
+    blockKey: FLOW_BLOCK_KEYS.step1Heading,
+    fallback: getPageContentFallback({
+      pageKey: FLOW_PAGE_KEY,
+      blockKey: FLOW_BLOCK_KEYS.step1Heading,
+    }),
   });
 
   const step1Body = getContentText({
     contentMap,
-    blockKey: "STEP1_BODY",
-    fallback:
-      "お申し込みフォームからご希望の日程を選択し、必要事項を入力して予約を完了させてください",
+    blockKey: FLOW_BLOCK_KEYS.step1Body,
+    fallback: getPageContentFallback({
+      pageKey: FLOW_PAGE_KEY,
+      blockKey: FLOW_BLOCK_KEYS.step1Body,
+    }),
   });
 
   const step2Heading = getContentText({
     contentMap,
-    blockKey: "STEP2_HEADING",
-    fallback: "体験/見学当日のご参加",
+    blockKey: FLOW_BLOCK_KEYS.step2Heading,
+    fallback: getPageContentFallback({
+      pageKey: FLOW_PAGE_KEY,
+      blockKey: FLOW_BLOCK_KEYS.step2Heading,
+    }),
   });
 
   const step2Body = getContentText({
     contentMap,
-    blockKey: "STEP2_BODY",
-    fallback: "当日は直接、練習場所へお越しください",
+    blockKey: FLOW_BLOCK_KEYS.step2Body,
+    fallback: getPageContentFallback({
+      pageKey: FLOW_PAGE_KEY,
+      blockKey: FLOW_BLOCK_KEYS.step2Body,
+    }),
   });
 
   const belongingsBody = getContentText({
     contentMap,
-    blockKey: "BELONGINGS_BODY",
-    fallback:
-      "体験の方は体育館シューズ、飲み物、運動着、タオルをご持参ください。\n見学の方は手ぶらでお越しいただけます。",
+    blockKey: FLOW_BLOCK_KEYS.belongingsBody,
+    fallback: getPageContentFallback({
+      pageKey: FLOW_PAGE_KEY,
+      blockKey: FLOW_BLOCK_KEYS.belongingsBody,
+    }),
   });
 
   return (
@@ -58,7 +88,7 @@ export default async function FlowPage() {
 
       <div className="space-y-8">
         <Link
-          href="/notice"
+          href="/notice#top"
           className="block rounded-lg border border-red-300 bg-red-50 p-4 font-bold leading-8 text-red-700"
         >
           {importantNoticeBody}
@@ -77,7 +107,7 @@ export default async function FlowPage() {
 
           <div className="mt-5">
             <Link
-              href="/session-application"
+              href="/session-application#top"
               className="inline-flex items-center justify-center rounded-md bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
             >
               体験/見学申し込みはこちら
@@ -95,14 +125,15 @@ export default async function FlowPage() {
           <p className="mt-4 whitespace-pre-wrap leading-8 text-neutral-700">
             {step2Body}
           </p>
+
           <div className="mt-5">
-   <Link
-          href="/summary#top"
-          className="inline-flex w-fit items-center justify-center rounded-full bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
-        >
-          通常の練習スケジュールはこちら
-        </Link>
-  </div>
+            <Link
+              href="/summary#top"
+              className="inline-flex w-fit items-center justify-center rounded-full bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
+            >
+              通常の練習スケジュールはこちら
+            </Link>
+          </div>
         </section>
 
         <section className="border-b border-neutral-300 pb-6">

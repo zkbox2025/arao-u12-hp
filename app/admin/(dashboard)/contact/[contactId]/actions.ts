@@ -3,80 +3,147 @@
 
 "use server";
 
+import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
+import {
+  ADMIN_MEMO_MAX_LENGTH,
+  ADMIN_MEMO_MAX_LENGTH_ERROR_MESSAGE,
+} from "@/constants/adminMemo";
+import { ADMIN_ACTION_UPDATE_ERROR_MESSAGE } from "@/constants/adminActionError";
+import type {
+  ContactMemoActionState,
+  ContactStatusActionState,
+} from "@/types/action-state";
+import {
+  buildContactMemoActionValues,
+  buildContactStatusActionValues,
+} from "@/app/admin/_utils/form-helpers";
 
-type AdminActionState = {
-  error?: string;
-  success?: string;
-};
+function buildAdminContactDetailPath({
+  contactId,
+  memoSaved,
+  statusSaved,
+}: {
+  contactId: string;
+  memoSaved?: boolean;
+  statusSaved?: boolean;
+}) {
+  const params = new URLSearchParams();
 
-//問い合わせのステータス（PENDING：未回答　REPLIED：回答済み）を更新するアクション関数
+  if (memoSaved) {
+    params.set("memoSaved", "1");
+    params.set("toastId", Date.now().toString());
+  }
+
+  if (statusSaved) {
+    params.set("statusSaved", "1");
+    params.set("toastId", Date.now().toString());
+  }
+
+  const query = params.toString();
+
+  return query
+    ? `/admin/contact/${contactId}?${query}#top`
+    : `/admin/contact/${contactId}#top`;
+}
+
 export async function updateContactStatus(
   contactId: string,
-  _state: AdminActionState,
+  state: ContactStatusActionState,
   formData: FormData
-): Promise<AdminActionState> {
+): Promise<ContactStatusActionState> {
   await requireAdmin();
 
-  const status = String(formData.get("status") ?? "");
+  const values = buildContactStatusActionValues(formData, state.values);
+  const status = values?.status ?? "PENDING";
 
   if (status !== "PENDING" && status !== "REPLIED") {
     return {
       error: "不正なステータスです。",
+      values,
     };
   }
 
-  await prisma.contact.update({
-    where: {
-      id: contactId,
-    },
-    data: {
+  try {
+    await prisma.contact.update({
+      where: {
+        id: contactId,
+      },
+      data: {
+        status,
+      },
+    });
+  } catch (error) {
+    console.error("お問い合わせステータス更新に失敗しました", {
+      contactId,
       status,
-    },
-  });
+      error,
+    });
 
-  //データが更新されたため、これら3つのページの画面（キャッシュ）を最新状態に作り直す
+    return {
+      error: ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
+      values,
+    };
+  }
+
   revalidatePath(`/admin/contact/${contactId}`);
   revalidatePath("/admin/contact");
   revalidatePath("/admin/dashboard");
 
-  return {
-    success: "ステータスを変更しました。",
-  };
+  redirect(
+    buildAdminContactDetailPath({
+      contactId,
+      statusSaved: true,
+    })
+  );
 }
 
-//問い合わせのメモ欄を更新するアクション関数
 export async function updateContactMemo(
   contactId: string,
-  _state: AdminActionState,
+  state: ContactMemoActionState,
   formData: FormData
-): Promise<AdminActionState> {
+): Promise<ContactMemoActionState> {
   await requireAdmin();
 
-  const adminMemo = String(formData.get("adminMemo") ?? "");
+  const values = buildContactMemoActionValues(formData, state.values);
+  const adminMemo = values?.adminMemo ?? "";
 
-  //最低限のバリデーション（管理者しか使わないため）
-  if (adminMemo.length > 2000) {
+  if (adminMemo.length > ADMIN_MEMO_MAX_LENGTH) {
     return {
-      error: "メモは2000文字以内で入力してください。",
+      error: ADMIN_MEMO_MAX_LENGTH_ERROR_MESSAGE,
+      values,
     };
   }
 
-  await prisma.contact.update({
-    where: {
-      id: contactId,
-    },
-    data: {
-      adminMemo,
-    },
-  });
+  try {
+    await prisma.contact.update({
+      where: {
+        id: contactId,
+      },
+      data: {
+        adminMemo,
+      },
+    });
+  } catch (error) {
+    console.error("お問い合わせメモ更新に失敗しました", {
+      contactId,
+      error,
+    });
 
-  //データが更新されたため、以下のページの画面（キャッシュ）を最新状態に作り直す
+    return {
+      error: ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
+      values,
+    };
+  }
+
   revalidatePath(`/admin/contact/${contactId}`);
 
-  return {
-    success: "メモを保存しました。",
-  };
+  redirect(
+    buildAdminContactDetailPath({
+      contactId,
+      memoSaved: true,
+    })
+  );
 }

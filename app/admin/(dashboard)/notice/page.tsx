@@ -2,23 +2,20 @@
 // 管理用練習スケ一覧ページ
 
 import Link from "next/link";
-import { format } from "date-fns";
 import { findAdminNotices } from "@/lib/repositories/admin-notice";
-import { CONTENT_STATUS_LABELS } from "@/constants/adminLabels";
+import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge";
 import { NoticeCreateModal } from "./NoticeCreateModal";
 import { ToastMessage } from "@/components/admin/ToastMessage";
 import { AdminPageHeader } from "@/components/admin/AdminPageHeader";//アイコン付きタイトル
-
-
-// もし文章が長すぎたら10文字に切り詰めて最後に...をつける
-function truncateText(text: string, maxLength = 35) {
-  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
-}
+import { ADMIN_ACTION_DELETE_ERROR_MESSAGE } from "@/constants/adminActionError";
+import { formatAdminDate } from "@/lib/utils/date";
+import { truncateText } from "@/lib/utils/text";
 
 type AdminNoticePageProps = {
   searchParams: Promise<{
     created?: string;
     deleted?: string;
+    deleteError?: string;
     toastId?: string;
   }>;
 };
@@ -29,12 +26,16 @@ export default async function AdminNoticePage({
   const params = await searchParams;
   const notices = await findAdminNotices({ take: 15 });
 
-  const toastMessage =
-    params.created === "1"
-      ? "作成しました。"
-      : params.deleted === "1"
-        ? "削除しました。"
+const toastMessage =
+  params.created === "1"
+    ? "作成しました。"
+    : params.deleted === "1"
+      ? "削除しました。"
+      : params.deleteError === "1"
+        ? ADMIN_ACTION_DELETE_ERROR_MESSAGE
         : "";
+
+const toastVariant = params.deleteError === "1" ? "error" : "success";
 
   return (
     <div>
@@ -42,6 +43,7 @@ export default async function AdminNoticePage({
   <ToastMessage
     key={`${toastMessage}-${params.toastId ?? ""}`}
     message={toastMessage}
+    variant={toastVariant}
   />
 ) : null}
 
@@ -76,23 +78,15 @@ export default async function AdminNoticePage({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <h2 className="text-lg font-black leading-8 text-neutral-900">
-                  {truncateText(notice.title)}
+                  {truncateText(notice.title, 35)}
                 </h2>
 
                 <p className="mt-2 text-sm text-neutral-500">
-                  更新日：{format(notice.updatedAt, "yyyy/MM/dd")}
+                  更新日：{formatAdminDate(notice.updatedAt)}
                 </p>
               </div>
 
-              <span
-                className={
-                  notice.status === "PUBLISHED"
-                    ? "w-fit rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700"
-                    : "w-fit rounded-full bg-neutral-100 px-3 py-1 text-xs font-bold text-neutral-700"
-                }
-              >
-                {CONTENT_STATUS_LABELS[notice.status]}
-              </span>
+              <ContentStatusBadge status={notice.status} />
             </div>
           </Link>
         ))}

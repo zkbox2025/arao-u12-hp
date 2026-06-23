@@ -5,30 +5,41 @@
 
 import { useActionState } from "react";
 import { updateNotice } from "./actions";
+import type { ContentStatus } from "@/types/prisma";
 
 type NoticeEditFormProps = {
   noticeId: string;
   defaultTitle: string;
   defaultContent: string;
+  defaultStatus: ContentStatus;
   onCancel: () => void;
-};
-
-const initialState = {
-  error: "",
 };
 
 export function NoticeEditForm({
   noticeId,
   defaultTitle,
   defaultContent,
+  defaultStatus,
   onCancel,
 }: NoticeEditFormProps) {
   const updateNoticeWithId = updateNotice.bind(null, noticeId);
+
+  const initialState = {
+    error: "",
+    values: {
+      title: defaultTitle,
+      content: defaultContent,
+      status: defaultStatus,
+    },
+  };
 
   const [state, formAction, isPending] = useActionState(
     updateNoticeWithId,
     initialState
   );
+
+  const currentTitle = state.values?.title ?? defaultTitle;
+  const currentContent = state.values?.content ?? defaultContent;
 
   return (
     <form action={formAction} className="space-y-5">
@@ -46,10 +57,11 @@ export function NoticeEditForm({
           タイトル
         </label>
         <input
+          key={`title-${currentTitle}`}
           id="edit-title"
           name="title"
           type="text"
-          defaultValue={defaultTitle}
+          defaultValue={currentTitle}
           className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
         />
       </div>
@@ -62,10 +74,11 @@ export function NoticeEditForm({
           本文
         </label>
         <textarea
+          key={`content-${currentContent}`}
           id="edit-content"
           name="content"
           rows={10}
-          defaultValue={defaultContent}
+          defaultValue={currentContent}
           className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
         />
       </div>

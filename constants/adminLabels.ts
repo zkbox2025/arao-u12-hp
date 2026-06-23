@@ -1,21 +1,31 @@
 // constants/adminLabels.ts
 // 管理画面の表示ラベル
 
+import type {
+  ContactStatus,
+  SessionApplicationStatus,
+  ContentStatus,
+  Grade,
+  ExperienceYears,
+  FormType,
+  SessionType,
+} from "@/types/prisma";
+
 export const CONTACT_STATUS_LABELS = {
   PENDING: "未回答",
   REPLIED: "回答済み",
-} as const;
+} as const satisfies Record<ContactStatus, string>;
 
 export const APPLICATION_STATUS_LABELS = {
   PENDING: "参加待ち",
   ATTENDED: "参加済み",
   CANCELED: "キャンセル",
-} as const;
+} as const satisfies Record<SessionApplicationStatus, string>;
 
 export const SESSION_TYPE_LABELS = {
   TRIAL: "体験",
   OBSERVATION: "見学",
-} as const;
+} as const satisfies Record<SessionType, string>;
 
 export const GRADE_LABELS = {
   YOUJI: "幼児",
@@ -25,23 +35,19 @@ export const GRADE_LABELS = {
   ELEMENTARY_4: "小学4年生",
   ELEMENTARY_5: "小学5年生",
   ELEMENTARY_6: "小学6年生",
-} as const;
+} as const satisfies Record<Grade, string>;
 
 export const EXPERIENCE_LABELS = {
   NONE: "未経験",
   LESS_THAN_1YEAR: "1年未満",
   YEARS_1_OR_MORE: "1年以上",
-} as const;
-
+} as const satisfies Record<ExperienceYears, string>;
 
 export const CONTENT_STATUS_LABELS = {
   DRAFT: "下書き",
   PUBLISHED: "公開中",
-} as const;
+} as const satisfies Record<ContentStatus, string>;
 
-
-
-//フォームのメール通知設定画面の定義
 export const FORM_NOTIFICATION_SETTINGS = [
   {
     formType: "CONTACT",
@@ -54,7 +60,11 @@ export const FORM_NOTIFICATION_SETTINGS = [
     description:
       "体験/見学申し込みフォーム送信時に、以下のメールアドレスへ通知します。",
   },
-] as const;
+] as const satisfies readonly {
+  formType: FormType;
+  label: string;
+  description: string;
+}[];
 
 export type FormNotificationType =
   (typeof FORM_NOTIFICATION_SETTINGS)[number]["formType"];
@@ -62,4 +72,4 @@ export type FormNotificationType =
 export const FORM_NOTIFICATION_LABELS = {
   CONTACT: "お問い合わせ通知先",
   SESSION_APPLICATION: "体験/見学申し込み通知先",
-} as const;
+} as const satisfies Record<FormType, string>;

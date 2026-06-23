@@ -1,21 +1,21 @@
 // app/admin/(dashboard)/faq/FaqItemCard.tsx
 // FAQ単一カード（表示のための装飾関数）
 
-import { CONTENT_STATUS_LABELS } from "@/constants/adminLabels";
+import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge";
 import type {
-  FaqCategoryValue,
   FaqStatusFilterValue,
 } from "@/constants/faq";
 import { FaqItemMenu } from "./FaqItemMenu";
 import { FaqSortHandle } from "./FaqSortHandle";
+import type { ContentStatus, FaqCategory } from "@/types/prisma";
 
 type FaqItemCardProps = {
   faq: {
     id: string;
-    category: FaqCategoryValue;
+    category: FaqCategory;
     question: string;
     answer: string;
-    status: "DRAFT" | "PUBLISHED";
+    status: ContentStatus;
     sortOrder: number;
   };
   displayIndex: number;
@@ -34,15 +34,7 @@ export function FaqItemCard({
           No. {displayIndex}
         </p>
 
-        <span
-          className={
-            faq.status === "PUBLISHED"
-              ? "w-fit rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700"
-              : "w-fit rounded-full bg-neutral-100 px-3 py-1 text-xs font-bold text-neutral-700"
-          }
-        >
-          {CONTENT_STATUS_LABELS[faq.status]}
-        </span>
+        <ContentStatusBadge status={faq.status} />
       </div>
 
       <div className="mt-5">

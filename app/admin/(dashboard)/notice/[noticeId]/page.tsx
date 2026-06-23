@@ -3,13 +3,12 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { format } from "date-fns";
-import { ja } from "date-fns/locale";
 import { findAdminNoticeById } from "@/lib/repositories/admin-notice";
-import { CONTENT_STATUS_LABELS } from "@/constants/adminLabels";
+import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge";
 import { ToastMessage } from "@/components/admin/ToastMessage";
 import { NoticeEditModal } from "./NoticeEditModal";
 import { NoticeDeleteButton } from "./NoticeDeleteButton";
+import { formatJapaneseDate } from "@/lib/utils/date";
 
 type AdminNoticeDetailPageProps = {
   params: Promise<{
@@ -59,21 +58,10 @@ export default async function AdminNoticeDetailPage({
 
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
             <p className="text-sm text-neutral-600">
-              更新日：
-              {format(notice.updatedAt, "yyyy年M月d日（E）", {
-                locale: ja,
-              })}
+              更新日：{formatJapaneseDate(notice.updatedAt)}
             </p>
 
-            <span
-              className={
-                notice.status === "PUBLISHED"
-                  ? "w-fit rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700"
-                  : "w-fit rounded-full bg-neutral-100 px-3 py-1 text-xs font-bold text-neutral-700"
-              }
-            >
-              {CONTENT_STATUS_LABELS[notice.status]}
-            </span>
+            <ContentStatusBadge status={notice.status} />
           </div>
         </div>
 
@@ -97,11 +85,12 @@ export default async function AdminNoticeDetailPage({
 
     <section className="py-6">
       <div className="flex flex-col gap-3 sm:flex-row">
-        <NoticeEditModal
-          noticeId={notice.id}
-          defaultTitle={notice.title}
-          defaultContent={notice.content}
-        />
+       <NoticeEditModal
+  noticeId={notice.id}
+  defaultTitle={notice.title}
+  defaultContent={notice.content}
+  defaultStatus={notice.status}
+/>
 
         <NoticeDeleteButton noticeId={notice.id} />
       </div>

@@ -3,22 +3,32 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { format } from "date-fns";
 import { findAdminContactById } from "@/lib/repositories/admin-contact";
-import { CONTACT_STATUS_LABELS } from "@/constants/adminLabels";
+import { ContactStatusBadge } from "@/components/admin/status/ContactStatusBadge";
 import { ContactStatusForm } from "./ContactStatusForm";
 import { ContactMemoForm } from "./ContactMemoForm";
+import { AdminPageHeader } from "@/components/admin/AdminPageHeader";//アイコン付きタイトル
+import { ToastMessage } from "@/components/admin/ToastMessage";
+import { formatAdminDateTime } from "@/lib/utils/date";
+
 
 type AdminContactDetailPageProps = {
   params: Promise<{
     contactId: string;
   }>;
+  searchParams: Promise<{
+    memoSaved?: string;
+    statusSaved?: string;
+    toastId?: string;
+  }>;
 };
 
 export default async function AdminContactDetailPage({
   params,
+  searchParams,
 }: AdminContactDetailPageProps) {
   const { contactId } = await params;
+  const query = await searchParams;
 
   const contact = await findAdminContactById(contactId);
 
@@ -26,27 +36,33 @@ export default async function AdminContactDetailPage({
     notFound();
   }
 
+    const toastMessage =
+  query.memoSaved === "1"
+    ? "メモを保存しました。"
+    : query.statusSaved === "1"
+      ? "ステータスを変更しました。"
+      : "";
+
   return (
-  <div>
+  <div id="top">
+    {toastMessage ? (
+      <ToastMessage
+        key={`${toastMessage}-${query.toastId ?? ""}`}
+        message={toastMessage}
+      />
+    ) : null}
     <div className="pb-5">
-      <p className="text-sm font-bold text-green-700">ADMIN</p>
-      <h1 className="mt-2 text-2xl font-black text-neutral-900">
-        お問い合わせ 詳細
-      </h1>
+      
+      <AdminPageHeader
+        href="/admin/contact"
+        title="お問い合わせ　詳細"
+        showBorder={false}
+      />
 
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <span
-          className={
-            contact.status === "PENDING"
-  ? "inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700"
-  : "inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700"
-          }
-        >
-          {CONTACT_STATUS_LABELS[contact.status]}
-        </span>
+      <div className="mt-4 text-left">
+  <ContactStatusBadge status={contact.status} />
+</div>
 
-        
-      </div>
     </div>
 
     <section className="border-y border-neutral-300 py-6">
@@ -58,7 +74,7 @@ export default async function AdminContactDetailPage({
           <div>
             <dt className="font-bold text-neutral-900">受信日時</dt>
             <dd className="mt-1 text-neutral-700">
-              {format(contact.createdAt, "yyyy/MM/dd HH:mm")}
+             {formatAdminDateTime(contact.createdAt)}
             </dd>
           </div>
 

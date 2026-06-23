@@ -46,7 +46,8 @@ model PageContent {
   pageKey   String // どのページか（例: "TOP", "ABOUT", "POLICY", "FLOW"）
   blockKey  String // どのパーツ（場所）か（例: "CLUB_NAME"）
   content   String   @db.Text // 編集する文章そのもの（テキストのみ）
-  imageUrl  String? // 画像URL（MVP v1ではここに固定のダミーURLを入れる）
+  imageUrl  String? // 画像URL
+  imagePath String? //DBストレージの画像削除用
   imageAlt  String?
 
   @@unique([pageKey, blockKey]) // 1ページ内に、同じブロックが重複しないように

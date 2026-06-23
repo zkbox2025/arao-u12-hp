@@ -1,24 +1,22 @@
 // app/admin/(dashboard)/faq/FaqEditForm.tsx
 // FAQ編集フォーム
-//${faqId}とつける理由は、「label と textarea を正しく連動させるため」と「画面内でのIDの重複（バグ）を防ぐため（クリックしたらクリックした質問と回答を編集できるようにするため）」
+// ${faqId} とつける理由は、label と textarea を正しく連動させるため。
+// 同じ画面に複数の編集フォームが出ても id が重複しないようにする。
 
 "use client";
 
 import { useActionState } from "react";
 import type { FaqCategoryValue } from "@/constants/faq";
 import { updateFaq } from "./actions";
+import type { ContentStatus } from "@/types/prisma";
 
 type FaqEditFormProps = {
   faqId: string;
   category: FaqCategoryValue;
   defaultQuestion: string;
   defaultAnswer: string;
-  defaultStatus: "DRAFT" | "PUBLISHED";
+  defaultStatus: ContentStatus;
   onCancel: () => void;
-};
-
-const initialState = {
-  error: "",
 };
 
 export function FaqEditForm({
@@ -31,10 +29,24 @@ export function FaqEditForm({
 }: FaqEditFormProps) {
   const updateFaqWithId = updateFaq.bind(null, faqId);
 
+  const initialState = {
+    error: "",
+    values: {
+      category,
+      question: defaultQuestion,
+      answer: defaultAnswer,
+      status: defaultStatus,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updateFaqWithId,
     initialState
   );
+
+  const currentQuestion = state.values?.question ?? defaultQuestion;
+  const currentAnswer = state.values?.answer ?? defaultAnswer;
+  const currentStatus = state.values?.status ?? defaultStatus;
 
   return (
     <form action={formAction} className="space-y-5">
@@ -54,10 +66,11 @@ export function FaqEditForm({
           質問
         </label>
         <textarea
+          key={`question-${currentQuestion}`}
           id={`edit-question-${faqId}`}
           name="question"
           rows={3}
-          defaultValue={defaultQuestion}
+          defaultValue={currentQuestion}
           className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
         />
       </div>
@@ -70,10 +83,11 @@ export function FaqEditForm({
           回答
         </label>
         <textarea
+          key={`answer-${currentAnswer}`}
           id={`edit-answer-${faqId}`}
           name="answer"
           rows={6}
-          defaultValue={defaultAnswer}
+          defaultValue={currentAnswer}
           className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
         />
       </div>
@@ -81,13 +95,13 @@ export function FaqEditForm({
       <div>
         <p className="text-sm font-bold text-neutral-900">公開状態</p>
 
-        <div className="mt-2 flex flex-col gap-3 sm:flex-row">
+        <div key={`status-${currentStatus}`} className="mt-2 flex flex-col gap-3 sm:flex-row">
           <label className="flex items-center gap-2">
             <input
               type="radio"
               name="status"
               value="DRAFT"
-              defaultChecked={defaultStatus === "DRAFT"}
+              defaultChecked={currentStatus === "DRAFT"}
             />
             下書き
           </label>
@@ -97,7 +111,7 @@ export function FaqEditForm({
               type="radio"
               name="status"
               value="PUBLISHED"
-              defaultChecked={defaultStatus === "PUBLISHED"}
+              defaultChecked={currentStatus === "PUBLISHED"}
             />
             公開
           </label>

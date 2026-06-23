@@ -3,47 +3,47 @@
 
 import Link from "next/link";
 import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
+import { definePageContentSections } from "@/lib/page-content/typed-block-keys";
 import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
 
-const summaryItems = [
+const SUMMARY_PAGE_KEY = "SUMMARY" as const;
+
+const summaryItems = definePageContentSections(SUMMARY_PAGE_KEY, [
   {
     title: "活動場所",
     blockKey: "PLACE_BODY",
-    fallback: "万田小学校体育館\n桜山小学校体育館\n荒尾市民体育館",
   },
   {
     title: "対象",
     blockKey: "TARGET_BODY",
-    fallback: "クラブ生：小１〜小６（男子）\nクラブ教室生：幼児・小１〜小６（女子）",
   },
   {
     title: "練習日時",
     blockKey: "SCHEDULE_BODY",
-    fallback: "火曜日：１８：００〜２０：００（万田小体育館）\n水曜日：１７：３０〜１９：３０（万田小体育館または荒尾市民体育館）\n木曜日：１８：００〜２０：００（桜山小体育館）\n金曜日：１８：００〜２０：００（桜山小体育館）\n土・日のどちらか１日：９：００〜１２：００（桜山小体育館または万田小体育館）",
   },
   {
     title: "月謝",
     blockKey: "MONTHLY_FEE_BODY",
-    fallback: "【クラブ生：小１〜小６（男子）】\n小１〜小３（３,０００円）\n小４〜小６（４,０００円）\n【クラブ教室生：幼児・小１〜小６（女子）】\n１回：５００円（ただし３,０００円を上限とする）",
   },
   {
     title: "その他費用",
     blockKey: "OTHER_COST_BODY",
-    fallback: "入会費：入会時にのみ納入する（内訳：スポーツ安全保険料等）\n【クラブ生：小１〜小６（男子）】\n小１〜小３（５,０００円）\n小４〜小６（６,０００円）\n【クラブ教室生：幼児・小１〜小６（女子）】\n一律１,０００円",
   },
   {
     title: "用意するもの",
     blockKey: "ITEMS_BODY",
-    fallback: "体育館シューズ、飲み物、運動着、タオルをご用意ください。",
   },
-] as const;
+]);
+
+export const dynamic = "force-dynamic";
 
 export default async function SummaryPage() {
-  const contents = await findPageContentsByPageKey("SUMMARY");
+  const contents = await findPageContentsByPageKey(SUMMARY_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
   return (
@@ -64,7 +64,10 @@ export default async function SummaryPage() {
               {getContentText({
                 contentMap,
                 blockKey: item.blockKey,
-                fallback: item.fallback,
+                fallback: getPageContentFallback({
+                  pageKey: SUMMARY_PAGE_KEY,
+                  blockKey: item.blockKey,
+                }),
               })}
             </p>
 

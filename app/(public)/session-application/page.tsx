@@ -4,11 +4,24 @@
 import { SessionApplicationForm } from "@/components/form/SessionApplicationForm";
 import { ThanksModal } from "@/components/form/ThanksModal";
 import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
+import { definePageContentBlockKeys } from "@/lib/page-content/typed-block-keys";
 import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
+
+const SESSION_APPLICATION_PAGE_KEY = "SESSION_APPLICATION" as const;
+
+const SESSION_APPLICATION_BLOCK_KEYS = definePageContentBlockKeys(
+  SESSION_APPLICATION_PAGE_KEY,
+  {
+    leadBody: "LEAD_BODY",
+    beginnerNote: "BEGINNER_NOTE",
+    thanksMessage: "THANKS_MESSAGE",
+  }
+);
 
 type SessionApplicationPageProps = {
   searchParams: Promise<{
@@ -16,33 +29,44 @@ type SessionApplicationPageProps = {
   }>;
 };
 
+export const dynamic = "force-dynamic";
+
 export default async function SessionApplicationPage({
   searchParams,
 }: SessionApplicationPageProps) {
   const params = await searchParams;
   const isSubmitted = params.submitted === "success";
 
-  const contents = await findPageContentsByPageKey("SESSION_APPLICATION");
+  const contents = await findPageContentsByPageKey(
+    SESSION_APPLICATION_PAGE_KEY
+  );
   const contentMap = toContentMap(contents);
 
   const leadBody = getContentText({
     contentMap,
-    blockKey: "LEAD_BODY",
-    fallback:
-      "無料体験/見学のお申し込みはこちらからお願いします。下記のフォームに必要事項をご記入ください。",
+    blockKey: SESSION_APPLICATION_BLOCK_KEYS.leadBody,
+    fallback: getPageContentFallback({
+      pageKey: SESSION_APPLICATION_PAGE_KEY,
+      blockKey: SESSION_APPLICATION_BLOCK_KEYS.leadBody,
+    }),
   });
 
   const beginnerNote = getContentText({
     contentMap,
-    blockKey: "BEGINNER_NOTE",
-    fallback: "未経験のお子様も大歓迎です！",
+    blockKey: SESSION_APPLICATION_BLOCK_KEYS.beginnerNote,
+    fallback: getPageContentFallback({
+      pageKey: SESSION_APPLICATION_PAGE_KEY,
+      blockKey: SESSION_APPLICATION_BLOCK_KEYS.beginnerNote,
+    }),
   });
 
   const thanksMessage = getContentText({
     contentMap,
-    blockKey: "THANKS_MESSAGE",
-    fallback:
-      "体験/見学の申し込みが完了しました。\n\n【当日お越しいただく際のご案内】\n体験をお申し込みの方は、体育館シューズ、飲み物、運動着上下、タオルをご持参ください。\n\n見学をお申し込みの方は、特にお持ちいただくものはございません。\n\nどうぞお気軽にお越しください。",
+    blockKey: SESSION_APPLICATION_BLOCK_KEYS.thanksMessage,
+    fallback: getPageContentFallback({
+      pageKey: SESSION_APPLICATION_PAGE_KEY,
+      blockKey: SESSION_APPLICATION_BLOCK_KEYS.thanksMessage,
+    }),
   });
 
   return (

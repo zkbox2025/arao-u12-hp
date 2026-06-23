@@ -1,5 +1,9 @@
 // app/admin/(dashboard)/pagecontent/PageContentEditorForm.tsx
 // サイト内文章設定フォーム
+// ページ側でフォーム全体に key を付けているため、保存成功後・選択変更後はフォーム全体が再マウントされる。
+// 一方、エラー時は updatedAt が変わらずフォーム全体は再マウントされないため、
+// defaultValue を確実に反映したい textarea / imageAlt には個別に key を付ける。
+// type="file" はセキュリティ上、エラー後に選択済みファイルを自動復元できない。
 
 "use client";
 
@@ -7,6 +11,7 @@ import Image from "next/image";
 import { useActionState } from "react";
 import { updatePageContent } from "./actions";
 import { PageContentImageDeleteButton } from "./PageContentImageDeleteButton";
+import type { PageContentActionState } from "@/types/action-state";
 
 type PageContentEditorFormProps = {
   pageKey: string;
@@ -16,20 +21,7 @@ type PageContentEditorFormProps = {
   defaultImageAlt: string;
 };
 
-type PageContentEditorState = {
-  error?: string;
-  values?: {
-    pageKey?: string;
-    blockKey?: string;
-    content?: string;
-    imageUrl?: string;
-    imageAlt?: string;
-  };
-};
 
-const initialState: PageContentEditorState = {
-  error: "",
-};
 
 export function PageContentEditorForm({
   pageKey,
@@ -38,6 +30,17 @@ export function PageContentEditorForm({
   defaultImageUrl,
   defaultImageAlt,
 }: PageContentEditorFormProps) {
+  const initialState: PageContentActionState = {
+    error: "",
+    values: {
+      pageKey,
+      blockKey,
+      content: defaultContent,
+      imageUrl: defaultImageUrl || undefined,
+      imageAlt: defaultImageAlt || undefined,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updatePageContent,
     initialState
@@ -51,9 +54,6 @@ export function PageContentEditorForm({
     <form action={formAction} className="space-y-6">
       <input type="hidden" name="pageKey" value={pageKey} />
       <input type="hidden" name="blockKey" value={blockKey} />
-
-      {/* 画像URLは手入力させず、現在の保存済みURLを保持する */}
-      <input type="hidden" name="imageUrl" value={imageUrlValue} />
 
       {state.error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 p-4">
@@ -71,12 +71,13 @@ export function PageContentEditorForm({
         </label>
 
         <textarea
-          id="content"
-          name="content"
-          rows={10}
-          defaultValue={contentValue}
-          className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
-        />
+  key={`content-${contentValue}`}
+  id="content"
+  name="content"
+  rows={10}
+  defaultValue={contentValue}
+  className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
+/>
       </section>
 
       <section className="border-t border-neutral-200 pt-6">
@@ -113,13 +114,14 @@ export function PageContentEditorForm({
           </label>
 
           <input
-            id="imageAlt"
-            name="imageAlt"
-            type="text"
-            defaultValue={imageAltValue}
-            placeholder="例：体育館で練習している子どもたち"
-            className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
-          />
+  key={`imageAlt-${imageAltValue}`}
+  id="imageAlt"
+  name="imageAlt"
+  type="text"
+  defaultValue={imageAltValue}
+  placeholder="例：体育館で練習している子どもたち"
+  className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+/>
 
           <p className="mt-2 text-xs leading-6 text-neutral-500">
             画像が表示されない環境や読み上げ機能で使われる説明文です。

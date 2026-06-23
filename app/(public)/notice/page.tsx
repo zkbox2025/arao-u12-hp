@@ -4,7 +4,7 @@
 import Link from "next/link";
 import { PageTitle } from "@/components/public/PageTitle";
 import { findPublishedNotices } from "@/lib/repositories/notice";
-import { formatDate } from "@/lib/utils/date";//日付を日本語表記にフォーマットするためのユーティリティ関数
+import { formatAdminDate } from "@/lib/utils/date";//日付を日本語表記にフォーマットするためのユーティリティ関数
 
 
 type NoticeItem = {
@@ -44,7 +44,7 @@ export default async function NoticePage() {
                 </h2>
 
                 <p className="mt-3 text-sm text-neutral-500">
-                  更新日：{formatDate(notice.updatedAt)}
+                  更新日：{formatAdminDate(notice.updatedAt)}
                 </p>
               </article>
             </Link>

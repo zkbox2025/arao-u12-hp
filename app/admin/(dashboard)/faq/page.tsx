@@ -3,11 +3,7 @@
 
 import Link from "next/link";
 import { findAdminFaqs } from "@/lib/repositories/admin-faq";
-import {
-  FAQ_CATEGORY_LABELS,
-  type FaqCategoryValue,
-  type FaqStatusFilterValue,
-} from "@/constants/faq";
+import { FAQ_CATEGORY_LABELS } from "@/constants/faq";
 import {
   parseFaqCategory,
   parseFaqStatusFilter,
@@ -15,7 +11,11 @@ import {
 import { ToastMessage } from "@/components/admin/ToastMessage";
 import { FaqFilterControls } from "./FaqFilterControls";
 import { FaqItemCard } from "./FaqItemCard";
-import { AdminPageHeader } from "@/components/admin/AdminPageHeader";//アイコン付きタイトル
+import { AdminPageHeader } from "@/components/admin/AdminPageHeader";
+import {
+  ADMIN_ACTION_DELETE_ERROR_MESSAGE,
+  ADMIN_ACTION_SORT_ERROR_MESSAGE,
+} from "@/constants/adminActionError";
 
 type AdminFaqPageProps = {
   searchParams: Promise<{
@@ -25,6 +25,7 @@ type AdminFaqPageProps = {
     updated?: string;
     deleted?: string;
     sorted?: string;
+    actionError?: string;
     toastId?: string;
   }>;
 };
@@ -42,16 +43,23 @@ export default async function AdminFaqPage({
     status: selectedStatus,
   });
 
-  const toastMessage =
-    params.created === "1"
-      ? "作成しました。"
-      : params.updated === "1"
-        ? "更新しました。"
-        : params.deleted === "1"
-          ? "削除しました。"
-          : params.sorted === "1"
-            ? "並び順を保存しました。"
-            : "";
+const toastMessage =
+  params.created === "1"
+    ? "作成しました。"
+    : params.updated === "1"
+      ? "更新しました。"
+      : params.deleted === "1"
+        ? "削除しました。"
+        : params.sorted === "1"
+          ? "並び順を保存しました。"
+          : params.actionError === "delete"
+            ? ADMIN_ACTION_DELETE_ERROR_MESSAGE
+            : params.actionError === "sort"
+              ? ADMIN_ACTION_SORT_ERROR_MESSAGE
+              : "";
+
+//toastVariant：トーストの種類を指定する
+const toastVariant = params.actionError ? "error" : "success";
 
   return (
     <div id="top">
@@ -59,6 +67,7 @@ export default async function AdminFaqPage({
   <ToastMessage
     key={`${toastMessage}-${params.toastId ?? ""}`}
     message={toastMessage}
+    variant={toastVariant}
   />
 ) : null}
 
@@ -88,18 +97,18 @@ export default async function AdminFaqPage({
         <div className="mt-5 space-y-4">
           {faqs.map((faq, index) => (
             <FaqItemCard
-              key={faq.id}
-              faq={{
-                id: faq.id,
-                category: faq.category as FaqCategoryValue,
-                question: faq.question,
-                answer: faq.answer,
-                status: faq.status as "DRAFT" | "PUBLISHED",
-                sortOrder: faq.sortOrder,
-              }}
-              displayIndex={index + 1}
-              statusFilter={selectedStatus as FaqStatusFilterValue}
-            />
+  key={faq.id}
+  faq={{
+    id: faq.id,
+    category: faq.category,
+    question: faq.question,
+    answer: faq.answer,
+    status: faq.status,
+    sortOrder: faq.sortOrder,
+  }}
+  displayIndex={index + 1}
+  statusFilter={selectedStatus}
+/>
           ))}
 
           {faqs.length === 0 ? (

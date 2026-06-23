@@ -11,11 +11,9 @@ export function AdminFooter() {
       <div className="mx-auto max-w-7xl px-4 py-8">
         <div className="text-center">
           <Link
-            href="/explore"
-            target="_blank"
-            rel="noreferrer"
+            href="/admin/dashboard#top"
             className="inline-block transition hover:opacity-80"
-            aria-label="公開トップページへ移動"
+            aria-label="管理者ダッシュボードへ移動"
           >
             <Image
               src="/images/logo.png"

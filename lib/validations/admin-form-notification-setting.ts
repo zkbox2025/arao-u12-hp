@@ -1,7 +1,7 @@
 // lib/validations/admin-form-notification-setting.ts
 // メール通知設定フォームのバリデーション
 
-import type { FormType } from "@prisma/client";
+import type { FormType } from "@/types/prisma";
 
 const FORM_TYPES = ["CONTACT", "SESSION_APPLICATION"] as const;
 

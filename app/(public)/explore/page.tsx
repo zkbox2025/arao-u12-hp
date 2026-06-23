@@ -6,9 +6,9 @@ import Image from "next/image";
 import { ChevronDown } from "lucide-react";
 import {
   findPageContentsByPageKey,
-  getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
+import { buildTopSummarySections } from "./top-summary-sections";//表示用データに変更する関数
 
 const topNavItems = [
   {
@@ -33,110 +33,42 @@ const topNavItems = [
   },
 ] as const;
 
+// 画像URLの許可ルール関数
+function validateImageUrl(value?: string | null) {
+  const imageUrl = value?.trim();
+
+  if (!imageUrl) return "";
+
+  if (imageUrl.startsWith("/")) {
+    return imageUrl;
+  }
+
+  try {
+    const url = new URL(imageUrl);
+
+    const allowedHosts = [
+      "uibiezgxpdfciznhbsxr.supabase.co",
+      "127.0.0.1",
+      "localhost",
+      "192.168.210.188",
+    ];
+
+    if (!allowedHosts.includes(url.hostname)) {
+      return "";
+    }
+
+    return imageUrl;
+  } catch {
+    return "";
+  }
+}
+
+export const dynamic = "force-dynamic";
+
 export default async function ExplorePage() {
   const contents = await findPageContentsByPageKey("TOP");
   const contentMap = toContentMap(contents);
-
-  const summarySections = [
-    {
-      id: "about-summary",
-      title: "チーム紹介",
-      heading: getContentText({
-        contentMap,
-        blockKey: "ABOUT_SUMMARY_TITLE",
-        fallback:
-          "全国・九州大会へ導いた本気の指導がここにある",
-      }),
-      body: getContentText({
-        contentMap,
-        blockKey: "ABOUT_SUMMARY_BODY",
-        fallback:
-          "私たちは、熊本県荒尾市を拠点としたミニバスケットボールチームです。\n全国大会や九州大会へと子どもたちを導いた実績のあるコーチが在籍しております。",
-      }),
-      href: "/about#top",
-      imageLabel: "ABOUT",
-      imageUrl: contentMap.ABOUT_SUMMARY_BODY?.imageUrl,
-      imageAlt: contentMap.ABOUT_SUMMARY_BODY?.imageAlt,
-    },
-    {
-      id: "policy-summary",
-      title: "指導方針",
-      heading: getContentText({
-        contentMap,
-        blockKey: "POLICY_SUMMARY_TITLE",
-        fallback:
-          "生涯の財産となる「心」を育てる",
-      }),
-      body: getContentText({
-        contentMap,
-        blockKey: "POLICY_SUMMARY_BODY",
-        fallback:
-          "技術の習得だけではなく、生涯の財産となる諦めない心を育てること。それが私たちの理念です。",
-      }),
-      href: "/policy#top",
-      imageLabel: "POLICY",
-      imageUrl: contentMap.POLICY_SUMMARY_BODY?.imageUrl,
-      imageAlt: contentMap.POLICY_SUMMARY_BODY?.imageAlt,
-    },
-    {
-      id: "summary-summary",
-      title: "活動概要",
-      heading: getContentText({
-        contentMap,
-        blockKey: "SUMMARY_SUMMARY_TITLE",
-        fallback: "幼児から小6まで！\n男女問わず大歓迎！",
-      }),
-      body: getContentText({
-        contentMap,
-        blockKey: "SUMMARY_SUMMARY_BODY",
-        fallback:
-          "活動場所は、荒尾市内の体育館。対象は、幼児〜小６の男女です（※女子および幼児は教室生として参加になります）\n火曜・水曜・木曜・金曜の夕方、および土日のいずれかに活動しています。",
-      }),
-      href: "/summary#top",
-      imageLabel: "SUMMARY",
-      imageUrl: contentMap.SUMMARY_SUMMARY_BODY?.imageUrl,
-      imageAlt: contentMap.SUMMARY_SUMMARY_BODY?.imageAlt,
-    },
-    {
-      id: "flow-summary",
-      title: "体験/見学の流れ",
-      heading: getContentText({
-        contentMap,
-        blockKey: "FLOW_SUMMARY_TITLE",
-        fallback:
-          "体験・見学はすべて無料！2ステップで簡単にご参加いただけます。",
-      }),
-      body: getContentText({
-        contentMap,
-        blockKey: "FLOW_SUMMARY_BODY",
-        fallback:
-          "フォームからご希望の日程を選んで簡単お申し込み。当日は動きやすい服装とシューズを持って直接体育館へお越しください。見学の方は手ぶらでOKです。",
-      }),
-      href: "/flow#top",
-      imageLabel: "FLOW",
-      imageUrl: contentMap.FLOW_SUMMARY_BODY?.imageUrl,
-      imageAlt: contentMap.FLOW_SUMMARY_BODY?.imageAlt,
-    },
-    {
-  id: "faq-summary",
-  title: "よくある質問",
-  heading: getContentText({
-    contentMap,
-    blockKey: "FAQ_SUMMARY_TITLE",
-    fallback: "入会前の不安や疑問を、わかりやすくまとめています。",
-  }),
-  body: getContentText({
-    contentMap,
-    blockKey: "FAQ_SUMMARY_BODY",
-    fallback:
-      "対象学年、練習日、費用、保護者の関わり方など、入会前によくいただく質問をまとめています。気になる点がある方は、まずはこちらをご覧ください。",
-  }),
-  href: "/faq#top",
-  imageLabel: "FAQ",
-  imageUrl: contentMap.FAQ_SUMMARY_BODY?.imageUrl,
-  imageAlt: contentMap.FAQ_SUMMARY_BODY?.imageAlt,
-},
-  ];
+  const summarySections = buildTopSummarySections(contentMap);
 
   return (
     <div className="relative">
@@ -213,6 +145,8 @@ function TopSummarySection({
   imageUrl,
   imageAlt,
 }: TopSummarySectionProps) {
+  const safeImageUrl = validateImageUrl(imageUrl);
+
   return (
     <section id={id} className="scroll-section py-10 sm:py-14">
       <div className="space-y-5">
@@ -220,10 +154,10 @@ function TopSummarySection({
           {title}
         </h2>
 
-        {imageUrl ? (
+        {safeImageUrl ? (
           <div className="relative aspect-video w-full overflow-hidden border border-neutral-300 bg-neutral-100">
             <Image
-              src={imageUrl}
+              src={safeImageUrl}
               alt={imageAlt || title}
               fill
               unoptimized
