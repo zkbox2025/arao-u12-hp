@@ -12,9 +12,14 @@ import { useEffect, useState } from "react";
 type ToastMessageProps = {
   message: string;
   durationMs?: number;
+  variant?: "success" | "error";
 };
 
-export function ToastMessage({ message, durationMs = 3000 }: ToastMessageProps) {
+export function ToastMessage({
+  message,
+  durationMs = 3000,
+  variant = "success",
+}: ToastMessageProps) {
   const [isVisible, setIsVisible] = useState(true);
 
   useEffect(() => {
@@ -27,9 +32,10 @@ export function ToastMessage({ message, durationMs = 3000 }: ToastMessageProps) 
 
   if (!isVisible) return null;
 
-  return (
-    <div className="fixed left-1/2 top-20 z-10001 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-lg bg-green-700 px-5 py-3 text-center text-sm font-bold text-white shadow-lg transition-opacity">
-      {message}
-    </div>
-  );
+  const className =
+    variant === "error"
+      ? "fixed left-1/2 top-20 z-10001 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-lg bg-red-700 px-5 py-3 text-center text-sm font-bold text-white shadow-lg transition-opacity"
+      : "fixed left-1/2 top-20 z-10001 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-lg bg-green-700 px-5 py-3 text-center text-sm font-bold text-white shadow-lg transition-opacity";
+
+  return <div className={className}>{message}</div>;
 }

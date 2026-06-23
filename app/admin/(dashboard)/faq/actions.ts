@@ -12,55 +12,50 @@ import type {
   FaqCategoryValue,
   FaqStatusFilterValue,
 } from "@/constants/faq";
+import {
+  ADMIN_ACTION_CREATE_ERROR_MESSAGE,
+  ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
+} from "@/constants/adminActionError";
+import { buildFaqActionValues } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
+import type { FaqActionState } from "@/types/action-state";
 
-type FaqActionState = {
-  error?: string;
-  values?: {
-    category?: string;
-    question?: string;
-    answer?: string;
-    status?: string;
-  };
-};
 
-//リダイレクト先を作るためにクエリパラメータ付きURL作成関数
-//messageには＝１をつけてページ側でトーストする（完了したことの３秒表示）
 function buildAdminFaqPath({
   category,
   status,
   message,
+  actionError,
 }: {
   category: string;
   status: string;
   message?: "created" | "updated" | "deleted" | "sorted";
+  actionError?: "delete" | "sort";
 }) {
   const params = new URLSearchParams();
 
-  params.set("category", category);//params.set("category", "TARGET") と書くと、内部で category=TARGET というデータが用意される。
-  params.set("status", status);//params.set("status", "DRAFT") と書くと、内部で status=DRAFT というデータが用意される。
+  params.set("category", category);
+  params.set("status", status);
 
   if (message) {
     params.set(message, "1");
     params.set("toastId", Date.now().toString());
   }
 
-  return `/admin/faq?${params.toString()}#top`;//URLSearchParamsで自動でクエリパラメータ付きのURLを作成する
+  if (actionError) {
+    params.set("actionError", actionError);
+    params.set("toastId", Date.now().toString());
+  }
+
+  return `/admin/faq?${params.toString()}#top`;
 }
 
-//FAQを新規作成するアクション関数
 export async function createFaq(
   _state: FaqActionState,
   formData: FormData
 ): Promise<FaqActionState> {
   await requireAdmin();
 
-  //エラー時に入力値を表示する際に使う
-  const values = {
-    category: String(formData.get("category") ?? "TARGET"),
-    question: String(formData.get("question") ?? ""),
-    answer: String(formData.get("answer") ?? ""),
-    status: String(formData.get("status") ?? "DRAFT"),
-  };
+  const values = buildFaqActionValues(formData);
 
   const parsed = parseFaqFormData(formData);
 
@@ -71,7 +66,8 @@ export async function createFaq(
     };
   }
 
-  //カテゴリー内の最後の番号を取るための関数（のちにそれに＋1をして番号をふり、最後尾に追加する）
+  //faq取得と新規作成をトライしてエラーであればエラーを投げる
+try {
   const lastFaq = await prisma.faq.findFirst({
     where: {
       category: parsed.data.category,
@@ -80,7 +76,7 @@ export async function createFaq(
       sortOrder: "desc",
     },
     select: {
-      sortOrder: true,//sortOrderの数値だけとる
+      sortOrder: true,
     },
   });
 
@@ -93,23 +89,29 @@ export async function createFaq(
       sortOrder: (lastFaq?.sortOrder ?? 0) + 1,
     },
   });
+} catch (error) {
+  console.error("FAQの作成に失敗しました", error);
 
-  //データが追加されたら、以下の二つのファイルも最新にする
-  revalidatePath("/admin/faq");
-  revalidatePath("/faq");
-
-
-  redirect(
-    buildAdminFaqPath({
-      category: parsed.data.category,
-      status: parsed.data.status,
-      message: "created",
-    })
-  );
+  return {
+    error: ADMIN_ACTION_CREATE_ERROR_MESSAGE,
+    values,
+  };
 }
 
+// 成功した場合のみ、ここに到達してリダイレクトされる
+revalidatePath("/admin/faq");
+revalidatePath("/faq");
 
-//FAQを編集し更新するアクション関数
+redirect(
+  buildAdminFaqPath({
+    category: parsed.data.category,
+    status: parsed.data.status,
+    message: "created",
+  })
+);
+
+}
+
 export async function updateFaq(
   faqId: string,
   _state: FaqActionState,
@@ -117,24 +119,39 @@ export async function updateFaq(
 ): Promise<FaqActionState> {
   await requireAdmin();
 
-  const parsed = parseFaqFormData(formData);
+const values = buildFaqActionValues(formData);
 
-  if (!parsed.ok) {
-    return {
-      error: parsed.error,
-    };
+const parsed = parseFaqFormData(formData);
+
+if (!parsed.ok) {
+  return {
+    error: parsed.error,
+    values,
+  };
+}
+
+  try {
+    await prisma.faq.update({
+      where: {
+        id: faqId,
+      },
+      data: {
+        question: parsed.data.question,
+        answer: parsed.data.answer,
+        status: parsed.data.status,
+      },
+    });
+  } catch (error) {
+    console.error("FAQ更新に失敗しました", {
+      faqId,
+      error,
+    });
+
+   return {
+  error: ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
+  values,
+};
   }
-
-  await prisma.faq.update({
-    where: {
-      id: faqId,
-    },
-    data: {
-      question: parsed.data.question,
-      answer: parsed.data.answer,
-      status: parsed.data.status,
-    },
-  });
 
   revalidatePath("/admin/faq");
   revalidatePath("/faq");
@@ -148,8 +165,6 @@ export async function updateFaq(
   );
 }
 
-
-//FAQを削除するアクション関数
 export async function deleteFaq(
   faqId: string,
   category: FaqCategoryValue,
@@ -157,11 +172,28 @@ export async function deleteFaq(
 ) {
   await requireAdmin();
 
-  await prisma.faq.delete({
-    where: {
-      id: faqId,
-    },
-  });
+  try {
+    await prisma.faq.delete({
+      where: {
+        id: faqId,
+      },
+    });
+  } catch (error) {
+    console.error("FAQ削除に失敗しました", {
+      faqId,
+      category,
+      status,
+      error,
+    });
+
+    redirect(
+      buildAdminFaqPath({
+        category,
+        status,
+        actionError: "delete",
+      })
+    );
+  }
 
   revalidatePath("/admin/faq");
   revalidatePath("/faq");
@@ -175,7 +207,6 @@ export async function deleteFaq(
   );
 }
 
-//FAQの並び順を変えるアクション関数
 export async function moveFaq(
   faqId: string,
   direction: "UP" | "DOWN",
@@ -184,64 +215,99 @@ export async function moveFaq(
 ) {
   await requireAdmin();
 
-  //カテゴリー内の全データを並び替えて、idとその番号を取得する関数
-  const faqs = await prisma.faq.findMany({
-    where: {
-      category,
-    },
-    orderBy: [
-      {
-        sortOrder: "asc",
-      },
-      {
-        createdAt: "asc",
-      },
-    ],
-    select: {
-      id: true,
-      sortOrder: true,
-    },
-  });
+  let faqs: {
+    id: string;
+    sortOrder: number;
+  }[];
 
-  //currentFaq：動かしたいFAQ
-  // targetFaq：入れ替え相手のFAQ
-  //動かしたいFAQの番号を特定する
+  try {
+    faqs = await prisma.faq.findMany({
+      where: {
+        category,
+      },
+      orderBy: [
+        {
+          sortOrder: "asc",
+        },
+        {
+          createdAt: "asc",
+        },
+      ],
+      select: {
+        id: true,
+        sortOrder: true,
+      },
+    });
+  } catch (error) {
+    console.error("FAQ並び順取得に失敗しました", {
+      faqId,
+      direction,
+      category,
+      status,
+      error,
+    });
+
+    redirect(
+      buildAdminFaqPath({
+        category,
+        status,
+        actionError: "sort",
+      })
+    );
+  }
+
   const currentIndex = faqs.findIndex((faq) => faq.id === faqId);
 
-  //FAQ番号のデータが見つからなかった（-1）際は、リダイレクトして終了
   if (currentIndex === -1) {
     redirect(buildAdminFaqPath({ category, status }));
   }
 
-  //入れ替え相手の番号を特定する処理
   const targetIndex = direction === "UP" ? currentIndex - 1 : currentIndex + 1;
   const targetFaq = faqs[targetIndex];
   const currentFaq = faqs[currentIndex];
 
-  //動かしたいFAQが一番上にいる時に上ボタンを押すもしくは一番下にいる時に下ボタンを押したときはリダイレクトして終了
   if (!targetFaq || !currentFaq) {
     redirect(buildAdminFaqPath({ category, status }));
   }
 
-  //以下同時処理を行う
-  await prisma.$transaction([
-    prisma.faq.update({
-      where: {
-        id: currentFaq.id,
-      },
-      data: {
-        sortOrder: targetFaq.sortOrder,
-      },
-    }),
-    prisma.faq.update({
-      where: {
-        id: targetFaq.id,
-      },
-      data: {
-        sortOrder: currentFaq.sortOrder,
-      },
-    }),
-  ]);
+  try {
+    await prisma.$transaction([
+      prisma.faq.update({
+        where: {
+          id: currentFaq.id,
+        },
+        data: {
+          sortOrder: targetFaq.sortOrder,
+        },
+      }),
+      prisma.faq.update({
+        where: {
+          id: targetFaq.id,
+        },
+        data: {
+          sortOrder: currentFaq.sortOrder,
+        },
+      }),
+    ]);
+  } catch (error) {
+    console.error("FAQ並び順更新に失敗しました", {
+      faqId,
+      direction,
+      category,
+      status,
+      currentFaqId: currentFaq.id,
+      targetFaqId: targetFaq.id,
+      error,
+    });
+
+    redirect(
+      buildAdminFaqPath({
+        category,
+        status,
+        actionError: "sort",
+      })
+    );
+  }
 
   revalidatePath("/admin/faq");
   revalidatePath("/faq");

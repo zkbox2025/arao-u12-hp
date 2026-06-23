@@ -7,6 +7,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Menu } from "lucide-react";
 import { useState } from "react";
+import { usePathname } from "next/navigation";
 import { AdminDrawer } from "./AdminDrawer";
 
 type AdminHeaderProps = {
@@ -19,13 +20,26 @@ export function AdminHeader({
   pendingSessionApplicationCount = 0,
 }: AdminHeaderProps) {
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const pathname = usePathname();
+
+  function handleLogoClick(event: React.MouseEvent<HTMLAnchorElement>) {
+    if (pathname === "/admin/dashboard") {
+      event.preventDefault();
+
+      window.scrollTo({
+        top: 0,
+        behavior: "smooth",
+      });
+    }
+  }
 
   return (
     <>
       <header className="sticky top-0 z-9000 border-b border-green-900/20 bg-green-700 text-white">
         <div className="relative mx-auto flex h-16 max-w-7xl items-center justify-center px-4">
           <Link
-            href="/admin/dashboard"
+            href="/admin/dashboard#top"
+            onClick={handleLogoClick}
             className="text-center text-sm font-black leading-tight tracking-widest transition hover:opacity-80"
             aria-label="管理者ダッシュボードへ移動"
           >

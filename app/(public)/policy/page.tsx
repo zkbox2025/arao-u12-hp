@@ -2,40 +2,63 @@
 // 公開ページの指導方針ページ
 
 import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
+import { definePageContentBlockKeys } from "@/lib/page-content/typed-block-keys";
 import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
 
+const POLICY_PAGE_KEY = "POLICY" as const;
+
+const POLICY_BLOCK_KEYS = definePageContentBlockKeys(POLICY_PAGE_KEY, {
+  conceptHeading: "CONCEPT_HEADING",
+  conceptHeadingEnglish: "CONCEPT_HEADING_ENGLISH",
+  conceptSubHeading: "CONCEPT_SUB_HEADING",
+  conceptBody: "CONCEPT_BODY",
+});
+
+export const dynamic = "force-dynamic";
+
 export default async function PolicyPage() {
-  const contents = await findPageContentsByPageKey("POLICY");
+  const contents = await findPageContentsByPageKey(POLICY_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
   const conceptHeading = getContentText({
     contentMap,
-    blockKey: "CONCEPT_HEADING",
-    fallback: "理念",
+    blockKey: POLICY_BLOCK_KEYS.conceptHeading,
+    fallback: getPageContentFallback({
+      pageKey: POLICY_PAGE_KEY,
+      blockKey: POLICY_BLOCK_KEYS.conceptHeading,
+    }),
   });
 
   const conceptHeadingEnglish = getContentText({
-  contentMap,
-  blockKey: "CONCEPT_HEADING_ENGLISH",
-  fallback: "-concept-",
-});
-
+    contentMap,
+    blockKey: POLICY_BLOCK_KEYS.conceptHeadingEnglish,
+    fallback: getPageContentFallback({
+      pageKey: POLICY_PAGE_KEY,
+      blockKey: POLICY_BLOCK_KEYS.conceptHeadingEnglish,
+    }),
+  });
 
   const conceptSubHeading = getContentText({
     contentMap,
-    blockKey: "CONCEPT_SUB_HEADING",
-    fallback: "真剣勝負の中で生涯の財産となる\n諦めない心を育てる",
+    blockKey: POLICY_BLOCK_KEYS.conceptSubHeading,
+    fallback: getPageContentFallback({
+      pageKey: POLICY_PAGE_KEY,
+      blockKey: POLICY_BLOCK_KEYS.conceptSubHeading,
+    }),
   });
 
   const conceptBody = getContentText({
     contentMap,
-    blockKey: "CONCEPT_BODY",
-    fallback:
-      "ここは、ただバスケットボールを楽しむだけの場所\nではありません。\n一歩踏み込んだ「勝負の世界」を経験する場所です。\n\n「勝つために仲間と努力すること」\n「ライバルと切磋琢磨すること」\n\n真剣勝負の競争の中でしか得られない「悔しさ」や「達成感」こそが、これからの時代を生き抜く子どもたちの諦めない心を育てます。",
+    blockKey: POLICY_BLOCK_KEYS.conceptBody,
+    fallback: getPageContentFallback({
+      pageKey: POLICY_PAGE_KEY,
+      blockKey: POLICY_BLOCK_KEYS.conceptBody,
+    }),
   });
 
   return (
@@ -51,15 +74,13 @@ export default async function PolicyPage() {
         </div>
 
         <div className="space-y-4">
-          <h3 className="whitespace-pre-wrap text-xl font-black text-center">
-  {conceptSubHeading}
-</h3>
-
+          <h3 className="whitespace-pre-wrap text-center text-xl font-black">
+            {conceptSubHeading}
+          </h3>
 
           <p className="whitespace-pre-wrap text-center leading-8 text-neutral-700">
-  {conceptBody}
-</p>
-
+            {conceptBody}
+          </p>
         </div>
       </section>
     </div>

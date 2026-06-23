@@ -17,7 +17,7 @@ export function PublicHeader() {
       <header className="sticky top-0 z-9000 border-b border-green-900/20 bg-green-700 text-white">
         <div className="relative mx-auto flex h-16 max-w-5xl items-center justify-center px-4">
           <Link
-            href="/explore"
+            href="/explore#top"
             className="text-center text-sm font-black leading-tight tracking-widest transition hover:opacity-80"
             aria-label="トップページへ移動"
           >

@@ -1,7 +1,17 @@
 // constants/faq.ts
 // FAQのカテゴリラベルと順番を定義するファイル
 
-import type { ContentStatus, FaqCategory } from "@prisma/client";
+import type { ContentStatus, FaqCategory } from "@/types/prisma";
+
+// DBに保存されるFAQカテゴリ
+export type FaqCategoryValue = FaqCategory;
+
+// DBに保存されるFAQステータス
+export type FaqStatusValue = ContentStatus;
+
+// 管理画面の絞り込み用ステータス
+// "ALL" はDBには存在しない画面専用の値
+export type FaqStatusFilterValue = "ALL" | ContentStatus;
 
 
 //FAQのカテゴリーの型定義
@@ -17,7 +27,7 @@ export const FAQ_CATEGORIES = [
   label: string;
 }[];
 
-export type FaqCategoryValue = (typeof FAQ_CATEGORIES)[number]["value"];
+
 
 export const FAQ_CATEGORY_ORDER: FaqCategory[] = FAQ_CATEGORIES.map(
   (category) => category.value
@@ -48,9 +58,7 @@ export const FAQ_STATUS_FILTERS = [
   { value: "DRAFT", label: "下書き" },
   { value: "ALL", label: "全件" },
 ] as const satisfies readonly {
-  value: ContentStatus | "ALL";
+  value: FaqStatusFilterValue;
   label: string;
 }[];
 
-export type FaqStatusFilterValue =
-  (typeof FAQ_STATUS_FILTERS)[number]["value"];

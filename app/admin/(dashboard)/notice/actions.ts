@@ -8,10 +8,13 @@ import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { parseNoticeFormData } from "@/lib/validations/admin-notice";
+import { ADMIN_ACTION_CREATE_ERROR_MESSAGE } from "@/constants/adminActionError";
+import { NoticeActionState } from "@/types/action-state";
+import { buildNoticeActionValues } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
 
-type NoticeActionState = {
-  error?: string;
-};
+
+
+
 
 export async function createNotice(
   _state: NoticeActionState,
@@ -19,21 +22,33 @@ export async function createNotice(
 ): Promise<NoticeActionState> {
   await requireAdmin();
 
+    const values = buildNoticeActionValues(formData);
+
   const parsed = parseNoticeFormData(formData);
 
   if (!parsed.ok) {
     return {
       error: parsed.error,
+      values,
     };
   }
 
-  await prisma.notice.create({
-    data: {
-      title: parsed.data.title,
-      content: parsed.data.content,
-      status: parsed.data.status,
-    },
-  });
+  try {
+    await prisma.notice.create({
+      data: {
+        title: parsed.data.title,
+        content: parsed.data.content,
+        status: parsed.data.status,
+      },
+    });
+  } catch (error) {
+    console.error("練習スケジュール変更の作成に失敗しました", error);
+
+    return {
+      error: ADMIN_ACTION_CREATE_ERROR_MESSAGE,
+      values,
+    };
+  }
 
   revalidatePath("/notice");
   revalidatePath("/admin/notice");

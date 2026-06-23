@@ -12,13 +12,13 @@ import {
   parseFormType,
   validateEmails,
 } from "@/lib/validations/admin-form-notification-setting";
+import { ADMIN_ACTION_UPDATE_ERROR_MESSAGE } from "@/constants/adminActionError";
+import type { MailNotificationActionState } from "@/types/action-state";
+import {
+  buildMailNotificationActionValues,
+} from "@/app/admin/_utils/form-helpers";
 
-type MailNotificationActionState = {
-  error?: string;
-  values?: {
-    emails?: string;
-  };
-};
+
 
 function buildMailNotificationPath(saved?: boolean) {
   const params = new URLSearchParams();
@@ -36,56 +36,59 @@ function buildMailNotificationPath(saved?: boolean) {
 }
 
 export async function updateMailNotificationSetting(
-  _state: MailNotificationActionState,
+  state: MailNotificationActionState,
   formData: FormData
 ): Promise<MailNotificationActionState> {
   await requireAdmin();
 
-  //フォームタイプ（問い合わせか体験・見学申し込みか）を確認するバリデーション関数にかける
-  const formType = parseFormType(String(formData.get("formType") ?? ""));
+  const values = buildMailNotificationActionValues(formData, state.values);
 
-  //全てのメアドテキストを抜き出し、それを１行ずつ配列に変換する関数に入れる
-  const emailsText = String(formData.get("emails") ?? "");
+  const formType = parseFormType(String(formData.get("formType") ?? ""));
+  const emailsText = values?.emails ?? "";
   const emails = parseEmailsText(emailsText);
 
   if (!formType) {
     return {
       error: "不正なフォーム種別です。",
-      values: {
-        emails: emailsText,
-      },
+      values,
     };
   }
 
-  //メアド配列をバリデーション関数にかける
   const emailError = validateEmails(emails);
 
   if (emailError) {
     return {
       error: emailError,
-      values: {
-        emails: emailsText,
-      },
+      values,
     };
   }
 
-  //バリデーション後のデータをDBに保存する。なければ新規追加、なければ更新。
-  await prisma.formNotificationSetting.upsert({
-    where: {
+  try {
+    await prisma.formNotificationSetting.upsert({
+      where: {
+        formType,
+      },
+      update: {
+        emails: emails.join("\n"),
+      },
+      create: {
+        formType,
+        emails: emails.join("\n"),
+      },
+    });
+  } catch (error) {
+    console.error("メール通知設定の更新に失敗しました", {
       formType,
-    },
-    update: {
-      emails: emails.join("\n"),
-    },
-    create: {
-      formType,
-      emails: emails.join("\n"),
-    },
-  });
+      error,
+    });
 
-  //メール通知設定ページを更新する
+    return {
+      error: ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
+      values,
+    };
+  }
+
   revalidatePath("/admin/mail-notification");
 
-  //?save=1&toastId=...#topに画面遷移する
   redirect(buildMailNotificationPath(true));
 }

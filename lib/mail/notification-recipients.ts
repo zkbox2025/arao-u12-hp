@@ -1,7 +1,7 @@
 // lib/mail/notification-recipients.ts
 // 実際にフォームを送信した際に通知メールの送信先を取得する関数
 
-import type { FormType } from "@prisma/client";
+import type { FormType } from "@/types/prisma";
 import { findFormNotificationSettingByType } from "@/lib/repositories/form-notification-setting";
 import { adminEmail } from "./resend";
 import { parseEmailsText } from "@/lib/validations/admin-form-notification-setting"

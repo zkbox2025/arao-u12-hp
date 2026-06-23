@@ -12,6 +12,11 @@ type NoticeCreateFormProps = {
 
 const initialState = {
   error: "",
+  values: {
+    title: "",
+    content: "",
+    status: "DRAFT",
+  },
 };
 
 export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
@@ -19,6 +24,9 @@ export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
     createNotice,
     initialState
   );
+
+  const currentTitle = state.values?.title ?? "";
+  const currentContent = state.values?.content ?? "";
 
   return (
     <form action={formAction} className="space-y-5">
@@ -36,9 +44,11 @@ export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
           タイトル
         </label>
         <input
+          key={`title-${currentTitle}`}
           id="create-title"
           name="title"
           type="text"
+          defaultValue={currentTitle}
           className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
         />
       </div>
@@ -51,9 +61,11 @@ export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
           本文
         </label>
         <textarea
+          key={`content-${currentContent}`}
           id="create-content"
           name="content"
           rows={8}
+          defaultValue={currentContent}
           className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 leading-8"
         />
       </div>

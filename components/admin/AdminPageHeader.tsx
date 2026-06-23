@@ -21,7 +21,7 @@ export function AdminPageHeader({
   const displayTitle = title ?? navigationItem?.label ?? "";
 
   return (
-    <div className={showBorder ? "border-b border-neutral-300 pb-5" : "pb-5"}>
+      <div className={showBorder ? "border-b border-neutral-300 pb-5" : "pb-0"}>
       <p className="text-sm font-bold text-green-700">ADMIN</p>
 
       <div className="mt-2 flex items-center gap-3">

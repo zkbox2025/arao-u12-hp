@@ -5,15 +5,12 @@
 
 import { useActionState } from "react";
 import { updateSessionApplicationStatus } from "./actions";
+import type { SessionApplicationStatusActionState } from "@/types/action-state";
+import type { SessionApplicationStatus } from "@/types/prisma";
 
 type SessionApplicationStatusFormProps = {
   sessionApplicationId: string;
-  currentStatus: "PENDING" | "ATTENDED" | "CANCELED";
-};
-
-const initialState = {
-  error: "",
-  success: "",
+  currentStatus: SessionApplicationStatus;
 };
 
 export function SessionApplicationStatusForm({
@@ -25,32 +22,38 @@ export function SessionApplicationStatusForm({
     sessionApplicationId
   );
 
+  const initialState: SessionApplicationStatusActionState = {
+    error: "",
+    values: {
+      status: currentStatus,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updateStatusWithId,
     initialState
   );
 
+  const selectedStatus = state.values?.status ?? currentStatus;
+
   return (
     <form action={formAction} className="space-y-4">
-      {state.success ? (
-        <p className="rounded-lg bg-green-50 p-3 text-sm font-bold text-green-700">
-          {state.success}
-        </p>
-      ) : null}
-
       {state.error ? (
         <p className="rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">
           {state.error}
         </p>
       ) : null}
 
-      <div className="space-y-3">
+      <div
+        key={`session-application-status-${selectedStatus}`}
+        className="space-y-3"
+      >
         <label className="flex items-center gap-2">
           <input
             type="radio"
             name="status"
             value="PENDING"
-            defaultChecked={currentStatus === "PENDING"}
+            defaultChecked={selectedStatus === "PENDING"}
           />
           参加待ち
         </label>
@@ -60,7 +63,7 @@ export function SessionApplicationStatusForm({
             type="radio"
             name="status"
             value="ATTENDED"
-            defaultChecked={currentStatus === "ATTENDED"}
+            defaultChecked={selectedStatus === "ATTENDED"}
           />
           参加済み
         </label>
@@ -70,7 +73,7 @@ export function SessionApplicationStatusForm({
             type="radio"
             name="status"
             value="CANCELED"
-            defaultChecked={currentStatus === "CANCELED"}
+            defaultChecked={selectedStatus === "CANCELED"}
           />
           キャンセル
         </label>

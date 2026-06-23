@@ -5,15 +5,12 @@
 
 import { useActionState } from "react";
 import { updateContactMemo } from "./actions";
+import { ADMIN_MEMO_MAX_LENGTH } from "@/constants/adminMemo";
+import type { ContactMemoActionState } from "@/types/action-state";
 
 type ContactMemoFormProps = {
   contactId: string;
   defaultMemo: string;
-};
-
-const initialState = {
-  error: "",
-  success: "",
 };
 
 export function ContactMemoForm({
@@ -22,19 +19,22 @@ export function ContactMemoForm({
 }: ContactMemoFormProps) {
   const updateContactMemoWithId = updateContactMemo.bind(null, contactId);
 
+  const initialState: ContactMemoActionState = {
+    error: "",
+    values: {
+      adminMemo: defaultMemo,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updateContactMemoWithId,
     initialState
   );
 
+  const currentMemo = state.values?.adminMemo ?? defaultMemo;
+
   return (
     <form action={formAction} className="space-y-4">
-      {state.success ? (
-        <p className="rounded-lg bg-green-50 p-3 text-sm font-bold text-green-700">
-          {state.success}
-        </p>
-      ) : null}
-
       {state.error ? (
         <p className="rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">
           {state.error}
@@ -42,9 +42,11 @@ export function ContactMemoForm({
       ) : null}
 
       <textarea
+        key={`adminMemo-${currentMemo}`}
         name="adminMemo"
         rows={6}
-        defaultValue={defaultMemo}
+        defaultValue={currentMemo}
+        maxLength={ADMIN_MEMO_MAX_LENGTH}
         className="w-full rounded-lg border border-neutral-300 px-4 py-3"
       />
 

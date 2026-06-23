@@ -15,12 +15,14 @@ import {
 import { ToastMessage } from "@/components/admin/ToastMessage";
 import { PageContentControls } from "./PageContentControls";
 import { PageContentEditorForm } from "./PageContentEditorForm";
+import { ADMIN_ACTION_DELETE_ERROR_MESSAGE } from "@/constants/adminActionError";
 
 type AdminPageContentPageProps = {
   searchParams: Promise<{
     pageKey?: string;
     blockKey?: string;
     saved?: string;
+    deleteError?: string;
     toastId?: string;
   }>;
 };
@@ -47,14 +49,22 @@ export default async function AdminPageContentPage({
     blockKey: selectedBlockKey,
   });
 
-  const toastMessage = params.saved === "1" ? "保存しました。" : "";
+  const toastMessage =
+  params.saved === "1"
+    ? "保存しました。"
+    : params.deleteError === "1"
+      ? ADMIN_ACTION_DELETE_ERROR_MESSAGE
+      : "";
+
+const toastVariant = params.deleteError === "1" ? "error" : "success";
 
   return (
     <div id="top">
       {toastMessage ? (
   <ToastMessage
-    key={`${params.pageKey}-${params.blockKey}-${params.saved}-${params.toastId}`}
+    key={`${params.pageKey}-${params.blockKey}-${params.saved}-${params.deleteError}-${params.toastId}`}
     message={toastMessage}
+    variant={toastVariant}
   />
 ) : null}
 

@@ -5,15 +5,12 @@
 
 import { useActionState } from "react";
 import { updateContactStatus } from "./actions";
+import type { ContactStatusActionState } from "@/types/action-state";
+import type { ContactStatus } from "@/types/prisma";
 
 type ContactStatusFormProps = {
   contactId: string;
-  currentStatus: "PENDING" | "REPLIED";
-};
-
-const initialState = {
-  error: "",
-  success: "",
+  currentStatus: ContactStatus;
 };
 
 export function ContactStatusForm({
@@ -22,32 +19,35 @@ export function ContactStatusForm({
 }: ContactStatusFormProps) {
   const updateContactStatusWithId = updateContactStatus.bind(null, contactId);
 
+  const initialState: ContactStatusActionState = {
+    error: "",
+    values: {
+      status: currentStatus,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updateContactStatusWithId,
     initialState
   );
 
+  const selectedStatus = state.values?.status ?? currentStatus;
+
   return (
     <form action={formAction} className="space-y-4">
-      {state.success ? (
-        <p className="rounded-lg bg-green-50 p-3 text-sm font-bold text-green-700">
-          {state.success}
-        </p>
-      ) : null}
-
       {state.error ? (
         <p className="rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">
           {state.error}
         </p>
       ) : null}
 
-      <div className="space-y-3">
+      <div key={`contact-status-${selectedStatus}`} className="space-y-3">
         <label className="flex items-center gap-2">
           <input
             type="radio"
             name="status"
             value="PENDING"
-            defaultChecked={currentStatus === "PENDING"}
+            defaultChecked={selectedStatus === "PENDING"}
           />
           未回答
         </label>
@@ -57,7 +57,7 @@ export function ContactStatusForm({
             type="radio"
             name="status"
             value="REPLIED"
-            defaultChecked={currentStatus === "REPLIED"}
+            defaultChecked={selectedStatus === "REPLIED"}
           />
           回答済み
         </label>

@@ -3,33 +3,53 @@
 
 import { ExternalLink } from "lucide-react";
 import { PageTitle } from "@/components/public/PageTitle";
+import { getPageContentFallback } from "@/constants/page-content";
+import { definePageContentBlockKeys } from "@/lib/page-content/typed-block-keys";
 import {
   findPageContentsByPageKey,
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
 
+const TERM_PAGE_KEY = "TERM" as const;
+
+const TERM_BLOCK_KEYS = definePageContentBlockKeys(TERM_PAGE_KEY, {
+  leadBody: "LEAD_BODY",
+  pdfDownloadGuide: "PDF_DOWNLOAD_GUIDE",
+  termBody: "TERM_BODY",
+});
+
+export const dynamic = "force-dynamic";
+
 export default async function TermPage() {
-  const contents = await findPageContentsByPageKey("TERM");
+  const contents = await findPageContentsByPageKey(TERM_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
   const leadBody = getContentText({
     contentMap,
-    blockKey: "LEAD_BODY",
-    fallback:
-      "当クラブでは、子どもたちが安全に、そして楽しくバスケットボールに打ち込める環境をつくるため、クラブ規約を設けています。",
+    blockKey: TERM_BLOCK_KEYS.leadBody,
+    fallback: getPageContentFallback({
+      pageKey: TERM_PAGE_KEY,
+      blockKey: TERM_BLOCK_KEYS.leadBody,
+    }),
   });
 
   const pdfDownloadGuide = getContentText({
     contentMap,
-    blockKey: "PDF_DOWNLOAD_GUIDE",
-    fallback: "印刷して保管用としてご利用いただけます。",
+    blockKey: TERM_BLOCK_KEYS.pdfDownloadGuide,
+    fallback: getPageContentFallback({
+      pageKey: TERM_PAGE_KEY,
+      blockKey: TERM_BLOCK_KEYS.pdfDownloadGuide,
+    }),
   });
 
   const termBody = getContentText({
     contentMap,
-    blockKey: "TERM_BODY",
-    fallback: "",
+    blockKey: TERM_BLOCK_KEYS.termBody,
+    fallback: getPageContentFallback({
+      pageKey: TERM_PAGE_KEY,
+      blockKey: TERM_BLOCK_KEYS.termBody,
+    }),
   });
 
   return (
@@ -42,9 +62,7 @@ export default async function TermPage() {
         </p>
 
         <section className="rounded-lg border border-neutral-300 bg-neutral-50 p-4">
-          <h2 className="font-bold text-neutral-900">
-            PDFはこちら
-          </h2>
+          <h2 className="font-bold text-neutral-900">PDFはこちら</h2>
 
           <p className="mt-3 whitespace-pre-wrap leading-8 text-neutral-700">
             {pdfDownloadGuide}

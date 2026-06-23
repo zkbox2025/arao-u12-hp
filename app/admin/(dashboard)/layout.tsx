@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { AdminHeader } from "@/components/admin/AdminHeader";
 import { AdminFooter } from "@/components/admin/AdminFooter";
 import { createClient } from "@/src/infrastructure/supabase/server";
-import { prisma } from "@/src/infrastructure/prisma/client";
+import { findAdminLayoutCounts } from "@/lib/repositories/admin-layout";
 
 type AdminDashboardLayoutProps = {
   children: React.ReactNode;
@@ -24,19 +24,8 @@ export default async function AdminDashboardLayout({
     redirect("/admin/login");
   }
 
-  const [pendingContactCount, pendingSessionApplicationCount] =
-    await Promise.all([
-      prisma.contact.count({
-        where: {
-          status: "PENDING",
-        },
-      }),
-      prisma.sessionApplication.count({
-        where: {
-          status: "PENDING",
-        },
-      }),
-    ]);
+  const { pendingContactCount, pendingSessionApplicationCount } =
+    await findAdminLayoutCounts();
 
   return (
     <div className="flex min-h-dvh flex-col bg-neutral-50">
@@ -45,7 +34,10 @@ export default async function AdminDashboardLayout({
         pendingSessionApplicationCount={pendingSessionApplicationCount}
       />
 
-      <main id="top" className="mx-auto w-full max-w-7xl flex-1 px-5 py-6 sm:px-6 lg:px-8">
+      <main
+        id="top"
+        className="mx-auto w-full max-w-7xl flex-1 px-5 py-6 sm:px-6 lg:px-8"
+      >
         {children}
       </main>
 

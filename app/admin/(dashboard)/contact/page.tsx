@@ -2,15 +2,13 @@
 // お問い合わせ管理一覧ページ
 
 import Link from "next/link";
-import { format } from "date-fns";//取得データを見やすい形に変換する関数（2026-06-07T11:34:56.789Zこれを2026/06/07へ）
 import { findAdminContacts } from "@/lib/repositories/admin-contact";
-import { CONTACT_STATUS_LABELS } from "@/constants/adminLabels";
+import { ContactStatusBadge } from "@/components/admin/status/ContactStatusBadge";
 import { AdminPageHeader } from "@/components/admin/AdminPageHeader";//アイコン付きタイトル
+import { formatAdminDate } from "@/lib/utils/date";
+import { truncateText } from "@/lib/utils/text";
 
-//もし文章が長すぎたら10文字に切り詰めて最後に...をつける
-function truncateText(text: string, maxLength = 10) {
-  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
-}
+
 
 export default async function AdminContactPage() {
   const contacts = await findAdminContacts({ take: 15 });
@@ -46,7 +44,7 @@ export default async function AdminContactPage() {
           <tr key={contact.id} className="transition hover:bg-green-50">
             <td className="whitespace-nowrap px-5 py-4 align-middle">
               <Link href={detailHref} className="block text-neutral-800">
-                {format(contact.createdAt, "yyyy/MM/dd")}
+                {formatAdminDate(contact.createdAt)}
               </Link>
             </td>
 
@@ -64,15 +62,7 @@ export default async function AdminContactPage() {
 
             <td className="whitespace-nowrap px-5 py-4 align-middle">
               <Link href={detailHref} className="block">
-                <span
-                  className={
-                    contact.status === "PENDING"
-  ? "inline-flex rounded-full bg-red-100 px-3 py-1 text-xs font-bold text-red-700"
-  : "inline-flex rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-700"
-                  }
-                >
-                  {CONTACT_STATUS_LABELS[contact.status]}
-                </span>
+                <ContactStatusBadge status={contact.status} />
               </Link>
             </td>
           </tr>

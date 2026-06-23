@@ -45,9 +45,9 @@ Supabase Dashboard
 
 
 ◯スマホでチェックするときのターミナルで起動方法
-npx next dev --hostname 192.168.210.188 --port 3000
+npx next dev --hostname 192.168.210.198 --port 3000
 ※数値の確認方法：ipconfig getifaddr en0
-URL＝http://192.168.210.188:3000
+URL＝http://192.168.210.198:3000
 
 
 【Ngrokの場合の立ち上げる時のコマンド】
@@ -65,3 +65,116 @@ URL＝http://192.168.210.188:3000
 
 URLは以下の通り
 https://talia-noncrinoid-fructuously.ngrok-free.dev
+
+
+◯liffの検証をする際は、本番用：https://arao-u12-hp.vercel.appで検証すること（起動の必要なし）。理由としては、ngrok（開発用を本番環境で試すためのURL）だと警告ページが表示されるのでリダイレクトがうまくいかないため
+
+◯内部ページ遷移は基本 #top なし
+ページ内アンカーだけ #top あり
+
+◯アクションとトライキャッチのルール
+・管理者がフォームから更新するAction → try/catchする
+・削除Action → try/catchする
+・redirect() は try/catch の外に置く
+・revalidatePath() も基本はDB成功後に実行する
+・ユーザーには共通メッセージ、console.errorには詳細情報
+
+【開発中の画像表示について】
+スマホから見るとページ本体はPCにアクセスできているけど、画像だけはスマホ自身の 127.0.0.1 に取りに行ってしまう。スマホ上にはsupabaseが動いていないためスマホでは画像が表示されません。そのためPC自身である192.168.210.198:54321に変更することでスマホでもPCでも（PCではsupabaseが動いているから見れる）画像確認できるようになる。
+よって画像をスマホで見る際は
+1. ページコンテントのアクション関数に以下を入れる
+
+function normalizeLocalSupabasePublicUrl(publicUrl: string) {
+  return publicUrl
+    .replace("http://127.0.0.1:54321", "http://192.168.210.198:54321")
+    .replace("http://localhost:54321", "http://192.168.210.198:54321");
+}
+return {
+  imageUrl: normalizeLocalSupabasePublicUrl(data.publicUrl),
+  imagePath: filePath,
+};
+を入れる
+
+2. next.config.tsに以下を入れる
+{
+  protocol: "http",
+  hostname: "192.168.210.198",
+  port: "54321",
+  pathname: "/storage/v1/object/public/**",
+}
+
+3. 公開ページ側(exploreのページ)の以下を書き加える    
+
+ const allowedHosts = [
+      "uibiezgxpdfciznhbsxr.supabase.co",
+      "127.0.0.1",
+      "localhost",
+      "192.168.210.198",
+    ];
+
+    if (!allowedHosts.includes(url.hostname)) {
+      return "";
+    }
+
+
+
+※なお、本番環境では画像の保存住所が 自分のPCの中ではなく、Supabaseのクラウド上 になる。そのため、PCでもスマホでも読める。
+※198の数字の確認方法：ipconfig getifaddr en0
+たまに変わる
+
+【リリース前の変更点について】
+1. normalizeLocalSupabasePublicUrl() を削除
+
+削除する関数：
+
+function normalizeLocalSupabasePublicUrl(publicUrl: string) {
+  return publicUrl
+    .replace("http://127.0.0.1:54321", "http://192.168.210.198:54321")
+    .replace("http://localhost:54321", "http://192.168.210.198:54321");
+}
+2. return を元に戻す
+
+開発中（スマホ確認中）：
+
+return {
+  imageUrl: normalizeLocalSupabasePublicUrl(data.publicUrl),
+  imagePath: filePath,
+};
+
+これを以下のようにリリース前に戻す：
+
+return {
+  imageUrl: data.publicUrl,
+  imagePath: filePath,
+};
+
+3. next.config.ts のLAN IP設定を削除
+
+削除する設定：
+
+{
+  protocol: "http",
+  hostname: "192.168.210.198",
+  port: "54321",
+  pathname: "/storage/v1/object/public/**",
+}
+
+4.公開ページ側(exploreのページ)の以下を削除する    
+
+ const allowedHosts = [
+      "uibiezgxpdfciznhbsxr.supabase.co",
+      "127.0.0.1",
+      "localhost",
+      "192.168.210.198",
+    ];
+
+    if (!allowedHosts.includes(url.hostname)) {
+      return "";
+    }
+
+以上。
+
+◯（スマホ実機版、ローカル画像URL）http://127.0.0.1:54321/storage/v1/object/public/...
+※PCブラウザのみ閲覧可能
+◯（PC実機版、ローカル画像URL）http://192.168.210.198:54321/storage/v1/object/public/...
+※スマホからでもPCからでも（PCではsupabaseが動いているため）確認可能

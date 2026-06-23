@@ -5,6 +5,7 @@
 
 import { useActionState } from "react";
 import { updateMailNotificationSetting } from "./actions";
+import type { MailNotificationActionState } from "@/types/action-state";
 
 type MailNotificationSettingFormProps = {
   formType: string;
@@ -13,35 +14,28 @@ type MailNotificationSettingFormProps = {
   defaultEmails: string;
 };
 
-type MailNotificationActionState = {
-  error?: string;
-  values?: {
-    emails?: string;
-  };
-};
-
-const initialState: MailNotificationActionState = {
-  error: "",
-};
-
-
-
 export function MailNotificationSettingForm({
   formType,
   label,
   description,
   defaultEmails,
 }: MailNotificationSettingFormProps) {
+  const initialState: MailNotificationActionState = {
+    error: "",
+    values: {
+      emails: defaultEmails,
+    },
+  };
+
   const [state, formAction, isPending] = useActionState(
     updateMailNotificationSetting,
     initialState
   );
 
-const emailsValue = state.values?.emails ?? defaultEmails;
+  const emailsValue = state.values?.emails ?? defaultEmails;
 
   return (
-    <form action={formAction} key={`${formType}-${emailsValue}`}
- className="rounded-2xl bg-white p-5 shadow-sm">
+    <form action={formAction} className="rounded-2xl bg-white p-5 shadow-sm">
       <input type="hidden" name="formType" value={formType} />
 
       <div className="border-b border-neutral-200 pb-4">
@@ -54,7 +48,6 @@ const emailsValue = state.values?.emails ?? defaultEmails;
         <p className="mt-2 text-sm leading-7 text-neutral-600">
           1行に1つずつメールアドレスを入力してください。
         </p>
-
       </div>
 
       {state.error ? (
@@ -72,6 +65,7 @@ const emailsValue = state.values?.emails ?? defaultEmails;
         </label>
 
         <textarea
+          key={`emails-${formType}-${emailsValue}`}
           id={`emails-${formType}`}
           name="emails"
           rows={5}

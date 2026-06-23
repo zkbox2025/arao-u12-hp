@@ -2,7 +2,7 @@
 // 管理画面練習スケ変更の投稿用のバリデーション
 //管理者のみ投稿するため、Zodは使わない簡易バージョン
 
-export type NoticeFormStatus = "DRAFT" | "PUBLISHED";
+import type { ContentStatus } from "@/types/prisma";
 
 type ParsedNoticeFormResult =
   | {
@@ -10,7 +10,7 @@ type ParsedNoticeFormResult =
       data: {
         title: string;
         content: string;
-        status: NoticeFormStatus;
+        status: ContentStatus;
       };
     }
   | {

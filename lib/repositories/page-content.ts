@@ -2,7 +2,7 @@
 // 公開ページ用PageContent取得関数と
 //配列→検索しやすい形への変換関数
 
-import type { PageContent } from "@prisma/client";
+import type { PageContent } from "@/types/prisma";
 import { prisma } from "@/src/infrastructure/prisma/client";
 
 //格公開用ページごとに表示するページコンテントを取得する関数
