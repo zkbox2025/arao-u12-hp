@@ -51,6 +51,7 @@ export default async function FaqPage() {
 
   const leadBody = getContentText({
     contentMap,
+    pageKey: FAQ_PAGE_KEY,
     blockKey: FAQ_BLOCK_KEYS.leadBody,
     fallback: getPageContentFallback({
       pageKey: FAQ_PAGE_KEY,

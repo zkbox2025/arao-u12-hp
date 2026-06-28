@@ -26,32 +26,36 @@ export default async function AboutPage() {
   const contents = await findPageContentsByPageKey(ABOUT_PAGE_KEY);
   const contentMap = toContentMap(contents);
 
-  const teamName = getContentText({
-    contentMap,
+const teamName = getContentText({
+  contentMap,
+  pageKey: ABOUT_PAGE_KEY,
+  blockKey: ABOUT_BLOCK_KEYS.teamName,
+  fallback: getPageContentFallback({
+    pageKey: ABOUT_PAGE_KEY,
     blockKey: ABOUT_BLOCK_KEYS.teamName,
-    fallback: getPageContentFallback({
-      pageKey: ABOUT_PAGE_KEY,
-      blockKey: ABOUT_BLOCK_KEYS.teamName,
-    }),
-  });
+  }),
+});
 
-  const conceptTitle = getContentText({
-    contentMap,
+
+const conceptTitle = getContentText({
+  contentMap,
+  pageKey: ABOUT_PAGE_KEY,
+  blockKey: ABOUT_BLOCK_KEYS.conceptTitle,
+  fallback: getPageContentFallback({
+    pageKey: ABOUT_PAGE_KEY,
     blockKey: ABOUT_BLOCK_KEYS.conceptTitle,
-    fallback: getPageContentFallback({
-      pageKey: ABOUT_PAGE_KEY,
-      blockKey: ABOUT_BLOCK_KEYS.conceptTitle,
-    }),
-  });
+  }),
+});
 
-  const mainBody = getContentText({
-    contentMap,
+const mainBody = getContentText({
+  contentMap,
+  pageKey: ABOUT_PAGE_KEY,
+  blockKey: ABOUT_BLOCK_KEYS.mainBody,
+  fallback: getPageContentFallback({
+    pageKey: ABOUT_PAGE_KEY,
     blockKey: ABOUT_BLOCK_KEYS.mainBody,
-    fallback: getPageContentFallback({
-      pageKey: ABOUT_PAGE_KEY,
-      blockKey: ABOUT_BLOCK_KEYS.mainBody,
-    }),
-  });
+  }),
+});
 
   return (
     <>

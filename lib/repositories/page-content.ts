@@ -28,15 +28,21 @@ export function toContentMap(contents: PageContent[]) {
 }
 
 // 指定のブロックキーに一致する本文を辞書から探して、
-// 空っぽじゃなければその文字を返し、空っぽならfallbackを返す
+// 空っぽじゃなければその内容を返し、空っぽならfallbackを返す
 export function getContentText<
-  TPageKey extends PageContentPageKey,//引数を記憶しておくためにジェネリクスを採用する
+  TPageKey extends PageContentPageKey,
 >({
   contentMap,
+  pageKey: _pageKey,
   blockKey,
   fallback,
 }: {
   contentMap: Record<string, PageContent>;
+
+  // TypeScriptに「このblockKeyはどのページのものか」を推測させるために渡す
+  // 実行時の処理では使わないので _pageKey にしている
+  pageKey: TPageKey;
+
   blockKey: PageContentBlockKey<TPageKey>;
   fallback: string;
 }) {
@@ -48,7 +54,7 @@ export function getContentText<
 // 1ブロックのみ本文を取得する関数
 // お問い合わせ・体験/見学申し込みの自動返信メール本文取得などで使う
 export async function findPageContentByKey<
-  TPageKey extends PageContentPageKey,//引数を記憶しておくためにジェネリクスを採用する
+  TPageKey extends PageContentPageKey,
 >({
   pageKey,
   blockKey,

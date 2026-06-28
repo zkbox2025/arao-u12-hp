@@ -27,6 +27,7 @@ export default async function PolicyPage() {
 
   const conceptHeading = getContentText({
     contentMap,
+    pageKey:POLICY_PAGE_KEY,
     blockKey: POLICY_BLOCK_KEYS.conceptHeading,
     fallback: getPageContentFallback({
       pageKey: POLICY_PAGE_KEY,
@@ -36,6 +37,7 @@ export default async function PolicyPage() {
 
   const conceptHeadingEnglish = getContentText({
     contentMap,
+    pageKey:POLICY_PAGE_KEY,
     blockKey: POLICY_BLOCK_KEYS.conceptHeadingEnglish,
     fallback: getPageContentFallback({
       pageKey: POLICY_PAGE_KEY,
@@ -45,6 +47,7 @@ export default async function PolicyPage() {
 
   const conceptSubHeading = getContentText({
     contentMap,
+    pageKey:POLICY_PAGE_KEY,
     blockKey: POLICY_BLOCK_KEYS.conceptSubHeading,
     fallback: getPageContentFallback({
       pageKey: POLICY_PAGE_KEY,
@@ -54,6 +57,7 @@ export default async function PolicyPage() {
 
   const conceptBody = getContentText({
     contentMap,
+    pageKey:POLICY_PAGE_KEY,
     blockKey: POLICY_BLOCK_KEYS.conceptBody,
     fallback: getPageContentFallback({
       pageKey: POLICY_PAGE_KEY,

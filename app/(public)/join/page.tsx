@@ -34,6 +34,7 @@ export default async function JoinPage() {
 
   const leadBody = getContentText({
     contentMap,
+    pageKey:JOIN_PAGE_KEY,
     blockKey: JOIN_BLOCK_KEYS.leadBody,
     fallback: getPageContentFallback({
       pageKey: JOIN_PAGE_KEY,
@@ -46,6 +47,7 @@ export default async function JoinPage() {
       step: "STEP 1",
       title: getContentText({
         contentMap,
+        pageKey:JOIN_PAGE_KEY,
         blockKey: JOIN_BLOCK_KEYS.step1Heading,
         fallback: getPageContentFallback({
           pageKey: JOIN_PAGE_KEY,
@@ -54,6 +56,7 @@ export default async function JoinPage() {
       }),
       body: getContentText({
         contentMap,
+        pageKey:JOIN_PAGE_KEY,
         blockKey: JOIN_BLOCK_KEYS.step1Body,
         fallback: getPageContentFallback({
           pageKey: JOIN_PAGE_KEY,
@@ -67,6 +70,7 @@ export default async function JoinPage() {
       step: "STEP 2",
       title: getContentText({
         contentMap,
+        pageKey:JOIN_PAGE_KEY,
         blockKey: JOIN_BLOCK_KEYS.step2Heading,
         fallback: getPageContentFallback({
           pageKey: JOIN_PAGE_KEY,
@@ -75,6 +79,7 @@ export default async function JoinPage() {
       }),
       body: getContentText({
         contentMap,
+        pageKey:JOIN_PAGE_KEY,
         blockKey: JOIN_BLOCK_KEYS.step2Body,
         fallback: getPageContentFallback({
           pageKey: JOIN_PAGE_KEY,
@@ -86,6 +91,7 @@ export default async function JoinPage() {
       step: "STEP 3",
       title: getContentText({
         contentMap,
+        pageKey:JOIN_PAGE_KEY,
         blockKey: JOIN_BLOCK_KEYS.step3Heading,
         fallback: getPageContentFallback({
           pageKey: JOIN_PAGE_KEY,
@@ -94,6 +100,7 @@ export default async function JoinPage() {
       }),
       body: getContentText({
         contentMap,
+        pageKey:JOIN_PAGE_KEY,
         blockKey: JOIN_BLOCK_KEYS.step3Body,
         fallback: getPageContentFallback({
           pageKey: JOIN_PAGE_KEY,
@@ -105,6 +112,7 @@ export default async function JoinPage() {
 
   const noPrinterHeading = getContentText({
     contentMap,
+    pageKey:JOIN_PAGE_KEY,
     blockKey: JOIN_BLOCK_KEYS.noPrinterHeading,
     fallback: getPageContentFallback({
       pageKey: JOIN_PAGE_KEY,
@@ -114,6 +122,7 @@ export default async function JoinPage() {
 
   const noPrinterBody = getContentText({
     contentMap,
+    pageKey:JOIN_PAGE_KEY,
     blockKey: JOIN_BLOCK_KEYS.noPrinterBody,
     fallback: getPageContentFallback({
       pageKey: JOIN_PAGE_KEY,
