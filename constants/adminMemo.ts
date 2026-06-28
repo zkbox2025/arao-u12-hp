@@ -4,4 +4,4 @@
 export const ADMIN_MEMO_MAX_LENGTH = 2000;
 
 export const ADMIN_MEMO_MAX_LENGTH_ERROR_MESSAGE =
-  "メモは2000文字以内で入力してください。";
+  `メモは${ADMIN_MEMO_MAX_LENGTH}文字以内で入力してください。`;

@@ -1,7 +1,6 @@
 //lib/repositories/notice.ts
 //公開ページの練習スケ変更（Notice）のDBから持ってくるリポジトリファイル（一覧ページと詳細ページ）
 
-import "dotenv/config";
 import { prisma } from "@/src/infrastructure/prisma/client";
 
 //一覧ページ用

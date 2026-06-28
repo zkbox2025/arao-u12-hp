@@ -11,7 +11,7 @@ import { parseNoticeFormData } from "@/lib/validations/admin-notice";
 import {
   ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
 } from "@/constants/adminActionError";
-import { NoticeActionState } from "@/types/action-state";
+import type { NoticeActionState } from "@/types/action-state";
 import { buildNoticeActionValues } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
 
 

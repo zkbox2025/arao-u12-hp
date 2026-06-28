@@ -1,9 +1,9 @@
 // components/admin/modal/ConfirmModal.tsx
-// 管理画面共通の確認モーダル
+// 管理画面共通の確認モーダル（yes or no）
 
 "use client";
 
-import { BaseModal } from "./BaseModal";
+import { BaseModal } from "../../modal/BaseModal";
 
 type ConfirmModalProps = {
   isOpen: boolean;

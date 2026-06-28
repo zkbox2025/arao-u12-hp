@@ -95,13 +95,14 @@ export function PageContentEditorForm({
             id="imageFile"
             name="imageFile"
             type="file"
-            accept="image/*"
+            accept="image/jpeg,image/png,image/webp,image/gif"
             className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
           />
 
           <p className="mt-2 text-xs leading-6 text-neutral-500">
-            スマートフォンでは「写真ライブラリ」や「写真を撮る」から選択できます。
-            新しい画像を選んで保存すると、現在の画像と差し替わります。
+  スマートフォンでは「写真ライブラリ」や「写真を撮る」から選択できます。
+  新しい画像を選んで保存すると、現在の画像と差し替わります。
+   jpg / png / webp / gif の画像を選択できます。最大5MBまでです。
           </p>
         </div>
 

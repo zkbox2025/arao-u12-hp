@@ -2,6 +2,7 @@
 // 公開ページのよくある質問ページ
 
 import type { FaqCategory } from "@/types/prisma";
+import type { FaqCategoryValue } from "@/constants/faq";
 import { ChevronDown } from "lucide-react";
 import { PageTitle } from "@/components/public/PageTitle";
 import { getPageContentFallback } from "@/constants/page-content";
@@ -32,9 +33,9 @@ type FaqItem = {
 };
 
 type FaqCategorySection = {
-  category: (typeof FAQ_CATEGORY_ORDER)[number];
+  category: FaqCategoryValue;
   label: string;
-  navLabel: string[];
+  navLabel: readonly string[];
   items: FaqItem[];
 };
 
@@ -50,6 +51,7 @@ export default async function FaqPage() {
 
   const leadBody = getContentText({
     contentMap,
+    pageKey: FAQ_PAGE_KEY,
     blockKey: FAQ_BLOCK_KEYS.leadBody,
     fallback: getPageContentFallback({
       pageKey: FAQ_PAGE_KEY,

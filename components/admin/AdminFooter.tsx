@@ -3,7 +3,7 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { SITE_NAME } from "@/constants/adminNavigation";
+import { SITE_NAME } from "@/constants/site";
 
 export function AdminFooter() {
   return (

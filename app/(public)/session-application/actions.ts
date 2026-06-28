@@ -19,7 +19,7 @@ import { sendLineSessionApplicationNotification } from "@/lib/line/admin-line-no
 import { getStringValue } from "@/lib/forms/form-data";
 import { getZodFieldErrors } from "@/lib/forms/zod-field-errors";
 import { runSilentNotifications } from "@/lib/notifications/run-notifications";
-import { parseDateOnly } from "@/lib/dates/date-only";
+import { parseJapaneseDateOnly } from "@/lib/dates/date-only";
 
 
 const SESSION_APPLICATION_FIELDS = [
@@ -153,9 +153,9 @@ if (!rateLimit.allowed) {
       childNameKana: parsed.data.childNameKana,
       childGrade: parsed.data.childGrade,
       experience: parsed.data.experience,
-      preferredDate1: parseDateOnly(parsed.data.preferredDate1),
+      preferredDate1: parseJapaneseDateOnly(parsed.data.preferredDate1),
       preferredDate2: parsed.data.preferredDate2
-  ? parseDateOnly(parsed.data.preferredDate2)
+  ? parseJapaneseDateOnly(parsed.data.preferredDate2)
   : null,
       email: parsed.data.email,
       phone: parsed.data.phone || null,

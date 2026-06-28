@@ -27,6 +27,7 @@ export default async function TermPage() {
 
   const leadBody = getContentText({
     contentMap,
+    pageKey:TERM_PAGE_KEY,
     blockKey: TERM_BLOCK_KEYS.leadBody,
     fallback: getPageContentFallback({
       pageKey: TERM_PAGE_KEY,
@@ -36,6 +37,7 @@ export default async function TermPage() {
 
   const pdfDownloadGuide = getContentText({
     contentMap,
+    pageKey:TERM_PAGE_KEY,
     blockKey: TERM_BLOCK_KEYS.pdfDownloadGuide,
     fallback: getPageContentFallback({
       pageKey: TERM_PAGE_KEY,
@@ -45,6 +47,7 @@ export default async function TermPage() {
 
   const termBody = getContentText({
     contentMap,
+    pageKey:TERM_PAGE_KEY,
     blockKey: TERM_BLOCK_KEYS.termBody,
     fallback: getPageContentFallback({
       pageKey: TERM_PAGE_KEY,

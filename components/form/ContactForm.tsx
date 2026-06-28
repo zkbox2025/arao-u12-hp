@@ -10,6 +10,8 @@ import { FormField } from "./FormField";
 import { PrivacyPolicyModal } from "./PrivacyPolicyModal";
 import { SubmitButton } from "./SubmitButton";
 import { SpamProtectionFields } from "./SpamProtectionFields";//スパム対策用のボット判定するための透明トラップ
+import { PrivacyAgreementField } from "./PrivacyAgreementField";//プライバシーポリシーチェック欄
+import { useScrollToFormError } from "./useScrollToFormError";
 
 const initialState: ActionState = {
   ok: false,
@@ -17,6 +19,8 @@ const initialState: ActionState = {
   errors: {},
   values: {},
 };
+
+
 
 export function ContactForm() {
   const [state, formAction] = useActionState(submitContactAction, initialState);
@@ -40,17 +44,22 @@ type ContactFormInnerProps = {
 function ContactFormInner({ state, formAction }: ContactFormInnerProps) {
   const [agreed, setAgreed] = useState(state.values?.agreed === "on");
   const [isPrivacyOpen, setIsPrivacyOpen] = useState(false);
+const formTopRef = useScrollToFormError(state);
 
   return (
     <>
+    <div ref={formTopRef} tabIndex={-1} className="scroll-mt-24" />
       <form action={formAction} className="mt-8 space-y-6">
         <SpamProtectionFields />
         
         {state.message ? (
-          <div className="rounded-lg bg-red-50 p-4 text-sm font-bold text-red-700">
-            {state.message}
-          </div>
-        ) : null}
+  <div
+    role="alert"
+    className="rounded-lg bg-red-50 p-4 text-sm font-bold text-red-700"
+  >
+    {state.message}
+  </div>
+) : null}
 
         <FormField
           label="お名前"
@@ -141,38 +150,13 @@ function ContactFormInner({ state, formAction }: ContactFormInnerProps) {
           />
         </FormField>
 
-        <div className="space-y-2">
-  <div className="flex items-start gap-3 text-sm leading-7">
-    <input
-      id="contact-agreed"
-      type="checkbox"
-      name="agreed"
-      checked={agreed}
-      onChange={(event) => setAgreed(event.target.checked)}
-      className="mt-1"
-    />
-
-    <div>
-      <button
-        type="button"
-        onClick={() => setIsPrivacyOpen(true)}
-        className="font-bold text-green-700 underline"
-      >
-        プライバシーポリシー
-      </button>
-
-      <label htmlFor="contact-agreed" className="ml-1">
-        に同意する
-      </label>
-    </div>
-  </div>
-
-  {state.errors?.agreed?.[0] ? (
-    <p className="text-sm font-medium text-red-600">
-      {state.errors.agreed[0]}
-    </p>
-  ) : null}
-</div>
+       <PrivacyAgreementField
+  id="contact-agreed"
+  agreed={agreed}
+  onAgreedChange={setAgreed}
+  error={state.errors?.agreed?.[0]}
+  onOpenPrivacy={() => setIsPrivacyOpen(true)}
+/>
 
         <SubmitButton agreed={agreed} />
       </form>

@@ -30,6 +30,7 @@ export default async function FlowPage() {
 
   const importantNoticeBody = getContentText({
     contentMap,
+    pageKey:FLOW_PAGE_KEY,
     blockKey: FLOW_BLOCK_KEYS.importantNoticeBody,
     fallback: getPageContentFallback({
       pageKey: FLOW_PAGE_KEY,
@@ -39,6 +40,7 @@ export default async function FlowPage() {
 
   const step1Heading = getContentText({
     contentMap,
+    pageKey:FLOW_PAGE_KEY,
     blockKey: FLOW_BLOCK_KEYS.step1Heading,
     fallback: getPageContentFallback({
       pageKey: FLOW_PAGE_KEY,
@@ -48,6 +50,7 @@ export default async function FlowPage() {
 
   const step1Body = getContentText({
     contentMap,
+    pageKey:FLOW_PAGE_KEY,
     blockKey: FLOW_BLOCK_KEYS.step1Body,
     fallback: getPageContentFallback({
       pageKey: FLOW_PAGE_KEY,
@@ -57,6 +60,7 @@ export default async function FlowPage() {
 
   const step2Heading = getContentText({
     contentMap,
+    pageKey:FLOW_PAGE_KEY,
     blockKey: FLOW_BLOCK_KEYS.step2Heading,
     fallback: getPageContentFallback({
       pageKey: FLOW_PAGE_KEY,
@@ -66,6 +70,7 @@ export default async function FlowPage() {
 
   const step2Body = getContentText({
     contentMap,
+    pageKey:FLOW_PAGE_KEY,
     blockKey: FLOW_BLOCK_KEYS.step2Body,
     fallback: getPageContentFallback({
       pageKey: FLOW_PAGE_KEY,
@@ -75,6 +80,7 @@ export default async function FlowPage() {
 
   const belongingsBody = getContentText({
     contentMap,
+    pageKey:FLOW_PAGE_KEY,
     blockKey: FLOW_BLOCK_KEYS.belongingsBody,
     fallback: getPageContentFallback({
       pageKey: FLOW_PAGE_KEY,

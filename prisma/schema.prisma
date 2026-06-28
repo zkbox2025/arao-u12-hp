@@ -76,7 +76,7 @@ model Faq {
   sortOrder Int           @default(0) // 自動で番号をふって並び替えできるようにする
 }
 
-//送信用スパム対策
+//フォーム送信用スパム対策
 model FormSubmissionLog {
   id          String   @id @default(uuid())
   createdAt   DateTime @default(now())
@@ -86,7 +86,7 @@ model FormSubmissionLog {
   emailHash   String?
   contentHash String?
   userAgent   String?
-  result      SubmissionResult
+  result      FormSubmissionResult
   reason      String?
 
   @@index([formType, ipHash, createdAt])
@@ -94,11 +94,28 @@ model FormSubmissionLog {
   @@index([formType, emailHash, contentHash, createdAt])
 }
 
+//メール通知先設定
 model FormNotificationSetting {
   formType  FormType @id
   emails    String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+//管理者ページへのログイン申請のスパム対策
+model LoginSubmissionLog {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  ipHash    String?
+  emailHash String?
+  userAgent String?
+  result    LoginSubmissionResult
+  reason    String?
+
+  @@index([ipHash, createdAt])
+  @@index([emailHash, createdAt])
+  @@index([emailHash, result, createdAt])
 }
 
 enum Type {
@@ -152,7 +169,13 @@ enum FormType {
   SESSION_APPLICATION
 }
 
-enum SubmissionResult {
+enum FormSubmissionResult {
   ALLOWED
+  BLOCKED
+}
+
+enum LoginSubmissionResult {
+  SUCCESS
+  FAILED
   BLOCKED
 }

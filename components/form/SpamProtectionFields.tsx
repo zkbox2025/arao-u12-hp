@@ -19,7 +19,7 @@ export function SpamProtectionFields() {
   tabIndex={-1}
   autoComplete="off"
   aria-hidden="true"
-  className="absolute -left-[9999px] top-auto h-px w-px overflow-hidden"
+  className="absolute -left-2499.75 top-auto h-px w-px overflow-hidden"
 />
 
       {/* フォーム表示開始時刻 */}

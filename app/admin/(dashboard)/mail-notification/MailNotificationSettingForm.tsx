@@ -6,9 +6,10 @@
 import { useActionState } from "react";
 import { updateMailNotificationSetting } from "./actions";
 import type { MailNotificationActionState } from "@/types/action-state";
+import type { FormType } from "@/types/prisma";
 
 type MailNotificationSettingFormProps = {
-  formType: string;
+  formType: FormType;
   label: string;
   description: string;
   defaultEmails: string;

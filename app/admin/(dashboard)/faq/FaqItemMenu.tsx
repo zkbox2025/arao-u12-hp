@@ -6,16 +6,15 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type {
-  FaqCategoryValue,
   FaqStatusFilterValue,
 } from "@/constants/faq";
 import { FaqEditModal } from "./FaqEditModal";
 import { FaqDeleteButton } from "./FaqDeleteButton";
-import type { ContentStatus } from "@/types/prisma";
+import type { ContentStatus, FaqCategory } from "@/types/prisma";
 
 type FaqItemMenuProps = {
   faqId: string;
-  category: FaqCategoryValue;
+  category: FaqCategory;
   question: string;
   answer: string;
   status: ContentStatus;

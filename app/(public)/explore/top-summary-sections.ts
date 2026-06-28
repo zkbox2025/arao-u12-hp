@@ -69,11 +69,14 @@ export function buildTopSummarySections(
   contentMap: Record<string, PageContent>
 ): TopSummarySection[] {
   return summarySectionDefinitions.map((section) => {
+    const bodyContent = contentMap[section.bodyBlockKey];
+
     return {
       id: section.id,
       title: section.title,
       heading: getContentText({
         contentMap,
+        pageKey: TOP_PAGE_KEY,
         blockKey: section.titleBlockKey,
         fallback: getPageContentFallback({
           pageKey: TOP_PAGE_KEY,
@@ -82,6 +85,7 @@ export function buildTopSummarySections(
       }),
       body: getContentText({
         contentMap,
+        pageKey: TOP_PAGE_KEY,
         blockKey: section.bodyBlockKey,
         fallback: getPageContentFallback({
           pageKey: TOP_PAGE_KEY,
@@ -90,11 +94,8 @@ export function buildTopSummarySections(
       }),
       href: section.href,
       imageLabel: section.imageLabel,
-      imageUrl: contentMap[section.bodyBlockKey]?.imageUrl,
-      imageAlt: contentMap[section.bodyBlockKey]?.imageAlt,
+      imageUrl: bodyContent?.imageUrl,
+      imageAlt: bodyContent?.imageAlt,
     };
   });
 }
-
-
-

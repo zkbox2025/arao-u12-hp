@@ -6,6 +6,7 @@ import {
   PAGE_CONTENT_DEFINITIONS,
   PAGE_CONTENT_PAGE_KEYS,
   getFirstBlockKey,
+  type PageContentBlockKey,
   type PageContentPageKey,
 } from "@/constants/page-content";
 
@@ -16,7 +17,6 @@ export type ParsedPageContentFormResult =
         pageKey: PageContentPageKey;
         blockKey: string;
         content: string;
-        imageUrl: string | null;
         imageAlt: string | null;
       };
     }
@@ -42,24 +42,28 @@ export function parsePageKey(pageKey: string | undefined): PageContentPageKey {
   return "TOP";
 }
 
-//選んだページの中に、指定された編集ブロック（パーツ）が本当に存在するかチェックし、
-// なければ自動的に1番目のブロックに補正して返す安全関数
-export function parseBlockKey({
+// 選んだページの中に、指定された編集ブロックが存在するか確認する。
+// 存在しない場合は、そのページの最初のブロックへ補正する。
+export function parseBlockKey<TPageKey extends PageContentPageKey>({
   pageKey,
   blockKey,
 }: {
-  pageKey: PageContentPageKey;
+  pageKey: TPageKey;
   blockKey: string | undefined;
-}) {
-  const blocks = PAGE_CONTENT_DEFINITIONS[pageKey].blocks;//指定されたページのブロック一覧を出す
+}): PageContentBlockKey<TPageKey> {
+  const blocks = PAGE_CONTENT_DEFINITIONS[pageKey].blocks; //指定されたページのブロック一覧を出す
 
   //hasOwnProperty.call:そのオブジェクトの中に(blocks)、指定した名前のプロパティ（blockKey）が存在するかどうかを安全に調べるための、JavaScriptの確実なチェック方法
-  if (blockKey && Object.prototype.hasOwnProperty.call(blocks, blockKey)) {//ブロック名が一覧にあるかチェックし、あったらそのまま返す
-    return blockKey;
+  if (
+    blockKey &&
+    Object.prototype.hasOwnProperty.call(blocks, blockKey)
+  ) { //ブロック名が一覧にあるかチェックし、あったらそのまま返す
+    return blockKey as PageContentBlockKey<TPageKey>;
   }
 
-  return getFirstBlockKey(pageKey);//なければ一番最初のブロックにする
+  return getFirstBlockKey(pageKey); //なければ一番最初のブロックにする
 }
+
 
 //入力値のバリデーション関数
 export function parsePageContentFormData(
@@ -108,7 +112,6 @@ export function parsePageContentFormData(
       pageKey,
       blockKey: rawBlockKey,
       content,
-      imageUrl: imageUrl || null,
       imageAlt: imageAlt || null,
     },
   };

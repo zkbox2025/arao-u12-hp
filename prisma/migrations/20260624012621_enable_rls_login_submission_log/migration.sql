@@ -1,0 +1,1 @@
+ALTER TABLE public."LoginSubmissionLog" ENABLE ROW LEVEL SECURITY;

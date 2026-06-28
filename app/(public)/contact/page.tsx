@@ -36,6 +36,7 @@ export default async function ContactPage({ searchParams }: ContactPageProps) {
 
   const leadBody = getContentText({
     contentMap,
+    pageKey: CONTACT_PAGE_KEY,
     blockKey: CONTACT_BLOCK_KEYS.leadBody,
     fallback: getPageContentFallback({
       pageKey: CONTACT_PAGE_KEY,
@@ -45,6 +46,7 @@ export default async function ContactPage({ searchParams }: ContactPageProps) {
 
   const thanksMessage = getContentText({
     contentMap,
+    pageKey: CONTACT_PAGE_KEY,
     blockKey: CONTACT_BLOCK_KEYS.thanksMessage,
     fallback: getPageContentFallback({
       pageKey: CONTACT_PAGE_KEY,

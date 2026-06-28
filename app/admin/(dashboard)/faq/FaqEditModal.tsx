@@ -4,14 +4,14 @@
 "use client";
 
 import { useState } from "react";
-import { BaseModal } from "@/components/admin/modal/BaseModal";
-import { FAQ_CATEGORY_LABELS, type FaqCategoryValue } from "@/constants/faq";
+import { BaseModal } from "@/components/modal/BaseModal";
+import { FAQ_CATEGORY_LABELS } from "@/constants/faq";
 import { FaqEditForm } from "./FaqEditForm";
-import type { ContentStatus } from "@/types/prisma";
+import type { ContentStatus, FaqCategory } from "@/types/prisma";
 
 type FaqEditModalProps = {
   faqId: string;
-  category: FaqCategoryValue;
+  category: FaqCategory;
   question: string;
   answer: string;
   status: ContentStatus;

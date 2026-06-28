@@ -5,15 +5,13 @@
 
 import { useState } from "react";
 import { ConfirmModal } from "@/components/admin/modal/ConfirmModal";
-import type {
-  FaqCategoryValue,
-  FaqStatusFilterValue,
-} from "@/constants/faq";
+import type { FaqStatusFilterValue } from "@/constants/faq";
+import type { FaqCategory } from "@/types/prisma";
 import { deleteFaq } from "./actions";
 
 type FaqDeleteButtonProps = {
   faqId: string;
-  category: FaqCategoryValue;
+  category: FaqCategory;
   statusFilter: FaqStatusFilterValue;
 };
 

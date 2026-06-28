@@ -63,6 +63,7 @@ export default async function SummaryPage() {
             <p className="whitespace-pre-wrap leading-8 text-neutral-700">
               {getContentText({
                 contentMap,
+                pageKey:SUMMARY_PAGE_KEY,
                 blockKey: item.blockKey,
                 fallback: getPageContentFallback({
                   pageKey: SUMMARY_PAGE_KEY,

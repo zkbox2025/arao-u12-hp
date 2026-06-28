@@ -7,6 +7,7 @@ import Link from "next/link";
 import { LogOut, X } from "lucide-react";
 import { adminNavigationItems } from "@/constants/adminNavigation";
 import { logoutAdmin } from "@/app/admin/(dashboard)/actions";
+import { useCloseOnEscape } from "@/components/ui/useCloseOnEscape";
 
 type AdminDrawerProps = {
   isOpen: boolean;
@@ -15,7 +16,7 @@ type AdminDrawerProps = {
   pendingSessionApplicationCount?: number;
 };
 
-//ドロワーメニューで選択した遷移先ページの一番上に遷移させる関数
+// ドロワーメニューで選択した遷移先ページの一番上に遷移させる関数
 function withTopHash(href: string) {
   const [pathAndQuery] = href.split("#");
 
@@ -28,6 +29,8 @@ export function AdminDrawer({
   pendingContactCount = 0,
   pendingSessionApplicationCount = 0,
 }: AdminDrawerProps) {
+  useCloseOnEscape({ isOpen, onClose });
+
   return (
     <>
       <div
@@ -67,7 +70,7 @@ export function AdminDrawer({
               className="rounded-full p-2 text-neutral-700 transition hover:bg-neutral-100"
               aria-label="管理メニューを閉じる"
             >
-              <X size={24} />
+              <X size={24} aria-hidden="true" />
             </button>
           </div>
 

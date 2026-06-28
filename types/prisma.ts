@@ -10,6 +10,7 @@ export type {
   Faq,
   FormSubmissionLog,
   FormNotificationSetting,
+  LoginSubmissionLog,
 } from "@prisma/client";
 
 
@@ -22,6 +23,8 @@ export type {
   Grade,
   ExperienceYears,
   FormType,
+  LoginSubmissionResult,
+  FormSubmissionResult,
   Type as SessionType,
 } from "@prisma/client";
 

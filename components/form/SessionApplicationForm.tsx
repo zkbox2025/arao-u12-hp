@@ -10,6 +10,13 @@ import { FormField } from "./FormField";
 import { PrivacyPolicyModal } from "./PrivacyPolicyModal";
 import { SubmitButton } from "./SubmitButton";
 import { SpamProtectionFields } from "./SpamProtectionFields";//スパム対策用のボット判定するための透明トラップ
+import { PrivacyAgreementField } from "./PrivacyAgreementField";
+import { useScrollToFormError } from "./useScrollToFormError";
+import {
+  EXPERIENCE_OPTIONS,
+  GRADE_OPTIONS,
+  SESSION_TYPE_OPTIONS,
+} from "@/constants/formOptions";//選択肢を定義化したファイル
 
 const initialState: ActionState = {
   ok: false,
@@ -17,6 +24,8 @@ const initialState: ActionState = {
   errors: {},
   values: {},
 };
+
+
 
 export function SessionApplicationForm() {
     //送信後の状態を管理するためのもの
@@ -52,23 +61,31 @@ type SessionApplicationFormInnerProps = {
 
 //プライバシーポリシーモーダル
 //→ 開く/閉じるを画面上で切り替える必要があるので useState で管理する
-function SessionApplicationFormInner({ state, formAction }: SessionApplicationFormInnerProps) {
+function SessionApplicationFormInner({
+  state,
+  formAction,
+}: SessionApplicationFormInnerProps) {
   const [agreed, setAgreed] = useState(state.values?.agreed === "on");
   const [isPrivacyOpen, setIsPrivacyOpen] = useState(false);
+const formTopRef = useScrollToFormError(state);
 
 //SessionApplicationFormInnerのリターン
   return (
     <>
+    <div ref={formTopRef} tabIndex={-1} className="scroll-mt-24" />
       <form
   action={formAction}
   className="mt-8 space-y-6"
 >
    <SpamProtectionFields />
         {state.message ? (
-          <div className="rounded-lg bg-red-50 p-4 text-sm font-bold text-red-700">
-            {state.message}
-          </div>
-        ) : null}
+  <div
+    role="alert"
+    className="rounded-lg bg-red-50 p-4 text-sm font-bold text-red-700"
+  >
+    {state.message}
+  </div>
+) : null}
 
         <FormField
           label="参加内容"
@@ -85,8 +102,11 @@ function SessionApplicationFormInner({ state, formAction }: SessionApplicationFo
             <option value="" disabled>
               選択してください
             </option>
-            <option value="TRIAL">体験：実際に練習に参加する</option>
-            <option value="OBSERVATION">見学：練習の様子を見る</option>
+            {SESSION_TYPE_OPTIONS.map((option) => (
+  <option key={option.value} value={option.value}>
+    {option.label}
+  </option>
+))}
           </select>
         </FormField>
 
@@ -136,13 +156,11 @@ function SessionApplicationFormInner({ state, formAction }: SessionApplicationFo
             <option value="" disabled>
               選択してください
             </option>
-            <option value="YOUJI">幼児</option>
-            <option value="ELEMENTARY_1">小学1年生</option>
-            <option value="ELEMENTARY_2">小学2年生</option>
-            <option value="ELEMENTARY_3">小学3年生</option>
-            <option value="ELEMENTARY_4">小学4年生</option>
-            <option value="ELEMENTARY_5">小学5年生</option>
-            <option value="ELEMENTARY_6">小学6年生</option>
+            {GRADE_OPTIONS.map((grade) => (
+  <option key={grade.value} value={grade.value}>
+    {grade.label}
+  </option>
+))}
           </select>
         </FormField>
 
@@ -161,9 +179,11 @@ function SessionApplicationFormInner({ state, formAction }: SessionApplicationFo
             <option value="" disabled>
               選択してください
             </option>
-            <option value="NONE">未経験</option>
-            <option value="LESS_THAN_1YEAR">1年未満</option>
-            <option value="YEARS_1_OR_MORE">1年以上</option>
+            {EXPERIENCE_OPTIONS.map((experience) => (
+  <option key={experience.value} value={experience.value}>
+    {experience.label}
+  </option>
+))}
           </select>
           <p className="mt-2 text-sm text-neutral-500">
             ※未経験でも大歓迎です！
@@ -243,41 +263,15 @@ function SessionApplicationFormInner({ state, formAction }: SessionApplicationFo
           />
         </FormField>
 
-        <div className="space-y-2">
-          <div className="space-y-2">
-  <div className="flex items-start gap-3 text-sm leading-7">
-    <input
-      id="session-agreed"
-      type="checkbox"
-      name="agreed"
-      checked={agreed}
-      onChange={(event) => setAgreed(event.target.checked)}
-      className="mt-1"
-    />
+        <PrivacyAgreementField
+  id="session-agreed"
+  agreed={agreed}
+  onAgreedChange={setAgreed}
+  error={state.errors?.agreed?.[0]}
+  onOpenPrivacy={() => setIsPrivacyOpen(true)}
+/>
 
-    <div>
-      <button
-        type="button"
-        onClick={() => setIsPrivacyOpen(true)}
-        className="font-bold text-green-700 underline"
-      >
-        プライバシーポリシー
-      </button>
 
-      <label htmlFor="session-agreed" className="ml-1">
-        に同意する
-      </label>
-    </div>
-  </div>
-
-  {state.errors?.agreed?.[0] ? (
-    <p className="text-sm font-medium text-red-600">
-      {state.errors.agreed[0]}
-    </p>
-  ) : null}
-</div>
-
-        </div>
 
         <SubmitButton agreed={agreed} />
       </form>

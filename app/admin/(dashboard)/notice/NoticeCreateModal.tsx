@@ -4,7 +4,7 @@
 "use client";
 
 import { useState } from "react";
-import { BaseModal } from "@/components/admin/modal/BaseModal";
+import { BaseModal } from "@/components/modal/BaseModal";
 import { NoticeCreateForm } from "./NoticeCreateForm";
 
 export function NoticeCreateModal() {

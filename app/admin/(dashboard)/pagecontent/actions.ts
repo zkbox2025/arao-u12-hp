@@ -3,10 +3,14 @@
 
 "use server";
 
-import { randomUUID } from "crypto";
+import {
+  MAX_PAGE_CONTENT_IMAGE_SIZE,
+  deletePageContentStorageImage,
+  isAllowedPageContentImageType,
+  uploadPageContentImage,
+} from "@/lib/storage/page-content-image-storage";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 import { requireAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
@@ -20,34 +24,12 @@ import {
 } from "@/constants/adminActionError";
 import {
   buildPageContentActionValuesFromData,
-  buildPageContentActionValuesFromFormData,
 } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
 import type { PageContentActionState } from "@/types/action-state";
 
 
-const PAGE_CONTENT_IMAGE_BUCKET = "club-images";
-const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
 
-function createStorageAdminClient() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl) {
-    throw new Error("NEXT_PUBLIC_SUPABASE_URL is not defined");
-  }
-
-  if (!serviceRoleKey) {
-    throw new Error("SUPABASE_SERVICE_ROLE_KEY is not defined");
-  }
-
-  return createSupabaseClient(supabaseUrl, serviceRoleKey, {
-    auth: {
-      persistSession: false,
-      autoRefreshToken: false,
-    },
-  });
-}
 
 function buildAdminPageContentPath({
   pageKey,
@@ -78,80 +60,9 @@ function buildAdminPageContentPath({
   return `/admin/pagecontent?${params.toString()}#top`;
 }
 
-function getSafeImageExtension(fileName: string) {
-  const extension = fileName.split(".").pop()?.toLowerCase();
-
-  if (
-    extension === "jpg" ||
-    extension === "jpeg" ||
-    extension === "png" ||
-    extension === "webp" ||
-    extension === "gif"
-  ) {
-    return extension;
-  }
-
-  return "jpg";
-}
 
 
-// ローカル開発でスマホ実機確認するときだけ使う一時対応。
-// 127.0.0.1 はスマホ自身を指してしまうため、PCのLAN IP（192..）に変換し、DB（ポスグレ）に保存する。
-// リリース前・本番反映前には削除して data.publicUrl をそのまま保存すること。
-function normalizeLocalSupabasePublicUrl(publicUrl: string) {
-  return publicUrl
-    .replace("http://127.0.0.1:54321", "http://192.168.210.188:54321")
-    .replace("http://localhost:54321", "http://192.168.210.188:54321");
-}
 
-async function uploadPageContentImage({
-  file,
-  pageKey,
-  blockKey,
-}: {
-  file: File;
-  pageKey: string;
-  blockKey: string;
-}) {
-  const supabase = createStorageAdminClient();
-
-  const extension = getSafeImageExtension(file.name);
-  const filePath = `page-content/${pageKey}/${blockKey}/${randomUUID()}.${extension}`;
-
-  const { error } = await supabase.storage
-    .from(PAGE_CONTENT_IMAGE_BUCKET)
-    .upload(filePath, file, {
-      contentType: file.type || "image/jpeg",
-      upsert: false,
-    });
-
-  if (error) {
-    throw new Error(error.message);
-  }
-
-  const { data } = supabase.storage
-    .from(PAGE_CONTENT_IMAGE_BUCKET)
-    .getPublicUrl(filePath);
-
-  return {
-  imageUrl: normalizeLocalSupabasePublicUrl(data.publicUrl),
-  imagePath: filePath,
-};
-}
-
-async function deletePageContentStorageImage(imagePath?: string | null) {
-  if (!imagePath) return;
-
-  const supabase = createStorageAdminClient();
-
-  const { error } = await supabase.storage
-    .from(PAGE_CONTENT_IMAGE_BUCKET)
-    .remove([imagePath]);
-
-  if (error) {
-    throw new Error(error.message);
-  }
-}
 
 export async function updatePageContent(
   state: PageContentActionState,
@@ -164,10 +75,7 @@ export async function updatePageContent(
 if (!parsed.ok) {
   return {
     error: parsed.error,
-    values: buildPageContentActionValuesFromFormData(
-      formData,
-      state.values
-    ),
+    values: parsed.values,
   };
 }
 
@@ -200,7 +108,10 @@ if (!parsed.ok) {
   error: ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
   values: buildPageContentActionValuesFromData({
     ...parsed.data,
-    imageUrl: state.values?.imageUrl,
+    imageUrl: state.values?.imageUrl ?? null,
+    // DBから現在の画像URLを取得できなかった。
+    // さらに、バリデーション成功時の parsed.data には imageUrl を含めていないため、
+    // 直前に画面で表示していた画像URLが state に残っていれば復元用に使う。
   }),
 };
   }
@@ -213,17 +124,17 @@ if (!parsed.ok) {
   const imageFile = formData.get("imageFile");
 
   if (imageFile instanceof File && imageFile.size > 0) {
-    if (!imageFile.type.startsWith("image/")) {
-      return {
-        error: "画像ファイルを選択してください。",
-        values: buildPageContentActionValuesFromData({
-          ...parsed.data,
-          imageUrl,
-        }),
-      };
-    }
+    if (!isAllowedPageContentImageType(imageFile.type)) {
+  return {
+    error: "画像は jpg / png / webp / gif のいずれかを選択してください。",
+    values: buildPageContentActionValuesFromData({
+      ...parsed.data,
+      imageUrl,
+    }),
+  };
+}
 
-    if (imageFile.size > MAX_IMAGE_SIZE) {
+    if (imageFile.size > MAX_PAGE_CONTENT_IMAGE_SIZE) {
       return {
         error: "画像は5MB以内にしてください。",
         values: buildPageContentActionValuesFromData({
@@ -233,6 +144,7 @@ if (!parsed.ok) {
       };
     }
 
+    //ストレージに画像ファイルを保存する
     try {
       const uploadedImage = await uploadPageContentImage({
         file: imageFile,
@@ -241,8 +153,8 @@ if (!parsed.ok) {
       });
 
       imageUrl = uploadedImage.imageUrl;
-      imagePath = uploadedImage.imagePath;
-      uploadedImagePath = uploadedImage.imagePath;
+      imagePath = uploadedImage.imagePath;//DBに保存するため
+      uploadedImagePath = uploadedImage.imagePath;//エラー時の削除のため（エラーになったら使う）
     } catch (error) {
       console.error("PageContent画像アップロードに失敗しました", {
         pageKey: parsed.data.pageKey,
@@ -290,6 +202,7 @@ if (!parsed.ok) {
       error,
     });
 
+    //DB保存が失敗した際に失敗ように取っておいたストレージに保存されてるデータを削除する
     if (uploadedImagePath) {
       try {
         await deletePageContentStorageImage(uploadedImagePath);
@@ -310,6 +223,7 @@ if (!parsed.ok) {
     };
   }
 
+  //アップロードの画像と以前の画像が競合した場合は、ストレージから以前の画像データを消す
   if (uploadedImagePath && previousImagePath) {
     try {
       await deletePageContentStorageImage(previousImagePath);
@@ -339,6 +253,7 @@ if (!parsed.ok) {
   );
 }
 
+//画像を削除する関数
 export async function deletePageContentImage(formData: FormData) {
   await requireAdmin();
 
@@ -383,26 +298,7 @@ export async function deletePageContentImage(formData: FormData) {
     );
   }
 
-  try {
-    await deletePageContentStorageImage(currentPageContent?.imagePath);
-  } catch (error) {
-    console.error("PageContent画像のStorage削除に失敗しました", {
-      pageKey,
-      blockKey,
-      imageUrl: currentPageContent?.imageUrl,
-      imagePath: currentPageContent?.imagePath,
-      error,
-    });
-
-    redirect(
-      buildAdminPageContentPath({
-        pageKey,
-        blockKey,
-        deleteError: true,
-      })
-    );
-  }
-
+  //画像削除する（null）にする
   try {
     await prisma.pageContent.update({
       where: {
@@ -431,6 +327,19 @@ export async function deletePageContentImage(formData: FormData) {
         deleteError: true,
       })
     );
+  }
+
+  //redirect(deleteError: true)にしない理由：DB上は画像なしになっているので、ユーザー表示としては成功扱いでOK。
+  // Storageにゴミが残る可能性はありますが、公開ページで壊れた画像が出るよりマシ。万が一Storage削除が失敗しても、画面上は画像なしになる。
+  try {
+    await deletePageContentStorageImage(currentPageContent?.imagePath);
+  } catch (error) {
+    console.error("PageContent画像のStorage削除に失敗しました", {
+      pageKey,
+      blockKey,
+      imagePath: currentPageContent?.imagePath,
+      error,
+    });
   }
 
   const publicPath = getPageContentPublicPath(pageKey);

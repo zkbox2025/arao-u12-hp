@@ -45,5 +45,12 @@ if (emails.length === 0) {
     return `メールアドレスの形式が正しくありません：${invalidEmail}`;
   }
 
+    // 大文字小文字の違いだけの同じメールアドレスも重複として扱う
+  const uniqueEmails = new Set(emails.map((email) => email.toLowerCase()));//すべてのメアドを小文字にしてnew Setにより重複を削る
+
+  if (uniqueEmails.size !== emails.length) {//重複を削った後の数と元々のメアドの数を比較して同じではなければ、以下のエラーを投げる
+    return "同じメールアドレスが重複しています。";
+  }
+
   return "";
 }

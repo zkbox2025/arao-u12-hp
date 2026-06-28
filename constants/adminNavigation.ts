@@ -14,7 +14,7 @@ import {
 
 export const adminNavigationItems = [
   {
-    label: "管理者メニュー",
+    label: "管理トップ",
     href: "/admin/dashboard",
     icon: Home,
     countKey: null,
@@ -63,4 +63,3 @@ export const adminNavigationItems = [
   },
 ] as const;
 
-export const SITE_NAME = "ARAO U-12 BASKETBALL CLUB";

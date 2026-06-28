@@ -44,6 +44,7 @@ export default async function SessionApplicationPage({
 
   const leadBody = getContentText({
     contentMap,
+    pageKey:SESSION_APPLICATION_PAGE_KEY,
     blockKey: SESSION_APPLICATION_BLOCK_KEYS.leadBody,
     fallback: getPageContentFallback({
       pageKey: SESSION_APPLICATION_PAGE_KEY,
@@ -53,6 +54,7 @@ export default async function SessionApplicationPage({
 
   const beginnerNote = getContentText({
     contentMap,
+    pageKey:SESSION_APPLICATION_PAGE_KEY,
     blockKey: SESSION_APPLICATION_BLOCK_KEYS.beginnerNote,
     fallback: getPageContentFallback({
       pageKey: SESSION_APPLICATION_PAGE_KEY,
@@ -62,6 +64,7 @@ export default async function SessionApplicationPage({
 
   const thanksMessage = getContentText({
     contentMap,
+    pageKey:SESSION_APPLICATION_PAGE_KEY,
     blockKey: SESSION_APPLICATION_BLOCK_KEYS.thanksMessage,
     fallback: getPageContentFallback({
       pageKey: SESSION_APPLICATION_PAGE_KEY,
