@@ -3,8 +3,9 @@
 //ログ保存関数で送信記録を残す
 
 import { prisma } from "@/src/infrastructure/prisma/client";
+import type { FormType } from "@/types/prisma";
+import type { FormSubmissionResult } from "@/types/prisma";
 
-type FormType = "CONTACT" | "SESSION_APPLICATION";
 
 type SaveSubmissionLogInput = {
   formType: FormType;
@@ -12,7 +13,7 @@ type SaveSubmissionLogInput = {
   emailHash: string;
   contentHash?: string | null;
   userAgent?: string | null;
-  result: "ALLOWED" | "BLOCKED";
+  result: FormSubmissionResult
   reason?: string | null;
 };
 

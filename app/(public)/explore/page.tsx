@@ -43,17 +43,17 @@ function validateImageUrl(value?: string | null) {
     return imageUrl;
   }
 
+  const allowedSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  if (!allowedSupabaseUrl) {
+    return "";
+  }
+
   try {
     const url = new URL(imageUrl);
+    const allowedUrl = new URL(allowedSupabaseUrl);
 
-    const allowedHosts = [
-      "uibiezgxpdfciznhbsxr.supabase.co",
-      "127.0.0.1",
-      "localhost",
-      "192.168.210.188",
-    ];
-
-    if (!allowedHosts.includes(url.hostname)) {
+    if (url.hostname !== allowedUrl.hostname) {
       return "";
     }
 

@@ -1,5 +1,5 @@
 // app/admin/(dashboard)/session-application/[sessionApplicationId]/actions.ts
-// 体験/見学申し込み詳細ページ用のServer Action
+// 体験/見学申し込み詳細ページ用のServer Action（ステータス変更とメモ欄の記入）
 
 "use server";
 

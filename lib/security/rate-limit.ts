@@ -13,8 +13,8 @@
 
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { hashValue } from "./hash"; // データをランダムな文字列に変換するための関数
+import type { FormType } from "@/types/prisma";
 
-type FormType = "CONTACT" | "SESSION_APPLICATION";
 
 type CheckRateLimitInput = {
   formType: FormType;

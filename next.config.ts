@@ -9,7 +9,7 @@ allowedDevOrigins: [
 
     experimental: {
     serverActions: {
-      bodySizeLimit: "4mb",
+      bodySizeLimit: "6mb",
     },
   },
   images: {
@@ -17,18 +17,6 @@ allowedDevOrigins: [
       {
         protocol: "https",
         hostname: "uibiezgxpdfciznhbsxr.supabase.co",
-        pathname: "/storage/v1/object/public/**",
-      },
-      {
-        protocol: "http",
-        hostname: "127.0.0.1",
-        port: "54321",
-        pathname: "/storage/v1/object/public/**",
-      },
-      {
-        protocol: "http",
-        hostname: "192.168.210.188",
-        port: "54321",
         pathname: "/storage/v1/object/public/**",
       },
     ],

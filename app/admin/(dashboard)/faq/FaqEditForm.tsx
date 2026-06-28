@@ -6,13 +6,12 @@
 "use client";
 
 import { useActionState } from "react";
-import type { FaqCategoryValue } from "@/constants/faq";
 import { updateFaq } from "./actions";
-import type { ContentStatus } from "@/types/prisma";
+import type { ContentStatus, FaqCategory } from "@/types/prisma";
 
 type FaqEditFormProps = {
   faqId: string;
-  category: FaqCategoryValue;
+  category: FaqCategory;
   defaultQuestion: string;
   defaultAnswer: string;
   defaultStatus: ContentStatus;

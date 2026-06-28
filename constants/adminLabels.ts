@@ -69,7 +69,3 @@ export const FORM_NOTIFICATION_SETTINGS = [
 export type FormNotificationType =
   (typeof FORM_NOTIFICATION_SETTINGS)[number]["formType"];
 
-export const FORM_NOTIFICATION_LABELS = {
-  CONTACT: "お問い合わせ通知先",
-  SESSION_APPLICATION: "体験/見学申し込み通知先",
-} as const satisfies Record<FormType, string>;

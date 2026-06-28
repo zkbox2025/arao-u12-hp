@@ -4,7 +4,7 @@
 "use client";
 
 import { useState } from "react";
-import { NoticeConfirmModal } from "@/components/admin/modal/NoticeConfirmModal";
+import { ConfirmModal } from "@/components/admin/modal/ConfirmModal";
 import { deleteNotice } from "./actions";
 
 type NoticeDeleteButtonProps = {
@@ -25,16 +25,16 @@ export function NoticeDeleteButton({ noticeId }: NoticeDeleteButtonProps) {
         削除する
       </button>
 
-      <NoticeConfirmModal
-        isOpen={isOpen}
-        title="削除の確認"
-        message="このスケジュール変更を完全に削除しますか？削除したデータは元に戻せません。"
-        confirmLabel="削除する"
-        cancelLabel="キャンセル"
-        onClose={() => setIsOpen(false)}
-        formAction={deleteNoticeWithId}
-        confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
-      />
+      <ConfirmModal
+  isOpen={isOpen}
+  title="削除の確認"
+  message="このスケジュール変更を完全に削除しますか？削除したデータは元に戻せません。"
+  confirmLabel="削除する"
+  cancelLabel="キャンセル"
+  onClose={() => setIsOpen(false)}
+  formAction={deleteNoticeWithId}
+  confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
+/>
     </>
   );
 }

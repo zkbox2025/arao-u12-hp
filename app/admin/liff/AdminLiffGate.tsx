@@ -4,11 +4,15 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import liff from "@line/liff";
 
 type AdminLiffGateProps = {
   nextPath: string;
 };
+
+// ローカル検証時だけ .env.local に NEXT_PUBLIC_LIFF_DEBUG=true を設定すると、
+// LIFF画面上に currentUrl やエラー詳細を表示する。
+// 本番では未設定にして非表示にする。
+const isDebug = process.env.NEXT_PUBLIC_LIFF_DEBUG === "true";
 
 function sanitizeAdminPath(path: string) {
   if (!path.startsWith("/admin/")) {
@@ -36,15 +40,25 @@ export function AdminLiffGate({ nextPath }: AdminLiffGateProps) {
     async function bootLiff() {
       const liffId = process.env.NEXT_PUBLIC_LIFF_ID;
 
-      setDebugMessage(`currentUrl: ${window.location.href}`);
+      if (isDebug) {
+        setDebugMessage(`currentUrl: ${window.location.href}`);
+      }
 
       if (!liffId) {
         setMessage("LIFF IDが設定されていません。");
-        setDebugMessage("NEXT_PUBLIC_LIFF_ID が空です。");
+
+        if (isDebug) {
+          setDebugMessage("NEXT_PUBLIC_LIFF_ID が空です。");
+        }
+
         return;
       }
 
       try {
+        setMessage("LIFF SDKを読み込んでいます...");
+
+        const { default: liff } = await import("@line/liff");
+
         setMessage("LIFFを初期化しています...");
 
         await liff.init({
@@ -73,9 +87,12 @@ export function AdminLiffGate({ nextPath }: AdminLiffGateProps) {
         console.error("LIFFの初期化に失敗しました。", error);
 
         setMessage("LINE管理画面の起動に失敗しました。");
-        setDebugMessage(
-          error instanceof Error ? error.message : "不明なエラー"
-        );
+
+        if (isDebug) {
+          setDebugMessage(
+            error instanceof Error ? error.message : "不明なエラー"
+          );
+        }
       }
     }
 
@@ -93,7 +110,7 @@ export function AdminLiffGate({ nextPath }: AdminLiffGateProps) {
 
         <p className="mt-4 leading-8 text-neutral-600">{message}</p>
 
-        {debugMessage ? (
+        {isDebug && debugMessage ? (
           <p className="mt-4 break-all rounded-lg bg-neutral-100 p-3 text-left text-xs leading-6 text-neutral-500">
             {debugMessage}
           </p>

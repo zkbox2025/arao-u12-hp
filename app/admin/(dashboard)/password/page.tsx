@@ -27,7 +27,7 @@ export default async function AdminPasswordPage({
           </h2>
 
           <p className="mt-2 text-sm leading-7 text-neutral-600">
-            新しいパスワードを入力して保存してください。
+            現在のパスワードと新しいパスワードを入力して保存してください。
           </p>
         </div>
 
@@ -37,7 +37,6 @@ export default async function AdminPasswordPage({
               パスワードを変更しました。
             </p>
           ) : null}
-
 
           <PasswordChangeForm key={params.toastId ?? "default"} />
         </div>

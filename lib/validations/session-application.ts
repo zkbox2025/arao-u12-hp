@@ -2,36 +2,18 @@
 // 体験/見学申し込みフォームのバリデーションスキーマ
 
 import { z } from "zod";//バリデーションするための道具
+import { isPastJapaneseDateOnly } from "@/lib/dates/date-only";//日付が本日以降であることを判定する関数
+import {
+  EXPERIENCE_VALUES,
+  GRADE_VALUES,
+  SESSION_TYPE_VALUES,
+} from "@/constants/formOptions";
 
-const participationTypes = ["TRIAL", "OBSERVATION"] as const;
 
-const childGrades = [
-  "YOUJI",
-  "ELEMENTARY_1",
-  "ELEMENTARY_2",
-  "ELEMENTARY_3",
-  "ELEMENTARY_4",
-  "ELEMENTARY_5",
-  "ELEMENTARY_6",
-] as const;
-
-const experienceYears = [
-  "NONE",
-  "LESS_THAN_1YEAR",
-  "YEARS_1_OR_MORE",
-] as const;
-
-function isPastDate(dateText: string) {
-  const inputDate = new Date(`${dateText}T00:00:00`);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  return inputDate < today;
-}
 
 export const sessionApplicationSchema = z
   .object({
-    type: z.enum(participationTypes, {
+    type: z.enum(SESSION_TYPE_VALUES, {
       error: "参加内容を選択してください",
     }),
 
@@ -47,18 +29,18 @@ export const sessionApplicationSchema = z
       .min(1, "フリガナを入力してください")
       .max(50, "フリガナは50文字以内で入力してください"),
 
-    childGrade: z.enum(childGrades, {
+    childGrade: z.enum(GRADE_VALUES, {
       error: "学年を選択してください",
     }),
 
-    experience: z.enum(experienceYears, {
+    experience: z.enum(EXPERIENCE_VALUES, {
       error: "経験年数を選択してください",
     }),
 
     preferredDate1: z
       .string()
       .min(1, "第一希望日を入力してください")
-      .refine((value) => !isPastDate(value), {
+      .refine((value) => !isPastJapaneseDateOnly(value), {
         message: "第一希望日は今日以降の日付を入力してください",
       }),
 
@@ -106,10 +88,14 @@ export const sessionApplicationSchema = z
       message: "第一希望日と第二希望日は別の日付を入力してください",
     }
   )
-  .refine((data) => !data.preferredDate2 || !isPastDate(data.preferredDate2), {
-    path: ["preferredDate2"],
-    message: "第二希望日は今日以降の日付を入力してください",
-  });
+  .refine(
+    (data) =>
+      !data.preferredDate2 || !isPastJapaneseDateOnly(data.preferredDate2),
+    {
+      path: ["preferredDate2"],
+      message: "第二希望日は今日以降の日付を入力してください",
+    }
+  );
 
 export type SessionApplicationInput = z.infer<
   typeof sessionApplicationSchema

@@ -4,7 +4,8 @@
 
 import Link from "next/link";
 import { FaInstagram } from "react-icons/fa";//インスタグラムのアイコンをインポート
-import { INSTAGRAM_URL, SITE_NAME } from "@/constants/publicNavigation";
+import { INSTAGRAM_URL } from "@/constants/publicNavigation";
+import { SITE_NAME } from "@/constants/site";
 import Image from "next/image";
 
 export function PublicFooter() {

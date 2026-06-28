@@ -95,7 +95,19 @@ return {
 };
 を入れる
 
-2. next.config.tsに以下を入れる
+2. lib/storage/page-content-image-storage.tsに以下を入れる
+function normalizeLocalSupabasePublicUrl(publicUrl: string) {
+  return publicUrl
+    .replace("http://127.0.0.1:54321", "http://192.168.210.188:54321")
+    .replace("http://localhost:54321", "http://192.168.210.188:54321");
+}
+return {
+    imageUrl: normalizeLocalSupabasePublicUrl(data.publicUrl),
+    imagePath: filePath,
+  };
+  を入れる
+
+3. next.config.tsに以下を入れる
 {
   protocol: "http",
   hostname: "192.168.210.198",
@@ -103,7 +115,7 @@ return {
   pathname: "/storage/v1/object/public/**",
 }
 
-3. 公開ページ側(exploreのページ)の以下を書き加える    
+4. 公開ページ側(exploreのページ)の以下を書き加える    
 
  const allowedHosts = [
       "uibiezgxpdfciznhbsxr.supabase.co",
@@ -123,7 +135,7 @@ return {
 たまに変わる
 
 【リリース前の変更点について】
-1. normalizeLocalSupabasePublicUrl() を削除
+1. normalizeLocalSupabasePublicUrl()をページコンテントのアクション関数及びlib/storage/page-content-image-storage.ts から削除
 
 削除する関数：
 
@@ -132,7 +144,7 @@ function normalizeLocalSupabasePublicUrl(publicUrl: string) {
     .replace("http://127.0.0.1:54321", "http://192.168.210.198:54321")
     .replace("http://localhost:54321", "http://192.168.210.198:54321");
 }
-2. return を元に戻す
+2. return を元に戻す（ページコンテントのアクション関数及びlib/storage/page-content-image-storage.ts ）
 
 開発中（スマホ確認中）：
 
@@ -159,18 +171,77 @@ return {
   pathname: "/storage/v1/object/public/**",
 }
 
-4.公開ページ側(exploreのページ)の以下を削除する    
+{
+  protocol: "http",
+  hostname: "127.0.0.1",
+  port: "54321",
+  pathname: "/storage/v1/object/public/**",
+},
 
- const allowedHosts = [
+4.公開ページ側(exploreのページ)の以下を変更する    
+
+function validateImageUrl(value?: string | null) {
+  const imageUrl = value?.trim();
+
+  if (!imageUrl) return "";
+
+  if (imageUrl.startsWith("/")) {
+    return imageUrl;
+  }
+
+  try {
+    const url = new URL(imageUrl);
+
+    const allowedHosts = [
       "uibiezgxpdfciznhbsxr.supabase.co",
       "127.0.0.1",
       "localhost",
-      "192.168.210.198",
+      "192.168.210.188",
     ];
 
     if (!allowedHosts.includes(url.hostname)) {
       return "";
     }
+
+    return imageUrl;
+  } catch {
+    return "";
+  }
+}
+
+を
+
+// 画像URLの許可ルール関数
+function validateImageUrl(value?: string | null) {
+  const imageUrl = value?.trim();
+
+  if (!imageUrl) return "";
+
+  if (imageUrl.startsWith("/")) {
+    return imageUrl;
+  }
+
+  const allowedSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+
+  if (!allowedSupabaseUrl) {
+    return "";
+  }
+
+  try {
+    const url = new URL(imageUrl);
+    const allowedUrl = new URL(allowedSupabaseUrl);
+
+    if (url.hostname !== allowedUrl.hostname) {
+      return "";
+    }
+
+    return imageUrl;
+  } catch {
+    return "";
+  }
+}
+
+にする。
 
 以上。
 

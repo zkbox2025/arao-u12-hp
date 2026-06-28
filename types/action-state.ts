@@ -1,11 +1,6 @@
 //types/action-state.ts
 //フォーム送信後の状態を表す関数
 
-import type {
-  ContactStatus,
-  SessionApplicationStatus,
-} from "@/types/prisma";
-
 export type ActionState = {
   ok: boolean;
   message?: string;
@@ -55,10 +50,11 @@ export type ContactMemoActionState = {
 };
 
 //お問い合わせ管理ページのステータスステイト
+//statusにContactStatusを使わない理由は改ざんされた status=HACK が来た場合、PENDING 扱いにせずに文字列として扱ってアクションで弾くため
 export type ContactStatusActionState = {
   error?: string;
   values?: {
-    status?: ContactStatus;
+    status?: string;
   };
 };
 
@@ -71,10 +67,11 @@ export type SessionApplicationMemoActionState = {
 };
 
 // 体験/見学申し込み管理ページのステータスステイト
+//statusにSessionApplicationStatusを使わない理由は改ざんされた status=HACK が来た場合、PENDING 扱いにせずに文字列として扱ってアクションで弾くため
 export type SessionApplicationStatusActionState = {
   error?: string;
   values?: {
-    status?: SessionApplicationStatus;
+    status?: string;
   };
 };
 

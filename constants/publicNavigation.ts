@@ -45,9 +45,12 @@ export const publicNavigationItems = [
 ] as const;
 
 
-//作成したらURLを変更する
-export const INSTAGRAM_URL = "https://www.instagram.com/本物のアカウント名/";
 
-export const SITE_NAME = "ARAO U-12 BASKETBALL CLUB";
+
+//作成したらURLを変更する("https://www.instagram.com/本物のアカウント名/";)
+export const INSTAGRAM_URL = "";
+
+
+
 
 

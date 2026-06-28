@@ -1,0 +1,1 @@
+ALTER TYPE "SubmissionResult" RENAME TO "FormSubmissionResult";

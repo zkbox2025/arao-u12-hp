@@ -1,15 +1,13 @@
 // app/admin/(dashboard)/faq/FaqSortHandle.tsx
 // FAQ並び替えボタン
 
-import type {
-  FaqCategoryValue,
-  FaqStatusFilterValue,
-} from "@/constants/faq";
+import type { FaqStatusFilterValue } from "@/constants/faq";
+import type { FaqCategory } from "@/types/prisma";
 import { moveFaq } from "./actions";
 
 type FaqSortHandleProps = {
   faqId: string;
-  category: FaqCategoryValue;
+  category: FaqCategory;
   statusFilter: FaqStatusFilterValue;
 };
 
