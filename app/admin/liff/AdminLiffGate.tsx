@@ -82,7 +82,6 @@ export function AdminLiffGate({ nextPath }: AdminLiffGateProps) {
 const safePath = sanitizeAdminPath(nextPath);
 const redirectUrl = buildRedirectUrl(safePath);
 
-sessionStorage.setItem("adminScrollToTop", "1");
 
 window.location.replace(redirectUrl);
       } catch (error) {
