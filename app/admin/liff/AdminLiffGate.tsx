@@ -79,10 +79,12 @@ export function AdminLiffGate({ nextPath }: AdminLiffGateProps) {
 
         setMessage("管理画面へ移動しています...");
 
-        const safePath = sanitizeAdminPath(nextPath);
-        const redirectUrl = buildRedirectUrl(safePath);
+const safePath = sanitizeAdminPath(nextPath);
+const redirectUrl = buildRedirectUrl(safePath);
 
-        window.location.replace(redirectUrl);
+sessionStorage.setItem("adminScrollToTop", "1");
+
+window.location.replace(redirectUrl);
       } catch (error) {
         console.error("LIFFの初期化に失敗しました。", error);
 

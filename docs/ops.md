@@ -249,3 +249,5 @@ function validateImageUrl(value?: string | null) {
 ※PCブラウザのみ閲覧可能
 ◯（PC実機版、ローカル画像URL）http://192.168.210.198:54321/storage/v1/object/public/...
 ※スマホからでもPCからでも（PCではsupabaseが動いているため）確認可能
+
+◯supabaseの本番のSQLについて：ローカルからマイグレーション済みなのでSQlエディタに載っていないけど反映はされてるので大丈夫
