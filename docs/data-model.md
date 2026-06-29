@@ -55,3 +55,5 @@ Supabase未ログインなら /admin/login
 export const INSTAGRAM_URL =
   "https://www.instagram.com/本物のアカウント名/";
 ※constants/publicNavigation.tsにある
+
+◯ラインのURLを押してliffで管理者ページに遷移する際に、トップ（一番上）ではなく途中から始まるのをトップから始まるように治すこと
