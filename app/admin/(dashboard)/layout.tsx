@@ -6,7 +6,6 @@ import { AdminHeader } from "@/components/admin/AdminHeader";
 import { AdminFooter } from "@/components/admin/AdminFooter";
 import { createClient } from "@/src/infrastructure/supabase/server";
 import { findAdminLayoutCounts } from "@/lib/repositories/admin-layout";
-import { AdminScrollToTop } from "@/app/admin/_components/AdminScrollToTop";
 
 type AdminDashboardLayoutProps = {
   children: React.ReactNode;
@@ -30,7 +29,6 @@ export default async function AdminDashboardLayout({
 
   return (
     <div className="flex min-h-dvh flex-col bg-neutral-50">
-      <AdminScrollToTop />
 
       <AdminHeader
         pendingContactCount={pendingContactCount}
@@ -39,7 +37,6 @@ export default async function AdminDashboardLayout({
 
       <main
         id="top"
-        tabIndex={-1}
         className="mx-auto w-full max-w-7xl flex-1 px-5 py-6 sm:px-6 lg:px-8"
       >
         {children}
