@@ -118,6 +118,60 @@ model LoginSubmissionLog {
   @@index([emailHash, result, createdAt])
 }
 
+//月別計画の画像保存テーブル
+model MonthlyPracticePlan {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  title     String
+  year      Int
+  month     Int
+
+  pdfUrl    String
+  pdfPath   String
+
+  status    ContentStatus @default(PUBLISHED)
+
+  @@index([status, year, month])
+}
+
+//スタッフ紹介ページ（個別ページ）の人物情報
+model Staff {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  role      String
+  name      String
+  profile   String
+  license   String?
+  achievement String?
+
+  imageUrl  String?
+  imagePath String?
+  imageAlt  String?
+
+  sortOrder Int @default(0)
+  status    ContentStatus @default(PUBLISHED)
+}
+
+//トップページのスタッフ紹介セクションと個別ページの導入文
+model StaffPageSetting {
+  id        String   @id @default("staff-page-setting")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  topSummaryTitle String
+  topSummaryBody  String
+
+  leadBody String
+
+  topImageUrl  String?
+  topImagePath String?
+  topImageAlt  String?
+}
+
 enum Type {
   OBSERVATION //見学
   TRIAL //体験

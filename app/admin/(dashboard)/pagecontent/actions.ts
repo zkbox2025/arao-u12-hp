@@ -26,7 +26,7 @@ import {
   buildPageContentActionValuesFromData,
 } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
 import type { PageContentActionState } from "@/types/action-state";
-
+import { canEditPageContentImage } from "@/lib/page-content/image-editable-blocks";
 
 
 
@@ -82,6 +82,7 @@ if (!parsed.ok) {
   let currentPageContent: {
     imageUrl: string | null;
     imagePath: string | null;
+    imageAlt: string | null;
   } | null = null;
 
   try {
@@ -93,9 +94,10 @@ if (!parsed.ok) {
         },
       },
       select: {
-        imageUrl: true,
-        imagePath: true,
-      },
+  imageUrl: true,
+  imagePath: true,
+  imageAlt: true,
+},
     });
   } catch (error) {
     console.error("PageContent取得に失敗しました", {
@@ -116,61 +118,68 @@ if (!parsed.ok) {
 };
   }
 
-  let imageUrl = currentPageContent?.imageUrl ?? null;
-  let imagePath = currentPageContent?.imagePath ?? null;
-  let uploadedImagePath: string | null = null;
-  const previousImagePath = imagePath;
+const canEditImage = canEditPageContentImage({
+  pageKey: parsed.data.pageKey,
+  blockKey: parsed.data.blockKey,
+});
 
-  const imageFile = formData.get("imageFile");
+let imageUrl = currentPageContent?.imageUrl ?? null;
+let imagePath = currentPageContent?.imagePath ?? null;
+const imageAlt = canEditImage
+  ? parsed.data.imageAlt
+  : currentPageContent?.imageAlt ?? null;
+let uploadedImagePath: string | null = null;
+const previousImagePath = imagePath;
 
-  if (imageFile instanceof File && imageFile.size > 0) {
-    if (!isAllowedPageContentImageType(imageFile.type)) {
-  return {
-    error: "画像は jpg / png / webp / gif のいずれかを選択してください。",
-    values: buildPageContentActionValuesFromData({
-      ...parsed.data,
-      imageUrl,
-    }),
-  };
-}
+const imageFile = formData.get("imageFile");
 
-    if (imageFile.size > MAX_PAGE_CONTENT_IMAGE_SIZE) {
-      return {
-        error: "画像は5MB以内にしてください。",
-        values: buildPageContentActionValuesFromData({
-          ...parsed.data,
-          imageUrl,
-        }),
-      };
-    }
-
-    //ストレージに画像ファイルを保存する
-    try {
-      const uploadedImage = await uploadPageContentImage({
-        file: imageFile,
-        pageKey: parsed.data.pageKey,
-        blockKey: parsed.data.blockKey,
-      });
-
-      imageUrl = uploadedImage.imageUrl;
-      imagePath = uploadedImage.imagePath;//DBに保存するため
-      uploadedImagePath = uploadedImage.imagePath;//エラー時の削除のため（エラーになったら使う）
-    } catch (error) {
-      console.error("PageContent画像アップロードに失敗しました", {
-        pageKey: parsed.data.pageKey,
-        blockKey: parsed.data.blockKey,
-        error,
-      });
-
-      return {
-        error: "画像のアップロードに失敗しました。",
-        values: buildPageContentActionValuesFromData({
-          ...parsed.data,
-          imageUrl: currentPageContent?.imageUrl,
-        }),
-      };
-    }
+if (canEditImage && imageFile instanceof File && imageFile.size > 0) {
+  if (!isAllowedPageContentImageType(imageFile.type)) {
+    return {
+      error: "画像は jpg / png / webp / gif のいずれかを選択してください。",
+      values: buildPageContentActionValuesFromData({
+        ...parsed.data,
+        imageUrl,
+      }),
+    };
   }
+
+  if (imageFile.size > MAX_PAGE_CONTENT_IMAGE_SIZE) {
+    return {
+      error: "画像は5MB以内にしてください。",
+      values: buildPageContentActionValuesFromData({
+        ...parsed.data,
+        imageUrl,
+      }),
+    };
+  }
+
+  try {
+    const uploadedImage = await uploadPageContentImage({
+      file: imageFile,
+      pageKey: parsed.data.pageKey,
+      blockKey: parsed.data.blockKey,
+    });
+
+    imageUrl = uploadedImage.imageUrl;
+    imagePath = uploadedImage.imagePath;
+    uploadedImagePath = uploadedImage.imagePath;
+  } catch (error) {
+    console.error("PageContent画像アップロードに失敗しました", {
+      pageKey: parsed.data.pageKey,
+      blockKey: parsed.data.blockKey,
+      error,
+    });
+
+    return {
+      error: "画像のアップロードに失敗しました。",
+      values: buildPageContentActionValuesFromData({
+        ...parsed.data,
+        imageUrl: currentPageContent?.imageUrl,
+      }),
+    };
+  }
+}
 
   try {
     await prisma.pageContent.upsert({
@@ -184,7 +193,7 @@ if (!parsed.ok) {
         content: parsed.data.content,
         imageUrl,
         imagePath,
-        imageAlt: parsed.data.imageAlt,
+        imageAlt,
       },
       create: {
         pageKey: parsed.data.pageKey,
@@ -192,7 +201,7 @@ if (!parsed.ok) {
         content: parsed.data.content,
         imageUrl,
         imagePath,
-        imageAlt: parsed.data.imageAlt,
+        imageAlt,
       },
     });
   } catch (error) {
@@ -264,9 +273,25 @@ export async function deletePageContentImage(formData: FormData) {
     blockKey: String(formData.get("blockKey") ?? ""),
   });
 
+  const canEditImage = canEditPageContentImage({
+  pageKey,
+  blockKey,
+});
+
+if (!canEditImage) {
+  redirect(
+    buildAdminPageContentPath({
+      pageKey,
+      blockKey,
+      deleteError: true,
+    })
+  );
+}
+
   let currentPageContent: {
     imageUrl: string | null;
     imagePath: string | null;
+    imageAlt: string | null;
   } | null = null;
 
   try {
@@ -278,9 +303,10 @@ export async function deletePageContentImage(formData: FormData) {
         },
       },
       select: {
-        imageUrl: true,
-        imagePath: true,
-      },
+  imageUrl: true,
+  imagePath: true,
+  imageAlt: true,
+},
     });
   } catch (error) {
     console.error("PageContent画像削除前のデータ取得に失敗しました", {

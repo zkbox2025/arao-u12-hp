@@ -10,8 +10,8 @@ export const PAGE_CONTENT_DEFINITIONS = {
       ABOUT_SUMMARY_BODY: "チーム紹介：要約本文",
       POLICY_SUMMARY_TITLE: "指導方針：要約見出し",
       POLICY_SUMMARY_BODY: "指導方針：要約本文",
-      SUMMARY_SUMMARY_TITLE: "活動概要：要約見出し",
-      SUMMARY_SUMMARY_BODY: "活動概要：要約本文",
+      SUMMARY_SUMMARY_TITLE: "活動内容・費用：要約見出し",
+      SUMMARY_SUMMARY_BODY: "活動内容・費用：要約本文",
       FLOW_SUMMARY_TITLE: "体験/見学の流れ：要約見出し",
       FLOW_SUMMARY_BODY: "体験/見学の流れ：要約本文",
       FAQ_SUMMARY_TITLE: "よくある質問：要約見出し",
@@ -41,7 +41,7 @@ export const PAGE_CONTENT_DEFINITIONS = {
   },
 
   SUMMARY: {
-    label: "活動概要",
+    label: "活動内容・費用",
     publicPath: "/summary",
     blocks: {
       PLACE_BODY: "活動場所",

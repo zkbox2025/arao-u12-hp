@@ -39,7 +39,7 @@ const summarySectionDefinitions = definePageContentSections(TOP_PAGE_KEY, [
   },
   {
     id: "summary-summary",
-    title: "活動概要",
+    title: "活動内容・費用",
     titleBlockKey: "SUMMARY_SUMMARY_TITLE",
     bodyBlockKey: "SUMMARY_SUMMARY_BODY",
     href: "/summary#top",

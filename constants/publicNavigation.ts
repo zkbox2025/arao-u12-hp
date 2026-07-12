@@ -10,12 +10,16 @@ export const publicNavigationItems = [
     label: "チーム紹介",
     href: "/about",
   },
+    {
+    label: "スタッフ紹介",
+    href: "/staff",
+  },
   {
     label: "指導方針",
     href: "/policy",
   },
   {
-    label: "活動概要",
+    label: "活動内容・費用",
     href: "/summary",
   },
   {

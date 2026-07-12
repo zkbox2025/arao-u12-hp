@@ -13,7 +13,7 @@ type ConfirmModalProps = {
   cancelLabel?: string;
   confirmButtonClassName?: string;
   onClose: () => void;
-  formAction: () => void;
+  formAction: (formData: FormData) => void | Promise<void>;
 };
 
 export function ConfirmModal({
@@ -28,7 +28,9 @@ export function ConfirmModal({
 }: ConfirmModalProps) {
   return (
     <BaseModal isOpen={isOpen} title={title} onClose={onClose}>
-      <p className="leading-8 text-neutral-700">{message}</p>
+      <p className="whitespace-pre-wrap wrap-break-word leading-8 text-neutral-700">
+  {message}
+</p>
 
       <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
         <button
