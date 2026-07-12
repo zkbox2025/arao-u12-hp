@@ -7,7 +7,8 @@
     "build": "prisma generate && next build",
     "start": "next start",
     "lint": "eslint",
-    "db:seed:local": "dotenv -e .env.local -- prisma db seed"
+    "db:seed:local": "dotenv -e .env.local -- prisma db seed",
+    "db:seed:prod": "dotenv -e .env.prod -- tsx prisma/seed.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.4.0",

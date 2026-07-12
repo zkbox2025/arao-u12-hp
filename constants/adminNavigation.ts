@@ -10,6 +10,8 @@ import {
   Megaphone,
   Settings,
   UserRoundCheck,
+  LayoutTemplate,
+  UsersRound,
 } from "lucide-react";
 
 export const adminNavigationItems = [
@@ -43,6 +45,18 @@ export const adminNavigationItems = [
     icon: Megaphone,
     countKey: null,
   },
+    {
+  label: "トップページ設定",
+  href: "/admin/top-settings",
+  icon: LayoutTemplate,
+  countKey: null,
+},
+{
+  label: "スタッフ紹介管理",
+  href: "/admin/staff",
+  icon: UsersRound,
+  countKey: null,
+},
   {
     label: "よくある質問",
     href: "/admin/faq",

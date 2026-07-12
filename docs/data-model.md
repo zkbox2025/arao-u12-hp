@@ -57,3 +57,13 @@ export const INSTAGRAM_URL =
 ※constants/publicNavigation.tsにある
 
 ◯ラインのURLを押してliffで管理者ページに遷移する際に、トップ（一番上）ではなく途中から始まるのをトップから始まるように治すこと
+
+◯PCで管理者ページ内でヘッダーのロゴとドロワーを押すと遷移先でカクカク動く（スマホだとならない。公開ページだとならない。ローカルだとならない（本番のみなる））。サイト内文章設定ページ、パスワード変更ページ,メール通知設定だと2回上下する。
+
+◯app/admin/(dashboard)/monthly-practice-plans/page.tsx をこうするか消す。
+
+import { redirect } from "next/navigation";
+
+export default function AdminMonthlyPracticePlansPage() {
+  redirect("/admin/top-settings");
+}

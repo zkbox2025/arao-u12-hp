@@ -65,28 +65,31 @@ export default async function PolicyPage() {
     }),
   });
 
-  return (
-    <div>
-      <PageTitle title="指導方針" />
+ return (
+  <div>
+    <PageTitle title="指導方針" />
 
-      <section className="space-y-6">
-        <div className="text-center">
-          <p className="text-sm text-neutral-500">{conceptHeadingEnglish}</p>
-          <h2 className="mx-auto mt-2 inline-block border-b border-neutral-800 px-6 pb-2 text-xl font-bold">
-            {conceptHeading}
-          </h2>
-        </div>
+    <section className="space-y-6">
+      <div className="w-fit text-center">
+  <p className="text-sm text-neutral-500">
+    {conceptHeadingEnglish}
+  </p>
 
-        <div className="space-y-4">
-          <h3 className="whitespace-pre-wrap text-center text-xl font-black">
-            {conceptSubHeading}
-          </h3>
+  <h2 className="mx-auto mt-2 w-fit border-b border-neutral-800 pb-2 text-xl font-bold">
+    {conceptHeading}
+  </h2>
+</div>
 
-          <p className="whitespace-pre-wrap text-center leading-8 text-neutral-700">
-            {conceptBody}
-          </p>
-        </div>
-      </section>
-    </div>
-  );
+      <div className="space-y-4">
+        <h3 className="whitespace-pre-wrap text-xl font-black">
+          {conceptSubHeading}
+        </h3>
+
+        <p className="whitespace-pre-wrap leading-8 text-neutral-700">
+          {conceptBody}
+        </p>
+      </div>
+    </section>
+  </div>
+);
 }

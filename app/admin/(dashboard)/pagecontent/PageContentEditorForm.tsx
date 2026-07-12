@@ -19,6 +19,7 @@ type PageContentEditorFormProps = {
   defaultContent: string;
   defaultImageUrl: string;
   defaultImageAlt: string;
+  canEditImage: boolean;
 };
 
 
@@ -29,6 +30,7 @@ export function PageContentEditorForm({
   defaultContent,
   defaultImageUrl,
   defaultImageAlt,
+  canEditImage,
 }: PageContentEditorFormProps) {
   const initialState: PageContentActionState = {
     error: "",
@@ -80,91 +82,93 @@ export function PageContentEditorForm({
 />
       </section>
 
-      <section className="border-t border-neutral-200 pt-6">
-        <h2 className="text-sm font-bold text-neutral-900">画像</h2>
+      {canEditImage ? (
+  <section className="border-t border-neutral-200 pt-6">
+    <h2 className="text-sm font-bold text-neutral-900">画像</h2>
 
-        <div className="mt-3">
-          <label
-            htmlFor="imageFile"
-            className="block text-sm font-bold text-neutral-700"
-          >
-            画像をアップロード
-          </label>
+    <div className="mt-3">
+      <label
+        htmlFor="imageFile"
+        className="block text-sm font-bold text-neutral-700"
+      >
+        画像をアップロード
+      </label>
 
-          <input
-            id="imageFile"
-            name="imageFile"
-            type="file"
-            accept="image/jpeg,image/png,image/webp,image/gif"
-            className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      <input
+        id="imageFile"
+        name="imageFile"
+        type="file"
+        accept="image/jpeg,image/png,image/webp,image/gif"
+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      />
+
+      <p className="mt-2 text-xs leading-6 text-neutral-500">
+        スマートフォンでは「写真ライブラリ」や「写真を撮る」から選択できます。
+        新しい画像を選んで保存すると、現在の画像と差し替わります。
+        jpg / png / webp / gif の画像を選択できます。最大5MBまでです。
+      </p>
+    </div>
+
+    <div className="mt-4">
+      <label
+        htmlFor="imageAlt"
+        className="block text-sm font-bold text-neutral-700"
+      >
+        画像の説明文（alt）
+      </label>
+
+      <input
+        key={`imageAlt-${imageAltValue}`}
+        id="imageAlt"
+        name="imageAlt"
+        type="text"
+        defaultValue={imageAltValue}
+        placeholder="例：体育館で練習している子どもたち"
+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      />
+
+      <p className="mt-2 text-xs leading-6 text-neutral-500">
+        画像が表示されない環境や読み上げ機能で使われる説明文です。
+      </p>
+    </div>
+
+    {imageUrlValue ? (
+      <div className="mt-5 rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+        <p className="mb-3 text-sm font-bold text-neutral-700">
+          現在の画像プレビュー
+        </p>
+
+        <div className="relative aspect-video overflow-hidden rounded-xl bg-neutral-200">
+          <Image
+            src={imageUrlValue}
+            alt={imageAltValue || "設定中の画像"}
+            fill
+            unoptimized
+            className="object-cover"
           />
-
-          <p className="mt-2 text-xs leading-6 text-neutral-500">
-  スマートフォンでは「写真ライブラリ」や「写真を撮る」から選択できます。
-  新しい画像を選んで保存すると、現在の画像と差し替わります。
-   jpg / png / webp / gif の画像を選択できます。最大5MBまでです。
-          </p>
         </div>
 
-        <div className="mt-4">
-          <label
-            htmlFor="imageAlt"
-            className="block text-sm font-bold text-neutral-700"
+        <p className="mt-3 break-all text-xs leading-6 text-neutral-500">
+          画像URL：
+          <a
+            href={imageUrlValue}
+            target="_blank"
+            rel="noreferrer"
+            className="font-bold text-green-700 underline"
           >
-            画像の説明文（alt）
-          </label>
+            {imageUrlValue}
+          </a>
+        </p>
 
-          <input
-  key={`imageAlt-${imageAltValue}`}
-  id="imageAlt"
-  name="imageAlt"
-  type="text"
-  defaultValue={imageAltValue}
-  placeholder="例：体育館で練習している子どもたち"
-  className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
-/>
-
-          <p className="mt-2 text-xs leading-6 text-neutral-500">
-            画像が表示されない環境や読み上げ機能で使われる説明文です。
-          </p>
-        </div>
-
-        {imageUrlValue ? (
-          <div className="mt-5 rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-            <p className="mb-3 text-sm font-bold text-neutral-700">
-              現在の画像プレビュー
-            </p>
-
-            <div className="relative aspect-video overflow-hidden rounded-xl bg-neutral-200">
-              <Image
-                src={imageUrlValue}
-                alt={imageAltValue || "設定中の画像"}
-                fill
-                unoptimized
-                className="object-cover"
-              />
-            </div>
-
-            <p className="mt-3 break-all text-xs leading-6 text-neutral-500">
-              画像URL：
-              <a
-                href={imageUrlValue}
-                target="_blank"
-                rel="noreferrer"
-                className="font-bold text-green-700 underline"
-              >
-                {imageUrlValue}
-              </a>
-            </p>
-
-            <PageContentImageDeleteButton />
-          </div>
-        ) : (
-          <div className="mt-5 rounded-2xl border border-dashed border-neutral-300 bg-neutral-50 p-5 text-sm leading-7 text-neutral-500">
-            現在設定されている画像はありません。画像を選択して保存すると、ここにプレビューが表示されます。
-          </div>
-        )}
-      </section>
+        <PageContentImageDeleteButton />
+      </div>
+    ) : (
+      <div className="mt-5 rounded-2xl border border-dashed border-neutral-300 bg-neutral-50 p-5 text-sm leading-7 text-neutral-500">
+        現在設定されている画像はありません。画像を選択して保存すると、ここにプレビューが表示されます。
+      </div>
+    )}
+  </section>
+) : null}
 
       <div className="border-t border-neutral-200 pt-6">
         <button

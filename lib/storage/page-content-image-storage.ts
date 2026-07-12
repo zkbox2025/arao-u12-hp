@@ -78,6 +78,10 @@ export async function uploadPageContentImage({
     throw new Error("Unsupported image type");
   }
 
+    if (file.size > MAX_PAGE_CONTENT_IMAGE_SIZE) {
+    throw new Error("PageContent image file is too large");
+  }
+
   const supabase = createStorageAdminClient();
 
   const extension = getImageExtensionByMimeType(file.type);

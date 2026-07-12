@@ -11,6 +11,9 @@ export type {
   FormSubmissionLog,
   FormNotificationSetting,
   LoginSubmissionLog,
+  MonthlyPracticePlan,
+  Staff,
+  StaffPageSetting,
 } from "@prisma/client";
 
 

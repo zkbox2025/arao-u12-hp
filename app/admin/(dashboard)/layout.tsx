@@ -7,6 +7,7 @@ import { AdminFooter } from "@/components/admin/AdminFooter";
 import { createClient } from "@/src/infrastructure/supabase/server";
 import { findAdminLayoutCounts } from "@/lib/repositories/admin-layout";
 
+
 type AdminDashboardLayoutProps = {
   children: React.ReactNode;
 };
@@ -29,7 +30,6 @@ export default async function AdminDashboardLayout({
 
   return (
     <div className="flex min-h-dvh flex-col bg-neutral-50">
-
       <AdminHeader
         pendingContactCount={pendingContactCount}
         pendingSessionApplicationCount={pendingSessionApplicationCount}

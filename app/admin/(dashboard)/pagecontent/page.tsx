@@ -16,6 +16,8 @@ import { ToastMessage } from "@/components/admin/ToastMessage";
 import { PageContentControls } from "./PageContentControls";
 import { PageContentEditorForm } from "./PageContentEditorForm";
 import { ADMIN_ACTION_DELETE_ERROR_MESSAGE } from "@/constants/adminActionError";
+import { canEditPageContentImage } from "@/lib/page-content/image-editable-blocks";
+
 
 type AdminPageContentPageProps = {
   searchParams: Promise<{
@@ -40,6 +42,11 @@ export default async function AdminPageContentPage({
 
   const selectedPage = PAGE_CONTENT_DEFINITIONS[selectedPageKey];
   const selectedBlockLabel = getPageContentBlockLabel({
+  pageKey: selectedPageKey,
+  blockKey: selectedBlockKey,
+});
+
+const canEditImage = canEditPageContentImage({
   pageKey: selectedPageKey,
   blockKey: selectedBlockKey,
 });
@@ -114,6 +121,7 @@ const toastVariant = params.deleteError === "1" ? "error" : "success";
   defaultContent={pageContent?.content ?? ""}
   defaultImageUrl={pageContent?.imageUrl ?? ""}
   defaultImageAlt={pageContent?.imageAlt ?? ""}
+  canEditImage={false}
 />
         </div>
       </section>

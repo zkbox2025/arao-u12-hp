@@ -251,3 +251,5 @@ function validateImageUrl(value?: string | null) {
 ※スマホからでもPCからでも（PCではsupabaseが動いているため）確認可能
 
 ◯supabaseの本番のSQLについて：ローカルからマイグレーション済みなのでSQlエディタに載っていないけど反映はされてるので大丈夫
+
+◯本番用のFAQや文章画像を納品者に添削してもらい、全てで揃ったら、シードしてDBに直接保存する

@@ -1,5 +1,5 @@
 // app/(public)/summary/page.tsx
-// 公開ページの活動概要ページ
+// 公開ページの活動内容・費用ページ
 
 import Link from "next/link";
 import { PageTitle } from "@/components/public/PageTitle";
@@ -48,7 +48,7 @@ export default async function SummaryPage() {
 
   return (
     <div>
-      <PageTitle title="活動概要" />
+      <PageTitle title="活動内容・費用" />
 
       <div className="space-y-8">
         {summaryItems.map((item) => (
