@@ -5,7 +5,7 @@ import Link from "next/link";
 import { ToastMessage } from "@/components/admin/ToastMessage";
 import {
   findAdminMonthlyPracticePlans,
-  findLatestPublishedMonthlyPracticePlan,
+  findLatestPublishedMonthlyPracticePlans,
 } from "@/lib/repositories/monthly-practice-plan";
 import { CurrentMonthlyPracticePlanCard } from "./CurrentMonthlyPracticePlanCard";
 import { MonthlyPracticePlanUploadForm } from "./MonthlyPracticePlanUploadForm";
@@ -24,10 +24,10 @@ export default async function AdminMonthlyPracticePlansPage({
 }: AdminMonthlyPracticePlansPageProps) {
   const params = await searchParams;
 
-  const [latestPublishedPlan, plans] = await Promise.all([
-    findLatestPublishedMonthlyPracticePlan(),
-    findAdminMonthlyPracticePlans(),
-  ]);
+const [latestPublishedPlans, plans] = await Promise.all([
+  findLatestPublishedMonthlyPracticePlans(2),
+  findAdminMonthlyPracticePlans(),
+]);
 
   const toastMessage =
     params.saved === "1"
@@ -52,13 +52,13 @@ export default async function AdminMonthlyPracticePlansPage({
         <p className="text-sm font-bold text-green-700">ADMIN</p>
 
         <h1 className="mt-2 text-2xl font-black text-neutral-900">
-          月別練習計画
+          月別練習計画設定
         </h1>
 
-        <p className="mt-3 leading-8 text-neutral-600">
-          トップページに表示する月別練習計画PDFを管理します。
-          公開中の最新1件がトップページに表示されます。
-        </p>
+       <p className="mt-3 leading-8 text-neutral-600">
+  公開ページに表示する月別練習計画PDFを管理します。
+  公開中の月別練習計画のうち、最新2件までが表示されます。
+</p>
 
         <div className="mt-5">
           <Link
@@ -73,8 +73,8 @@ export default async function AdminMonthlyPracticePlansPage({
       </div>
 
       <CurrentMonthlyPracticePlanCard
-        latestPublishedPlan={latestPublishedPlan}
-      />
+  latestPublishedPlans={latestPublishedPlans}
+/>
 
       <MonthlyPracticePlanUploadForm />
 

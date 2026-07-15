@@ -3,6 +3,7 @@
 
 import {
   Bell,
+  CalendarDays,
   FileText,
   HelpCircle,
   Home,
@@ -28,7 +29,7 @@ export const adminNavigationItems = [
     countKey: "contact",
   },
   {
-    label: "体験/見学申し込み",
+    label: "体験/見学申し込み一覧",
     href: "/admin/session-application",
     icon: UserRoundCheck,
     countKey: "sessionApplication",
@@ -45,6 +46,12 @@ export const adminNavigationItems = [
     icon: Megaphone,
     countKey: null,
   },
+  {
+  label: "月別練習計画設定",
+  href: "/admin/monthly-practice-plans",
+  icon: CalendarDays,
+  countKey: null,
+},
     {
   label: "トップページ設定",
   href: "/admin/top-settings",
@@ -58,7 +65,7 @@ export const adminNavigationItems = [
   countKey: null,
 },
   {
-    label: "よくある質問",
+    label: "よくある質問変更",
     href: "/admin/faq",
     icon: HelpCircle,
     countKey: null,

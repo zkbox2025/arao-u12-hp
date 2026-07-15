@@ -258,6 +258,7 @@ export async function createStaff(formData: FormData) {
   await requireAdmin();
 
   const role = String(formData.get("role") ?? "").trim();
+  const externalRole = getOptionalText(formData, "externalRole");
   const name = String(formData.get("name") ?? "").trim();
   const profile = String(formData.get("profile") ?? "").trim();
   const license = getOptionalText(formData, "license");
@@ -297,6 +298,7 @@ export async function createStaff(formData: FormData) {
     await prisma.staff.create({
       data: {
         role,
+        externalRole,
         name,
         profile,
         license,
@@ -342,6 +344,7 @@ export async function updateStaff(formData: FormData) {
 
   const id = String(formData.get("id") ?? "");
   const role = String(formData.get("role") ?? "").trim();
+  const externalRole = getOptionalText(formData, "externalRole");
   const name = String(formData.get("name") ?? "").trim();
   const profile = String(formData.get("profile") ?? "").trim();
   const license = getOptionalText(formData, "license");
@@ -399,6 +402,7 @@ export async function updateStaff(formData: FormData) {
       },
       data: {
         role,
+        externalRole,
         name,
         profile,
         license,

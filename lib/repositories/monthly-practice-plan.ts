@@ -17,6 +17,21 @@ export async function findLatestPublishedMonthlyPracticePlan() {
   });
 }
 
+// 公開トップページ・管理画面に表示する公開中の月別練習計画PDFを最新順で最大2件取得する
+export async function findLatestPublishedMonthlyPracticePlans(limit = 2) {
+  return prisma.monthlyPracticePlan.findMany({
+    where: {
+      status: "PUBLISHED",
+    },
+    orderBy: [
+      { year: "desc" },
+      { month: "desc" },
+      { createdAt: "desc" },
+    ],
+    take: limit,
+  });
+}
+
 // 管理画面で月別練習計画PDF一覧を表示するために取得する
 export async function findAdminMonthlyPracticePlans() {
   return prisma.monthlyPracticePlan.findMany({

@@ -9,13 +9,17 @@ import {
   toContentMap,
 } from "@/lib/repositories/page-content";
 import { buildTopSummarySections } from "./top-summary-sections";//表示用データに変更する関数
-import { findLatestPublishedMonthlyPracticePlan } from "@/lib/repositories/monthly-practice-plan";//最新の月別練習計画PDFを取得する関数
+import { findLatestPublishedMonthlyPracticePlans } from "@/lib/repositories/monthly-practice-plan";//最新２件分の月別練習計画PDFを取得する関数
 import { findStaffPageSetting } from "@/lib/repositories/staff";
-import type { StaffPageSetting } from "@/types/prisma";
+import type {
+  MonthlyPracticePlan,
+  StaffPageSetting,
+} from "@/types/prisma";
 import {
   STAFF_TOP_SUMMARY_BODY_FALLBACK,
   STAFF_TOP_SUMMARY_TITLE_FALLBACK,
 } from "@/constants/staff/fallbacks";
+import { MonthlyPracticePlanLinks } from "@/components/public/MonthlyPracticePlanLinks";
 
 const topNavItems = [
   {
@@ -77,10 +81,10 @@ function validateImageUrl(value?: string | null) {
 export const dynamic = "force-dynamic";
 
 export default async function ExplorePage() {
-const [contents, monthlyPracticePlan, staffPageSetting] =
+const [contents, monthlyPracticePlans, staffPageSetting] =
   await Promise.all([
     findPageContentsByPageKey("TOP"),
-    findLatestPublishedMonthlyPracticePlan(),
+    findLatestPublishedMonthlyPracticePlans(2),
     findStaffPageSetting(),
   ]);
 
@@ -125,11 +129,8 @@ const topDisplaySections = summarySections.flatMap((section) => {
           </ul>
         </nav>
       </section>
-      {monthlyPracticePlan ? (
-  <MonthlyPracticePlanSection
-    title={monthlyPracticePlan.title}
-    href={monthlyPracticePlan.pdfUrl}
-  />
+      {monthlyPracticePlans.length > 0 ? (
+  <MonthlyPracticePlanSection plans={monthlyPracticePlans} />
 ) : null}
 
 <div className="divide-y divide-neutral-300">
@@ -181,44 +182,27 @@ type TopSummarySectionProps = {
 };
 
 function MonthlyPracticePlanSection({
-  title,
-  href,
+  plans,
 }: {
-  title: string;
-  href: string;
+  plans: MonthlyPracticePlan[];
 }) {
   return (
     <section
       aria-labelledby="monthly-practice-plan-title"
       className="border-b border-neutral-300 py-6"
     >
-      <div className="rounded-2xl border border-green-100 bg-green-50 p-5">
-        <p className="text-sm font-bold text-green-700">
-          新着・重要なお知らせ
-        </p>
-
-        <h2
-          id="monthly-practice-plan-title"
-          className="mt-2 text-xl font-black text-neutral-900"
+      <MonthlyPracticePlanLinks
+        plans={plans}
+        title="月別練習計画"
+        showDescription
+      >
+        <Link
+          href="/notice#top"
+          className="block w-fit text-sm font-bold leading-7 text-red-700 underline underline-offset-4 transition hover:text-red-800"
         >
-          月別練習計画
-        </h2>
-
-        <p className="mt-2 text-sm leading-7 text-neutral-600">
-          最新の練習計画をPDFで確認できます。
-        </p>
-
-        <div className="mt-4">
-          <a
-            href={href}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center justify-center rounded-md bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
-          >
-            📅 {title}をダウンロード
-          </a>
-        </div>
-      </div>
+          直近の練習時間・場所の変更はこちらをご確認ください
+        </Link>
+      </MonthlyPracticePlanLinks>
     </section>
   );
 }

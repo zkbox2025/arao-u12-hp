@@ -17,43 +17,64 @@ export function StaffCreateForm() {
       </div>
 
       <form action={createStaff} className="mt-5 space-y-5">
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label
-              htmlFor="create-role"
-              className="block text-sm font-bold text-neutral-900"
-            >
-              役職
-            </label>
+  <div className="grid gap-4 sm:grid-cols-2">
+    <div>
+      <label
+        htmlFor="create-role"
+        className="block text-sm font-bold text-neutral-900"
+      >
+        役職
+      </label>
 
-            <input
-              id="create-role"
-              name="role"
-              type="text"
-              placeholder="例：総監督"
-              className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
-              required
-            />
-          </div>
+      <input
+        id="create-role"
+        name="role"
+        type="text"
+        placeholder="例：コーチ"
+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+        required
+      />
+    </div>
 
-          <div>
-            <label
-              htmlFor="create-name"
-              className="block text-sm font-bold text-neutral-900"
-            >
-              名前
-            </label>
+    <div>
+      <label
+        htmlFor="create-externalRole"
+        className="block text-sm font-bold text-neutral-900"
+      >
+        外部役職
+      </label>
 
-            <input
-              id="create-name"
-              name="name"
-              type="text"
-              placeholder="例：田中 太郎"
-              className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
-              required
-            />
-          </div>
-        </div>
+      <input
+        id="create-externalRole"
+        name="externalRole"
+        type="text"
+        placeholder="例：荒尾市バスケットボール協会 会長"
+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      />
+
+      <p className="mt-2 text-xs leading-6 text-neutral-500">
+        クラブ外での役職がある場合のみ入力してください。
+      </p>
+    </div>
+  </div>
+
+  <div>
+    <label
+      htmlFor="create-name"
+      className="block text-sm font-bold text-neutral-900"
+    >
+      名前
+    </label>
+
+    <input
+      id="create-name"
+      name="name"
+      type="text"
+      placeholder="例：田中 太郎"
+      className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      required
+    />
+  </div>
 
         <div>
           <label

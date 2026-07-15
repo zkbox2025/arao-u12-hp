@@ -107,12 +107,18 @@ function StaffProfileSection({
         )}
 
         <div>
-          <p className="text-sm font-bold text-green-700">{staff.role}</p>
+  <p className="text-sm font-bold text-green-700">{staff.role}</p>
 
-          <h2 className="mt-2 text-2xl font-black text-neutral-900">
-            {staff.name}
-          </h2>
-        </div>
+  {staff.externalRole ? (
+    <p className="mt-1 text-sm font-bold text-neutral-500">
+      {staff.externalRole}
+    </p>
+  ) : null}
+
+  <h2 className="mt-2 text-2xl font-black text-neutral-900">
+    {staff.name}
+  </h2>
+</div>
 
         <div className="space-y-5">
           <StaffInfoBlock title="プロフィール" body={staff.profile} />
