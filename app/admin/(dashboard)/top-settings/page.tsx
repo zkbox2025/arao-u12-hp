@@ -7,13 +7,6 @@ import {
   findPageContentsByPageKey,
   toContentMap,
 } from "@/lib/repositories/page-content";
-import {
-  findAdminMonthlyPracticePlans,
-  findLatestPublishedMonthlyPracticePlan,
-} from "@/lib/repositories/monthly-practice-plan";
-import { CurrentMonthlyPracticePlanCard } from "../monthly-practice-plans/CurrentMonthlyPracticePlanCard";
-import { MonthlyPracticePlanUploadForm } from "../monthly-practice-plans/MonthlyPracticePlanUploadForm";
-import { MonthlyPracticePlanList } from "../monthly-practice-plans/MonthlyPracticePlanList";
 import { TopSummaryImageSettings } from "./TopSummaryImageSettings";
 
 type AdminTopSettingsPageProps = {
@@ -29,11 +22,7 @@ export default async function AdminTopSettingsPage({
 }: AdminTopSettingsPageProps) {
   const params = await searchParams;
 
-  const [contents, latestPublishedPlan, plans] = await Promise.all([
-    findPageContentsByPageKey("TOP"),
-    findLatestPublishedMonthlyPracticePlan(),
-    findAdminMonthlyPracticePlans(),
-  ]);
+const contents = await findPageContentsByPageKey("TOP");
 
   const contentMap = toContentMap(contents);
 
@@ -64,8 +53,10 @@ export default async function AdminTopSettingsPage({
         </h1>
 
         <p className="mt-3 leading-8 text-neutral-600">
-          トップページに表示する新着・重要なお知らせ（月別練習計画PDF）、要約写真を管理します。
-        </p>
+  トップページに表示する要約写真を管理します。
+  文章は「サイト内文章設定」から編集できます。
+  月別練習計画PDFは「月別練習計画設定」から管理できます。
+</p>
 
         <div className="mt-5 flex flex-col items-start gap-3">
           <Link
@@ -86,51 +77,8 @@ export default async function AdminTopSettingsPage({
         </div>
       </div>
 
-      <section className="mt-8">
-  <div className="mb-6 border-l-[6px] border-green-700 py-1 pl-4 sm:border-l-4">
-    <p className="text-sm font-bold text-green-700">
-      IMPORTANT NOTICE
-    </p>
-
-    <h2 className="mt-2 text-xl font-black text-neutral-900">
-      新着・重要なお知らせ設定
-    </h2>
-
-    <p className="mt-2 text-sm leading-7 text-neutral-600">
-      トップページ上部に表示する月別練習計画PDFを管理します。
-    </p>
-  </div>
-
-  <div className="space-y-6">
-    <CurrentMonthlyPracticePlanCard
-      latestPublishedPlan={latestPublishedPlan}
-    />
-
-    <MonthlyPracticePlanUploadForm returnPath="/admin/top-settings" />
-
-    <MonthlyPracticePlanList
-      plans={plans.slice(0, 5)}
-      returnPath="/admin/top-settings"
-    />
-  </div>
-</section>
-
-<div className="my-10 border-t border-neutral-300" />
 
 <section>
-  <div className="mb-6 border-l-[6px] border-green-700 py-1 pl-4 sm:border-l-4">
-    <p className="text-sm font-bold text-green-700">
-      SUMMARY IMAGES
-    </p>
-
-    <h2 className="mt-2 text-xl font-black text-neutral-900">
-      トップページ写真設定
-    </h2>
-
-    <p className="mt-2 text-sm leading-7 text-neutral-600">
-      トップページの各セクションに表示する写真を管理します。
-    </p>
-  </div>
 
   <TopSummaryImageSettings contentMap={contentMap} />
 </section>

@@ -10,6 +10,8 @@ import {
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
+import { findLatestPublishedMonthlyPracticePlans } from "@/lib/repositories/monthly-practice-plan";
+import { MonthlyPracticePlanLinks } from "@/components/public/MonthlyPracticePlanLinks";
 
 const FLOW_PAGE_KEY = "FLOW" as const;
 
@@ -25,8 +27,12 @@ const FLOW_BLOCK_KEYS = definePageContentBlockKeys(FLOW_PAGE_KEY, {
 export const dynamic = "force-dynamic";
 
 export default async function FlowPage() {
-  const contents = await findPageContentsByPageKey(FLOW_PAGE_KEY);
-  const contentMap = toContentMap(contents);
+const [contents, monthlyPracticePlans] = await Promise.all([
+  findPageContentsByPageKey(FLOW_PAGE_KEY),
+  findLatestPublishedMonthlyPracticePlans(2),
+]);
+
+const contentMap = toContentMap(contents);
 
   const importantNoticeBody = getContentText({
     contentMap,
@@ -113,11 +119,11 @@ export default async function FlowPage() {
 
           <div className="mt-5">
             <Link
-              href="/session-application#top"
-              className="inline-flex items-center justify-center rounded-md bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
-            >
-              体験/見学申し込みはこちら
-            </Link>
+  href="/session-application#top"
+  className="inline-flex w-fit items-center justify-center rounded-md bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
+>
+  体験/見学申し込みはこちら
+</Link>
           </div>
         </section>
 
@@ -132,14 +138,18 @@ export default async function FlowPage() {
             {step2Body}
           </p>
 
-          <div className="mt-5">
-            <Link
-              href="/summary#top"
-              className="inline-flex w-fit items-center justify-center rounded-full bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
-            >
-              通常の練習スケジュールはこちら
-            </Link>
-          </div>
+          <div className="mt-5 space-y-4">
+ <Link
+  href="/summary#top"
+  className="inline-flex w-fit items-center justify-center rounded-md border border-green-700 bg-white px-5 py-3 text-sm font-bold text-green-700 transition hover:bg-green-50"
+>
+  通常の練習曜日・時間はこちら
+</Link>
+
+  {monthlyPracticePlans.length > 0 ? (
+    <MonthlyPracticePlanLinks plans={monthlyPracticePlans} />
+  ) : null}
+</div>
         </section>
 
         <section className="border-b border-neutral-300 pb-6">
@@ -153,3 +163,4 @@ export default async function FlowPage() {
     </div>
   );
 }
+

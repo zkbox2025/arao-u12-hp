@@ -1,5 +1,5 @@
 // app/admin/(dashboard)/top-settings/actions.ts
-// 管理者ページのトップページ設定の保存Action
+// 管理者ページのトップページ設定の画像保存Action
 
 "use server";
 

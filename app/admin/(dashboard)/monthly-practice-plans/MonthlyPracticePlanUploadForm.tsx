@@ -22,8 +22,8 @@ export function MonthlyPracticePlanUploadForm({
         </h2>
 
         <p className="mt-2 text-sm leading-7 text-neutral-600">
-          PDFをアップロードすると、公開中の最新年月のものがトップページに表示されます。
-        </p>
+  PDFをアップロードすると、公開中の月別練習計画のうち最新2件までが公開ページに表示されます。
+</p>
       </div>
 
       <form action={createMonthlyPracticePlan} className="mt-5 space-y-5">

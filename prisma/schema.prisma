@@ -143,6 +143,7 @@ model Staff {
   updatedAt DateTime @updatedAt
 
   role      String
+  externalRole String?
   name      String
   profile   String
   license   String?

@@ -73,44 +73,65 @@ export function StaffList({ staffs }: StaffListProps) {
         </div>
 
         <div className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div>
-              <label
-                htmlFor={`role-${staff.id}`}
-                className="block text-sm font-bold text-neutral-900"
-              >
-                役職
-              </label>
+  <div className="grid gap-4 sm:grid-cols-2">
+    <div>
+      <label
+        htmlFor={`role-${staff.id}`}
+        className="block text-sm font-bold text-neutral-900"
+      >
+        役職
+      </label>
 
-              <input
-                id={`role-${staff.id}`}
-                name="role"
-                type="text"
-                defaultValue={staff.role}
-                className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
-                required
-              />
-            </div>
+      <input
+        id={`role-${staff.id}`}
+        name="role"
+        type="text"
+        defaultValue={staff.role}
+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+        required
+      />
+    </div>
 
-            <div>
-              <label
-                htmlFor={`name-${staff.id}`}
-                className="block text-sm font-bold text-neutral-900"
-              >
-                名前
-              </label>
+    <div>
+      <label
+        htmlFor={`externalRole-${staff.id}`}
+        className="block text-sm font-bold text-neutral-900"
+      >
+        外部役職
+      </label>
 
-              <input
-                id={`name-${staff.id}`}
-                name="name"
-                type="text"
-                defaultValue={staff.name}
-                className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
-                required
-              />
-            </div>
-          </div>
+      <input
+        id={`externalRole-${staff.id}`}
+        name="externalRole"
+        type="text"
+        defaultValue={staff.externalRole ?? ""}
+        placeholder="例：荒尾市バスケットボール協会 会長"
+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      />
 
+      <p className="mt-2 text-xs leading-6 text-neutral-500">
+        クラブ外での役職がある場合のみ入力してください。
+      </p>
+    </div>
+  </div>
+
+  <div>
+    <label
+      htmlFor={`name-${staff.id}`}
+      className="block text-sm font-bold text-neutral-900"
+    >
+      名前
+    </label>
+
+    <input
+      id={`name-${staff.id}`}
+      name="name"
+      type="text"
+      defaultValue={staff.name}
+      className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3"
+      required
+    />
+  </div>
           <div>
             <label
               htmlFor={`profile-${staff.id}`}
