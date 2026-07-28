@@ -57,7 +57,6 @@ export const PAGE_CONTENT_DEFINITIONS = {
     label: "体験/見学の流れ",
     publicPath: "/flow",
     blocks: {
-      IMPORTANT_NOTICE_BODY: "重要アナウンス文",
       STEP1_HEADING: "STEP1：見出し",
       STEP1_BODY: "STEP1：本文",
       STEP2_HEADING: "STEP2：見出し",

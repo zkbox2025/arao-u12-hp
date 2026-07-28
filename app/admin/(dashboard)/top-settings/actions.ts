@@ -19,15 +19,22 @@ import type { PageContentBlockKey } from "@/constants/page-content";
 
 function buildAdminTopSettingsPath({
   saved,
+  deleted,
   error,
 }: {
   saved?: boolean;
+  deleted?: boolean;
   error?: boolean;
 }) {
   const params = new URLSearchParams();
 
   if (saved) {
     params.set("saved", "1");
+    params.set("toastId", Date.now().toString());
+  }
+
+  if (deleted) {
+    params.set("deleted", "1");
     params.set("toastId", Date.now().toString());
   }
 
@@ -229,5 +236,6 @@ export async function deleteTopSummaryImage(blockKey: string) {
   revalidatePath("/explore");
   revalidatePath("/");
 
-  redirect(buildAdminTopSettingsPath({ saved: true }));
+  redirect(buildAdminTopSettingsPath({ deleted: true }));
 }
+
