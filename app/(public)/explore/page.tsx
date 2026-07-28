@@ -20,6 +20,7 @@ import {
   STAFF_TOP_SUMMARY_TITLE_FALLBACK,
 } from "@/constants/staff/fallbacks";
 import { MonthlyPracticePlanLinks } from "@/components/public/MonthlyPracticePlanLinks";
+import { PracticeScheduleChangeLink } from "@/components/public/PracticeScheduleChangeLink";//練習スケジュール変更ページへの共通リンク
 
 const topNavItems = [
   {
@@ -196,12 +197,7 @@ function MonthlyPracticePlanSection({
         title="月別練習計画"
         showDescription
       >
-        <Link
-          href="/notice#top"
-          className="block w-fit text-sm font-bold leading-7 text-red-700 underline underline-offset-4 transition hover:text-red-800"
-        >
-          直近の練習時間・場所の変更はこちらをご確認ください
-        </Link>
+        <PracticeScheduleChangeLink />
       </MonthlyPracticePlanLinks>
     </section>
   );

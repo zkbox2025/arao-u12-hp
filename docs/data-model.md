@@ -67,3 +67,5 @@ import { redirect } from "next/navigation";
 export default function AdminMonthlyPracticePlansPage() {
   redirect("/admin/top-settings");
 }
+
+◯スタッフ紹介管理ページで保存ボタンを押した後にリロード機能をつける。現在着けていないのでボタンが押されたのかがわからない。

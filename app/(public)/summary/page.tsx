@@ -1,7 +1,6 @@
 // app/(public)/summary/page.tsx
 // 公開ページの活動内容・費用ページ
 
-import Link from "next/link";
 import { PageTitle } from "@/components/public/PageTitle";
 import { getPageContentFallback } from "@/constants/page-content";
 import { definePageContentSections } from "@/lib/page-content/typed-block-keys";
@@ -10,6 +9,7 @@ import {
   getContentText,
   toContentMap,
 } from "@/lib/repositories/page-content";
+import { PracticeScheduleChangeLink } from "@/components/public/PracticeScheduleChangeLink";
 
 const SUMMARY_PAGE_KEY = "SUMMARY" as const;
 
@@ -73,21 +73,10 @@ export default async function SummaryPage() {
             </p>
 
             {item.blockKey === "SCHEDULE_BODY" ? (
-              <div className="mt-5 rounded-lg border border-red-300 bg-red-50 p-4">
-                <p className="font-bold leading-8 text-red-700">
-                  練習日時が変更になる場合がありますので、こちらでご確認ください。
-                </p>
-
-                <div className="mt-4">
-                  <Link
-                    href="/notice#top"
-                    className="inline-flex items-center justify-center rounded-md bg-red-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-red-700"
-                  >
-                    練習スケジュール変更一覧を見る
-                  </Link>
-                </div>
-              </div>
-            ) : null}
+  <div className="mt-5">
+    <PracticeScheduleChangeLink variant="box" />
+  </div>
+) : null}
           </section>
         ))}
       </div>

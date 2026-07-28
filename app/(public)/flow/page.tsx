@@ -12,11 +12,11 @@ import {
 } from "@/lib/repositories/page-content";
 import { findLatestPublishedMonthlyPracticePlans } from "@/lib/repositories/monthly-practice-plan";
 import { MonthlyPracticePlanLinks } from "@/components/public/MonthlyPracticePlanLinks";
+import { PracticeScheduleChangeLink } from "@/components/public/PracticeScheduleChangeLink";
 
 const FLOW_PAGE_KEY = "FLOW" as const;
 
 const FLOW_BLOCK_KEYS = definePageContentBlockKeys(FLOW_PAGE_KEY, {
-  importantNoticeBody: "IMPORTANT_NOTICE_BODY",
   step1Heading: "STEP1_HEADING",
   step1Body: "STEP1_BODY",
   step2Heading: "STEP2_HEADING",
@@ -34,15 +34,6 @@ const [contents, monthlyPracticePlans] = await Promise.all([
 
 const contentMap = toContentMap(contents);
 
-  const importantNoticeBody = getContentText({
-    contentMap,
-    pageKey:FLOW_PAGE_KEY,
-    blockKey: FLOW_BLOCK_KEYS.importantNoticeBody,
-    fallback: getPageContentFallback({
-      pageKey: FLOW_PAGE_KEY,
-      blockKey: FLOW_BLOCK_KEYS.importantNoticeBody,
-    }),
-  });
 
   const step1Heading = getContentText({
     contentMap,
@@ -98,13 +89,8 @@ const contentMap = toContentMap(contents);
     <div>
       <PageTitle title="体験/見学の流れ" />
 
-      <div className="space-y-8">
-        <Link
-          href="/notice#top"
-          className="block rounded-lg border border-red-300 bg-red-50 p-4 font-bold leading-8 text-red-700"
-        >
-          {importantNoticeBody}
-        </Link>
+      <div className="space-y-8 ">
+        <PracticeScheduleChangeLink variant="box" />
 
         <section className="border-b border-neutral-300 pb-6">
           <p className="font-bold text-green-700">STEP 1</p>

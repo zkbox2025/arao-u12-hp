@@ -12,6 +12,7 @@ import { TopSummaryImageSettings } from "./TopSummaryImageSettings";
 type AdminTopSettingsPageProps = {
   searchParams: Promise<{
     saved?: string;
+    deleted?: string;
     error?: string;
     toastId?: string;
   }>;
@@ -26,23 +27,25 @@ const contents = await findPageContentsByPageKey("TOP");
 
   const contentMap = toContentMap(contents);
 
-  const toastMessage =
-    params.saved === "1"
+const toastMessage =
+  params.deleted === "1"
+    ? "削除しました。"
+    : params.saved === "1"
       ? "保存しました。"
       : params.error === "1"
-        ? "保存に失敗しました。"
+        ? "処理に失敗しました。"
         : "";
 
-  const toastVariant = params.error === "1" ? "error" : "success";
+const toastVariant = params.error === "1" ? "error" : "success";
 
   return (
     <div id="top">
       {toastMessage ? (
         <ToastMessage
-          key={`${params.saved}-${params.error}-${params.toastId}`}
-          message={toastMessage}
-          variant={toastVariant}
-        />
+  key={`${params.saved}-${params.deleted}-${params.error}-${params.toastId}`}
+  message={toastMessage}
+  variant={toastVariant}
+/>
       ) : null}
 
       <div className="border-b border-neutral-300 pb-5">
