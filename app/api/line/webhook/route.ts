@@ -1,29 +1,13 @@
 // app/api/line/webhook/route.ts
 // LINE Messaging APIから送信されるWebhookを受信する
-//LINE Developers の Messaging API から飛んでくる Webhook を Next.js の API Route で受け取り、
-// 「本当にLINEから来たリクエストか」を署名検証してから、グループIDなどをログ出力するコード
-//LINE公式アカウントにイベントが起きる
-//↓
-//LINEが /api/line/webhook にPOSTする
-//↓
-//x-line-signature を確認する
-//↓
-//生の本文 rawBody で署名検証する
-//↓
-//正しければ JSON.parse する
-//↓
-//events を確認する
-//↓
-//groupId があればログに出す
-//↓
-//LINEへ 200 OK を返す
 
 import "server-only";
 
-import { createHmac, timingSafeEqual } from "crypto";//署名を作成するためのHMACと、署名を安全に比較するためのtimingSafeEqualをインポート
-import { NextRequest, NextResponse } from "next/server";//リクエストとレスポンスの際に使う
+import { createHmac, timingSafeEqual } from "crypto";
+import { NextRequest, NextResponse } from "next/server";
+import { flushLogs, logError, logInfo, logWarn } from "@/lib/axiom/server";
 
-type LineWebhookSource = //ライン送信もとの型
+type LineWebhookSource =
   | {
       type: "user";
       userId?: string;
@@ -39,8 +23,8 @@ type LineWebhookSource = //ライン送信もとの型
       userId?: string;
     };
 
-type LineWebhookEvent = {  //ラインから届くイベント1回分の型
-  type: string;  //イベントの種類
+type LineWebhookEvent = {
+  type: string;
   webhookEventId?: string;
   source?: LineWebhookSource;
   message?: {
@@ -49,13 +33,11 @@ type LineWebhookEvent = {  //ラインから届くイベント1回分の型
   };
 };
 
-type LineWebhookBody = { //リクエストの本文型
-  destination?: string;  //LINE公式アカウントのID
+type LineWebhookBody = {
+  destination?: string;
   events?: LineWebhookEvent[];
 };
 
-
-//届いたwebhookが本当にラインから来たものなのかを確認する関数
 function verifyLineSignature({
   rawBody,
   signature,
@@ -69,54 +51,65 @@ function verifyLineSignature({
     throw new Error("LINE_CHANNEL_SECRET is not defined");
   }
 
-  //期待される署名を作成する
   const expectedSignature = createHmac("sha256", channelSecret)
     .update(rawBody)
     .digest("base64");
 
   const actualBuffer = Buffer.from(signature);
-  const expectedBuffer = Buffer.from(expectedSignature);//期待される署名をバッファーに変換する
+  const expectedBuffer = Buffer.from(expectedSignature);
 
-  if (actualBuffer.length !== expectedBuffer.length) {//長さを確かめ違えばエラーを返す
+  if (actualBuffer.length !== expectedBuffer.length) {
     return false;
   }
 
-  return timingSafeEqual(actualBuffer, expectedBuffer);//ラインから来た署名と計算した（バッファーに変換した）署名を安全に比較する。一致すればtrue.
+  return timingSafeEqual(actualBuffer, expectedBuffer);
 }
 
-
-//ラインからPOSTリクエストが/api/line/webhookへ来た時発動する関数
 export async function POST(request: NextRequest) {
-  const signature = request.headers.get("x-line-signature");//ライン署名をヘッダーから抜き出す
+  const signature = request.headers.get("x-line-signature");
 
   if (!signature) {
+    logWarn("LINE webhook: signatureがありません", {
+      path: "/api/line/webhook",
+    });
+
+    await flushLogs();
+
     return NextResponse.json(
       { message: "Missing LINE signature" },
       { status: 401 }
     );
   }
 
-  // 署名検証より前にJSONへ変換しない。
-  // LINEから届いた生のリクエスト本文をそのまま使用する。
   const rawBody = await request.text();
 
-  let isValidSignature = false;//署名検証結果の初期値はfalse。成功すればtrue。
+  let isValidSignature = false;
 
   try {
-    isValidSignature = verifyLineSignature({//署名検証実行
+    isValidSignature = verifyLineSignature({
       rawBody,
       signature,
     });
   } catch (error) {
-    console.error("LINE署名検証の準備に失敗しました", error);
+    logError("LINE webhook: 署名検証の準備に失敗しました", {
+      error: error instanceof Error ? error.message : String(error),
+    });
 
-    return NextResponse.json(//検証失敗なら500エラー
+    await flushLogs();
+
+    return NextResponse.json(
       { message: "Webhook configuration error" },
       { status: 500 }
     );
   }
 
-  if (!isValidSignature) {//署名が不正なら401エラー
+  if (!isValidSignature) {
+    logWarn("LINE webhook: 署名が不正です", {
+      path: "/api/line/webhook",
+    });
+
+    await flushLogs();
+
     return NextResponse.json(
       { message: "Invalid LINE signature" },
       { status: 401 }
@@ -128,6 +121,12 @@ export async function POST(request: NextRequest) {
   try {
     body = JSON.parse(rawBody) as LineWebhookBody;
   } catch {
+    logWarn("LINE webhook: JSONの解析に失敗しました", {
+      path: "/api/line/webhook",
+    });
+
+    await flushLogs();
+
     return NextResponse.json(
       { message: "Invalid JSON body" },
       { status: 400 }
@@ -136,22 +135,39 @@ export async function POST(request: NextRequest) {
 
   const events = Array.isArray(body.events) ? body.events : [];
 
-  // 「検証」ではeventsが空のPOSTが届くため、そのまま200を返す。
-  if (events.length === 0) {
-    return NextResponse.json({ ok: true });
-  }
+// LINE Developersの「検証」ではeventsが空のPOSTが届くことがある
+if (events.length === 0) {
+  logInfo("LINE webhook: 検証リクエストを受信しました", {
+    eventCount: 0,
+    destination: body.destination,
+  });
 
-  for (const event of events) {
-    if (event.source?.type === "group" && event.source.groupId) {
-      // groupId確認用の一時ログ。
-      // 取得後は不要なログを削除するか、DB登録処理へ置き換える。
-      console.info("LINEグループイベントを受信しました", {
-        eventType: event.type,
-        groupId: event.source.groupId,
-        webhookEventId: event.webhookEventId,
-      });
-    }
-  }
+  await flushLogs();
 
   return NextResponse.json({ ok: true });
+}
+
+// 初回のgroupId確認期間だけtrueにする
+const isGroupIdLoggingEnabled =
+  process.env.LINE_GROUP_ID_LOG_ENABLED === "true";
+
+for (const event of events) {
+  if (
+    isGroupIdLoggingEnabled &&
+    event.source?.type === "group" &&
+    event.source.groupId
+  ) {
+    logInfo("LINE groupId確認用", {
+      lineGroupId: event.source.groupId,
+      eventType: event.type,
+      webhookEventId: event.webhookEventId,
+      sourceType: event.source.type,
+      destination: body.destination,
+    });
+  }
+}
+
+await flushLogs();
+
+return NextResponse.json({ ok: true });
 }

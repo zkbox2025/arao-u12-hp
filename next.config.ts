@@ -1,13 +1,12 @@
 // next.config.ts
-
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-allowedDevOrigins: [
-    "https://talia-noncrinoid-fructuously.ngrok-free.dev",
+  allowedDevOrigins: [
+    "https://ngrok-free.dev",
   ],
 
-    experimental: {
+  experimental: {
     serverActions: {
       bodySizeLimit: "12mb",
     },
@@ -23,4 +22,4 @@ allowedDevOrigins: [
   },
 };
 
-export default nextConfig;
+export default nextConfig; // 👈 元のシンプルな形に戻す
