@@ -2,6 +2,7 @@
 // スタッフ新規追加フォーム
 
 import { createStaff } from "./actions";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 
 export function StaffCreateForm() {
   return (
@@ -200,12 +201,15 @@ export function StaffCreateForm() {
         </div>
 
         <div className="flex justify-end border-t border-neutral-200 pt-5">
-          <button
-            type="submit"
-            className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
-          >
-            スタッフを追加する
-          </button>
+          <PendingSubmitButton
+  idleLabel="スタッフを追加する"
+  pendingLabel="保存中..."
+  className="
+    rounded-lg bg-blue-600 px-5 py-3
+    text-sm font-bold text-white
+    transition hover:bg-blue-700
+  "
+/>
         </div>
       </form>
     </section>

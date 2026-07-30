@@ -1,6 +1,7 @@
 // app/admin/(dashboard)/monthly-practice-plans/MonthlyPracticePlanUploadForm.tsx
 // 月別練習計画PDFのアップロードフォーム
 
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { createMonthlyPracticePlan } from "./actions";
 import {
   getCurrentMonth,
@@ -139,12 +140,15 @@ export function MonthlyPracticePlanUploadForm({
         </div>
 
         <div className="flex justify-end">
-          <button
-            type="submit"
-            className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
-          >
-            保存する
-          </button>
+          <PendingSubmitButton
+  idleLabel="保存する"
+  pendingLabel="保存中..."
+  className="
+    rounded-lg bg-green-700 px-5 py-3
+    text-sm font-bold text-white
+    transition hover:bg-green-800
+  "
+/>
         </div>
       </form>
     </section>

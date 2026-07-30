@@ -4,6 +4,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updateSessionApplicationStatus } from "./actions";
 import type { SessionApplicationStatusActionState } from "@/types/action-state";
 import type { SessionApplicationStatus } from "@/types/prisma";
@@ -29,7 +30,7 @@ export function SessionApplicationStatusForm({
     },
   };
 
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updateStatusWithId,
     initialState
   );
@@ -79,13 +80,11 @@ export function SessionApplicationStatusForm({
         </label>
       </div>
 
-      <button
-        type="submit"
-        disabled={isPending}
-        className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800 disabled:bg-neutral-300"
-      >
-        {isPending ? "更新中..." : "ステータスを更新する"}
-      </button>
+      <PendingSubmitButton
+        idleLabel="ステータスを更新する"
+        pendingLabel="更新中..."
+        className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
+      />
     </form>
   );
 }

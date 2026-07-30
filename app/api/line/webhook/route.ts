@@ -3,6 +3,8 @@
 
 import "server-only";
 
+export const runtime = "nodejs";
+
 import { createHmac, timingSafeEqual } from "crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { flushLogs, logError, logInfo, logWarn } from "@/lib/axiom/server";

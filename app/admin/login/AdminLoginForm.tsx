@@ -4,14 +4,15 @@
 "use client";
 
 import { useActionState } from "react";
-import { loginAdmin } from "./actions";//ログイン時のアクション関数
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
+import { loginAdmin } from "./actions";
 
 const initialState = {
   error: "",
 };
 
 export function AdminLoginForm() {
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     loginAdmin,
     initialState
   );
@@ -60,13 +61,11 @@ export function AdminLoginForm() {
         />
       </div>
 
-      <button
-        type="submit"
-        disabled={isPending}
-        className="w-full rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800 disabled:cursor-not-allowed disabled:bg-neutral-300"
-      >
-        {isPending ? "ログイン中..." : "ログイン"}
-      </button>
+      <PendingSubmitButton
+        idleLabel="ログイン"
+        pendingLabel="ログイン中..."
+        className="w-full rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
+      />
     </form>
   );
 }

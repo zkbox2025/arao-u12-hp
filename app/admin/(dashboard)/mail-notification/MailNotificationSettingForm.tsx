@@ -4,6 +4,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updateMailNotificationSetting } from "./actions";
 import type { MailNotificationActionState } from "@/types/action-state";
 import type { FormType } from "@/types/prisma";
@@ -28,7 +29,7 @@ export function MailNotificationSettingForm({
     },
   };
 
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updateMailNotificationSetting,
     initialState
   );
@@ -77,13 +78,11 @@ export function MailNotificationSettingForm({
       </div>
 
       <div className="mt-5 border-t border-neutral-200 pt-5">
-        <button
-          type="submit"
-          disabled={isPending}
-          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "保存する"}
-        </button>
+        <PendingSubmitButton
+          idleLabel="保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+        />
       </div>
     </form>
   );

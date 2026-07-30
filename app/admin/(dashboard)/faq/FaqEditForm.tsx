@@ -1,13 +1,17 @@
 // app/admin/(dashboard)/faq/FaqEditForm.tsx
 // FAQ編集フォーム
-// ${faqId} とつける理由は、label と textarea を正しく連動させるため。
-// 同じ画面に複数の編集フォームが出ても id が重複しないようにする。
+// faqIdを付ける理由は、labelとtextareaを正しく連動させるため。
+// 同じ画面に複数の編集フォームが出てもidが重複しないようにする。
 
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updateFaq } from "./actions";
-import type { ContentStatus, FaqCategory } from "@/types/prisma";
+import type {
+  ContentStatus,
+  FaqCategory,
+} from "@/types/prisma";
 
 type FaqEditFormProps = {
   faqId: string;
@@ -38,18 +42,27 @@ export function FaqEditForm({
     },
   };
 
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updateFaqWithId,
     initialState
   );
 
-  const currentQuestion = state.values?.question ?? defaultQuestion;
-  const currentAnswer = state.values?.answer ?? defaultAnswer;
-  const currentStatus = state.values?.status ?? defaultStatus;
+  const currentQuestion =
+    state.values?.question ?? defaultQuestion;
+
+  const currentAnswer =
+    state.values?.answer ?? defaultAnswer;
+
+  const currentStatus =
+    state.values?.status ?? defaultStatus;
 
   return (
     <form action={formAction} className="space-y-5">
-      <input type="hidden" name="category" value={category} />
+      <input
+        type="hidden"
+        name="category"
+        value={category}
+      />
 
       {state.error ? (
         <p className="rounded-lg bg-red-50 p-3 text-sm font-bold text-red-700">
@@ -64,6 +77,7 @@ export function FaqEditForm({
         >
           質問
         </label>
+
         <textarea
           key={`question-${currentQuestion}`}
           id={`edit-question-${faqId}`}
@@ -81,6 +95,7 @@ export function FaqEditForm({
         >
           回答
         </label>
+
         <textarea
           key={`answer-${currentAnswer}`}
           id={`edit-answer-${faqId}`}
@@ -92,9 +107,14 @@ export function FaqEditForm({
       </div>
 
       <div>
-        <p className="text-sm font-bold text-neutral-900">公開状態</p>
+        <p className="text-sm font-bold text-neutral-900">
+          公開状態
+        </p>
 
-        <div key={`status-${currentStatus}`} className="mt-2 flex flex-col gap-3 sm:flex-row">
+        <div
+          key={`status-${currentStatus}`}
+          className="mt-2 flex flex-col gap-3 sm:flex-row"
+        >
           <label className="flex items-center gap-2">
             <input
               type="radio"
@@ -126,13 +146,11 @@ export function FaqEditForm({
           キャンセル
         </button>
 
-        <button
-          type="submit"
-          disabled={isPending}
-          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "保存する"}
-        </button>
+        <PendingSubmitButton
+          idleLabel="保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+        />
       </div>
     </form>
   );

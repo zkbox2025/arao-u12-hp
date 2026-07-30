@@ -4,6 +4,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updateContactMemo } from "./actions";
 import { ADMIN_MEMO_MAX_LENGTH } from "@/constants/adminMemo";
 import type { ContactMemoActionState } from "@/types/action-state";
@@ -26,7 +27,7 @@ export function ContactMemoForm({
     },
   };
 
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updateContactMemoWithId,
     initialState
   );
@@ -50,13 +51,11 @@ export function ContactMemoForm({
         className="w-full rounded-lg border border-neutral-300 px-4 py-3"
       />
 
-      <button
-        type="submit"
-        disabled={isPending}
-        className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-      >
-        {isPending ? "保存中..." : "メモを保存する"}
-      </button>
+      <PendingSubmitButton
+        idleLabel="メモを保存する"
+        pendingLabel="保存中..."
+        className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+      />
     </form>
   );
 }

@@ -37,15 +37,16 @@ export function MonthlyPracticePlanDeleteButton({
       </button>
 
       <ConfirmModal
-        isOpen={isOpen}
-        title="削除の確認"
-        message={`「${title}」を完全に削除しますか？削除したPDFは元に戻せません。`}
-        confirmLabel="削除する"
-        cancelLabel="キャンセル"
-        onClose={() => setIsOpen(false)}
-        formAction={deleteMonthlyPracticePlanWithId}
-        confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
-      />
+  isOpen={isOpen}
+  title="削除の確認"
+  message={`「${title}」を完全に削除しますか？削除したPDFは元に戻せません。`}
+  confirmLabel="削除する"
+  pendingLabel="削除中..."
+  cancelLabel="キャンセル"
+  onClose={() => setIsOpen(false)}
+  formAction={deleteMonthlyPracticePlanWithId}
+  confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
+/>
     </>
   );
 }

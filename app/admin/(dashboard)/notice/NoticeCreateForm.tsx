@@ -1,9 +1,10 @@
 // app/admin/(dashboard)/notice/NoticeCreateForm.tsx
-// Notice新規作成フォーム
+// 練習スケジュール変更の新規作成フォーム
 
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { createNotice } from "./actions";
 
 type NoticeCreateFormProps = {
@@ -19,8 +20,10 @@ const initialState = {
   },
 };
 
-export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
-  const [state, formAction, isPending] = useActionState(
+export function NoticeCreateForm({
+  onCancel,
+}: NoticeCreateFormProps) {
+  const [state, formAction] = useActionState(
     createNotice,
     initialState
   );
@@ -43,6 +46,7 @@ export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
         >
           タイトル
         </label>
+
         <input
           key={`title-${currentTitle}`}
           id="create-title"
@@ -60,6 +64,7 @@ export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
         >
           本文
         </label>
+
         <textarea
           key={`content-${currentContent}`}
           id="create-content"
@@ -79,25 +84,21 @@ export function NoticeCreateForm({ onCancel }: NoticeCreateFormProps) {
           キャンセル
         </button>
 
-        <button
-          type="submit"
+        <PendingSubmitButton
           name="status"
           value="DRAFT"
-          disabled={isPending}
-          className="rounded-lg bg-neutral-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-neutral-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "下書き保存する"}
-        </button>
+          idleLabel="下書き保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-neutral-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-neutral-700"
+        />
 
-        <button
-          type="submit"
+        <PendingSubmitButton
           name="status"
           value="PUBLISHED"
-          disabled={isPending}
-          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "公開保存する"}
-        </button>
+          idleLabel="公開保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+        />
       </div>
     </form>
   );
