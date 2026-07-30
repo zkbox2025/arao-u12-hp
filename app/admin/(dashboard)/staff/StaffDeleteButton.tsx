@@ -27,16 +27,17 @@ export function StaffDeleteButton({ staffId, name }: StaffDeleteButtonProps) {
         削除する
       </button>
 
-      <ConfirmModal
-        isOpen={isOpen}
-        title="削除の確認"
-        message={`「${name}」を削除しますか？削除したスタッフ情報は元に戻せません。`}
-        confirmLabel="削除する"
-        cancelLabel="キャンセル"
-        onClose={() => setIsOpen(false)}
-        formAction={deleteStaffWithId}
-        confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
-      />
+     <ConfirmModal
+  isOpen={isOpen}
+  title="削除の確認"
+  message={`「${name}」を削除しますか？削除したスタッフ情報は元に戻せません。`}
+  confirmLabel="削除する"
+  pendingLabel="削除中..."
+  cancelLabel="キャンセル"
+  onClose={() => setIsOpen(false)}
+  formAction={deleteStaffWithId}
+  confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
+/>
     </>
   );
 }

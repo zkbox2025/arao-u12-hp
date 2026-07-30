@@ -1,9 +1,10 @@
 // app/admin/(dashboard)/notice/[noticeId]/NoticeEditForm.tsx
-// 管理用練習スケ変更編集フォーム
+// 管理用練習スケジュール変更編集フォーム
 
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updateNotice } from "./actions";
 import type { ContentStatus } from "@/types/prisma";
 
@@ -22,7 +23,10 @@ export function NoticeEditForm({
   defaultStatus,
   onCancel,
 }: NoticeEditFormProps) {
-  const updateNoticeWithId = updateNotice.bind(null, noticeId);
+  const updateNoticeWithId = updateNotice.bind(
+    null,
+    noticeId
+  );
 
   const initialState = {
     error: "",
@@ -33,13 +37,16 @@ export function NoticeEditForm({
     },
   };
 
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updateNoticeWithId,
     initialState
   );
 
-  const currentTitle = state.values?.title ?? defaultTitle;
-  const currentContent = state.values?.content ?? defaultContent;
+  const currentTitle =
+    state.values?.title ?? defaultTitle;
+
+  const currentContent =
+    state.values?.content ?? defaultContent;
 
   return (
     <form action={formAction} className="space-y-5">
@@ -56,6 +63,7 @@ export function NoticeEditForm({
         >
           タイトル
         </label>
+
         <input
           key={`title-${currentTitle}`}
           id="edit-title"
@@ -73,6 +81,7 @@ export function NoticeEditForm({
         >
           本文
         </label>
+
         <textarea
           key={`content-${currentContent}`}
           id="edit-content"
@@ -92,25 +101,21 @@ export function NoticeEditForm({
           キャンセル
         </button>
 
-        <button
-          type="submit"
+        <PendingSubmitButton
           name="status"
           value="DRAFT"
-          disabled={isPending}
-          className="rounded-lg bg-neutral-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-neutral-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "下書き保存する"}
-        </button>
+          idleLabel="下書き保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-neutral-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-neutral-700"
+        />
 
-        <button
-          type="submit"
+        <PendingSubmitButton
           name="status"
           value="PUBLISHED"
-          disabled={isPending}
-          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "公開保存する"}
-        </button>
+          idleLabel="公開保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+        />
       </div>
     </form>
   );

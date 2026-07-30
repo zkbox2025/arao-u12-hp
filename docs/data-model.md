@@ -68,6 +68,6 @@ export default function AdminMonthlyPracticePlansPage() {
   redirect("/admin/top-settings");
 }
 
-◯スタッフ紹介管理ページで保存ボタンを押した後にリロード機能をつける。現在着けていないのでボタンが押されたのかがわからない。
+
 
 ◯マルチテナント化した後にgroupIDを確認する際のログにクラブ情報も入れる仕様にする（どのクラブから送られたgroupIDかを識別できるように）

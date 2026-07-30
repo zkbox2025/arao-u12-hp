@@ -1,9 +1,10 @@
 // app/admin/(dashboard)/contact/[contactId]/ContactStatusForm.tsx
-// お問い合わせステータス変更（PENDING：未回答　REPLIED：回答済み）フォーム
+// お問い合わせステータス変更フォーム
 
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updateContactStatus } from "./actions";
 import type { ContactStatusActionState } from "@/types/action-state";
 import type { ContactStatus } from "@/types/prisma";
@@ -26,7 +27,7 @@ export function ContactStatusForm({
     },
   };
 
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updateContactStatusWithId,
     initialState
   );
@@ -63,13 +64,11 @@ export function ContactStatusForm({
         </label>
       </div>
 
-      <button
-        type="submit"
-        disabled={isPending}
-        className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800 disabled:bg-neutral-300"
-      >
-        {isPending ? "更新中..." : "ステータスを更新する"}
-      </button>
+      <PendingSubmitButton
+        idleLabel="ステータスを更新する"
+        pendingLabel="更新中..."
+        className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
+      />
     </form>
   );
 }

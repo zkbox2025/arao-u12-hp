@@ -5,6 +5,7 @@ import Image from "next/image";
 import type { Staff } from "@/types/prisma";
 import { updateStaff } from "./actions";
 import { StaffDeleteButton } from "./StaffDeleteButton";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 
 type StaffListProps = {
   staffs: Staff[];
@@ -240,12 +241,15 @@ export function StaffList({ staffs }: StaffListProps) {
           </div>
 
           <div className="flex justify-end border-t border-neutral-200 pt-5">
-            <button
-              type="submit"
-              className="rounded-lg bg-green-700 px-5 py-3 text-sm font-bold text-white transition hover:bg-green-800"
-            >
-              保存する
-            </button>
+            <PendingSubmitButton
+  idleLabel="保存する"
+  pendingLabel="保存中..."
+  className="
+    rounded-lg bg-green-700 px-5 py-3
+    text-sm font-bold text-white
+    transition hover:bg-green-800
+  "
+/>
           </div>
         </div>
       </div>

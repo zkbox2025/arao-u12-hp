@@ -5,6 +5,7 @@
 
 import { useActionState, useState } from "react";
 import { Eye, EyeOff } from "lucide-react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { updatePassword } from "./actions";
 
 type PasswordActionState = {
@@ -15,19 +16,16 @@ const initialState: PasswordActionState = {
   error: "",
 };
 
-//isVisible＝trueなら、テキストを返す
-//isVisible＝falseなら、パスワード（隠されてる）を返す
 function getPasswordInputType(isVisible: boolean) {
   return isVisible ? "text" : "password";
 }
 
 export function PasswordChangeForm() {
-  const [state, formAction, isPending] = useActionState(
+  const [state, formAction] = useActionState(
     updatePassword,
     initialState
   );
 
-  //押すたびにisVisible が trueやfalseになる
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showNewPasswordConfirm, setShowNewPasswordConfirm] = useState(false);
@@ -161,13 +159,11 @@ export function PasswordChangeForm() {
       </section>
 
       <div className="border-t border-neutral-200 pt-6">
-        <button
-          type="submit"
-          disabled={isPending}
-          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "変更中..." : "パスワードを変更する"}
-        </button>
+        <PendingSubmitButton
+          idleLabel="パスワードを変更する"
+          pendingLabel="変更中..."
+          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+        />
       </div>
     </form>
   );

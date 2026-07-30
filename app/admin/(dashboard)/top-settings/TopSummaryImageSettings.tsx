@@ -6,6 +6,7 @@ import type { PageContent } from "@/types/prisma";
 import { TOP_SUMMARY_IMAGE_ITEMS } from "@/constants/top-summary-images";
 import { updateTopSummaryImage } from "./actions";
 import { TopSummaryImageDeleteButton } from "./TopSummaryImageDeleteButton";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 
 type TopSummaryImageSettingsProps = {
   contentMap: Record<string, PageContent>;
@@ -84,12 +85,17 @@ export function TopSummaryImageSettings({
                 </div>
 
                 <div className="flex justify-start">
-                  <button
-                    type="submit"
-                    className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
-                  >
-                    {content?.imageUrl ? "画像を差し替える" : "画像を保存する"}
-                  </button>
+                  <PendingSubmitButton
+  idleLabel={
+    content?.imageUrl ? "画像を差し替える" : "画像を保存する"
+  }
+  pendingLabel="保存中..."
+  className="
+    rounded-lg bg-blue-600 px-5 py-3
+    text-sm font-bold text-white
+    transition hover:bg-blue-700
+  "
+/>
                 </div>
               </form>
 

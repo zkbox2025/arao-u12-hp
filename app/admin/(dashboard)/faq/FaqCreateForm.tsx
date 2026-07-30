@@ -4,6 +4,7 @@
 "use client";
 
 import { useActionState } from "react";
+import { PendingSubmitButton } from "@/components/admin/form/PendingSubmitButton";
 import { FAQ_CATEGORIES } from "@/constants/faq";
 import { createFaq } from "./actions";
 
@@ -21,8 +22,10 @@ const initialState = {
   },
 };
 
-export function FaqCreateForm({ onCancel }: FaqCreateFormProps) {
-  const [state, formAction, isPending] = useActionState(
+export function FaqCreateForm({
+  onCancel,
+}: FaqCreateFormProps) {
+  const [state, formAction] = useActionState(
     createFaq,
     initialState
   );
@@ -42,6 +45,7 @@ export function FaqCreateForm({ onCancel }: FaqCreateFormProps) {
         >
           カテゴリー
         </label>
+
         <select
           id="create-category"
           name="category"
@@ -63,6 +67,7 @@ export function FaqCreateForm({ onCancel }: FaqCreateFormProps) {
         >
           質問
         </label>
+
         <textarea
           id="create-question"
           name="question"
@@ -79,6 +84,7 @@ export function FaqCreateForm({ onCancel }: FaqCreateFormProps) {
         >
           回答
         </label>
+
         <textarea
           id="create-answer"
           name="answer"
@@ -89,16 +95,32 @@ export function FaqCreateForm({ onCancel }: FaqCreateFormProps) {
       </div>
 
       <div>
-        <p className="text-sm font-bold text-neutral-900">公開状態</p>
+        <p className="text-sm font-bold text-neutral-900">
+          公開状態
+        </p>
 
         <div className="mt-2 flex flex-col gap-3 sm:flex-row">
           <label className="flex items-center gap-2">
-            <input type="radio" name="status" value="DRAFT" defaultChecked={(state.values?.status ?? "DRAFT") === "DRAFT"} />
+            <input
+              type="radio"
+              name="status"
+              value="DRAFT"
+              defaultChecked={
+                (state.values?.status ?? "DRAFT") === "DRAFT"
+              }
+            />
             下書き
           </label>
 
           <label className="flex items-center gap-2">
-            <input type="radio" name="status" value="PUBLISHED" defaultChecked={state.values?.status === "PUBLISHED"} />
+            <input
+              type="radio"
+              name="status"
+              value="PUBLISHED"
+              defaultChecked={
+                state.values?.status === "PUBLISHED"
+              }
+            />
             公開
           </label>
         </div>
@@ -113,13 +135,11 @@ export function FaqCreateForm({ onCancel }: FaqCreateFormProps) {
           キャンセル
         </button>
 
-        <button
-          type="submit"
-          disabled={isPending}
-          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 disabled:bg-neutral-300"
-        >
-          {isPending ? "保存中..." : "保存する"}
-        </button>
+        <PendingSubmitButton
+          idleLabel="保存する"
+          pendingLabel="保存中..."
+          className="rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
+        />
       </div>
     </form>
   );

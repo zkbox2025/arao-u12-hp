@@ -34,15 +34,16 @@ export function TopSummaryImageDeleteButton({
       </button>
 
       <ConfirmModal
-        isOpen={isOpen}
-        title="削除の確認"
-        message={`「${label}」の画像を削除しますか？削除した画像は元に戻せません。`}
-        confirmLabel="削除する"
-        cancelLabel="キャンセル"
-        onClose={() => setIsOpen(false)}
-        formAction={deleteTopSummaryImageWithBlockKey}
-        confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
-      />
+  isOpen={isOpen}
+  title="削除の確認"
+  message={`「${label}」の画像を削除しますか？削除した画像は元に戻せません。`}
+  confirmLabel="削除する"
+  pendingLabel="削除中..."
+  cancelLabel="キャンセル"
+  onClose={() => setIsOpen(false)}
+  formAction={deleteTopSummaryImageWithBlockKey}
+  confirmButtonClassName="bg-red-600 text-white hover:bg-red-700"
+/>
     </>
   );
 }
