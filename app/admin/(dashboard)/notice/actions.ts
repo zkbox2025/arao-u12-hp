@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { parseNoticeFormData } from "@/lib/validations/admin-notice";
 import { ADMIN_ACTION_CREATE_ERROR_MESSAGE } from "@/constants/adminActionError";
@@ -20,7 +20,7 @@ export async function createNotice(
   _state: NoticeActionState,
   formData: FormData
 ): Promise<NoticeActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
     const values = buildNoticeActionValues(formData);
 

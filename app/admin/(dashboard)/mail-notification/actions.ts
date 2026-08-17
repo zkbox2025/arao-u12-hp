@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
   parseEmailsText,
@@ -39,7 +39,7 @@ export async function updateMailNotificationSetting(
   state: MailNotificationActionState,
   formData: FormData
 ): Promise<MailNotificationActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const values = buildMailNotificationActionValues(formData, state.values);
 
