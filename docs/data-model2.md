@@ -151,3 +151,5 @@ planType = PRO：入れない
 ◯DB方式のデプロイが安定した後に、WEBSITE_ADMIN_USER_IDS をVercelから削除
 
 以上！
+
+ホームページマルチテナント化の際には、ClubEmailSetting、ClubLineSettingをDBに入れる

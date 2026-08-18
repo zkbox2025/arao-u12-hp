@@ -1,5 +1,6 @@
 // types/prisma.ts
 // Prisma由来の型をアプリ内で使いやすく集約する
+//必要になったら随時追加すること（アプリは現在PlanType,ClubMemberRole,PlatformAdminRoleのみ追加済み）
 
 //DBのテーブル
 export type {
@@ -29,6 +30,9 @@ export type {
   LoginSubmissionResult,
   FormSubmissionResult,
   Type as SessionType,
+  ClubMemberRole,
+  PlanType,
+  PlatformAdminRole,
 } from "@prisma/client";
 
 export type { ApplicationStatus as SessionApplicationStatus } from "@prisma/client";

@@ -202,6 +202,7 @@ model Club {
   noticeReads ClubNoticeRead[]
 
   invitations ClubInvitation[]
+  storageDeletionJobs StorageDeletionJob[]
 
   lineSetting            ClubLineSetting?
   lineTargets            ClubLineTarget[]
@@ -746,6 +747,7 @@ model ClubLineDelivery {
   @@index([clubId, eventId, status])
   @@index([clubId, noticeId, status])
   @@index([status, nextAttemptAt])
+  @@index([status, leaseExpiresAt])
   @@index([clubId, status, nextAttemptAt])
 }
 
@@ -765,6 +767,35 @@ model PlatformAdmin {
   handledSupportReports SupportReport[] @relation("SupportReportHandler")
 
   @@index([role, isActive])
+}
+
+model StorageDeletionJob {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String?
+  club   Club?  @relation(fields: [clubId], references: [id], onDelete: SetNull)
+
+  bucket      String
+  storagePath String
+
+  sourceType StorageDeletionSourceType
+  status     StorageDeletionStatus @default(PENDING)
+
+  attemptCount  Int       @default(0)
+  lastAttemptAt DateTime?
+  nextAttemptAt DateTime?
+  lastError     String?   @db.Text
+
+  claimedAt     DateTime?
+  claimToken    String?   @unique
+  leaseExpiresAt DateTime?
+
+  @@unique([bucket, storagePath])
+  @@index([clubId, status])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseExpiresAt])
 }
 
 enum Type {
@@ -868,6 +899,7 @@ enum ClubNoticeGenre {
 
 enum LineDeliveryStatus {
   PENDING
+  PROCESSING
   SENT
   FAILED
 }
@@ -904,4 +936,16 @@ enum ClubInvitationStatus {
   ACCEPTED
   CANCELLED
   EXPIRED
+}
+
+enum StorageDeletionSourceType {
+  EVENT_ATTACHMENT
+  NOTICE_ATTACHMENT
+}
+
+enum StorageDeletionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
 }
