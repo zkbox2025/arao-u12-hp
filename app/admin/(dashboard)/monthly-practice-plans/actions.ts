@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
   MAX_MONTHLY_PRACTICE_PLAN_PDF_SIZE,
@@ -58,7 +58,7 @@ function parseContentStatus(value: FormDataEntryValue | null): ContentStatus {
 
 //月別練習計画をアップロードするアクション関数
 export async function createMonthlyPracticePlan(formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const rawReturnPath = String(
     formData.get("returnPath") ?? "/admin/monthly-practice-plans"
@@ -158,7 +158,7 @@ export async function deleteMonthlyPracticePlan(
   planId: string,
   returnPath = "/admin/monthly-practice-plans"
 ) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const safeReturnPath =
     returnPath === "/admin/top-settings"

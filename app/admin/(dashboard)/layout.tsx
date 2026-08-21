@@ -1,12 +1,11 @@
 // app/admin/(dashboard)/layout.tsx
 // 管理者ページ共通レイアウト
 
-import { redirect } from "next/navigation";
+
 import { AdminHeader } from "@/components/admin/AdminHeader";
 import { AdminFooter } from "@/components/admin/AdminFooter";
-import { createClient } from "@/src/infrastructure/supabase/server";
 import { findAdminLayoutCounts } from "@/lib/repositories/admin-layout";
-
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 
 type AdminDashboardLayoutProps = {
   children: React.ReactNode;
@@ -15,15 +14,7 @@ type AdminDashboardLayoutProps = {
 export default async function AdminDashboardLayout({
   children,
 }: AdminDashboardLayoutProps) {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/admin/login");
-  }
+  await requireWebsiteAdmin();
 
   const { pendingContactCount, pendingSessionApplicationCount } =
     await findAdminLayoutCounts();

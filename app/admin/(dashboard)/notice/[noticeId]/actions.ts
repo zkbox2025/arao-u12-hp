@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { parseNoticeFormData } from "@/lib/validations/admin-notice";
 import {
@@ -46,7 +46,7 @@ export async function updateNotice(
   _state: NoticeActionState,
   formData: FormData
 ): Promise<NoticeActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
    const values = buildNoticeActionValues(formData);
 
@@ -92,7 +92,7 @@ export async function updateNotice(
 }
 
 export async function deleteNotice(noticeId: string) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   try {
     await prisma.notice.delete({

@@ -26,16 +26,16 @@ model SessionApplication {
 
 //問い合わせ
 model Contact {
-  id            String        @id @default(uuid())
-  createdAt     DateTime      @default(now())
-  name          String // 名前（必須）
-  nameKana      String // 名前カナ（必須）
-  email         String // メールアドレス（必須）
-  phone         String? // 電話番号（任意）
-  content       String // 問い合わせ内容
-  status        ContactStatus @default(PENDING) // 初期値は未回答
-  adminMemo     String? // 管理者メモ
-  updatedAt     DateTime      @updatedAt // ステータス変更・メモ編集日時
+  id        String        @id @default(uuid())
+  createdAt DateTime      @default(now())
+  name      String // 名前（必須）
+  nameKana  String // 名前カナ（必須）
+  email     String // メールアドレス（必須）
+  phone     String? // 電話番号（任意）
+  content   String // 問い合わせ内容
+  status    ContactStatus @default(PENDING) // 初期値は未回答
+  adminMemo String? // 管理者メモ
+  updatedAt DateTime      @updatedAt // ステータス変更・メモ編集日時
 }
 
 //文章ブロック管理画面用
@@ -78,8 +78,8 @@ model Faq {
 
 //フォーム送信用スパム対策
 model FormSubmissionLog {
-  id          String   @id @default(uuid())
-  createdAt   DateTime @default(now())
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
 
   formType    FormType
   ipHash      String?
@@ -124,14 +124,14 @@ model MonthlyPracticePlan {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  title     String
-  year      Int
-  month     Int
+  title String
+  year  Int
+  month Int
 
-  pdfUrl    String
-  pdfPath   String
+  pdfUrl  String
+  pdfPath String
 
-  status    ContentStatus @default(PUBLISHED)
+  status ContentStatus @default(PUBLISHED)
 
   @@index([status, year, month])
 }
@@ -142,18 +142,18 @@ model Staff {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  role      String
+  role         String
   externalRole String?
-  name      String
-  profile   String
-  license   String?
-  achievement String?
+  name         String
+  profile      String
+  license      String?
+  achievement  String?
 
   imageUrl  String?
   imagePath String?
   imageAlt  String?
 
-  sortOrder Int @default(0)
+  sortOrder Int           @default(0)
   status    ContentStatus @default(PUBLISHED)
 }
 
@@ -171,6 +171,631 @@ model StaffPageSetting {
   topImageUrl  String?
   topImagePath String?
   topImageAlt  String?
+}
+
+// クラブごとのテーブル
+model Club {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  name         String
+  slug         String   @unique
+  websiteUrl   String?
+  instagramUrl String?
+  domain       String?  @unique
+  planType     PlanType @default(STARTER)
+  appBaseUrl   String?
+
+  timezone String @default("Asia/Tokyo") //基準とする時間（DBではUTCで保存する）イベントを日別で表示する際にどの日付で表示するかに使う
+
+  memberships      ClubMembership[]
+  childMemberships ChildClubMembership[]
+  events           ClubEvent[]
+  notices          ClubNotice[]
+
+  eventAttachments  ClubEventAttachment[]
+  noticeAttachments ClubNoticeAttachment[]
+
+  eventMemos  ClubEventMemo[]
+  eventReads  ClubEventRead[]
+  noticeReads ClubNoticeRead[]
+
+  invitations ClubInvitation[]
+  storageDeletionJobs StorageDeletionJob[]
+
+  lineSetting            ClubLineSetting?
+  lineTargets            ClubLineTarget[]
+  lineRegistrationTokens ClubLineRegistrationToken[]
+  lineDeliveries         ClubLineDelivery[] //ライン通知の送信記録テーブル
+  emailSetting           ClubEmailSetting?
+
+  supportReports SupportReport[]
+}
+
+// 運営アプリのユーザー
+model AppUser {
+  id        String   @id
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  email String? @unique //他の人と被らないただ一つのメアド（招待処理で検索するため）
+  name  String?
+
+  children    Child[]
+  memberships ClubMembership[]
+}
+
+//子どものテーブル
+model Child {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parentId String
+  parent   AppUser @relation(fields: [parentId], references: [id], onDelete: Cascade)
+
+  name            String
+  grade           Grade?
+  clubMemberships ChildClubMembership[]
+
+  @@unique([id, parentId])
+  @@index([parentId])
+}
+
+// 運営アプリのユーザー（親）のクラブ所属・役割
+model ClubMembership {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  userId String
+
+  role   ClubMemberRole       @default(MEMBER)
+  status ClubMembershipStatus @default(ACTIVE)
+
+  parentedChildMemberships ChildClubMembership[] @relation("ChildClubMembershipParent")
+
+  canManageWebsite Boolean @default(false) //HPに入れるかの判定
+
+  club Club    @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  user AppUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  eventMemos  ClubEventMemo[]
+  eventReads  ClubEventRead[]
+  noticeReads ClubNoticeRead[]
+
+  createdEvents ClubEvent[] @relation("ClubEventCreatedBy")
+  updatedEvents ClubEvent[] @relation("ClubEventUpdatedBy")
+
+  createdNotices ClubNotice[] @relation("ClubNoticeCreatedBy")
+  updatedNotices ClubNotice[] @relation("ClubNoticeUpdatedBy")
+
+  supportReports SupportReport[] @relation("SupportReportReporter")
+
+  lineRegistrationTokens ClubLineRegistrationToken[]
+
+  sentInvitations ClubInvitation[] @relation("ClubInvitationInviter") //過去に送ったメンバー加入への招待状データ
+
+  invitation ClubInvitation? @relation("ClubInvitationMembership") //承諾した招メンバー加入招待状のデータ
+
+  requestedLineDeliveries ClubLineDelivery[] @relation("ClubLineDeliveryRequester")
+
+  @@unique([id, clubId])
+  @@unique([clubId, userId])
+  @@index([userId, status])
+  @@index([clubId, role])
+  @@index([clubId, status])
+  @@index([clubId, status, canManageWebsite])
+  @@index([clubId, role, status])
+}
+
+//子どものクラブ所属・役割を管理するテーブル（複数クラブに所属してもいいようにする）
+model ChildClubMembership {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId  String
+  childId String
+
+  parentUserId String
+
+  status ClubMembershipStatus @default(ACTIVE)
+
+  club  Club  @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  child Child @relation(fields: [childId, parentUserId], references: [id, parentId], onDelete: Cascade, onUpdate: Cascade)
+
+  parentMembership ClubMembership @relation("ChildClubMembershipParent", fields: [clubId, parentUserId], references: [clubId, userId], onDelete: Cascade, onUpdate: Cascade)
+
+  @@unique([clubId, childId])
+  @@index([childId, status])
+  @@index([clubId, status])
+  @@index([parentUserId])
+}
+
+// クラブ会員へのメール招待状のテーブル
+model ClubInvitation {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  email String
+  name  String?
+
+  role ClubMemberRole
+
+  status ClubInvitationStatus @default(PREPARING)
+
+  tokenHash  String    @unique
+  expiresAt  DateTime //有効期限
+  acceptedAt DateTime? //承諾した日時
+
+  membershipId String?         @unique
+  membership   ClubMembership? @relation("ClubInvitationMembership", fields: [membershipId], references: [id], onDelete: SetNull)
+
+  authUserId String?
+
+  invitedByMembershipId String //誰から招待状が送られたかのID
+  invitedByMembership   ClubMembership @relation("ClubInvitationInviter", fields: [invitedByMembershipId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  emailSentAt    DateTime? //メール送信日時
+  emailSendError String?   @db.Text //メール送信エラーについて
+
+  attemptCount  Int       @default(0)
+  lastAttemptAt DateTime?
+
+  @@index([clubId, email])
+  @@index([expiresAt])
+  @@index([acceptedAt])
+}
+
+// クラブイベント
+model ClubEvent {
+  id        String        @id @default(uuid())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  status    ContentStatus @default(DRAFT)
+
+  title   String
+  content String? @db.Text
+
+  targetRoles ClubMemberRole[] // 会員画面での公開対象。OWNERは常に含める
+
+  startAt  DateTime
+  endAt    DateTime?
+  isAllDay Boolean   @default(false) // 終日イベントかどうか
+
+  location        String?
+  meetingAt       DateTime? // 集合日時
+  meetingLocation String? // 集合場所
+
+  belongings String? @db.Text // 持ち物
+  notes      String? @db.Text // 注意事項
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  createdByMembershipId String?
+  createdByMembership   ClubMembership? @relation("ClubEventCreatedBy", fields: [createdByMembershipId], references: [id], onDelete: SetNull)
+
+  updatedByMembershipId String?
+  updatedByMembership   ClubMembership? @relation("ClubEventUpdatedBy", fields: [updatedByMembershipId], references: [id], onDelete: SetNull)
+
+  personalMemos ClubEventMemo[] // メモ
+  reads         ClubEventRead[] //既読機能
+  attachments   ClubEventAttachment[] //添付したPDFのテーブル
+
+  lineDeliveries ClubLineDelivery[] //ライン通知の記録テーブル
+
+  genre ClubEventGenre @default(PRACTICE)
+
+  firstPublishedAt DateTime? // 初めて公開した日時
+  readRequiredAt   DateTime? //未読・再確認表示の基準日時
+
+  @@unique([id, clubId])
+  @@index([clubId, status, startAt])
+  @@index([clubId, status, endAt])
+}
+
+// イベントに対する「自分専用メモ」
+model ClubEventMemo {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  content   String   @db.Text // メモの内容
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  eventId String
+  event   ClubEvent @relation(fields: [eventId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  membershipId String // 「誰（どの所属メンバー）が書いたメモか」
+  membership   ClubMembership @relation(fields: [membershipId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  @@unique([clubId, eventId, membershipId])
+  @@index([clubId, eventId])
+  @@index([clubId, membershipId])
+}
+
+// クラブお知らせ
+model ClubNotice {
+  id        String        @id @default(uuid())
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+  status    ContentStatus @default(DRAFT)
+
+  title       String
+  content     String           @db.Text
+  targetRoles ClubMemberRole[] // // 会員画面での公開対象。OWNERは常に含める
+
+  isPinned Boolean         @default(false) //重要表示
+  genre    ClubNoticeGenre @default(GENERAL)
+
+  createdByMembershipId String?
+  createdByMembership   ClubMembership? @relation("ClubNoticeCreatedBy", fields: [createdByMembershipId], references: [id], onDelete: SetNull)
+
+  updatedByMembershipId String?
+  updatedByMembership   ClubMembership? @relation("ClubNoticeUpdatedBy", fields: [updatedByMembershipId], references: [id], onDelete: SetNull)
+
+  reads       ClubNoticeRead[] //既読機能
+  attachments ClubNoticeAttachment[]
+
+  lineDeliveries ClubLineDelivery[]
+
+  firstPublishedAt DateTime? // 初めて公開した日時
+  readRequiredAt   DateTime? // 未読・再確認表示の基準日時
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  @@unique([id, clubId])
+  @@index([clubId, status, createdAt])
+  @@index([clubId, status, isPinned, updatedAt])
+}
+
+//イベントに添付されたPDFのテーブル
+model ClubEventAttachment {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  eventId String
+  event   ClubEvent @relation(fields: [eventId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  storagePath String @unique
+  fileName    String
+  mimeType    String
+  sizeBytes   Int
+
+  displayOrder Int @default(0) //並び順
+
+  @@index([clubId, eventId])
+  @@index([clubId, eventId, displayOrder])
+  @@index([eventId])
+}
+
+//お知らせに添付したPDFのテーブル
+model ClubNoticeAttachment {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  noticeId String
+  notice   ClubNotice @relation(fields: [noticeId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  storagePath String @unique
+  fileName    String
+  mimeType    String
+  sizeBytes   Int
+
+  displayOrder Int @default(0) //並び順
+
+  @@index([clubId, noticeId])
+  @@index([clubId, noticeId, displayOrder])
+  @@index([noticeId])
+}
+
+//イベントの既読か未読かの記録テーブル
+model ClubEventRead {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  eventId String
+  event   ClubEvent @relation(fields: [eventId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  membershipId String
+  membership   ClubMembership @relation(fields: [membershipId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  readAt DateTime @default(now())
+
+  @@unique([clubId, eventId, membershipId])
+  @@index([clubId, membershipId, readAt])
+  @@index([clubId, eventId])
+}
+
+//お知らせの既読か未読かの記録テーブル
+model ClubNoticeRead {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  noticeId String
+  notice   ClubNotice @relation(fields: [noticeId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  membershipId String
+  membership   ClubMembership @relation(fields: [membershipId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  readAt DateTime @default(now())
+
+  @@unique([clubId, noticeId, membershipId])
+  @@index([clubId, membershipId, readAt])
+  @@index([clubId, noticeId])
+}
+
+// クラブLINE通知・LIFF設定
+model ClubLineSetting {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String @unique
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  lineChannelId                   String? //LINE Developers上のチャネルID
+  lineBotUserId                   String? //Webhook本文のdestinationとクラブ設定を照合するためのBotユーザーID
+  lineChannelAccessTokenEncrypted String? @db.Text //LINEへ通知を送信する際に使う暗号化済みトークン
+  lineChannelSecretEncrypted      String? @db.Text //LINEから届いたWebhookの署名検証に使う暗号化済み秘密鍵
+
+  webhookKey String @unique @default(uuid()) // Webhook URL用の公開識別子.秘密鍵ではないが、推測困難なランダム値として扱う
+
+  targets            ClubLineTarget[]
+  registrationTokens ClubLineRegistrationToken[]
+
+  adminLiffId  String? // HP管理者ページ用LIFF
+  adminLiffUrl String?
+
+  operationLiffId  String? // 運営アプリ用LIFF
+  operationLiffUrl String?
+
+  @@unique([id, clubId])
+}
+
+// クラブごとのLINEグループ通知先
+model ClubLineTarget {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  lineSettingId String
+  lineSetting   ClubLineSetting @relation(fields: [lineSettingId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  targetName  String?
+  lineGroupId String
+
+  targetRoles ClubMemberRole[] // このグループへ通知する対象
+
+  isEnabled Boolean @default(false)
+
+  deliveries ClubLineDelivery[] //通知先ごとの送信履歴を辿れるように
+
+  @@unique([id, clubId])
+  @@unique([lineSettingId, lineGroupId])
+  @@index([clubId, isEnabled])
+  @@index([clubId])
+  @@index([lineSettingId, isEnabled])
+}
+
+//通知ライングループ登録用テーブル
+model ClubLineRegistrationToken {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  lineSettingId String
+  lineSetting   ClubLineSetting @relation(fields: [lineSettingId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+
+  createdByMembershipId String
+  createdByMembership   ClubMembership @relation(fields: [createdByMembershipId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  @@index([clubId, expiresAt])
+  @@index([clubId, usedAt])
+  @@index([lineSettingId, expiresAt])
+}
+
+//メール通知機能テーブル
+model ClubEmailSetting {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String @unique
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  // HPの問い合わせ・体験見学、お知らせ通知、イベント通知を送るクラブ側通知先
+  notificationEmail String?
+
+  // メール表示名。nullならClub.nameを使用
+  fromName String?
+
+  // 返信先（問い合わせに対して返信する時にfromに自動で入るメアド）
+  replyToEmail String?
+
+  isEnabled Boolean @default(true)
+}
+
+//ヘルプ・不具合報告の記録テーブル
+model SupportReport {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  membershipId String?
+  membership   ClubMembership? @relation("SupportReportReporter", fields: [membershipId], references: [id], onDelete: SetNull)
+
+  category SupportReportCategory @default(BUG)
+  status   SupportReportStatus   @default(OPEN)
+
+  message String @db.Text
+
+  pageUrl   String? @db.Text
+  userAgent String? @db.Text
+
+  reporterName  String?
+  reporterEmail String?
+  reporterRole  ClubMemberRole?
+
+  handledByPlatformAdminId String?
+
+  handledByPlatformAdmin PlatformAdmin? @relation("SupportReportHandler", fields: [handledByPlatformAdminId], references: [id], onDelete: SetNull)
+
+  statusChangedAt DateTime?
+
+  resolvedAt DateTime?
+
+  internalNote String? @db.Text
+
+  notifiedAt  DateTime?
+  notifyError String?   @db.Text
+
+  @@index([clubId, status, createdAt])
+  @@index([clubId, membershipId, createdAt])
+  @@index([status, createdAt])
+}
+
+//ライン通知の送信記録テーブル
+model ClubLineDelivery {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  targetId String
+  target   ClubLineTarget @relation(fields: [targetId, clubId], references: [id, clubId], onDelete: Restrict)
+
+  // 元となったイベント。
+  // イベント削除後も送信履歴を残すためSetNull。
+  eventId String?
+  event   ClubEvent? @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  // 元となったお知らせ。
+  // お知らせ削除後も送信履歴を残すためSetNull。
+  noticeId String?
+  notice   ClubNotice? @relation(fields: [noticeId], references: [id], onDelete: SetNull)
+
+  // 送信時点の内容を履歴として保存する
+  contentType        LineDeliveryContentType
+  contentTitle       String
+  messageSnapshot    String?                 @db.Text
+  targetNameSnapshot String?
+
+  requestedByMembershipId String?
+  requestedByMembership   ClubMembership? @relation("ClubLineDeliveryRequester", fields: [requestedByMembershipId], references: [id], onDelete: SetNull)
+
+  status LineDeliveryStatus @default(PENDING)
+
+  requestedAt DateTime  @default(now())
+  sentAt      DateTime?
+
+  errorCode   String?
+  errorDetail String? @db.Text
+
+  idempotencyKey String @unique
+  requestId      String
+
+  claimedAt      DateTime?
+  claimToken     String?   @unique
+  leaseExpiresAt DateTime?
+
+  attemptCount  Int       @default(0)
+  lastAttemptAt DateTime?
+  nextAttemptAt DateTime?
+
+  @@index([clubId, requestedAt])
+  @@index([clubId, requestId])
+  @@index([clubId, targetId, status])
+  @@index([clubId, eventId, status])
+  @@index([clubId, noticeId, status])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseExpiresAt])
+  @@index([clubId, status, nextAttemptAt])
+}
+
+// クラブ情報共有アプリ全体を管理する運営者
+model PlatformAdmin {
+  // Supabase Auth user.id と同じUUIDを使用する
+  id        String   @id
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  email String  @unique
+  name  String?
+
+  role     PlatformAdminRole @default(DEVELOPER)
+  isActive Boolean           @default(true)
+
+  handledSupportReports SupportReport[] @relation("SupportReportHandler")
+
+  @@index([role, isActive])
+}
+
+model StorageDeletionJob {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String?
+  club   Club?  @relation(fields: [clubId], references: [id], onDelete: SetNull)
+
+  bucket      String
+  storagePath String
+
+  sourceType StorageDeletionSourceType
+  status     StorageDeletionStatus @default(PENDING)
+
+  attemptCount  Int       @default(0)
+  lastAttemptAt DateTime?
+  nextAttemptAt DateTime?
+  lastError     String?   @db.Text
+
+  claimedAt     DateTime?
+  claimToken    String?   @unique
+  leaseExpiresAt DateTime?
+
+  @@unique([bucket, storagePath])
+  @@index([clubId, status])
+  @@index([status, nextAttemptAt])
+  @@index([status, leaseExpiresAt])
 }
 
 enum Type {
@@ -233,4 +858,94 @@ enum LoginSubmissionResult {
   SUCCESS
   FAILED
   BLOCKED
+}
+
+enum ClubMemberRole {
+  OWNER // クラブ代表者・最高管理者
+  COACH // コーチ（指導者）
+  OFFICER // 役員（保護者会長や会計など）
+  MEMBER // 会員（保護者・選手）
+}
+
+enum ClubMembershipStatus {
+  INVITED // 招待中
+  ACTIVE // 在籍中
+  SUSPENDED // 休部中
+  WITHDRAWN // 退会済み
+}
+
+enum PlanType {
+  STARTER
+  STANDARD
+  PRO
+}
+
+enum ClubEventGenre {
+  PRACTICE
+  PRACTICE_GAME
+  TOURNAMENT
+  CAMP
+  HOLIDAY
+  OTHER
+}
+
+enum ClubNoticeGenre {
+  IMPORTANT //緊急連絡・重要
+  SCHEDULE //スケジュール変更
+  EVENT //大会・試合・合宿について
+  ACCOUNTING //会計・手続き
+  GENERAL //その他
+}
+
+enum LineDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+}
+
+enum SupportReportCategory {
+  BUG //バグ
+  QUESTION //質問
+  REQUEST //要望
+  OTHER //その他
+}
+
+enum SupportReportStatus {
+  OPEN // 未対応
+  IN_PROGRESS // 対応中
+  ON_HOLD // 保留
+  RESOLVED // 対応済み
+}
+
+enum PlatformAdminRole {
+  DEVELOPER // 開発者・サービス運営者
+  SUPPORT // 将来サポート担当者を追加する場合
+}
+
+enum LineDeliveryContentType {
+  EVENT
+  NOTICE
+}
+
+enum ClubInvitationStatus {
+  PREPARING
+  READY_TO_SEND
+  SENT
+  EMAIL_FAILED
+  ACCEPTED
+  CANCELLED
+  EXPIRED
+}
+
+enum StorageDeletionSourceType {
+  EVENT_ATTACHMENT
+  NOTICE_ATTACHMENT
+}
+
+enum StorageDeletionStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
 }
