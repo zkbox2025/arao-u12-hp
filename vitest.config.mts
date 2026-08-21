@@ -1,3 +1,4 @@
+//vitest.config.mts
 //npm run verify:localなどテストで動作確認をする際にテストコードとして読むべきファイルを選定する（ターゲット選定）コード
 
 

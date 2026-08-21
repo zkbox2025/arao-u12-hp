@@ -153,3 +153,13 @@ planType = PRO：入れない
 以上！
 
 ホームページマルチテナント化の際には、ClubEmailSetting、ClubLineSettingをDBに入れる
+
+・月間の訪問者数を見れるようにする：グーグルアナリティクス用DBテーブルを作成し、レイアウトを実装。初期設定時にグーグルアナリティクスの登録を追加する。
+
+・PDFの上限がHPのストレージは５mbでアプリイベントお知らせ（src/infrastructure/storage/pdf-file-validation.ts）は３mb。next.config.tsは４mb。ここは適切なのか調べて随時修正する。
+
+・アプリ開発後は、Proxyへ移行する。現在中身は事前に揃えている。
+アプリをブランチ上で完成させてPRマージした後に以下を実行しブランチにプッシュしてメインにマージする
+「npx @next/codemod@canary middleware-to-proxy .」
+
+・Resendは開発者のアカウントひとつにしてクラブの個別アカウントは作らない。故にマルチテナント化したらARAO U-12のアカウントは消して、開発者のアカウントにARAO U-12のアカウントを作成すること！

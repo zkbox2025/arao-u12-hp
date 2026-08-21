@@ -7,8 +7,11 @@
 import "dotenv/config";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
-
 import { prisma } from "@/src/infrastructure/prisma/client";
+import {
+  normalizeEmail,
+} from "@/domain/shared/email";
+
 
 const seedEnvSchema = z.object({
   DATABASE_URL: z.string().trim().min(1),
@@ -51,7 +54,9 @@ async function main() {
   assertLocalUrl(env.DATABASE_URL, "DATABASE_URL");
   assertLocalUrl(env.NEXT_PUBLIC_SUPABASE_URL, "NEXT_PUBLIC_SUPABASE_URL");
 
-  const ownerEmail = env.SEED_DEV_OWNER_EMAIL.trim().toLowerCase();
+const ownerEmail = normalizeEmail(
+  env.SEED_DEV_OWNER_EMAIL,
+);
   const ownerName = env.SEED_DEV_OWNER_NAME.trim();
 
   const supabaseAdmin = createClient(
@@ -76,7 +81,9 @@ async function main() {
     );
   }
 
-  const authEmail = data.user.email?.trim().toLowerCase();
+  const authEmail = data.user.email
+  ? normalizeEmail(data.user.email)
+  : undefined;
 
   if (authEmail !== ownerEmail) {
     throw new Error(
@@ -109,7 +116,9 @@ async function main() {
 
     if (
       existingUserById?.email &&
-      existingUserById.email.trim().toLowerCase() !== ownerEmail
+      normalizeEmail(
+  existingUserById.email,
+) !== ownerEmail
     ) {
       throw new Error(
         "指定されたAuthユーザーIDのAppUserに、別のメールアドレスが登録されています。",
