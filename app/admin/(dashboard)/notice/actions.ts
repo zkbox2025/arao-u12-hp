@@ -9,17 +9,17 @@ import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { parseNoticeFormData } from "@/lib/validations/admin-notice";
 import { ADMIN_ACTION_CREATE_ERROR_MESSAGE } from "@/constants/adminActionError";
-import type { NoticeActionState } from "@/types/action-state";
+import type { WebsiteNoticeActionState } from "@/types/action-state";
 import { buildNoticeActionValues } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
 
 
 
 
 
-export async function createNotice(
-  _state: NoticeActionState,
+export async function createWebsiteNotice(
+  _state: WebsiteNoticeActionState,
   formData: FormData
-): Promise<NoticeActionState> {
+): Promise<WebsiteNoticeActionState> {
   await requireWebsiteAdmin();
 
     const values = buildNoticeActionValues(formData);

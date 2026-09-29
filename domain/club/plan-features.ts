@@ -24,6 +24,7 @@ export function hasClubFeature(
   return enabledFeatures.includes(feature);
 }
 
+//利用できない場合の表示
 export class ClubFeatureUnavailableError extends Error {
   readonly name = "ClubFeatureUnavailableError";
 

@@ -201,7 +201,7 @@ model Club {
   eventReads  ClubEventRead[]
   noticeReads ClubNoticeRead[]
 
-  invitations ClubInvitation[]
+  invitations         ClubInvitation[]
   storageDeletionJobs StorageDeletionJob[]
 
   lineSetting            ClubLineSetting?
@@ -741,6 +741,7 @@ model ClubLineDelivery {
   lastAttemptAt DateTime?
   nextAttemptAt DateTime?
 
+  @@unique([clubId, requestId, targetId], map: "ClubLineDelivery_club_request_target_key")
   @@index([clubId, requestedAt])
   @@index([clubId, requestId])
   @@index([clubId, targetId, status])
@@ -775,21 +776,21 @@ model StorageDeletionJob {
   updatedAt DateTime @updatedAt
 
   clubId String?
-  club   Club?  @relation(fields: [clubId], references: [id], onDelete: SetNull)
+  club   Club?   @relation(fields: [clubId], references: [id], onDelete: SetNull)
 
   bucket      String
   storagePath String
 
   sourceType StorageDeletionSourceType
-  status     StorageDeletionStatus @default(PENDING)
+  status     StorageDeletionStatus     @default(PENDING)
 
   attemptCount  Int       @default(0)
   lastAttemptAt DateTime?
   nextAttemptAt DateTime?
   lastError     String?   @db.Text
 
-  claimedAt     DateTime?
-  claimToken    String?   @unique
+  claimedAt      DateTime?
+  claimToken     String?   @unique
   leaseExpiresAt DateTime?
 
   @@unique([bucket, storagePath])

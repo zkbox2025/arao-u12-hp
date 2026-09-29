@@ -1,4 +1,4 @@
-//domain/shared/date-time/club-date-time.ts
+//domain/shared/date-time/club-date-time.test.ts
 //クラブアプリ用日数関数のテストファイル
 
 
@@ -12,6 +12,7 @@ import {
   getClubMonthUtcRange,
   parseDateSearchParam,
   parseMonthSearchParam,
+  formatClubDateOnly,
 } from "./club-date-time";
 
 const TOKYO = "Asia/Tokyo";
@@ -118,4 +119,14 @@ describe("現地日時の変換と表示", () => {
       "2026年8月1日（土） 00:00",
     );
   });
+  it("UTC日時をクラブ現地の日付へ変換する", () => {
+  expect(
+    formatClubDateOnly(
+      new Date(
+        "2026-08-23T15:00:00.000Z",
+      ),
+      "Asia/Tokyo",
+    ),
+  ).toBe("2026-08-24");
+});
 });

@@ -48,7 +48,7 @@ export function getClubLoginDestination(
   if (availableMemberships.length === 1) {
     return `/club/${encodeURIComponent(
       availableMemberships[0].club.slug,
-    )}`;
+    )}/events`;
   }
 
   // 0件と複数件は選択画面へ

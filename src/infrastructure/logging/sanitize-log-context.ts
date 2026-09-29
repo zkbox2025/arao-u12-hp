@@ -1,8 +1,7 @@
 // src/infrastructure/logging/sanitize-log-context.ts
 // ログへ出力してよい項目だけをクリーニングして取り出す関数
 
-//エラー名のクリーニング
-//
+
 
 import "server-only";
 

@@ -6,6 +6,7 @@
 //クラブ現地の月・日の範囲をUTCへ変換する（DB保存のため）
 //フォームで入力された日時をUTCへ変換する（DB保存のため）
 //DBから取得した日時をクラブ現地時刻で表示する
+// DBのUTC日時を、クラブ現地のYYYY-MM-DDへ変換する
 
 import { TZDate } from "@date-fns/tz";
 
@@ -394,4 +395,52 @@ export function formatClubDateTime(
   }).formatToParts(date);
 
   return `${getPart(parts, "year")}年${getPart(parts, "month")}月${getPart(parts, "day")}日（${getPart(parts, "weekday")}） ${getPart(parts, "hour")}:${getPart(parts, "minute")}`;
+}
+
+
+// DBのUTC日時を、クラブ現地のYYYY-MM-DDへ変換する
+export function formatClubDateOnly(
+  date: Date,
+  timeZone: string,
+): string {
+  assertValidDate(//日時が正常かを検証する
+    date,
+    "date",
+  );
+
+  assertValidTimeZone(//タイムゾーンが正常かを検証する
+    timeZone,
+  );
+
+  return formatDateOnly(//数字の「年・月・日」をYYYY-MM-DD形式（文字列）にする関数
+    getCalendarDateInTimeZone(//UTCの日時をカレンダー上の数字の日付に変換する関数
+      date,
+      timeZone,
+    ),
+  );
+}
+
+//日時を日本時間の21:30のような表記にする関数
+export function formatClubTime(
+  date: Date,
+  timeZone: string,
+): string {
+  assertValidDate(date, "date");//正しい日付かのバリデーション
+  assertValidTimeZone(timeZone);//正しいタイムゾーンかのバリデーション
+
+  const parts =
+    new Intl.DateTimeFormat(
+      "en-GB-u-ca-gregory-nu-latn",//西暦アラビア数字に変換する
+      {
+        timeZone,
+        hour: "2-digit",//時を二桁
+        minute: "2-digit",//分を二桁
+        hourCycle: "h23",//00:00〜23:59 の24時間表記
+      },
+    ).formatToParts(date);//以上のようにパーツに分解
+
+  return `${getPart(
+    parts,
+    "hour",
+  )}:${getPart(parts, "minute")}`;//21:30のように組み立てる
 }

@@ -76,10 +76,21 @@ export function getClubEventRevalidationPaths(
 }
 
 //お知らせの再検証(revalidate)パスを生成する関数
+/**
+ * お知らせ更新後に再検証するパスを生成する。
+ *
+ * noticeIdがない場合は一覧だけ、
+ * noticeIdがある場合は一覧と詳細・編集ページを返す。
+ */
+// お知らせの再検証パスを生成する
 export function getClubNoticeRevalidationPaths(
   clubSlug: string,
   noticeId?: string,
 ): string[] {
+  /*
+   * getClubBasePath内で
+   * clubSlugの形式を検証する。
+   */
   const basePath =
     getClubBasePath(clubSlug);
 
@@ -88,8 +99,16 @@ export function getClubNoticeRevalidationPaths(
     `${basePath}/admin/notice`,
   ];
 
+  /*
+   * 空文字も不正値として検証するため、
+   * if (!noticeId)ではなく
+   * undefinedだけを判定する。
+   */
   if (noticeId !== undefined) {
-    assertId(noticeId, "noticeId");
+    assertId(
+      noticeId,
+      "noticeId",
+    );
 
     paths.push(
       `${basePath}/notice/${noticeId}`,
@@ -99,6 +118,7 @@ export function getClubNoticeRevalidationPaths(
 
   return paths;
 }
+
 
 //(オーナー用)メンバー管理・設定ページとマイページの再検証(revalidate)パスを生成する関数
 export function getClubMemberRevalidationPaths(

@@ -69,6 +69,17 @@ export function convertPrismaError(
           cause: error,
         },
       );
+
+  // CHECK制約・DB triggerによる制約違反
+  case "P2004":
+    return new DomainError(
+      "INVALID_REFERENCE",
+      "関連するデータの組み合わせを確認できません。",
+      {
+        cause: error,
+      },
+    );
+    
 //P2025の場合は、レコードがないという表示をする
     case "P2025":
       return new DomainError(

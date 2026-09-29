@@ -163,3 +163,74 @@ planType = PRO：入れない
 「npx @next/codemod@canary middleware-to-proxy .」
 
 ・Resendは開発者のアカウントひとつにしてクラブの個別アカウントは作らない。故にマルチテナント化したらARAO U-12のアカウントは消して、開発者のアカウントにARAO U-12のアカウントを作成すること！
+
+・マーブルジムのHPようにHPのトップに画面いっぱい（画面の下が少しはみ出るくらい）に写真を設けてやや少し引きになる
+動作にする（写真は３〜４枚くらい）。それに加えて、トップ見出しはしたからスッと上がってくる感じ、トップ写真は左右からフェードインするような動きを加えること
+
+・イベント作成時のトーストがないのでお知らせのように作成する
+
+・requestReconfirmationからshouldMarkAsUnreadへ変更
+
+・以下、イベントの新規作成・編集ページとそのアクション関数、そのフォームがないので作成する
+app/(club-app)/club/[clubSlug]/admin/events/new/page.tsx
+app/(club-app)/club/[clubSlug]/admin/events/new/actions.ts
+
+app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/page.tsx
+app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/actions.ts
+
+app/(club-app)/club/[clubSlug]/admin/events/new/EventCreateForm.ts
+app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/EventEditForm.ts
+
+◯練習変更なら練習変更を押すとテンプレが本文に入力される仕様にする
+
+
+◯Next.js 16.3以降ではretryへ変更する
+
+16.3になった瞬間、必ず現在のコードが壊れるとは限りません。ただし、unstable_retryは試験的APIなので、16.3以降へ更新した際は正式版のretryへ変更するのが適切です。
+
+Next.js公式ドキュメントでは、16.3.0からretryが正式化されています。
+
+変更は名前の置き換えだけです。
+
+現在の16.2.6：
+
+type ClubNoticeErrorProps = {
+  error: Error & {
+    digest?: string;
+  };
+
+  reset: () => void;
+  unstable_retry: () => void;
+};
+
+16.3以降：
+
+type ClubNoticeErrorProps = {
+  error: Error & {
+    digest?: string;
+  };
+
+  reset: () => void;
+  retry: () => void;
+};
+
+引数も変更します。
+
+export default function ClubNoticeError({
+  error,
+  retry,
+}: ClubNoticeErrorProps) {
+
+再試行処理も変更します。
+
+function handleRetry(): void {
+  startRetryTransition(() => {
+    retry();
+  });
+}
+
+管理者用も同じ変更です。それ以外のコードは変更不要です。
+
+◯未読お知らせ０件の場合は表示しないようにする
+
+◯お知らせ・イベント新規作成ページのPDF添付欄：このPDFを削除するにチェックを入れて保存ボタンを押しても画面遷移しない（新たなPDFを追加しないと削除されない）。新しいPDFを追加ボタンが一つずつしか追加できない。新しいPDFを追加するボタンにカーソルを乗せるまたはクリックすると表示が変わるようにする（クリックされたことがわかりにくいため）

@@ -29,7 +29,7 @@ function revalidatePaths(
   }
 }
 
-//イベントを更新(追加、編集、削除)した時のrevalidatePath実行関数
+//イベントを更新(追加、編集、削除、既読、メモ保存・削除)した時のrevalidatePath実行関数
 export function revalidateClubEventPaths(
   clubSlug: string,
   eventId?: string,

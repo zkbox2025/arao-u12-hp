@@ -3,25 +3,33 @@
 
 import "server-only";
 
-import { notFound, redirect } from "next/navigation";
+import {
+  notFound,
+  redirect,
+} from "next/navigation";
 
-import { prisma } from "@/src/infrastructure/prisma/client";
-import { createClient } from "@/src/infrastructure/supabase/server";
 import {
   isClubAdminRole,
 } from "@/domain/club/club-member-role";
+import {
+  prisma,
+} from "@/src/infrastructure/prisma/client";
+import {
+  createClient,
+} from "@/src/infrastructure/supabase/server";
 
 import type {
   ClubMemberRole,
   PlanType,
 } from "@/types/prisma";
 
-//返すデータの型
+// 認可成功時に返すデータ
 export type ClubAccessContext = {
   userId: string;
 
   club: {
     id: string;
+    name: string;
     slug: string;
     timezone: string;
     planType: PlanType;
@@ -33,43 +41,47 @@ export type ClubAccessContext = {
   };
 };
 
-
-
-
-
-//クラブ内のアクティブな特定のユーザーのメンバーシップやクラブ情報（プランタイプなど）を取得する関数
+/**
+ * ログイン情報からACTIVEなクラブMembershipとクラブ情報を取得する。
+ *
+ * 未ログインの場合はグローバルログイン画面へ移動する。
+ * ログイン済みでも対象クラブのACTIVE Membershipがない場合は
+ * notFoundにする。
+ */
 export async function requireActiveClubMembership(
   clubSlug: string,
 ): Promise<ClubAccessContext> {
-  const normalizedClubSlug = clubSlug.trim();
+  const normalizedClubSlug =
+    clubSlug.trim();
 
   if (!normalizedClubSlug) {
     notFound();
   }
 
-  const supabase = await createClient();
+  const supabase =
+    await createClient();
 
   const {
-    data: { user },
+    data: {
+      user,
+    },
     error,
   } = await supabase.auth.getUser();
 
   if (error || !user) {
-    redirect(
-      `/club/${encodeURIComponent(normalizedClubSlug)}/login`,
-    );
+    redirect("/club-login");
   }
 
   const membership =
     await prisma.clubMembership.findFirst({
       where: {
-        // Membership.userIdとAuth user.idを一致させる
+        // Auth user.idとMembership.userIdを一致させる
         userId: user.id,
 
-        // ACTIVEだけを許可する
+        // ACTIVEなMembershipだけを許可する
         status: "ACTIVE",
 
-        // URLのslugに対応するClubだけを対象にする
+        // URLのclubSlugに対応するクラブだけを対象にする
         club: {
           is: {
             slug: normalizedClubSlug,
@@ -84,6 +96,7 @@ export async function requireActiveClubMembership(
         club: {
           select: {
             id: true,
+            name: true,
             slug: true,
             timezone: true,
             planType: true,
@@ -92,6 +105,11 @@ export async function requireActiveClubMembership(
       },
     });
 
+  /*
+   * ログイン済みでも、
+   * URLで指定されたクラブのACTIVE Membershipがなければ
+   * クラブの存在を公開せずnotFoundにする。
+   */
   if (!membership) {
     notFound();
   }
@@ -101,9 +119,12 @@ export async function requireActiveClubMembership(
 
     club: {
       id: membership.club.id,
+      name: membership.club.name,
       slug: membership.club.slug,
-      timezone: membership.club.timezone,
-      planType: membership.club.planType,
+      timezone:
+        membership.club.timezone,
+      planType:
+        membership.club.planType,
     },
 
     membership: {
@@ -114,29 +135,41 @@ export async function requireActiveClubMembership(
 }
 
 /**
- * クラブアプリ管理者のMembershipを取得し、管理権限（OWNER / COACH / OFFICER）がなければnotFoundにする関数
+ * OWNER・COACH・OFFICERのいずれかであることを確認する。
  */
 export async function requireClubAdminMembership(
   clubSlug: string,
 ): Promise<ClubAccessContext> {
   const context =
-    await requireActiveClubMembership(clubSlug);
+    await requireActiveClubMembership(
+      clubSlug,
+    );
 
-  if (!isClubAdminRole(context.membership.role)) {//もし管理者ではない場合（Memberの場合）、notfoundにする
+  if (
+    !isClubAdminRole(
+      context.membership.role,
+    )
+  ) {
     notFound();
   }
 
-  return context;//データをそのまま返却する
+  return context;
 }
 
-//クラブオーナーであることを確認する関数
+/**
+ * OWNERであることを確認する。
+ */
 export async function requireClubOwner(
   clubSlug: string,
 ): Promise<ClubAccessContext> {
   const context =
-    await requireActiveClubMembership(clubSlug);
+    await requireActiveClubMembership(
+      clubSlug,
+    );
 
-  if (context.membership.role !== "OWNER") {
+  if (
+    context.membership.role !== "OWNER"
+  ) {
     notFound();
   }
 

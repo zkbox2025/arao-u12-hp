@@ -54,7 +54,7 @@ describe(
           memberships,
         ),
       ).toBe(
-        "/club/test-club-standard-1",
+        "/club/test-club-standard-1/events",
       );
     });
 
@@ -128,7 +128,7 @@ describe(
           memberships,
         ),
       ).toBe(
-        "/club/test-club-standard-1",
+        "/club/test-club-standard-1/events",
       );
     });
   },

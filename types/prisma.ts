@@ -1,6 +1,6 @@
 // types/prisma.ts
 // Prisma由来の型をアプリ内で使いやすく集約する
-//必要になったら随時追加すること（アプリは現在PlanType,ClubMemberRole,PlatformAdminRoleのみ追加済み）
+//必要になったら随時追加すること（アプリは現在PlanType,ClubMemberRole,PlatformAdminRole,ClubEventGenre,LineDeliveryStatusのみ追加済み）
 
 //DBのテーブル
 export type {
@@ -15,6 +15,27 @@ export type {
   MonthlyPracticePlan,
   Staff,
   StaffPageSetting,
+  AppUser,
+  Club,
+  ClubMembership,
+  Child,
+  ChildClubMembership,
+  ClubInvitation,
+  ClubEvent,
+  ClubEventAttachment,
+  ClubEventMemo,
+  ClubEventRead,
+  ClubNotice,
+  ClubNoticeAttachment,
+  ClubNoticeRead,
+  ClubLineSetting,
+  ClubLineTarget,
+  ClubLineRegistrationToken,
+  ClubLineDelivery,
+  ClubEmailSetting,
+  SupportReport,
+  PlatformAdmin,
+  StorageDeletionJob,
 } from "@prisma/client";
 
 
@@ -31,8 +52,18 @@ export type {
   FormSubmissionResult,
   Type as SessionType,
   ClubMemberRole,
+  ClubMembershipStatus,
   PlanType,
+  ClubEventGenre,
+  ClubNoticeGenre,
   PlatformAdminRole,
+  LineDeliveryStatus,
+  LineDeliveryContentType,
+  ClubInvitationStatus,
+  SupportReportCategory,
+  SupportReportStatus,
+  StorageDeletionSourceType,
+  StorageDeletionStatus,
 } from "@prisma/client";
 
 export type { ApplicationStatus as SessionApplicationStatus } from "@prisma/client";
