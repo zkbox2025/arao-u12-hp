@@ -61,3 +61,9 @@ api/cron/delete-old-security-logs
 ・Supabase Cronについて
 api/cron/club-line-deliveries
 api/cron/storage-deletions
+
+※ローカルのsupabase cronの立ち上げる場合のURL
+コマンド：npx next dev \
+  --hostname 0.0.0.0 \
+  --port 3000
+URL：http://host.docker.internal:3000/api/cron/club-line-deliveriesなど
