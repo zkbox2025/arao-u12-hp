@@ -1,16 +1,9 @@
+
 {
   "crons": [
     {
       "path": "/api/cron/delete-old-security-logs",
-      "schedule": "0 3 * * *"
-    },
-    {
-      "path": "/api/cron/club-line-deliveries",
-      "schedule": "*/5 * * * *"
-    },
-    {
-      "path": "/api/cron/storage-deletions",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 18 * * *"
     }
   ]
 }

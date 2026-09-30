@@ -54,3 +54,10 @@ npx dotenv-cli -e .env.local -- npx prisma migrate dev
 npx dotenv-cli -e .env.prod -- npx prisma migrate deploy
 
 ◯本番DBを変更前にバックアップをする
+
+◯cronについて
+・Vercel Hobby（無料版）の１枠（1日1回1時間以内の制限あり）
+api/cron/delete-old-security-logs
+・Supabase Cronについて
+api/cron/club-line-deliveries
+api/cron/storage-deletions

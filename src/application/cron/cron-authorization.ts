@@ -9,7 +9,7 @@ import {
 
 /**
  * 【追加】定期実行されるプログラム（Cronジョブ）からのリクエストが、本物（許可されたもの）かどうかを安全に確認する
- * Vercel Cronから送られる
+ * Vercel Cronと外部スケジューラ（supabase cron）から送られる
  * Authorization: Bearer <CRON_SECRET>
  * を検証する。
  */
