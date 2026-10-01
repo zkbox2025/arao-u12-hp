@@ -66,4 +66,5 @@ api/cron/storage-deletions
 コマンド：npx next dev \
   --hostname 0.0.0.0 \
   --port 3000
-URL：http://host.docker.internal:3000/api/cron/club-line-deliveriesなど
+URL：http://192.168.210.198:3000/api/cron/club-line-deliveriesなど
+ローカルではターミナルにクロンの200が表示される

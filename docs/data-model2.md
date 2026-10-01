@@ -235,5 +235,6 @@ function handleRetry(): void {
 
 ◯お知らせ・イベント新規作成ページのPDF添付欄：このPDFを削除するにチェックを入れて保存ボタンを押しても画面遷移しない（新たなPDFを追加しないと削除されない）。新しいPDFを追加ボタンが一つずつしか追加できない。新しいPDFを追加するボタンにカーソルを乗せるまたはクリックすると表示が変わるようにする（クリックされたことがわかりにくいため）
 
-⭐️マルチテナント化した場合、supabase cronのSupabase Vaultに登録されてあるclub_app_production_base_urlの値が、現在、ARAO CLUBのドメイン（https://本番の独自ドメイン）
+⭐️マルチテナント化した場合、本番のsupabase cronのSupabase Vaultに登録されてあるclub_app_production_base_urlの値が、現在、ARAO CLUBのドメイン（https://本番の独自ドメイン）
 になってるから、新しく取得した本丸のドメイン（HP＆アプリの自社サービスのドメイン）に書き換えること
+ちなみにローカルはhttp://192.168.210.198:3000

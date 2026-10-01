@@ -1,0 +1,1479 @@
+diff --git a/package.json b/package.json
+index 8420ded..f2ebc09 100644
+--- a/package.json
++++ b/package.json
+@@ -10,7 +10,7 @@
+     "typecheck": "tsc --noEmit",
+     "test": "vitest run",
+     "test:watch": "vitest",
+-    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts",
++    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts",
+     "prisma:validate": "prisma validate",
+     "env:validate": "node scripts/validate-env.mjs",
+     "predev": "npm run env:validate",
+diff --git a/src/infrastructure/prisma/repositories/club-line-setting-repository.ts b/src/infrastructure/prisma/repositories/club-line-setting-repository.ts
+new file mode 100644
+index 0000000..ab25b31
+--- /dev/null
++++ b/src/infrastructure/prisma/repositories/club-line-setting-repository.ts
+@@ -0,0 +1,447 @@
++// src/infrastructure/prisma/repositories/club-line-setting-repository.ts
++// OWNER用LINE設定・Webhook登録処理の永続化
++
++import "server-only";
++
++import type {
++  ClubLineTargetRole,
++} from "@/domain/club/line/line-target-form";
++
++import {
++  prisma,
++} from "@/src/infrastructure/prisma/client";
++
++function hasStoredValue(
++  value: string | null,
++): value is string {
++  return (
++    typeof value === "string" &&
++    value.trim().length > 0
++  );
++}
++
++/**
++ * OWNER画面へ表示するLINE設定一式を取得する。
++ * 暗号文・lineGroupId・lineSettingIdは返さない。
++ */
++export async function findClubLineSettingsForOwner(
++  input: {
++    clubId: string;
++    now?: Date;
++  },
++) {
++  const now =
++    input.now ?? new Date();
++
++  const setting =
++    await prisma
++      .clubLineSetting
++      .findUnique({
++        where: {
++          clubId:
++            input.clubId,
++        },
++
++        select: {
++          lineChannelId: true,
++          lineBotUserId: true,
++          lineChannelAccessTokenEncrypted:
++            true,
++          lineChannelSecretEncrypted:
++            true,
++          webhookKey: true,
++
++          targets: {
++            where: {
++              clubId:
++                input.clubId,
++            },
++
++            orderBy: [
++              {
++                createdAt:
++                  "asc",
++              },
++              {
++                id: "asc",
++              },
++            ],
++
++            select: {
++              id: true,
++              targetName: true,
++              targetRoles: true,
++              isEnabled: true,
++              createdAt: true,
++              updatedAt: true,
++            },
++          },
++
++          registrationTokens: {
++            where: {
++              clubId:
++                input.clubId,
++
++              usedAt: null,
++              expiresAt: {
++                gt: now,
++              },
++            },
++
++            orderBy: [
++              {
++                createdAt:
++                  "desc",
++              },
++              {
++                id: "desc",
++              },
++            ],
++
++            take: 1,
++
++            select: {
++              id: true,
++              createdAt: true,
++              expiresAt: true,
++            },
++          },
++        },
++      });
++
++  if (!setting) {
++    return null;
++  }
++
++  return {
++    isConnected:
++      hasStoredValue(
++        setting.lineChannelId,
++      ) &&
++      hasStoredValue(
++        setting.lineBotUserId,
++      ) &&
++      hasStoredValue(
++        setting
++          .lineChannelAccessTokenEncrypted,
++      ) &&
++      hasStoredValue(
++        setting
++          .lineChannelSecretEncrypted,
++      ) &&
++      hasStoredValue(
++        setting.webhookKey,
++      ),
++
++    targets:
++      setting.targets,
++
++    activeRegistrationToken:
++      setting
++        .registrationTokens[0] ??
++      null,
++  };
++}
++
++/**
++ * OWNERが所属クラブの通知先だけを更新する。
++ * lineSettingIdはクライアント入力として受け取らない。
++ */
++export async function updateClubLineTargetForOwner(
++  input: {
++    clubId: string;
++    targetId: string;
++    targetName: string;
++    targetRoles:
++      readonly ClubLineTargetRole[];
++    isEnabled: boolean;
++  },
++): Promise<boolean> {
++  const result =
++    await prisma
++      .clubLineTarget
++      .updateMany({
++        where: {
++          id: input.targetId,
++          clubId:
++            input.clubId,
++
++          lineSetting: {
++            is: {
++              clubId:
++                input.clubId,
++            },
++          },
++        },
++
++        data: {
++          targetName:
++            input.targetName,
++
++          targetRoles: [
++            ...input.targetRoles,
++          ],
++
++          isEnabled:
++            input.isEnabled,
++        },
++      });
++
++  return result.count === 1;
++}
++
++/**
++ * 新しい登録コード用token hashを保存する。
++ * 同じクラブ・LINE設定に残っている未使用tokenは先に失効させる。
++ */
++export async function replaceClubLineRegistrationToken(
++  input: {
++    clubId: string;
++    createdByMembershipId:
++      string;
++    tokenHash: string;
++    expiresAt: Date;
++    now: Date;
++  },
++) {
++  return prisma.$transaction(
++    async (transaction) => {
++      const setting =
++        await transaction
++          .clubLineSetting
++          .findUnique({
++            where: {
++              clubId:
++                input.clubId,
++            },
++
++            select: {
++              id: true,
++            },
++          });
++
++      if (!setting) {
++        return null;
++      }
++
++      await transaction
++        .clubLineRegistrationToken
++        .updateMany({
++          where: {
++            clubId:
++              input.clubId,
++
++            lineSettingId:
++              setting.id,
++
++            usedAt: null,
++          },
++
++          data: {
++            expiresAt:
++              input.now,
++          },
++        });
++
++      return transaction
++        .clubLineRegistrationToken
++        .create({
++          data: {
++            clubId:
++              input.clubId,
++
++            lineSettingId:
++              setting.id,
++
++            tokenHash:
++              input.tokenHash,
++
++            expiresAt:
++              input.expiresAt,
++
++            usedAt: null,
++
++            createdByMembershipId:
++              input
++                .createdByMembershipId,
++          },
++
++          select: {
++            id: true,
++            createdAt: true,
++            expiresAt: true,
++          },
++        });
++    },
++  );
++}
++
++/**
++ * webhookKeyから署名検証に必要な最小限の設定を取得する。
++ * 署名検証前にWebhook本文をクラブ判定へ使わない。
++ */
++export async function findClubLineSettingForWebhook(
++  input: {
++    webhookKey: string;
++  },
++) {
++  if (
++    !hasStoredValue(
++      input.webhookKey,
++    )
++  ) {
++    return null;
++  }
++
++  const setting =
++    await prisma
++      .clubLineSetting
++      .findUnique({
++        where: {
++          webhookKey:
++            input.webhookKey,
++        },
++
++        select: {
++          id: true,
++          clubId: true,
++          lineBotUserId: true,
++          lineChannelSecretEncrypted:
++            true,
++        },
++      });
++
++  if (
++    !setting ||
++    !hasStoredValue(
++      setting.lineBotUserId,
++    ) ||
++    !hasStoredValue(
++      setting
++        .lineChannelSecretEncrypted,
++    )
++  ) {
++    return null;
++  }
++
++  return {
++    id: setting.id,
++    clubId:
++      setting.clubId,
++    lineBotUserId:
++      setting.lineBotUserId,
++    lineChannelSecretEncrypted:
++      setting
++        .lineChannelSecretEncrypted,
++  };
++}
++
++/**
++ * 有効な登録tokenを一度だけ消費し、同じtransactionで通知先を登録する。
++ * 既存グループの再登録時は名前・roleを保持し、必ず無効へ戻す。
++ */
++export async function consumeClubLineRegistrationTokenAndUpsertTarget(
++  input: {
++    clubId: string;
++    lineSettingId: string;
++    tokenHash: string;
++    lineGroupId: string;
++    now: Date;
++  },
++) {
++  if (
++    !hasStoredValue(
++      input.clubId,
++    ) ||
++    !hasStoredValue(
++      input.lineSettingId,
++    ) ||
++    !hasStoredValue(
++      input.tokenHash,
++    ) ||
++    !hasStoredValue(
++      input.lineGroupId,
++    )
++  ) {
++    return null;
++  }
++
++  return prisma.$transaction(
++    async (transaction) => {
++      const consumed =
++        await transaction
++          .clubLineRegistrationToken
++          .updateMany({
++            where: {
++              clubId:
++                input.clubId,
++
++              lineSettingId:
++                input.lineSettingId,
++
++              tokenHash:
++                input.tokenHash,
++
++              usedAt: null,
++
++              expiresAt: {
++                gt: input.now,
++              },
++            },
++
++            data: {
++              usedAt:
++                input.now,
++            },
++          });
++
++      if (consumed.count !== 1) {
++        return null;
++      }
++
++      return transaction
++        .clubLineTarget
++        .upsert({
++          where: {
++            lineSettingId_lineGroupId:
++              {
++                lineSettingId:
++                  input
++                    .lineSettingId,
++
++                lineGroupId:
++                  input.lineGroupId,
++              },
++          },
++
++          create: {
++            clubId:
++              input.clubId,
++
++            lineSettingId:
++              input.lineSettingId,
++
++            lineGroupId:
++              input.lineGroupId,
++
++            targetName: null,
++            targetRoles: [],
++            isEnabled: false,
++          },
++
++          update: {
++            isEnabled: false,
++          },
++
++          select: {
++            id: true,
++            targetName: true,
++            targetRoles: true,
++            isEnabled: true,
++            createdAt: true,
++            updatedAt: true,
++          },
++        });
++    },
++  );
++}
+diff --git a/tests/club-line-setting.integration.test.ts b/tests/club-line-setting.integration.test.ts
+new file mode 100644
+index 0000000..f1e7657
+--- /dev/null
++++ b/tests/club-line-setting.integration.test.ts
+@@ -0,0 +1,1007 @@
++// tests/club-line-setting.integration.test.ts
++// LINE設定Repositoryのクラブ境界・token一回性・再登録整合性
++
++import {
++  randomUUID,
++} from "node:crypto";
++
++import {
++  afterAll,
++  beforeAll,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
++
++/*
++ * server-onlyをVitestで読み込めるようにする。
++ */
++vi.mock(
++  "server-only",
++  () => ({}),
++);
++
++import {
++  consumeClubLineRegistrationTokenAndUpsertTarget,
++  findClubLineSettingForWebhook,
++  findClubLineSettingsForOwner,
++  replaceClubLineRegistrationToken,
++  updateClubLineTargetForOwner,
++} from "@/src/infrastructure/prisma/repositories/club-line-setting-repository";
++
++import {
++  findEnabledClubLineTargets,
++} from "@/src/infrastructure/prisma/repositories/club-line-target-repository";
++
++import {
++  prisma,
++} from "@/src/infrastructure/prisma/client";
++
++const describeDatabase =
++  process.env
++    .RUN_DB_INTEGRATION_TESTS ===
++  "1"
++    ? describe
++    : describe.skip;
++
++describeDatabase(
++  "ClubLineSetting Repository",
++  () => {
++    const clubAId =
++      randomUUID();
++
++    const clubBId =
++      randomUUID();
++
++    const userAId =
++      randomUUID();
++
++    const userBId =
++      randomUUID();
++
++    const membershipAId =
++      randomUUID();
++
++    const membershipBId =
++      randomUUID();
++
++    const lineSettingAId =
++      randomUUID();
++
++    const lineSettingBId =
++      randomUUID();
++
++    const targetAId =
++      randomUUID();
++
++    const targetBId =
++      randomUUID();
++
++    const webhookKeyA =
++      randomUUID();
++
++    const webhookKeyB =
++      randomUUID();
++
++    const encryptedAccessTokenA =
++      `encrypted-access-${randomUUID()}`;
++
++    const encryptedChannelSecretA =
++      `encrypted-secret-${randomUUID()}`;
++
++    function buildTokenHash(
++      label: string,
++    ): string {
++      return `${label}-${randomUUID()}`;
++    }
++
++    function buildLineGroupId(
++      label: string,
++    ): string {
++      return `${label}-${randomUUID()}`;
++    }
++
++    async function createRegistrationToken(
++      input: {
++        clubId: string;
++        lineSettingId: string;
++        membershipId: string;
++        tokenHash?: string;
++        expiresAt: Date;
++        usedAt?: Date | null;
++      },
++    ) {
++      const tokenHash =
++        input.tokenHash ??
++        buildTokenHash(
++          "token",
++        );
++
++      const token =
++        await prisma
++          .clubLineRegistrationToken
++          .create({
++            data: {
++              clubId:
++                input.clubId,
++
++              lineSettingId:
++                input.lineSettingId,
++
++              tokenHash,
++
++              expiresAt:
++                input.expiresAt,
++
++              usedAt:
++                input.usedAt ??
++                null,
++
++              createdByMembershipId:
++                input.membershipId,
++            },
++          });
++
++      return token;
++    }
++
++    beforeAll(
++      async () => {
++        await prisma
++          .appUser
++          .createMany({
++            data: [
++              {
++                id: userAId,
++                email:
++                  `${userAId}@example.test`,
++              },
++              {
++                id: userBId,
++                email:
++                  `${userBId}@example.test`,
++              },
++            ],
++          });
++
++        await prisma
++          .club
++          .createMany({
++            data: [
++              {
++                id: clubAId,
++                name:
++                  "F03 Club A",
++                slug:
++                  `f03-a-${clubAId}`,
++              },
++              {
++                id: clubBId,
++                name:
++                  "F03 Club B",
++                slug:
++                  `f03-b-${clubBId}`,
++              },
++            ],
++          });
++
++        await prisma
++          .clubMembership
++          .createMany({
++            data: [
++              {
++                id:
++                  membershipAId,
++                clubId:
++                  clubAId,
++                userId:
++                  userAId,
++                role: "OWNER",
++                status: "ACTIVE",
++              },
++              {
++                id:
++                  membershipBId,
++                clubId:
++                  clubBId,
++                userId:
++                  userBId,
++                role: "OWNER",
++                status: "ACTIVE",
++              },
++            ],
++          });
++
++        await prisma
++          .clubLineSetting
++          .createMany({
++            data: [
++              {
++                id:
++                  lineSettingAId,
++                clubId:
++                  clubAId,
++                lineChannelId:
++                  "channel-a",
++                lineBotUserId:
++                  "bot-a",
++                lineChannelAccessTokenEncrypted:
++                  encryptedAccessTokenA,
++                lineChannelSecretEncrypted:
++                  encryptedChannelSecretA,
++                webhookKey:
++                  webhookKeyA,
++              },
++              {
++                id:
++                  lineSettingBId,
++                clubId:
++                  clubBId,
++                lineChannelId:
++                  "channel-b",
++                lineBotUserId:
++                  "bot-b",
++                lineChannelAccessTokenEncrypted:
++                  `encrypted-access-${randomUUID()}`,
++                lineChannelSecretEncrypted:
++                  `encrypted-secret-${randomUUID()}`,
++                webhookKey:
++                  webhookKeyB,
++              },
++            ],
++          });
++
++        await prisma
++          .clubLineTarget
++          .createMany({
++            data: [
++              {
++                id: targetAId,
++                clubId:
++                  clubAId,
++                lineSettingId:
++                  lineSettingAId,
++                targetName:
++                  "Club A Target",
++                lineGroupId:
++                  buildLineGroupId(
++                    "group-a",
++                  ),
++                targetRoles: [
++                  "MEMBER",
++                ],
++                isEnabled: true,
++              },
++              {
++                id: targetBId,
++                clubId:
++                  clubBId,
++                lineSettingId:
++                  lineSettingBId,
++                targetName:
++                  "Club B Target",
++                lineGroupId:
++                  buildLineGroupId(
++                    "group-b",
++                  ),
++                targetRoles: [
++                  "COACH",
++                ],
++                isEnabled: true,
++              },
++            ],
++          });
++      },
++    );
++
++    afterAll(
++      async () => {
++        await prisma.club.deleteMany({
++          where: {
++            id: {
++              in: [
++                clubAId,
++                clubBId,
++              ],
++            },
++          },
++        });
++
++        await prisma
++          .appUser
++          .deleteMany({
++            where: {
++              id: {
++                in: [
++                  userAId,
++                  userBId,
++                ],
++              },
++            },
++          });
++
++        await prisma.$disconnect();
++      },
++    );
++
++    it(
++      "OWNER画面用取得結果へ暗号文・lineGroupId・lineSettingIdを返さない",
++      async () => {
++        const result =
++          await findClubLineSettingsForOwner({
++            clubId: clubAId,
++            now: new Date(),
++          });
++
++        expect(result).not.toBeNull();
++
++        expect(
++          result?.isConnected,
++        ).toBe(true);
++
++        expect(
++          result?.targets,
++        ).toEqual(
++          expect.arrayContaining([
++            expect.objectContaining({
++              id: targetAId,
++              targetName:
++                "Club A Target",
++              isEnabled: true,
++            }),
++          ]),
++        );
++
++        const serialized =
++          JSON.stringify(result);
++
++        expect(serialized).not.toContain(
++          encryptedAccessTokenA,
++        );
++
++        expect(serialized).not.toContain(
++          encryptedChannelSecretA,
++        );
++
++        expect(serialized).not.toContain(
++          "lineGroupId",
++        );
++
++        expect(serialized).not.toContain(
++          "lineSettingId",
++        );
++      },
++    );
++
++    it(
++      "同じクラブのTargetを更新できる",
++      async () => {
++        const targetId =
++          randomUUID();
++
++        await prisma
++          .clubLineTarget
++          .create({
++            data: {
++              id: targetId,
++              clubId:
++                clubAId,
++              lineSettingId:
++                lineSettingAId,
++              targetName:
++                "更新前",
++              lineGroupId:
++                buildLineGroupId(
++                  "update-success",
++                ),
++              targetRoles: [
++                "MEMBER",
++              ],
++              isEnabled: false,
++            },
++          });
++
++        const updated =
++          await updateClubLineTargetForOwner({
++            clubId: clubAId,
++            targetId,
++            targetName:
++              "更新後",
++            targetRoles: [
++              "COACH",
++              "MEMBER",
++            ],
++            isEnabled: true,
++          });
++
++        expect(updated).toBe(true);
++
++        await expect(
++          prisma.clubLineTarget.findUnique({
++            where: {
++              id: targetId,
++            },
++            select: {
++              targetName: true,
++              targetRoles: true,
++              isEnabled: true,
++            },
++          }),
++        ).resolves.toEqual({
++          targetName: "更新後",
++          targetRoles: [
++            "COACH",
++            "MEMBER",
++          ],
++          isEnabled: true,
++        });
++      },
++    );
++
++    it(
++      "別クラブのTargetを更新できない",
++      async () => {
++        const updated =
++          await updateClubLineTargetForOwner({
++            clubId: clubAId,
++            targetId: targetBId,
++            targetName:
++              "不正な更新",
++            targetRoles: [
++              "MEMBER",
++            ],
++            isEnabled: false,
++          });
++
++        expect(updated).toBe(false);
++
++        await expect(
++          prisma.clubLineTarget.findUnique({
++            where: {
++              id: targetBId,
++            },
++            select: {
++              targetName: true,
++              targetRoles: true,
++              isEnabled: true,
++            },
++          }),
++        ).resolves.toEqual({
++          targetName:
++            "Club B Target",
++          targetRoles: [
++            "COACH",
++          ],
++          isEnabled: true,
++        });
++      },
++    );
++
++    it(
++      "再発行時に既存の未使用tokenを失効させる",
++      async () => {
++        const now =
++          new Date();
++
++        const oldToken =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++          });
++
++        const newTokenHash =
++          buildTokenHash(
++            "replacement",
++          );
++
++        const newExpiresAt =
++          new Date(
++            now.getTime() +
++              600_000,
++          );
++
++        const created =
++          await replaceClubLineRegistrationToken({
++            clubId: clubAId,
++            createdByMembershipId:
++              membershipAId,
++            tokenHash:
++              newTokenHash,
++            expiresAt:
++              newExpiresAt,
++            now,
++          });
++
++        expect(created).not.toBeNull();
++        expect(created).not.toHaveProperty(
++          "tokenHash",
++        );
++
++        await expect(
++          prisma
++            .clubLineRegistrationToken
++            .findUnique({
++              where: {
++                id: oldToken.id,
++              },
++              select: {
++                expiresAt: true,
++                usedAt: true,
++              },
++            }),
++        ).resolves.toEqual({
++          expiresAt: now,
++          usedAt: null,
++        });
++
++        await expect(
++          prisma
++            .clubLineRegistrationToken
++            .findUnique({
++              where: {
++                tokenHash:
++                  newTokenHash,
++              },
++              select: {
++                clubId: true,
++                lineSettingId: true,
++                createdByMembershipId:
++                  true,
++                expiresAt: true,
++                usedAt: true,
++              },
++            }),
++        ).resolves.toEqual({
++          clubId: clubAId,
++          lineSettingId:
++            lineSettingAId,
++          createdByMembershipId:
++            membershipAId,
++          expiresAt:
++            newExpiresAt,
++          usedAt: null,
++        });
++      },
++    );
++
++    it(
++      "webhookKeyから署名検証に必要な最小限の設定だけを取得する",
++      async () => {
++        const result =
++          await findClubLineSettingForWebhook({
++            webhookKey:
++              webhookKeyA,
++          });
++
++        expect(result).toEqual({
++          id: lineSettingAId,
++          clubId: clubAId,
++          lineBotUserId:
++            "bot-a",
++          lineChannelSecretEncrypted:
++            encryptedChannelSecretA,
++        });
++
++        expect(result).not.toHaveProperty(
++          "lineChannelAccessTokenEncrypted",
++        );
++
++        await expect(
++          findClubLineSettingForWebhook({
++            webhookKey:
++              randomUUID(),
++          }),
++        ).resolves.toBeNull();
++      },
++    );
++
++    it(
++      "別クラブのtokenを使えない",
++      async () => {
++        const now =
++          new Date();
++
++        const token =
++          await createRegistrationToken({
++            clubId: clubBId,
++            lineSettingId:
++              lineSettingBId,
++            membershipId:
++              membershipBId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++          });
++
++        const result =
++          await consumeClubLineRegistrationTokenAndUpsertTarget({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            tokenHash:
++              token.tokenHash,
++            lineGroupId:
++              buildLineGroupId(
++                "cross-club",
++              ),
++            now,
++          });
++
++        expect(result).toBeNull();
++
++        await expect(
++          prisma
++            .clubLineRegistrationToken
++            .findUnique({
++              where: {
++                id: token.id,
++              },
++              select: {
++                usedAt: true,
++              },
++            }),
++        ).resolves.toEqual({
++          usedAt: null,
++        });
++      },
++    );
++
++    it(
++      "別のlineSettingIdとtokenを混ぜられない",
++      async () => {
++        const now =
++          new Date();
++
++        const token =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++          });
++
++        const result =
++          await consumeClubLineRegistrationTokenAndUpsertTarget({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingBId,
++            tokenHash:
++              token.tokenHash,
++            lineGroupId:
++              buildLineGroupId(
++                "mixed-setting",
++              ),
++            now,
++          });
++
++        expect(result).toBeNull();
++
++        await expect(
++          prisma
++            .clubLineRegistrationToken
++            .findUnique({
++              where: {
++                id: token.id,
++              },
++              select: {
++                usedAt: true,
++              },
++            }),
++        ).resolves.toEqual({
++          usedAt: null,
++        });
++      },
++    );
++
++    it(
++      "期限切れ・使用済みtokenを拒否する",
++      async () => {
++        const now =
++          new Date();
++
++        const expiredToken =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() -
++                  1,
++              ),
++          });
++
++        const usedToken =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++            usedAt:
++              new Date(
++                now.getTime() -
++                  1_000,
++              ),
++          });
++
++        await expect(
++          consumeClubLineRegistrationTokenAndUpsertTarget({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            tokenHash:
++              expiredToken
++                .tokenHash,
++            lineGroupId:
++              buildLineGroupId(
++                "expired",
++              ),
++            now,
++          }),
++        ).resolves.toBeNull();
++
++        await expect(
++          consumeClubLineRegistrationTokenAndUpsertTarget({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            tokenHash:
++              usedToken.tokenHash,
++            lineGroupId:
++              buildLineGroupId(
++                "used",
++              ),
++            now,
++          }),
++        ).resolves.toBeNull();
++      },
++    );
++
++    it(
++      "同じtokenを並列消費しても1件だけ成功する",
++      async () => {
++        const now =
++          new Date();
++
++        const token =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++          });
++
++        const lineGroupId =
++          buildLineGroupId(
++            "parallel",
++          );
++
++        const results =
++          await Promise.all([
++            consumeClubLineRegistrationTokenAndUpsertTarget({
++              clubId: clubAId,
++              lineSettingId:
++                lineSettingAId,
++              tokenHash:
++                token.tokenHash,
++              lineGroupId,
++              now,
++            }),
++            consumeClubLineRegistrationTokenAndUpsertTarget({
++              clubId: clubAId,
++              lineSettingId:
++                lineSettingAId,
++              tokenHash:
++                token.tokenHash,
++              lineGroupId,
++              now,
++            }),
++          ]);
++
++        expect(
++          results.filter(
++            (result) =>
++              result !== null,
++          ),
++        ).toHaveLength(1);
++
++        await expect(
++          prisma
++            .clubLineRegistrationToken
++            .findUnique({
++              where: {
++                id: token.id,
++              },
++              select: {
++                usedAt: true,
++              },
++            }),
++        ).resolves.toEqual({
++          usedAt: now,
++        });
++
++        await expect(
++          prisma.clubLineTarget.count({
++            where: {
++              clubId: clubAId,
++              lineSettingId:
++                lineSettingAId,
++              lineGroupId,
++            },
++          }),
++        ).resolves.toBe(1);
++      },
++    );
++
++    it(
++      "同じグループの再登録で重複せず既存名・roleを保持して無効へ戻す",
++      async () => {
++        const now =
++          new Date();
++
++        const lineGroupId =
++          buildLineGroupId(
++            "reregister",
++          );
++
++        const existingTarget =
++          await prisma
++            .clubLineTarget
++            .create({
++              data: {
++                clubId: clubAId,
++                lineSettingId:
++                  lineSettingAId,
++                targetName:
++                  "既存グループ名",
++                lineGroupId,
++                targetRoles: [
++                  "COACH",
++                  "MEMBER",
++                ],
++                isEnabled: true,
++              },
++            });
++
++        const token =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++          });
++
++        const result =
++          await consumeClubLineRegistrationTokenAndUpsertTarget({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            tokenHash:
++              token.tokenHash,
++            lineGroupId,
++            now,
++          });
++
++        expect(result).toEqual(
++          expect.objectContaining({
++            id:
++              existingTarget.id,
++            targetName:
++              "既存グループ名",
++            targetRoles: [
++              "COACH",
++              "MEMBER",
++            ],
++            isEnabled: false,
++          }),
++        );
++
++        await expect(
++          prisma.clubLineTarget.count({
++            where: {
++              lineSettingId:
++                lineSettingAId,
++              lineGroupId,
++            },
++          }),
++        ).resolves.toBe(1);
++      },
++    );
++
++    it(
++      "新規登録直後は必ず無効で既存LINE送信対象に出ない",
++      async () => {
++        const now =
++          new Date();
++
++        const token =
++          await createRegistrationToken({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            membershipId:
++              membershipAId,
++            expiresAt:
++              new Date(
++                now.getTime() +
++                  600_000,
++              ),
++          });
++
++        const result =
++          await consumeClubLineRegistrationTokenAndUpsertTarget({
++            clubId: clubAId,
++            lineSettingId:
++              lineSettingAId,
++            tokenHash:
++              token.tokenHash,
++            lineGroupId:
++              buildLineGroupId(
++                "new-target",
++              ),
++            now,
++          });
++
++        expect(result).toEqual(
++          expect.objectContaining({
++            targetName: null,
++            targetRoles: [],
++            isEnabled: false,
++          }),
++        );
++
++        if (!result) {
++          throw new Error(
++            "LINE通知先が作成されませんでした。",
++          );
++        }
++
++        await expect(
++          findEnabledClubLineTargets({
++            clubId: clubAId,
++            targetIds: [
++              result.id,
++            ],
++          }),
++        ).resolves.toEqual([]);
++      },
++    );
++  },
++);
