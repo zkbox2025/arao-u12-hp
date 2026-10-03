@@ -45,6 +45,13 @@ function shouldHideFooter(
   const noticeAdminPath =
     `${basePath}/admin/notice`;
 
+  /*
+   * LINE通知設定は複数の編集フォームを含むため、
+   * 新規・編集ページと同様に固定フッターを隠す。
+   */
+  const lineSettingsPath =
+    `${basePath}/admin/settings/line`;
+
   const isEventNew =
     pathname ===
     `${eventAdminPath}/new`;
@@ -69,11 +76,16 @@ function shouldHideFooter(
       "/edit",
     );
 
+  const isLineSettings =
+    pathname ===
+    lineSettingsPath;
+
   return (
     isEventNew ||
     isEventEdit ||
     isNoticeNew ||
-    isNoticeEdit
+    isNoticeEdit ||
+    isLineSettings
   );
 }
 

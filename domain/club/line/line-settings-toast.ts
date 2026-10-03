@@ -1,5 +1,6 @@
 // domain/club/line/line-settings-toast.ts
-// LINE通知設定ページのURL識別子を固定メッセージへ変換する
+// LINE通知設定ページのURL識別子（line-settings-saved）を
+// 固定メッセージ（LINE通知設定を保存しました）へ変換する
 
 export type ClubLineSettingsToastCode =
   "line-settings-saved";

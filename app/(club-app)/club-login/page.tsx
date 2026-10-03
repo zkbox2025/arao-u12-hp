@@ -11,7 +11,7 @@ import {
   getClubLoginDestination,//１件のクラブに所属している会員は、トップページに遷移して、それ以外はクラブ選択画面に遷移する関数
 } from "@/domain/club/club-login-destination";
 import {
-  createInitialActionState,
+  createInitialActionState,//新規登録画面はまっさらで編集画面はDBから取得した既存のデータ（value）が入る
 } from "@/domain/shared/action-state";//アクションステイトの初期値を作成する。新規登録画面はまっさら。
 import {
   findActiveClubMemberships,//ユーザーのアクティブなクラブメンバーシップとクラブ情報を取得する関数

@@ -559,7 +559,7 @@ model ClubLineSetting {
   club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
 
   lineChannelId                   String? //LINE Developers上のチャネルID
-  lineBotUserId                   String? //Webhook本文のdestinationとクラブ設定を照合するためのBotユーザーID
+  lineBotUserId                   String? //Webhook本文のdestinationとクラブ設定を照合するためのライン公式アカウントのユーザーID
   lineChannelAccessTokenEncrypted String? @db.Text //LINEへ通知を送信する際に使う暗号化済みトークン
   lineChannelSecretEncrypted      String? @db.Text //LINEから届いたWebhookの署名検証に使う暗号化済み秘密鍵
 

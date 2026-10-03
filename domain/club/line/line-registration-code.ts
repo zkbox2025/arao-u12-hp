@@ -2,7 +2,7 @@
 // LINEグループ登録コードの形式と有効期限に関する純粋なルール
 
 import type {
-  ActionState,
+  ActionState,//フォーム送信後のステイト
 } from "@/domain/shared/action-state";
 
 export const
@@ -18,21 +18,23 @@ const SECURE_TOKEN_LENGTH = 43;
 const SECURE_TOKEN_PATTERN =
   /^[A-Za-z0-9_-]+$/;
 
-export type ClubLineRegistrationCodeFormValues =
+export type ClubLineRegistrationCodeFormValues =//ユーザーが入力する項目は一つもないことの宣言
   Record<never, never>;
 
 export type ClubLineRegistrationCodeActionData = {
-  registrationCode: string;
-  expiresAt: string;
+  registrationCode: string;//通知先グループを追加する際の登録コード
+  expiresAt: string;//登録コードの有効期限
 };
 
+//ライン通知先アクションステイトの型（入力・エラー・戻り値）
 export type ClubLineRegistrationCodeActionState =
   ActionState<
-    ClubLineRegistrationCodeFormValues,
-    never,
-    ClubLineRegistrationCodeActionData
+    ClubLineRegistrationCodeFormValues,//入力：ユーザーが入力する項目は一つもないことの宣言
+    never,//エラー：今回はなし
+    ClubLineRegistrationCodeActionData//成功した際に返ってくるデータ：通知先グループを追加する際の登録コードとその有効期限
   >;
 
+  //トークンの長さとパターンが適切かを検証する関数（trueかfalseか）
 function isSecureToken(
   value: string,
 ): boolean {
@@ -69,9 +71,9 @@ export function buildClubLineRegistrationCode(
  * 前後の空白、改行、説明文を含むメッセージは受け付けない。
  */
 export function parseClubLineRegistrationCode(
-  value: unknown,
+  value: unknown,//文字列かわからないのでunknown(その代わり最初に文字列チェックを行うこと)
 ): string | null {
-  if (
+  if (//メッセージが文字列ではなかったり、CLUB-LINE-から始まらない場合はnullを返す
     typeof value !== "string" ||
     !value.startsWith(
       CLUB_LINE_REGISTRATION_CODE_PREFIX,
@@ -80,11 +82,13 @@ export function parseClubLineRegistrationCode(
     return null;
   }
 
+  //CLUB-LINE-を除いて純粋な生のトークンにする
   const rawToken =
     value.slice(
       CLUB_LINE_REGISTRATION_CODE_PREFIX.length,
     );
 
+    //長さとパターンが適切か測る関数にかける
   if (!isSecureToken(rawToken)) {
     return null;
   }
@@ -102,7 +106,7 @@ export function buildClubLineRegistrationCodeExpiresAt(
     now.getTime();
 
   if (
-    Number.isNaN(timestamp)
+    Number.isNaN(timestamp)//NaN とは Not a Number（数値ではない）:無理な計算をした結果、NaNになっていないか確認する
   ) {
     throw new RangeError(
       "登録コードの発行日時が正しくありません。",

@@ -2,7 +2,7 @@
 //パスワード再設定申請ページ
 
 import {
-  createInitialActionState,
+  createInitialActionState,//新規登録画面はまっさらで編集画面はDBから取得した既存のデータ（value）が入る
 } from "@/domain/shared/action-state";//初期値(state)を作成する関数
 
 import {
@@ -23,7 +23,7 @@ export const dynamic =//キャッシュ（前回のを保存）せずにアク�
 export default function ForgotPasswordPage() {
   const initialState:
     ForgotPasswordActionState =
-      createInitialActionState<ForgotPasswordValues>(
+      createInitialActionState<ForgotPasswordValues>(//新規登録画面はまっさらで編集画面はDBから取得した既存のデータ（value）が入る
         {
           email: "",
         },

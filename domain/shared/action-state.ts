@@ -28,7 +28,7 @@ export type ActionState<
 };
 
 //初期値を作成する
-//新規登録画面はまっさらで編集画面はDBから取得した既存のデータが入る
+//新規登録画面はまっさらで編集画面はDBから取得した既存のデータ（value）が入る
 export function createInitialActionState<
   TValues,
 >(

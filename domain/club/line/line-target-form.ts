@@ -2,16 +2,16 @@
 // LINE通知先編集フォームの値構築・初期値生成・バリデーション
 
 import {
-  CLUB_MEMBER_ROLE_LABELS,
+  CLUB_MEMBER_ROLE_LABELS,//すべての役割のラベル
 } from "@/domain/club/club-member-role";
 
 import type {
-  ActionState,
-  FieldErrors,
+  ActionState,//フォーム送信後のステイト
+  FieldErrors,//フォームの入力項目ごとのエラーメッセージを格納する型
 } from "@/domain/shared/action-state";
 
 import type {
-  ClubMemberRole,
+  ClubMemberRole,//"OWNER" | "COACH" | "OFFICER" | "MEMBER"
 } from "@/types/prisma";
 
 export const
@@ -39,16 +39,18 @@ export const CLUB_LINE_TARGET_ROLE_OPTIONS = [
       CLUB_MEMBER_ROLE_LABELS.MEMBER,
   },
 ] as const satisfies ReadonlyArray<{
-  value: Exclude<
+  value: Exclude<//オーナーを除外しているかの検証
     ClubMemberRole,
     "OWNER"
   >;
   label: string;
 }>;
 
+//バリューと番号のみを抜き出して型を作る
 export type ClubLineTargetRole =
   (typeof CLUB_LINE_TARGET_ROLE_OPTIONS)[number]["value"];
 
+  //オーナー以外の役割の value（"COACH", "OFFICER", "MEMBER"）だけを抜き出して、綺麗に並べたセット（集合）を作っている
 const CLUB_LINE_TARGET_ROLES =
   new Set<string>(
     CLUB_LINE_TARGET_ROLE_OPTIONS.map(
@@ -56,30 +58,35 @@ const CLUB_LINE_TARGET_ROLES =
     ),
   );
 
+  //ライン通知先フォームの値
 export type ClubLineTargetFormValues = {
   targetName: string;
   targetRoles: string[];
   isEnabled: boolean;
 };
 
+//Extract<対象の型, 残したい型> という形でフォームバリューの項目名リストの中から文字データを残すという意味
 export type ClubLineTargetFormField =
   Extract<
-    keyof ClubLineTargetFormValues,
-    string
+    keyof ClubLineTargetFormValues,//項目名のリストを作成する
+    string//文字データであるもののみを抜き出す
   >;
 
+  //ライン通知先変更フォームの入力値の型
 export type ValidClubLineTargetInput = {
   targetName: string;
   targetRoles: ClubLineTargetRole[];
   isEnabled: boolean;
 };
 
+//ライン通知先アクションのステイト
 export type ClubLineTargetActionState =
   ActionState<
-    ClubLineTargetFormValues,
-    ClubLineTargetFormField
+    ClubLineTargetFormValues,////ライン通知先フォームの値
+    ClubLineTargetFormField//ライン通知先フォームの値の項目名のリスト
   >;
 
+  //DBの通知先を編集フォームの初期値へ変換する関数の引数の型
 type BuildClubLineTargetInitialValuesInput = {
   targetName: string | null;
   targetRoles:
@@ -87,6 +94,7 @@ type BuildClubLineTargetInitialValuesInput = {
   isEnabled: boolean;
 };
 
+//フォームデータから名前の入力値を取得して文字列であればそのまま。ファイルなど文字列でなければ空欄にする関数
 function getString(
   formData: FormData,
   name: string,
@@ -99,9 +107,10 @@ function getString(
     : "";
 }
 
+//オーナー以外のターゲットロールに含んでいるかの検証関数
 function isClubLineTargetRole(
   value: string,
-): value is ClubLineTargetRole {
+): value is ClubLineTargetRole {//通知対象のバリューと番号のみを抜き出して型を作る
   return CLUB_LINE_TARGET_ROLES.has(
     value,
   );
@@ -115,7 +124,7 @@ export function buildClubLineTargetFormValues(
 ): ClubLineTargetFormValues {
   return {
     targetName:
-      getString(
+      getString(//フォームデータから名前の入力値を取得して文字列であればそのまま。ファイルなど文字列でなければ空欄にする関数
         formData,
         "targetName",
       ).trim(),
@@ -131,12 +140,12 @@ export function buildClubLineTargetFormValues(
 
     isEnabled:
       formData.get("isEnabled") ===
-      "on",
+      "on",//オンの時はオンを返してオフの時はnullを返す
   };
 }
 
 /**
- * DBの通知先を編集フォームの初期値へ変換する。
+ * DBの通知先を編集フォームの初期値へ変換する関数
  */
 export function buildClubLineTargetInitialValues(
   target:
@@ -169,7 +178,7 @@ export function validateClubLineTargetFormValues(
   | {
       success: false;
       fieldErrors:
-        FieldErrors<ClubLineTargetFormField>;
+        FieldErrors<ClubLineTargetFormField>;//Extract<対象の型, 残したい型> という形でフォームバリューの項目名リストの中から文字データを残す
     } {
   const fieldErrors:
     FieldErrors<ClubLineTargetFormField> =
@@ -194,7 +203,7 @@ export function validateClubLineTargetFormValues(
   if (
     values.targetRoles.some(
       (role) =>
-        !isClubLineTargetRole(
+        !isClubLineTargetRole(//オーナー以外のターゲットロールに含んでいるかの検証関数
           role,
         ),
     )
@@ -226,12 +235,12 @@ export function validateClubLineTargetFormValues(
   if (
     targetRoleErrors.length > 0
   ) {
-    fieldErrors.targetRoles =
+    fieldErrors.targetRoles =//エラーがある場合はfieldErrors.targetRolesの箱に詰める
       targetRoleErrors;
   }
 
   if (
-    Object.keys(fieldErrors)
+    Object.keys(fieldErrors)//箱の中に１つでもエラーがある場合は失敗とする
       .length > 0
   ) {
     return {

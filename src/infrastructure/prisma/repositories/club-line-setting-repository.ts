@@ -1,16 +1,17 @@
 // src/infrastructure/prisma/repositories/club-line-setting-repository.ts
-// OWNER用LINE設定・Webhook登録処理の永続化
+// OWNER用LINE通知先設定・Webhook登録処理の永続化
 
 import "server-only";
 
 import type {
-  ClubLineTargetRole,
+  ClubLineTargetRole,// "COACH" | "OFFICER" | "MEMBER"
 } from "@/domain/club/line/line-target-form";
 
 import {
   prisma,
 } from "@/src/infrastructure/prisma/client";
 
+//渡された値が「ただの文字列であること」「スペースを削ってもちゃんと中身（文字）が残る有効な文字列かどうか」のチェック関数
 function hasStoredValue(
   value: string | null,
 ): value is string {
@@ -21,7 +22,7 @@ function hasStoredValue(
 }
 
 /**
- * OWNER画面へ表示するLINE設定一式を取得する。
+ * OWNERのみ閲覧可能なライン通知先設定画面へ表示するLINE設定一式をDBから取得する。
  * 暗号文・lineGroupId・lineSettingIdは返さない。
  */
 export async function findClubLineSettingsForOwner(
@@ -77,7 +78,7 @@ export async function findClubLineSettingsForOwner(
             },
           },
 
-          registrationTokens: {
+          registrationTokens: {//有効期限内の登録コードを一件取得する
             where: {
               clubId:
                 input.clubId,
@@ -144,7 +145,7 @@ export async function findClubLineSettingsForOwner(
 }
 
 /**
- * OWNERが所属クラブの通知先だけを更新する。
+ * OWNERが所属クラブの通知先だけを１件DB更新する関数
  * lineSettingIdはクライアント入力として受け取らない。
  */
 export async function updateClubLineTargetForOwner(
@@ -191,7 +192,7 @@ export async function updateClubLineTargetForOwner(
 }
 
 /**
- * 新しい登録コード用token hashを保存する。
+ * 新しい登録コードをハッシュ化したtoken hashをDBに保存する関数。
  * 同じクラブ・LINE設定に残っている未使用tokenは先に失効させる。
  */
 export async function replaceClubLineRegistrationToken(
@@ -226,7 +227,7 @@ export async function replaceClubLineRegistrationToken(
 
       await transaction
         .clubLineRegistrationToken
-        .updateMany({
+        .updateMany({//今ある有効期限を今に上書きすることで失効させる
           where: {
             clubId:
               input.clubId,
@@ -277,7 +278,7 @@ export async function replaceClubLineRegistrationToken(
 }
 
 /**
- * webhookKeyから署名検証に必要な最小限の設定を取得する。
+ * webhookKeyから署名検証に必要な最小限の設定をDBから取得する（事前にDBに公式ライン情報を登録していること前提で、公式ラインからの登録コード投稿検知からのwebhookが送られてきた際に署名検証するためのデータを取得する）。
  * 署名検証前にWebhook本文をクラブ判定へ使わない。
  */
 export async function findClubLineSettingForWebhook(
@@ -286,7 +287,7 @@ export async function findClubLineSettingForWebhook(
   },
 ) {
   if (
-    !hasStoredValue(
+    !hasStoredValue(//渡された値が「ただの文字列であること」「スペースを削ってもちゃんと中身（文字）が残る有効な文字列かどうか」のチェック関数
       input.webhookKey,
     )
   ) {
@@ -305,8 +306,8 @@ export async function findClubLineSettingForWebhook(
         select: {
           id: true,
           clubId: true,
-          lineBotUserId: true,
-          lineChannelSecretEncrypted:
+          lineBotUserId: true,//Webhook本文のdestinationとクラブ設定を照合するためのライン公式アカウントのユーザーID
+          lineChannelSecretEncrypted://LINEから届いたWebhookの署名検証に使う暗号化済み秘密鍵
             true,
         },
       });
@@ -337,8 +338,9 @@ export async function findClubLineSettingForWebhook(
 }
 
 /**
- * 有効な登録tokenを一度だけ消費し、同じtransactionで通知先を登録する。
+ * 有効な登録tokenを一度だけ消費し、同じtransactionで通知先を無効で登録する。
  * 既存グループの再登録時は名前・roleを保持し、必ず無効へ戻す。
+ * 管理画面でオーナーが通知を有効化できるようにするための『下準備（データの保存と取得）』を行う
  */
 export async function consumeClubLineRegistrationTokenAndUpsertTarget(
   input: {
@@ -390,7 +392,7 @@ export async function consumeClubLineRegistrationTokenAndUpsertTarget(
             },
 
             data: {
-              usedAt:
+              usedAt://トークンが使用された日時を現在に上書きして消費する
                 input.now,
             },
           });
