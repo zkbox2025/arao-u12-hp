@@ -68,3 +68,5 @@ api/cron/storage-deletions
   --port 3000
 URL：http://192.168.210.198:3000/api/cron/club-line-deliveriesなど
 ローカルではターミナルにクロンの200が表示される
+
+◯本番で初期データ（LINE_CHANNEL_ACCESS_TOKENなど）を各クラブのDBに入れる際はターミナルから打ち込み（スクリプト）をして入れる。envに書かなくてもターミナルに打ち込むだけでコード内の「process.env.LINE_CHANNEL_SECRET」という命令を使ってキャッチする（process.envだからと言ってenvに書く必要はない）
