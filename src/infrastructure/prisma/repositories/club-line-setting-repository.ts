@@ -312,16 +312,17 @@ export async function findClubLineSettingForWebhook(
         },
       });
 
-  if (
-    !setting ||
-    !hasStoredValue(
-      setting.lineBotUserId,
-    ) ||
-    !hasStoredValue(
-      setting
-        .lineChannelSecretEncrypted,
-    )
-  ) {
+  /*
+   * 【粒度5修正】
+   * 未登録だけをnullにする。
+   *
+   * 設定行は存在するがBot IDやSecretが欠けるケースまで
+   * nullにすると、Webhook側で「未登録=404」と
+   * 「設定不完全=503」を区別できないため、nullableのまま返す。
+   */
+  //設定が不完全な状態（データ自体はある状態）をそのまま呼び出し元に返すことで、
+  // 後続の処理（Webhookのコントローラーなど）が503エラーを返せるように役割分担している
+  if (!setting) {
     return null;
   }
 
@@ -338,7 +339,7 @@ export async function findClubLineSettingForWebhook(
 }
 
 /**
- * 有効な登録tokenを一度だけ消費し、同じtransactionで通知先を無効で登録する。
+ * 有効な登録コードを一度だけ消費し、同じtransactionで通知先を無効で登録する。
  * 既存グループの再登録時は名前・roleを保持し、必ず無効へ戻す。
  * 管理画面でオーナーが通知を有効化できるようにするための『下準備（データの保存と取得）』を行う
  */

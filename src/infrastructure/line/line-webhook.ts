@@ -130,10 +130,7 @@ function decodeLineSignature(
   return decoded;
 }
 
-/**
- * 受信したraw bodyを変更せず、Channel Secretを鍵とした
- * HMAC-SHA256でx-line-signatureを検証する。
- */
+//受信したraw body(Webhook本文（LINEが送ってきた一言一句そのまんまの姿）)とChannel Secretで正解の署名を作成し送られてきた署名と比較して正しい署名か検証する
 export function verifyLineWebhookSignature(
   input: {
     rawBody: string;//Webhook本文（LINEが送ってきた一言一句そのまんまの姿）
@@ -250,7 +247,7 @@ export function parseLineWebhookPayload(
     return {
       success: false,
       error:
-        "PAYLOAD_TOO_LARGE",
+        "PAYLOAD_TOO_LARGE",//中身の容量が大きすぎる
     };
   }
 

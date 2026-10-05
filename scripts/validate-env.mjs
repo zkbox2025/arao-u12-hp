@@ -284,17 +284,6 @@ const envSchema =
       LINE_CHANNEL_SECRET:
         optionalText,
 
-      LINE_GROUP_ID_LOG_ENABLED:
-        z.preprocess(
-          emptyToUndefined,
-          z
-            .enum([
-              "true",
-              "false",
-            ])
-            .optional(),
-        ),
-
       NEXT_PUBLIC_LIFF_ID:
         optionalText,
 

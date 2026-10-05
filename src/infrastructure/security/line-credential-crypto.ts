@@ -214,15 +214,13 @@ export function encryptLineCredential(
   ].join(".");
 }
 
-/**
- * LINE資格情報を復号する。
- */
+//DBにあるチャンネルシークレットを安全に開封する関数（ラインから送られてきたものと照合するため）
 export function decryptLineCredential(
   input: DecryptLineCredentialInput,
 ): string {
-  assertContext(input);
+  assertContext(input);//クラブIDとタイプの検証関数
 
-  const key = getEncryptionKey();
+  const key = getEncryptionKey();//暗号の鍵を32バイトへ変換する
 
   try {
     const parts =
