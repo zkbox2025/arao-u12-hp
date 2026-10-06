@@ -238,3 +238,9 @@ function handleRetry(): void {
 ⭐️マルチテナント化した場合、本番のsupabase cronのSupabase Vaultに登録されてあるclub_app_production_base_urlの値が、現在、ARAO CLUBのドメイン（https://本番の独自ドメイン）
 になってるから、新しく取得した本丸のドメイン（HP＆アプリの自社サービスのドメイン）に書き換えること
 ちなみにローカルはhttp://192.168.210.198:3000
+
+
+⭐️ラインのwebhookの窓口の変更について
+LINE Developersの新しいWebhook URLは、/api/line/webhook/[webhookKey]になるので
+以下のURLを設定する。
+https://本番ドメイン/api/line/webhook/クラブ固有のwebhookKey

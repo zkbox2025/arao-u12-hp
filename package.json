@@ -20,7 +20,8 @@
     "verify:local": "dotenv -e .env.local -- npm run verify && dotenv -e .env.local -- npm run test:db",
     "db:seed:local": "dotenv -e .env.local -- prisma db seed",
     "db:seed:prod": "dotenv -e .env.prod -- tsx prisma/seed.ts",
-    "db:seed:app:local": "dotenv -e .env.local -- tsx prisma/seed-app-local.ts"
+    "db:seed:app:local": "dotenv -e .env.local -- tsx prisma/seed-app-local.ts",
+    "club:line:init": "node --conditions=react-server --import tsx scripts/initialize-club-line-setting.ts"
   },
   "dependencies": {
     "@axiomhq/js": "^1.8.0",
