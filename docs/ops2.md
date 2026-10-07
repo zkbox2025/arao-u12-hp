@@ -501,7 +501,7 @@ LINE Platform
     ↓ トンネル転送
 localhost:3000
     ↓
-https://connections-dark-resort-depend.trycloudflare.com/api/line/webhook/実際のwebhookKey
+https://trycloudflare.com URL（毎回異なる）/api/line/webhook/実際のwebhookKey
 
 ※Quick TunnelのURLは停止すると使えなくなります。再起動すると別のURLになるため、次回はLINE DevelopersのWebhook URLを更新します。なお、次回は初期化スクリプトの再実行は不要。
 
@@ -516,3 +516,5 @@ cloudflared起動
 既存webhookKeyを末尾へ付ける
   ↓
 LINE DevelopersのWebhook URLだけ更新
+
+※イベントやお知らせの投稿時に通知ができるかのテストについてはappBaseUrlをローカルsupabaseのSQLでDBのappBaseUrlにhttps://trycloudflare.com URL（毎回異なる）を挿入するとできる

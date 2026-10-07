@@ -30,9 +30,10 @@ const REGISTRATION_POLL_INTERVAL_MILLISECONDS =//4秒ごとにポーリング（
   4_000;
 
 type CopyStatus =
-  | "idle"
-  | "copied"
-  | "failed";
+  | "idle"//待機中
+  | "copying"//コピー中
+  | "copied"//コピー完了
+  | "failed";//失敗
 
   //関数の引数の型
 type ClubLineRegistrationCodePanelProps = {
@@ -86,24 +87,40 @@ function formatExpiresAt(
   }
 }
 
-//登録コードをコピーする関数
+/*
+ * HTTPSではClipboard APIを使用する。
+ * ローカルIPのHTTPやClipboard APIが失敗した場合は、
+ * textareaを一時作成する方式へフォールバックする。
+ */
 async function copyText(
   value: string,
 ): Promise<void> {
   if (
-    navigator.clipboard &&
-    window.isSecureContext
+    window.isSecureContext &&
+    typeof navigator.clipboard
+      ?.writeText === "function"
   ) {
-    await navigator.clipboard.writeText(
-      value,
-    );
-    return;
+    try {
+      await navigator.clipboard.writeText(
+        value,
+      );
+
+      return;
+    } catch {
+      /*
+       * Clipboard APIが権限などで失敗した場合は、
+       * 下のフォールバックを試す。
+       */
+    }
   }
 
-  /*
-   * ローカルIPのHTTP確認など、Clipboard APIを
-   * 使用できない環境向けのフォールバック。
-   */
+    const activeElement =
+    document.activeElement instanceof
+    HTMLElement
+      ? document.activeElement
+      : null;
+
+
   const textArea =
     document.createElement(
       "textarea",
@@ -111,23 +128,50 @@ async function copyText(
 
   textArea.value = value;
   textArea.readOnly = true;
-  textArea.style.position =
+    /*
+   * iPhone Safariでも選択できるように、
+   * display:noneにはせず画面上に極小で配置する。
+   */
+   textArea.style.position =
     "fixed";
-  textArea.style.opacity =
-    "0";
+  textArea.style.top = "0";
+  textArea.style.left = "0";
+  textArea.style.width = "1px";
+  textArea.style.height = "1px";
+  textArea.style.padding = "0";
+  textArea.style.border = "0";
+  textArea.style.fontSize = "16px";
+  textArea.style.opacity = "0.01";
 
   document.body.appendChild(
     textArea,
   );
 
-  textArea.select();
+  let copied = false;
 
-  const copied =
-    document.execCommand(
-      "copy",
+  try {
+    textArea.focus({
+      preventScroll: true,
+    });
+
+    textArea.select();
+
+    textArea.setSelectionRange(
+      0,
+      value.length,
     );
 
-  textArea.remove();
+    copied =
+      document.execCommand(
+        "copy",
+      );
+  } finally {
+    textArea.remove();
+
+    activeElement?.focus({
+      preventScroll: true,
+    });
+  }
 
   if (!copied) {
     throw new Error(
@@ -152,6 +196,16 @@ function RegistrationCodeDisplay({
   
   async function handleCopy():
     Promise<void> {
+    if (
+      copyStatus === "copying"
+    ) {
+      return;
+    }
+
+    setCopyStatus(
+      "copying",
+    );
+
     try {
       await copyText(
         registrationCode,
@@ -167,13 +221,22 @@ function RegistrationCodeDisplay({
     }
   }
 
+    const buttonLabel =
+    copyStatus === "copying"
+      ? "コピー中..."
+      : copyStatus === "copied"
+        ? "コピーしました"
+        : copyStatus === "failed"
+          ? "もう一度コピー"
+          : "コードをコピー";
+
   return (
     <div className="rounded-lg border border-blue-300 bg-white p-4">
       <p className="text-sm font-bold text-neutral-900">
         発行した登録コード
       </p>
 
-      <code className="mt-3 block break-all rounded-md bg-neutral-900 p-3 text-sm font-bold text-white">
+      <code className="mt-3 block select-all break-all rounded-md bg-neutral-900 p-3 text-sm font-bold text-white">
         {registrationCode}
       </code>
 
@@ -181,9 +244,28 @@ function RegistrationCodeDisplay({
         <button
           type="button"
           onClick={handleCopy}
-          className="cursor-pointer rounded-md border border-blue-300 bg-white px-4 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+          disabled={
+            copyStatus ===
+            "copying"
+          }
+          aria-busy={
+            copyStatus ===
+            "copying"
+          }
+          className="
+            cursor-pointer rounded-md
+            border border-blue-300
+            bg-white px-4 py-2
+            text-sm font-bold text-blue-700
+            transition hover:bg-blue-50
+            focus-visible:outline-2
+            focus-visible:outline-offset-2
+            focus-visible:outline-blue-600
+            disabled:cursor-wait
+            disabled:opacity-60
+          "
         >
-          コードをコピー
+          {buttonLabel}
         </button>
 
         <span
@@ -191,12 +273,15 @@ function RegistrationCodeDisplay({
           className="text-xs font-medium text-neutral-700"
         >
           {copyStatus ===
-          "copied"
-            ? "コピーしました。"
+          "copying"
+            ? "登録コードをコピーしています。"
             : copyStatus ===
-                "failed"
-              ? "コピーできませんでした。コードを長押ししてコピーしてください。"
-              : "このコードは再読み込み後に再表示できません。"}
+                "copied"
+              ? "クリップボードへコピーしました。再度押すとコピーし直せます。"
+              : copyStatus ===
+                  "failed"
+                ? "コピーできませんでした。コードを長押ししてコピーしてください。"
+                : "このコードは再読み込み後に再表示できません。"}
         </span>
       </div>
     </div>
@@ -239,8 +324,9 @@ const formRef =
   );
 
 
-// サーバー上で一度確認できた
-// 発行コードの有効期限とコードを画面に表示する。
+// サーバー上で今回発行した登録コードが
+// 一度有効になったことを確認するため、
+// 発行時の有効期限を画面側で保持する。
 const [
   observedIssuedExpiresAt,//発行された登録コードの有効期限とコードをメモして画面に表示するための変数（初期はnull）
   //DBから送られてきた『変わる方の有効期限（activeRegistrationExpiresAt）』とissuedExpiresAt（stateの有効期限。固定値）が一致する場合に働く（つまり登録コード発行済みの合図。ライングループに登録コードが投稿されたら働かない）。
@@ -517,19 +603,29 @@ const displayedExpiresAt =
         ) : null}
 
         <button
-          type="submit"
-          disabled={
-            isPending ||
-            !canIssueCode
-          }
-          className="cursor-pointer rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {isPending
-            ? "発行中..."
-            : isWaitingForRegistration//登録コードは発行されてあるがグループラインにまだ投稿してない状態
-              ? "新しいコードを再発行する"
-              : "登録コードを発行する"}
-        </button>
+  type="submit"
+  disabled={
+    isPending ||
+    !canIssueCode
+  }
+  aria-busy={isPending}
+  className={[
+    "rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition",
+    "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600",
+
+    isPending
+      ? "cursor-wait opacity-60"
+      : !canIssueCode
+        ? "cursor-not-allowed opacity-60"
+        : "cursor-pointer hover:bg-blue-700",
+  ].join(" ")}
+>
+  {isPending
+    ? "発行中..."
+    : isWaitingForRegistration
+      ? "新しいコードを再発行する"
+      : "登録コードを発行する"}
+</button>
       </form>
     </section>
   );

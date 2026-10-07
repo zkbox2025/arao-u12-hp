@@ -244,3 +244,116 @@ function handleRetry(): void {
 LINE Developersの新しいWebhook URLは、/api/line/webhook/[webhookKey]になるので
 以下のURLを設定する。
 https://本番ドメイン/api/line/webhook/クラブ固有のwebhookKey
+
+
+⭐️本番デプロイ時のwebhook関連の設定について
+安全な本番切替順序
+第1段階：旧・新Webhookを併存させてデプロイ
+
+次の両方が存在する状態で本番へデプロイします。
+
+旧：
+/api/line/webhook
+
+新：
+/api/line/webhook/[webhookKey]
+
+この時点では、旧LINE_CHANNEL_SECRETも残します。
+
+第2段階：本番のクラブ別LINE設定を初期化
+
+本番DBへ以下を登録します。
+
+lineChannelId
+lineBotUserId
+lineChannelAccessTokenEncrypted
+lineChannelSecretEncrypted
+webhookKey
+
+本番初期化時のLINE_CREDENTIAL_ENCRYPTION_KEYは、Vercel本番に設定したものと一致させます。
+
+第3段階：LINE DevelopersのWebhook URLを変更
+
+旧URLから、
+
+https://本番ドメイン/api/line/webhook
+
+新URLへ変更します。
+
+https://本番ドメイン/api/line/webhook/<本番DBのwebhookKey>
+第4段階：本番で新Webhookを確認
+
+最低限、次の3点を確認します。
+
+LINE Developersの「検証」が成功する
+登録コードをグループへ投稿して通知先を登録できる
+通知先を有効化し、イベント・お知らせの投稿でLINE通知が届く
+
+Vercelログでは、新Webhookの検証時に次のような結果を確認します。
+
+club_line_webhook_processed {
+  outcome: 'VERIFICATION_SUCCEEDED',
+  status: 200
+}
+
+ここまで成功すれば、新Webhookへ切り替わったと判断できます。
+
+第5段階：粒度7をまとめて実行
+
+本番確認後、次の3か所を同じコミットで削除します。
+
+1. 旧Webhookファイル全体
+git rm 'app/api/line/webhook/route.ts'
+2. .env.exampleの旧変数
+# 【削除】
+# 既存の単一クラブ用Webhook（移行期間中のみ）
+# クラブ運営アプリの新WebhookはDBの暗号化済みSecretを使用する
+LINE_CHANNEL_SECRET=
+
+以下はHP送信用なので残します。
+
+LINE_CHANNEL_ACCESS_TOKEN=
+LINE_ADMIN_GROUP_ID=
+3. scripts/validate-env.mjs
+// 【削除】
+LINE_CHANNEL_SECRET:
+  optionalText,
+
+以下は残します。
+
+LINE_CHANNEL_ACCESS_TOKEN:
+  optionalText,
+
+LINE_ADMIN_GROUP_ID:
+  optionalText,
+requireTogether(
+  "LINE_CHANNEL_ACCESS_TOKEN",
+  "LINE_ADMIN_GROUP_ID",
+);
+第6段階：粒度7を本番へデプロイ
+
+検証します。
+
+npm run verify:local
+
+問題がなければ粒度7をコミットします。
+
+git add -A
+
+git diff --cached
+
+git commit -m "chore: remove legacy line webhook"
+
+その後、本番へデプロイします。
+
+第7段階：Vercelの旧環境変数を削除
+
+粒度7のデプロイ成功後に、Vercelから次だけを削除します。
+
+LINE_CHANNEL_SECRET
+
+以下は削除しません。
+
+LINE_CHANNEL_ACCESS_TOKEN
+LINE_ADMIN_GROUP_ID
+LINE_CREDENTIAL_ENCRYPTION_KEY

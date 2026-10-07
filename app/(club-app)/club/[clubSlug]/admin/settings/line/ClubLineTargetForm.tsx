@@ -5,6 +5,7 @@
 
 import {
   useActionState,
+  useState,
 } from "react";
 
 import {
@@ -27,6 +28,7 @@ import {
   CLUB_LINE_TARGET_NAME_MAX_LENGTH,//ライン通知先の名前の文字数制限（100）
   CLUB_LINE_TARGET_ROLE_OPTIONS,//指導者、役員、会員のvalueとlabel
   type ClubLineTargetActionState,//ライン通知先アクションステイト（待機中、成功、失敗）
+  type ClubLineTargetFormValues,//ライン通知先フォームの値
 } from "@/domain/club/line/line-target-form";
 
 //フォームの引数の型
@@ -58,6 +60,32 @@ export function ClubLineTargetForm({
   ] = useActionState(//アクションを実行して変更したstateを記録する
     action,
     initialState,
+  );
+
+    /*
+   * 入力中の値をActionStateとは別のローカルstateで保持する。
+   *
+   * router.refresh()によってServer Componentが更新されても、
+   * targetIdをkeyにしている同一フォームの入力値を維持できる。
+   */
+  const [
+    draftValues,
+    setDraftValues,
+  ] = useState<ClubLineTargetFormValues>(//ライン通知先フォームの値
+    () => ({
+      targetName:
+        initialState.values
+          .targetName,
+
+      targetRoles: [
+        ...initialState.values
+          .targetRoles,
+      ],
+
+      isEnabled:
+        initialState.values
+          .isEnabled,
+    }),
   );
 
   const formRef =
@@ -106,7 +134,7 @@ export function ClubLineTargetForm({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-bold text-neutral-900">
-            {state.values.targetName ||
+            {draftValues.targetName ||
               "名称未設定の通知先"}
           </h2>
 
@@ -118,12 +146,12 @@ export function ClubLineTargetForm({
 
         <span
           className={
-            state.values.isEnabled
+            draftValues.isEnabled
               ? "rounded-full bg-green-100 px-3 py-1 text-xs font-bold text-green-800"
               : "rounded-full bg-neutral-200 px-3 py-1 text-xs font-bold text-neutral-700"
           }
         >
-          {state.values.isEnabled
+          {draftValues.isEnabled
             ? "有効"
             : "無効"}
         </span>
@@ -142,13 +170,28 @@ export function ClubLineTargetForm({
         </label>
 
         <input
-          key={`name-${state.values.targetName}`}
           id={`${fieldPrefix}-name`}
           name="targetName"
           type="text"
-          defaultValue={
-            state.values.targetName
+           /*
+           * defaultValueと動的keyを削除し、
+           * controlled inputへ変更する。
+           */
+          value={
+            draftValues.targetName
           }
+          onChange={(event) => {
+            const targetName =
+              event.currentTarget
+                .value;
+
+            setDraftValues(
+              (current) => ({
+                ...current,
+                targetName,
+              }),
+            );
+          }}
           maxLength={
             CLUB_LINE_TARGET_NAME_MAX_LENGTH
           }
@@ -176,18 +219,19 @@ export function ClubLineTargetForm({
       </div>
 
       <fieldset
-        aria-invalid={Boolean(
-          state.fieldErrors
-            .targetRoles?.length,
-        )}
-        aria-describedby={
-          state.fieldErrors
-            .targetRoles?.length
-            ? targetRolesErrorId
-            : undefined
-        }
-        className="rounded-lg border border-neutral-200 p-4"
-      >
+  disabled={isPending}
+  aria-invalid={Boolean(
+    state.fieldErrors
+      .targetRoles?.length,
+  )}
+  aria-describedby={
+    state.fieldErrors
+      .targetRoles?.length
+      ? targetRolesErrorId
+      : undefined
+  }
+  className="rounded-lg border border-neutral-200 p-4 disabled:cursor-wait disabled:opacity-60"
+>
         <legend className="px-1 text-sm font-bold text-neutral-900">
           通知対象
         </legend>
@@ -196,7 +240,7 @@ export function ClubLineTargetForm({
           {CLUB_LINE_TARGET_ROLE_OPTIONS.map(
             (option) => {
               const checked =
-                state.values
+                draftValues
                   .targetRoles
                   .includes(
                     option.value,
@@ -208,12 +252,60 @@ export function ClubLineTargetForm({
                   className="flex min-h-11 items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm font-medium text-neutral-800"
                 >
                   <input
-                    key={`${option.value}-${checked ? "checked" : "unchecked"}`}
                     type="checkbox"
                     name="targetRoles"
                     value={option.value}
-                    defaultChecked={checked}
-                    disabled={isPending}
+                    /*
+                     * defaultCheckedと動的keyを削除し、
+                     * controlled checkboxへ変更する。
+                     */
+                    checked={checked}
+                    onChange={(
+                      event,
+                    ) => {
+                      const isChecked =
+                        event
+                          .currentTarget
+                          .checked;
+
+                      setDraftValues(
+                        (
+                          current,
+                        ) => {
+                          const alreadySelected =
+                            current
+                              .targetRoles
+                              .includes(
+                                option.value,
+                              );
+
+                          const targetRoles =
+                            isChecked
+                              ? alreadySelected
+                                ? current
+                                    .targetRoles
+                                : [
+                                    ...current
+                                      .targetRoles,
+                                    option.value,
+                                  ]
+                              : current
+                                  .targetRoles
+                                  .filter(
+                                    (
+                                      role,
+                                    ) =>
+                                      role !==
+                                      option.value,
+                                  );
+
+                          return {
+                            ...current,
+                            targetRoles,
+                          };
+                        },
+                      );
+                    }}
                     className="size-5 accent-blue-600"
                   />
 
@@ -236,12 +328,23 @@ export function ClubLineTargetForm({
       <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-4">
         <label className="flex items-start gap-3">
           <input
-            key={`enabled-${state.values.isEnabled ? "yes" : "no"}`}
             type="checkbox"
             name="isEnabled"
-            defaultChecked={
-              state.values.isEnabled
+            checked={
+              draftValues.isEnabled
             }
+            onChange={(event) => {
+              const isEnabled =
+                event.currentTarget
+                  .checked;
+
+              setDraftValues(
+                (current) => ({
+                  ...current,
+                  isEnabled,
+                }),
+              );
+            }}
             disabled={isPending}
             aria-invalid={Boolean(
               state.fieldErrors
@@ -280,6 +383,7 @@ export function ClubLineTargetForm({
         <button
           type="submit"
           disabled={isPending}
+          aria-busy={isPending}
           className="cursor-pointer rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:cursor-wait disabled:opacity-60"
         >
           {isPending

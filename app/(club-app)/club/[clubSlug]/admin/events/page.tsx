@@ -326,34 +326,7 @@ const adminCalendarEvents:
         </Link>
       </div>
 
-      <nav
-        aria-label="対象月の切り替え"
-        className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
-      >
-        <Link
-            href={buildMonthHref(
-            previousMonth,
-          )}
-          className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-        >
-          ← 前月
-        </Link>
-
-        <h2 className="font-bold text-slate-900">
-          {formatYearMonthLabel(
-            month,
-          )}
-        </h2>
-
-         <Link
-          href={buildMonthHref(
-            nextMonth,
-          )}
-          className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-        >
-          翌月 →
-        </Link>
-      </nav>
+    
 
       {/*
        * ここに追加：
@@ -451,17 +424,40 @@ const adminCalendarEvents:
         }}
       />
 
-      {/* 【追加】管理用月間イベントカレンダー */}
+      {/* 管理用月間イベントカレンダー */}
 <section
-  aria-labelledby="admin-event-calendar-heading"
+  aria-label="月間イベントカレンダー"
   className="space-y-3"
 >
-  <h2
-    id="admin-event-calendar-heading"
-    className="text-lg font-bold text-slate-900"
+
+  <nav
+    aria-label="対象月の切り替え"
+    className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
   >
-    月間カレンダー
-  </h2>
+    <Link
+      href={buildMonthHref(
+        previousMonth,
+      )}
+      className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+    >
+      ← 前月
+    </Link>
+
+    <h2 className="font-bold text-slate-900">
+      {formatYearMonthLabel(
+        month,
+      )}
+    </h2>
+
+    <Link
+      href={buildMonthHref(
+        nextMonth,
+      )}
+      className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+    >
+      翌月 →
+    </Link>
+  </nav>
 
   <ClubEventMonthCalendar
     month={month}
@@ -470,13 +466,13 @@ const adminCalendarEvents:
     }
     variant="admin"
     events={
-      adminCalendarEvents// Repositoryの取得結果を共通カレンダー用に変換する
+      adminCalendarEvents
     }
     dayListPath={
       `${basePath}/admin/events/list`
     }
     dayQueryParams={
-      adminCalendarDayQueryParams// カレンダーの日付を押したときに維持する検索条件
+      adminCalendarDayQueryParams
     }
   />
 </section>

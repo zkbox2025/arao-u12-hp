@@ -145,3 +145,60 @@ LINEから、Next.jsのURL /api/line/webhook/[webhookKey] 宛てに「メッセ�
 グループ名（例：「Arao U12 保護者会グループ」など）が正しいことを確認し、画面にある「有効化（承認）」ボタンを押します。
 3. 連携完了：
 DBの isEnabled が true に書き換わり、ロックが解除されます。これ以降、スケジュールされたCronやお知らせの通知が、このLINEグループへ100%安全かつ確実に自動配信されるようになります！
+
+
+【ライン通知先変更について】
+ユーザー操作からDBまでの処理フロー
+通知先編集
+順序	ファイル・関数
+1	ClubLineTargetForm.tsxから送信
+2	updateClubLineTargetAction()
+3	requireClubAppOwnerAccess()
+4	buildClubLineTargetFormValues()
+5	validateClubLineTargetFormValues()
+6	updateClubLineTargetForOwner()
+7	ClubLineTargetをtargetId + clubIdで更新
+8	revalidateClubSettingsPaths()
+9	設定ページへredirect
+登録コード発行
+順序	ファイル・関数
+1	ClubLineRegistrationCodePanel.tsx
+2	createClubLineRegistrationCodeAction()
+3	OWNER認可
+4	createSecureToken()
+5	buildClubLineRegistrationCode()
+6	hashToken()
+7	replaceClubLineRegistrationToken()
+8	旧未使用コードを期限切れ化
+9	hashだけDB保存
+10	生コードをActionStateへ一度だけ返す
+Webhook登録
+順序	ファイル・関数
+1	app/api/line/webhook/[webhookKey]/route.ts
+2	handleClubLineWebhook()
+3	findClubLineSettingForWebhook()
+4	decryptLineCredential()
+5	verifyLineWebhookSignature()
+6	parseLineWebhookPayload()
+7	destination === lineBotUserId確認
+8	parseClubLineRegistrationCode()
+9	hashToken()
+10	consumeClubLineRegistrationTokenAndUpsertTarget()
+11	transaction内でtokenを条件付き消費
+12	TargetをisEnabled=falseでupsert
+13	設定ページを再検証
+
+
+新会員のメンバーシップ登録の流れ
+※オーナーが新会員に向けて招待メールを送り（status: "INVITED"）
+新会員が承諾をした後の流れ
+1.編集フォームからroleとstatusを送信
+2.buildClubMemberUpdateFormValues()がFormDataを文字列へ変換
+3.validateClubMemberUpdateFormValues()がPrisma enumへ絞り込み
+4.後続のupdateClubMemberAction()がOWNER認可を実行
+5.RepositoryがmembershipId + clubIdで対象を取得
+6.Serializable transaction内でACTIVE OWNER数を取得
+7.evaluateClubMembershipUpdate()で業務ルールを判定
+8.allowed: trueの場合だけClubMembershipを更新
+9.?toast=member-updatedへリダイレクト
+10.getClubMembersToastMessage()で固定メッセージへ変換

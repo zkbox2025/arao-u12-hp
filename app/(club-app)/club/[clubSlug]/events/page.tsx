@@ -277,7 +277,7 @@ const memberCalendarEvents:
       <header className="space-y-2">
         <div className="flex items-center justify-between gap-3 flex-wrap">
         <h1 className="text-2xl font-bold text-slate-900">
-          イベント
+          月別イベント
         </h1>
         {canManageEvents ? (
           <Link
@@ -305,34 +305,7 @@ const memberCalendarEvents:
 </Link>
       </div>
 
-      <nav
-        aria-label="対象月の切り替え"
-        className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
-      >
-        <Link
-  href={buildMonthHref(
-    previousMonth,
-  )}
-          className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-        >
-          ← 前月
-        </Link>
-
-        <h2 className="font-bold text-slate-900">
-          {formatYearMonthLabel(
-            month,
-          )}
-        </h2>
-
-        <Link
-  href={buildMonthHref(
-    nextMonth,
-  )}
-          className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-        >
-          翌月 →
-        </Link>
-      </nav>
+      
 
       {/* ここに追加：ジャンル絞り込み */}
 <ClubEventGenreFilter
@@ -360,15 +333,37 @@ const memberCalendarEvents:
 
      {/*会員用月間イベントカレンダー */}
 <section
-  aria-labelledby="member-event-calendar-heading"
+  aria-label="月間イベントカレンダー"
   className="space-y-3"
 >
-  <h2
-    id="member-event-calendar-heading"
-    className="text-lg font-bold text-slate-900"
+  <nav
+    aria-label="対象月の切り替え"
+    className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
   >
-    月間カレンダー
-  </h2>
+    <Link
+      href={buildMonthHref(
+        previousMonth,
+      )}
+      className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+    >
+      ← 前月
+    </Link>
+
+    <h2 className="font-bold text-slate-900">
+      {formatYearMonthLabel(
+        month,
+      )}
+    </h2>
+
+    <Link
+      href={buildMonthHref(
+        nextMonth,
+      )}
+      className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+    >
+      翌月 →
+    </Link>
+  </nav>
 
   <ClubEventMonthCalendar
     month={month}
