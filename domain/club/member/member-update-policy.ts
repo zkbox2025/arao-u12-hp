@@ -54,7 +54,7 @@ export function isActiveClubOwner(
   );
 }
 
-//クラブメンバーシップ更新の判定関数
+//クラブメンバーシップ更新の許可判定関数
 export function evaluateClubMembershipUpdate({
   current,
   next,
