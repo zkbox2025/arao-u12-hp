@@ -1,725 +1,954 @@
-diff --git a/docs/runbooks/initialize-club-line-setting.md b/docs/runbooks/initialize-club-line-setting.md
+diff --git a/domain/club/member/member-labels.ts b/domain/club/member/member-labels.ts
 new file mode 100644
-index 0000000..2bc16f6
+index 0000000..f3be6d0
 --- /dev/null
-+++ b/docs/runbooks/initialize-club-line-setting.md
-@@ -0,0 +1,175 @@
-+# クラブ別LINE設定の初期化手順
++++ b/domain/club/member/member-labels.ts
+@@ -0,0 +1,46 @@
++// domain/club/member/member-labels.ts
++// メンバーの在籍状態・招待状態を画面表示用の固定文言へ変換する
 +
-+## 目的
++import type {
++  ClubInvitationStatus,
++  ClubMembershipStatus,
++} from "@/types/prisma";
 +
-+`ClubLineSetting`へ、クラブ固有のLINE Messaging API設定を安全に登録・更新します。
++export const CLUB_MEMBERSHIP_STATUS_LABELS = {
++  INVITED: "招待中",
++  ACTIVE: "在籍中",
++  SUSPENDED: "利用停止",
++  WITHDRAWN: "退会済み",
++} as const satisfies Record<
++  ClubMembershipStatus,
++  string
++>;
 +
-+登録対象は次の5項目です。
++export const CLUB_INVITATION_STATUS_LABELS = {
++  PREPARING: "準備中",
++  READY_TO_SEND: "送信待ち",
++  SENT: "送信済み",
++  EMAIL_FAILED: "送信失敗",
++  ACCEPTED: "承諾済み",
++  CANCELLED: "取消済み",
++  EXPIRED: "期限切れ",
++} as const satisfies Record<
++  ClubInvitationStatus,
++  string
++>;
 +
-+- `lineChannelId`
-+- `lineBotUserId`
-+- `lineChannelAccessTokenEncrypted`
-+- `lineChannelSecretEncrypted`
-+- `webhookKey`
-+
-+Channel Access TokenとChannel Secretの平文はDBへ保存しません。実行時だけ一時環境変数から受け取り、既存の`encryptLineCredential()`で暗号化して保存します。
-+
-+## 重要な前提
-+
-+- 最初に必ず`--dry-run`を実行してください。
-+- `--apply`はDBを書き換えます。
-+- `clubSlug`と、別途DBで確認した`clubId`の両方が一致しなければ処理しません。
-+- 既存設定を更新しても`webhookKey`は変更しません。
-+- SecretやAccess TokenをCLI引数、migration、seed、Git管理対象ファイルへ書かないでください。
-+- ローカルDBと本番DBは、それぞれの環境の`LINE_CREDENTIAL_ENCRYPTION_KEY`で別々に初期化してください。
-+- 別環境で作った暗号文をコピーしないでください。暗号文は暗号鍵・`clubId`・資格情報種別に結び付いています。
-+
-+このスクリプトは既存の`server-only`暗号化処理を再利用するため、必ず`npm run club:line:init`経由で実行します。
-+
-+## 1. 対象クラブを確認する
-+
-+Supabase SQL Editorなど、対象環境のDBで次を実行します。
-+
-+```sql
-+select
-+  id,
-+  name,
-+  slug
-+from "Club"
-+where slug = 'arao-u-12';
-+```
-+
-+表示された`id`を、後述の`--club-id`へ指定します。ローカルDBと本番DBでIDが異なる場合は、それぞれのIDを使用してください。
-+
-+## 2. 一時環境変数へ入力する
-+
-+以下はzsh用です。SecretとAccess Tokenは画面に表示されず、値自体もシェル履歴へ残りません。
-+
-+```bash
-+read -r "CLUB_LINE_INIT_CHANNEL_ID?LINE Channel ID: "
-+read -r "CLUB_LINE_INIT_BOT_USER_ID?LINE Bot User ID: "
-+read -rs "CLUB_LINE_INIT_CHANNEL_ACCESS_TOKEN?LINE Channel Access Token: "
-+echo
-+read -rs "CLUB_LINE_INIT_CHANNEL_SECRET?LINE Channel Secret: "
-+echo
-+
-+export CLUB_LINE_INIT_CHANNEL_ID
-+export CLUB_LINE_INIT_BOT_USER_ID
-+export CLUB_LINE_INIT_CHANNEL_ACCESS_TOKEN
-+export CLUB_LINE_INIT_CHANNEL_SECRET
-+```
-+
-+スクリプトが読む一時環境変数は次の4つです。
-+
-+| 環境変数 | 内容 | 秘密情報 |
-+|---|---|---:|
-+| `CLUB_LINE_INIT_CHANNEL_ID` | Channel ID | いいえ |
-+| `CLUB_LINE_INIT_BOT_USER_ID` | Bot User ID（Webhook本文の`destination`） | いいえ |
-+| `CLUB_LINE_INIT_CHANNEL_ACCESS_TOKEN` | Channel Access Token | はい |
-+| `CLUB_LINE_INIT_CHANNEL_SECRET` | Channel Secret | はい |
-+
-+`DATABASE_URL`、`APP_BASE_URL`、`LINE_CREDENTIAL_ENCRYPTION_KEY`は、対象環境の既存envファイルから読み込みます。LINE資格情報の平文4項目はenvファイルへ追記しません。
-+
-+## 3. ローカルDBでdry-runする
-+
-+`<LOCAL_CLUB_ID>`を手順1で確認したローカルDBのIDへ置き換えます。
-+
-+```bash
-+npx dotenv-cli -e .env.local -- \
-+  npm run club:line:init -- \
-+  --club-slug arao-u-12 \
-+  --club-id '<LOCAL_CLUB_ID>' \
-+  --dry-run
-+```
-+
-+dry-runでは次だけを確認し、DBを変更しません。
-+
-+- 対象クラブが存在するか
-+- `clubSlug`と確認用`clubId`が一致するか
-+- 必須環境変数が揃っているか
-+- LINE資格情報を現在の暗号鍵で暗号化できるか
-+- 新規作成か既存設定の更新か
-+
-+初回作成のdry-runでは`webhookKey`をまだ保存しないため、Webhook URLは表示しません。`--apply`成功後に確定したURLを表示します。
-+
-+## 4. ローカルDBへ適用する
-+
-+dry-runの内容に問題がなければ、最後の引数だけ`--apply`へ変更します。
-+
-+```bash
-+npx dotenv-cli -e .env.local -- \
-+  npm run club:line:init -- \
-+  --club-slug arao-u-12 \
-+  --club-id '<LOCAL_CLUB_ID>' \
-+  --apply
-+```
-+
-+成功時に表示するのは次だけです。
-+
-+- クラブ名
-+- `clubSlug`
-+- 作成または更新結果
-+- LINE Developersへ設定するWebhook URL
-+
-+## 5. 本番DBへ適用する
-+
-+本番用の`DATABASE_URL`、`APP_BASE_URL`、`LINE_CREDENTIAL_ENCRYPTION_KEY`を読み込む状態で、手順1からやり直します。
-+
-+`<PRODUCTION_CLUB_ID>`には本番DBで確認したIDを指定します。
-+
-+```bash
-+npx dotenv-cli -e .env.prod -- \
-+  npm run club:line:init -- \
-+  --club-slug arao-u-12 \
-+  --club-id '<PRODUCTION_CLUB_ID>' \
-+  --dry-run
-+```
-+
-+確認後に適用します。
-+
-+```bash
-+npx dotenv-cli -e .env.prod -- \
-+  npm run club:line:init -- \
-+  --club-slug arao-u-12 \
-+  --club-id '<PRODUCTION_CLUB_ID>' \
-+  --apply
-+```
-+
-+本番の`APP_BASE_URL`はHTTPSの共通本番ドメインを指定してください。成功時に表示されたWebhook URLを、ARAOのLINE DevelopersにあるMessaging APIチャネルへ設定します。
-+
-+## 6. 一時環境変数を削除する
-+
-+ローカル・本番とも、実行後すぐに次を実行します。
-+
-+```bash
-+unset CLUB_LINE_INIT_CHANNEL_ID
-+unset CLUB_LINE_INIT_BOT_USER_ID
-+unset CLUB_LINE_INIT_CHANNEL_ACCESS_TOKEN
-+unset CLUB_LINE_INIT_CHANNEL_SECRET
-+```
-+
-+ターミナルを閉じた場合も、そのシェルの一時環境変数は失われます。
-+
-+## 7. 適用後の確認
-+
-+1. OWNER用LINE設定ページで「Messaging API設定済み」「Webhook受付設定済み」を確認します。
-+2. LINE Developersへ、スクリプトが表示したWebhook URLを設定します。
-+3. Webhookの「検証」でHTTP 200を確認します。
-+4. 登録コードを発行し、対象LINEグループでコードだけを送信します。
-+5. 登録された通知先が初期状態で無効になっていることを確認します。
-+6. 通知先名と対象roleを設定してから有効化します。
-+
-+## 再実行時の動作
-+
-+- 同じクラブへ再実行すると資格情報を更新します。
-+- 既存の`webhookKey`は維持するため、LINE DevelopersのWebhook URLは変わりません。
-+- 通知先、登録コード、配信履歴は削除しません。
-+- 誤った資格情報を適用した場合は、正しい値で再度dry-runしてからapplyしてください。
-+
-+## 環境変数について
-+
-+`process.env`は、実行中のNode.jsプロセスへ渡された環境変数を読みます。ターミナルで値を入力しただけではなく、`export`した値が`npm run club:line:init`の子プロセスへ引き継がれることで読み取れます。
-+
-+この初期化では、旧単一クラブ用の`LINE_CHANNEL_SECRET`や`LINE_CHANNEL_ACCESS_TOKEN`を使用しません。マルチテナントで別クラブの資格情報を誤登録しないため、初期化専用の`CLUB_LINE_INIT_*`だけを使用します。
-+
-+永続的に必要な`LINE_CREDENTIAL_ENCRYPTION_KEY`は環境ごとのサーバー設定に残します。一方、Channel SecretとChannel Access Tokenの平文は初期化時だけ渡し、暗号化済みの値だけをDBへ保存します。
-diff --git a/package.json b/package.json
-index 9473468..118ed08 100644
---- a/package.json
-+++ b/package.json
-@@ -21,7 +21,8 @@
-     "verify:local": "dotenv -e .env.local -- npm run verify && dotenv -e .env.local -- npm run test:db",
-     "db:seed:local": "dotenv -e .env.local -- prisma db seed",
-     "db:seed:prod": "dotenv -e .env.prod -- tsx prisma/seed.ts",
--    "db:seed:app:local": "dotenv -e .env.local -- tsx prisma/seed-app-local.ts"
-+    "db:seed:app:local": "dotenv -e .env.local -- tsx prisma/seed-app-local.ts",
-+    "club:line:init": "node --conditions=react-server --import tsx scripts/initialize-club-line-setting.ts"
-   },
-   "dependencies": {
-     "@axiomhq/js": "^1.8.0",
-diff --git a/scripts/initialize-club-line-setting.ts b/scripts/initialize-club-line-setting.ts
-new file mode 100644
-index 0000000..9715fe6
---- /dev/null
-+++ b/scripts/initialize-club-line-setting.ts
-@@ -0,0 +1,524 @@
-+// scripts/initialize-club-line-setting.ts
-+// 既存クラブへLINE Messaging API資格情報を安全に初期登録・更新する。
-+
-+import {
-+  randomUUID,
-+} from "node:crypto";
-+
-+import {
-+  parseArgs,
-+} from "node:util";
-+
-+import {
-+  prisma,
-+} from "../src/infrastructure/prisma/client";
-+
-+import {
-+  encryptLineCredential,
-+} from "../src/infrastructure/security/line-credential-crypto";
-+
-+const INITIALIZER_ENV_NAMES = {
-+  lineChannelId:
-+    "CLUB_LINE_INIT_CHANNEL_ID",
-+
-+  lineBotUserId:
-+    "CLUB_LINE_INIT_BOT_USER_ID",
-+
-+  lineChannelAccessToken:
-+    "CLUB_LINE_INIT_CHANNEL_ACCESS_TOKEN",
-+
-+  lineChannelSecret:
-+    "CLUB_LINE_INIT_CHANNEL_SECRET",
-+} as const;
-+
-+type ExecutionMode =
-+  | "dry-run"
-+  | "apply";
-+
-+type InitializerOptions = {
-+  clubSlug: string;
-+  expectedClubId: string;
-+  mode: ExecutionMode;
-+};
-+
-+type InitializerCredentials = {
-+  lineChannelId: string;
-+  lineBotUserId: string;
-+  lineChannelAccessToken: string;
-+  lineChannelSecret: string;
-+};
-+
-+class SafeInitializerError extends Error {
-+  override readonly name =
-+    "SafeInitializerError";
++export function getClubMembershipStatusLabel(
++  status: ClubMembershipStatus,
++): string {
++  return CLUB_MEMBERSHIP_STATUS_LABELS[
++    status
++  ];
 +}
 +
-+function parseInitializerOptions(
-+  args: readonly string[],
-+): InitializerOptions {
-+  let values: {
-+    "club-slug"?: string;
-+    "club-id"?: string;
-+    "dry-run"?: boolean;
-+    apply?: boolean;
-+  };
-+
-+  try {
-+    const parsed =
-+      parseArgs({
-+        args: [
-+          ...args,
-+        ],
-+
-+        options: {
-+          "club-slug": {
-+            type: "string",
-+          },
-+
-+          "club-id": {
-+            type: "string",
-+          },
-+
-+          "dry-run": {
-+            type: "boolean",
-+          },
-+
-+          apply: {
-+            type: "boolean",
-+          },
-+        },
-+
-+        allowPositionals: false,
-+        strict: true,
-+      });
-+
-+    values = parsed.values;
-+  } catch {
-+    throw new SafeInitializerError(
-+      "コマンド引数の形式が正しくありません。",
-+    );
-+  }
-+
-+  const clubSlug =
-+    values["club-slug"]
-+      ?.trim();
-+
-+  const expectedClubId =
-+    values["club-id"]
-+      ?.trim();
-+
-+  const hasDryRun =
-+    values["dry-run"] === true;
-+
-+  const hasApply =
-+    values.apply === true;
-+
-+  if (
-+    !clubSlug ||
-+    !expectedClubId ||
-+    hasDryRun === hasApply
-+  ) {
-+    throw new SafeInitializerError(
-+      "--club-slug、--club-id、--dry-runまたは--applyを指定してください。",
-+    );
-+  }
-+
-+  if (
-+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(
-+      clubSlug,
-+    )
-+  ) {
-+    throw new SafeInitializerError(
-+      "clubSlugの形式が正しくありません。",
-+    );
-+  }
-+
-+  return {
-+    clubSlug,
-+    expectedClubId,
-+    mode: hasApply
-+      ? "apply"
-+      : "dry-run",
-+  };
++export function getClubInvitationStatusLabel(
++  status: ClubInvitationStatus,
++): string {
++  return CLUB_INVITATION_STATUS_LABELS[
++    status
++  ];
 +}
+diff --git a/domain/club/member/member-update-form.ts b/domain/club/member/member-update-form.ts
+new file mode 100644
+index 0000000..90d1e6f
+--- /dev/null
++++ b/domain/club/member/member-update-form.ts
+@@ -0,0 +1,169 @@
++// domain/club/member/member-update-form.ts
++// メンバーの権限・在籍状態変更フォームの値構築とバリデーション
 +
-+function readRequiredEnvironmentVariable(
++import type {
++  ActionState,
++  FieldErrors,
++} from "@/domain/shared/action-state";
++
++import type {
++  ClubMemberRole,
++  ClubMembershipStatus,
++} from "@/types/prisma";
++
++const CLUB_MEMBER_ROLES =
++  new Set<string>([
++    "OWNER",
++    "COACH",
++    "OFFICER",
++    "MEMBER",
++  ] satisfies readonly ClubMemberRole[]);
++
++const CLUB_MEMBERSHIP_STATUSES =
++  new Set<string>([
++    "INVITED",
++    "ACTIVE",
++    "SUSPENDED",
++    "WITHDRAWN",
++  ] satisfies readonly ClubMembershipStatus[]);
++
++export type ClubMemberUpdateFormValues = {
++  role: string;
++  status: string;
++};
++
++export type ClubMemberUpdateFormField =
++  Extract<
++    keyof ClubMemberUpdateFormValues,
++    string
++  >;
++
++export type ValidClubMemberUpdateInput = {
++  role: ClubMemberRole;
++  status: ClubMembershipStatus;
++};
++
++export type ClubMemberUpdateActionState =
++  ActionState<
++    ClubMemberUpdateFormValues,
++    ClubMemberUpdateFormField
++  >;
++
++type BuildClubMemberUpdateInitialValuesInput = {
++  role: ClubMemberRole;
++  status: ClubMembershipStatus;
++};
++
++function getString(
++  formData: FormData,
 +  name: string,
 +): string {
 +  const value =
-+    process.env[name];
++    formData.get(name);
 +
-+  if (
-+    !value ||
-+    value.trim().length === 0
-+  ) {
-+    throw new SafeInitializerError(
-+      `${name}が設定されていません。`,
-+    );
-+  }
-+
-+  if (
-+    value !== value.trim() ||
-+    /[\r\n]/.test(value)
-+  ) {
-+    throw new SafeInitializerError(
-+      `${name}の形式が正しくありません。`,
-+    );
-+  }
-+
-+  return value;
++  return typeof value === "string"
++    ? value
++    : "";
 +}
 +
-+function assertSecretValue(
++function isClubMemberRole(
 +  value: string,
-+  name: string,
-+): void {
-+  if (
-+    value.length > 4_096 ||
-+    /\s/.test(value)
-+  ) {
-+    throw new SafeInitializerError(
-+      `${name}の形式が正しくありません。`,
-+    );
-+  }
++): value is ClubMemberRole {
++  return CLUB_MEMBER_ROLES.has(
++    value,
++  );
 +}
 +
-+function readInitializerCredentials():
-+  InitializerCredentials {
-+  const lineChannelId =
-+    readRequiredEnvironmentVariable(
-+      INITIALIZER_ENV_NAMES
-+        .lineChannelId,
-+    );
-+
-+  const lineBotUserId =
-+    readRequiredEnvironmentVariable(
-+      INITIALIZER_ENV_NAMES
-+        .lineBotUserId,
-+    );
-+
-+  const lineChannelAccessToken =
-+    readRequiredEnvironmentVariable(
-+      INITIALIZER_ENV_NAMES
-+        .lineChannelAccessToken,
-+    );
-+
-+  const lineChannelSecret =
-+    readRequiredEnvironmentVariable(
-+      INITIALIZER_ENV_NAMES
-+        .lineChannelSecret,
-+    );
-+
-+  if (
-+    lineChannelId.length > 64 ||
-+    !/^\d+$/.test(lineChannelId)
-+  ) {
-+    throw new SafeInitializerError(
-+      "LINE Channel IDの形式が正しくありません。",
-+    );
-+  }
-+
-+  if (
-+    !/^U[0-9a-fA-F]{32}$/.test(
-+      lineBotUserId,
-+    )
-+  ) {
-+    throw new SafeInitializerError(
-+      "LINE Bot User IDの形式が正しくありません。",
-+    );
-+  }
-+
-+  assertSecretValue(
-+    lineChannelAccessToken,
-+    "LINE Channel Access Token",
++function isClubMembershipStatus(
++  value: string,
++): value is ClubMembershipStatus {
++  return CLUB_MEMBERSHIP_STATUSES.has(
++    value,
 +  );
++}
 +
-+  assertSecretValue(
-+    lineChannelSecret,
-+    "LINE Channel Secret",
-+  );
-+
++export function buildClubMemberUpdateFormValues(
++  formData: FormData,
++): ClubMemberUpdateFormValues {
 +  return {
-+    lineChannelId,
-+    lineBotUserId,
-+    lineChannelAccessToken,
-+    lineChannelSecret,
++    role:
++      getString(
++        formData,
++        "role",
++      ).trim(),
++
++    status:
++      getString(
++        formData,
++        "status",
++      ).trim(),
 +  };
 +}
 +
-+function readAppBaseUrl(): string {
-+  const rawValue =
-+    readRequiredEnvironmentVariable(
-+      "APP_BASE_URL",
++export function buildClubMemberUpdateInitialValues(
++  membership:
++    BuildClubMemberUpdateInitialValuesInput,
++): ClubMemberUpdateFormValues {
++  return {
++    role: membership.role,
++    status: membership.status,
++  };
++}
++
++export function validateClubMemberUpdateFormValues(
++  values: ClubMemberUpdateFormValues,
++):
++  | {
++      success: true;
++      data:
++        ValidClubMemberUpdateInput;
++    }
++  | {
++      success: false;
++      fieldErrors:
++        FieldErrors<ClubMemberUpdateFormField>;
++    } {
++  const fieldErrors:
++    FieldErrors<ClubMemberUpdateFormField> =
++      {};
++
++  const roleIsValid =
++    isClubMemberRole(
++      values.role,
 +    );
 +
-+  let url: URL;
-+
-+  try {
-+    url = new URL(rawValue);
-+  } catch {
-+    throw new SafeInitializerError(
-+      "APP_BASE_URLの形式が正しくありません。",
++  const statusIsValid =
++    isClubMembershipStatus(
++      values.status,
 +    );
++
++  if (!roleIsValid) {
++    fieldErrors.role = [
++      "権限を確認してください。",
++    ];
++  }
++
++  if (!statusIsValid) {
++    fieldErrors.status = [
++      "在籍状態を確認してください。",
++    ];
 +  }
 +
 +  if (
-+    ![
-+      "http:",
-+      "https:",
-+    ].includes(url.protocol) ||
-+    url.username ||
-+    url.password ||
-+    (url.pathname !== "/" &&
-+      url.pathname !== "") ||
-+    url.search ||
-+    url.hash
++    !roleIsValid ||
++    !statusIsValid
 +  ) {
-+    throw new SafeInitializerError(
-+      "APP_BASE_URLにはhttp(s)のoriginだけを指定してください。",
-+    );
-+  }
-+
-+  return url.origin;
-+}
-+
-+function encryptCredentials(
-+  clubId: string,
-+  credentials:
-+    InitializerCredentials,
-+) {
-+  try {
 +    return {
-+      lineChannelAccessTokenEncrypted:
-+        encryptLineCredential({
-+          clubId,
-+          credentialType:
-+            "CHANNEL_ACCESS_TOKEN",
-+          value:
-+            credentials
-+              .lineChannelAccessToken,
-+        }),
-+
-+      lineChannelSecretEncrypted:
-+        encryptLineCredential({
-+          clubId,
-+          credentialType:
-+            "CHANNEL_SECRET",
-+          value:
-+            credentials
-+              .lineChannelSecret,
-+        }),
++      success: false,
++      fieldErrors,
 +    };
-+  } catch {
-+    throw new SafeInitializerError(
-+      "LINE資格情報を暗号化できません。暗号鍵を確認してください。",
-+    );
 +  }
-+}
 +
-+function buildWebhookUrl(
-+  appBaseUrl: string,
-+  webhookKey: string,
-+): string {
-+  return new URL(
-+    `/api/line/webhook/${encodeURIComponent(
-+      webhookKey,
-+    )}`,
-+    `${appBaseUrl}/`,
-+  ).toString();
++  return {
++    success: true,
++    data: {
++      role: values.role,
++      status: values.status,
++    },
++  };
 +}
+diff --git a/domain/club/member/member-update-form.test.ts b/domain/club/member/member-update-form.test.ts
+new file mode 100644
+index 0000000..b68ea8d
+--- /dev/null
++++ b/domain/club/member/member-update-form.test.ts
+@@ -0,0 +1,190 @@
++// domain/club/member/member-update-form.test.ts
 +
-+function printResult(
-+  input: {
-+    clubName: string;
-+    clubSlug: string;
-+    result: string;
-+    webhookUrl?: string;
++import {
++  describe,
++  expect,
++  it,
++} from "vitest";
++
++import {
++  buildClubMemberUpdateFormValues,
++  buildClubMemberUpdateInitialValues,
++  validateClubMemberUpdateFormValues,
++} from "./member-update-form";
++
++describe(
++  "buildClubMemberUpdateFormValues",
++  () => {
++    it(
++      "roleとstatusを文字列として取得して前後の空白を除く",
++      () => {
++        const formData =
++          new FormData();
++
++        formData.set(
++          "role",
++          "  COACH  ",
++        );
++
++        formData.set(
++          "status",
++          "  ACTIVE  ",
++        );
++
++        expect(
++          buildClubMemberUpdateFormValues(
++            formData,
++          ),
++        ).toEqual({
++          role: "COACH",
++          status: "ACTIVE",
++        });
++      },
++    );
++
++    it(
++      "未入力値を空文字へ変換する",
++      () => {
++        expect(
++          buildClubMemberUpdateFormValues(
++            new FormData(),
++          ),
++        ).toEqual({
++          role: "",
++          status: "",
++        });
++      },
++    );
 +  },
-+): void {
-+  console.log(
-+    `クラブ名: ${input.clubName}`,
-+  );
++);
 +
-+  console.log(
-+    `clubSlug: ${input.clubSlug}`,
-+  );
-+
-+  console.log(
-+    `結果: ${input.result}`,
-+  );
-+
-+  if (input.webhookUrl) {
-+    console.log(
-+      `設定すべきWebhook URL: ${input.webhookUrl}`,
-+    );
-+  }
-+}
-+
-+async function main(): Promise<void> {
-+  const options =
-+    parseInitializerOptions(
-+      process.argv.slice(2),
-+    );
-+
-+  const credentials =
-+    readInitializerCredentials();
-+
-+  const appBaseUrl =
-+    readAppBaseUrl();
-+
-+  const club =
-+    await prisma.club.findUnique({
-+      where: {
-+        slug: options.clubSlug,
++describe(
++  "buildClubMemberUpdateInitialValues",
++  () => {
++    it(
++      "DBのenum値をフォーム初期値へ変換する",
++      () => {
++        expect(
++          buildClubMemberUpdateInitialValues({
++            role: "OFFICER",
++            status: "SUSPENDED",
++          }),
++        ).toEqual({
++          role: "OFFICER",
++          status: "SUSPENDED",
++        });
 +      },
++    );
++  },
++);
 +
-+      select: {
-+        id: true,
-+        name: true,
-+        slug: true,
-+
-+        lineSetting: {
-+          select: {
-+            webhookKey: true,
++describe(
++  "validateClubMemberUpdateFormValues",
++  () => {
++    it.each([
++      "OWNER",
++      "COACH",
++      "OFFICER",
++      "MEMBER",
++    ] as const)(
++      "%sをroleとして受け付ける",
++      (role) => {
++        expect(
++          validateClubMemberUpdateFormValues({
++            role,
++            status: "ACTIVE",
++          }),
++        ).toEqual({
++          success: true,
++          data: {
++            role,
++            status: "ACTIVE",
 +          },
-+        },
++        });
 +      },
-+    });
-+
-+  if (!club) {
-+    throw new SafeInitializerError(
-+      "指定したクラブが見つかりません。",
-+    );
-+  }
-+
-+  if (
-+    club.id !==
-+    options.expectedClubId
-+  ) {
-+    throw new SafeInitializerError(
-+      "clubSlugと確認用clubIdが同じクラブを示していません。",
-+    );
-+  }
-+
-+  const encryptedCredentials =
-+    encryptCredentials(
-+      club.id,
-+      credentials,
 +    );
 +
-+  const existingSetting =
-+    club.lineSetting;
++    it.each([
++      "INVITED",
++      "ACTIVE",
++      "SUSPENDED",
++      "WITHDRAWN",
++    ] as const)(
++      "%sをstatusとして受け付ける",
++      (status) => {
++        expect(
++          validateClubMemberUpdateFormValues({
++            role: "MEMBER",
++            status,
++          }),
++        ).toEqual({
++          success: true,
++          data: {
++            role: "MEMBER",
++            status,
++          },
++        });
++      },
++    );
 +
-+  if (
-+    options.mode === "dry-run"
-+  ) {
-+    printResult({
-+      clubName: club.name,
-+      clubSlug: club.slug,
-+      result: existingSetting
-+        ? "DRY-RUN（既存設定を更新予定・DB変更なし）"
-+        : "DRY-RUN（設定を新規作成予定・DB変更なし）",
++    it(
++      "不正なroleを拒否する",
++      () => {
++        expect(
++          validateClubMemberUpdateFormValues({
++            role: "ADMIN",
++            status: "ACTIVE",
++          }),
++        ).toEqual({
++          success: false,
++          fieldErrors: {
++            role: [
++              "権限を確認してください。",
++            ],
++          },
++        });
++      },
++    );
 +
-+      ...(existingSetting
-+        ? {
-+            webhookUrl:
-+              buildWebhookUrl(
-+                appBaseUrl,
-+                existingSetting
-+                  .webhookKey,
-+              ),
-+          }
-+        : {}),
-+    });
++    it(
++      "不正なstatusを拒否する",
++      () => {
++        expect(
++          validateClubMemberUpdateFormValues({
++            role: "MEMBER",
++            status: "DELETED",
++          }),
++        ).toEqual({
++          success: false,
++          fieldErrors: {
++            status: [
++              "在籍状態を確認してください。",
++            ],
++          },
++        });
++      },
++    );
 +
-+    return;
-+  }
++    it(
++      "roleとstatusの両方が不正なら両方のエラーを返す",
++      () => {
++        expect(
++          validateClubMemberUpdateFormValues({
++            role: "",
++            status: "",
++          }),
++        ).toEqual({
++          success: false,
++          fieldErrors: {
++            role: [
++              "権限を確認してください。",
++            ],
++            status: [
++              "在籍状態を確認してください。",
++            ],
++          },
++        });
++      },
++    );
++  },
++);
+diff --git a/domain/club/member/member-update-policy.ts b/domain/club/member/member-update-policy.ts
+new file mode 100644
+index 0000000..a29e3e8
+--- /dev/null
++++ b/domain/club/member/member-update-policy.ts
+@@ -0,0 +1,124 @@
++// domain/club/member/member-update-policy.ts
++// メンバーの権限・在籍状態変更に関する純粋な業務ルール
 +
-+  const webhookKey =
-+    existingSetting
-+      ?.webhookKey ??
-+    randomUUID();
++import type {
++  ClubMemberRole,
++  ClubMembershipStatus,
++} from "@/types/prisma";
 +
-+  const setting =
-+    await prisma
-+      .clubLineSetting
-+      .upsert({
-+        where: {
-+          clubId: club.id,
-+        },
++type ClubMembershipRoleAndStatus = {
++  role: ClubMemberRole;
++  status: ClubMembershipStatus;
++};
 +
-+        create: {
-+          clubId: club.id,
++export type ClubMembershipUpdateViolation =
++  | "INVITED_OWNER_NOT_ALLOWED"
++  | "INVITATION_STATUS_CHANGE_NOT_ALLOWED"
++  | "LAST_ACTIVE_OWNER";
 +
-+          lineChannelId:
-+            credentials.lineChannelId,
++export type ClubMembershipUpdateEvaluation =
++  | {
++      allowed: true;
++    }
++  | {
++      allowed: false;
++      violation:
++        ClubMembershipUpdateViolation;
++    };
 +
-+          lineBotUserId:
-+            credentials.lineBotUserId,
++type EvaluateClubMembershipUpdateInput = {
++  current:
++    ClubMembershipRoleAndStatus;
++  next:
++    ClubMembershipRoleAndStatus;
 +
-+          ...encryptedCredentials,
++  /**
++   * 対象メンバー本人を含む、変更直前のクラブ内ACTIVE OWNER数。
++   * RepositoryではSerializable transaction内で取得する。
++   */
++  activeOwnerCount: number;
++};
 +
-+          webhookKey,
-+        },
-+
-+        update: {
-+          lineChannelId:
-+            credentials.lineChannelId,
-+
-+          lineBotUserId:
-+            credentials.lineBotUserId,
-+
-+          ...encryptedCredentials,
-+
-+          // 既存のWebhook URLを壊さないため、
-+          // updateではwebhookKeyを変更しない。
-+        },
-+
-+        select: {
-+          webhookKey: true,
-+        },
-+      });
-+
-+  printResult({
-+    clubName: club.name,
-+    clubSlug: club.slug,
-+    result: existingSetting
-+      ? "更新しました。"
-+      : "作成しました。",
-+    webhookUrl:
-+      buildWebhookUrl(
-+        appBaseUrl,
-+        setting.webhookKey,
-+      ),
-+  });
++export function isActiveClubOwner(
++  membership:
++    ClubMembershipRoleAndStatus,
++): boolean {
++  return (
++    membership.role === "OWNER" &&
++    membership.status === "ACTIVE"
++  );
 +}
 +
-+main()
-+  .catch((error: unknown) => {
-+    if (
-+      error instanceof
-+      SafeInitializerError
-+    ) {
-+      console.error(
-+        `エラー: ${error.message}`,
-+      );
-+    } else {
-+      /*
-+       * Prismaの生エラーには接続先や入力値が含まれる可能性がある。
-+       * 資格情報を含むerrorオブジェクトは出力しない。
-+       */
-+      console.error(
-+        "エラー: LINE設定の初期化に失敗しました。DB接続と入力値を確認してください。",
-+      );
-+    }
++export function evaluateClubMembershipUpdate({
++  current,
++  next,
++  activeOwnerCount,
++}: EvaluateClubMembershipUpdateInput):
++  ClubMembershipUpdateEvaluation {
++  if (
++    !Number.isSafeInteger(
++      activeOwnerCount,
++    ) ||
++    activeOwnerCount < 0
++  ) {
++    throw new RangeError(
++      "ACTIVE OWNER数が正しくありません。",
++    );
++  }
 +
-+    process.exitCode = 1;
-+  })
-+  .finally(async () => {
-+    try {
-+      await prisma.$disconnect();
-+    } catch {
-+      process.exitCode = 1;
-+    }
-+  });
++  /*
++   * INVITEDの間はOWNERへ昇格できない。
++   * 招待承諾によってACTIVEになった後で昇格させる。
++   */
++  if (
++    current.status === "INVITED" &&
++    next.role === "OWNER"
++  ) {
++    return {
++      allowed: false,
++      violation:
++        "INVITED_OWNER_NOT_ALLOWED",
++    };
++  }
++
++  /*
++   * INVITEDへの遷移とINVITEDからの遷移は、
++   * メンバー編集ではなく招待フローだけが管理する。
++   */
++  if (
++    (current.status === "INVITED") !==
++    (next.status === "INVITED")
++  ) {
++    return {
++      allowed: false,
++      violation:
++        "INVITATION_STATUS_CHANGE_NOT_ALLOWED",
++    };
++  }
++
++  const currentIsActiveOwner =
++    isActiveClubOwner(
++      current,
++    );
++
++  const nextIsActiveOwner =
++    isActiveClubOwner(
++      next,
++    );
++
++  if (
++    currentIsActiveOwner &&
++    !nextIsActiveOwner &&
++    activeOwnerCount <= 1
++  ) {
++    return {
++      allowed: false,
++      violation:
++        "LAST_ACTIVE_OWNER",
++    };
++  }
++
++  return {
++    allowed: true,
++  };
++}
+diff --git a/domain/club/member/member-update-policy.test.ts b/domain/club/member/member-update-policy.test.ts
+new file mode 100644
+index 0000000..18ec493
+--- /dev/null
++++ b/domain/club/member/member-update-policy.test.ts
+@@ -0,0 +1,315 @@
++// domain/club/member/member-update-policy.test.ts
++
++import {
++  describe,
++  expect,
++  it,
++} from "vitest";
++
++import {
++  evaluateClubMembershipUpdate,
++  isActiveClubOwner,
++} from "./member-update-policy";
++
++describe(
++  "isActiveClubOwner",
++  () => {
++    it(
++      "roleがOWNERかつstatusがACTIVEの場合だけtrueを返す",
++      () => {
++        expect(
++          isActiveClubOwner({
++            role: "OWNER",
++            status: "ACTIVE",
++          }),
++        ).toBe(true);
++      },
++    );
++
++    it.each([
++      {
++        role: "MEMBER",
++        status: "ACTIVE",
++      },
++      {
++        role: "OWNER",
++        status: "SUSPENDED",
++      },
++      {
++        role: "OWNER",
++        status: "WITHDRAWN",
++      },
++      {
++        role: "OWNER",
++        status: "INVITED",
++      },
++    ] as const)(
++      "$roleかつ$statusではfalseを返す",
++      (membership) => {
++        expect(
++          isActiveClubOwner(
++            membership,
++          ),
++        ).toBe(false);
++      },
++    );
++  },
++);
++
++describe(
++  "evaluateClubMembershipUpdate",
++  () => {
++    it(
++      "通常のrole・status変更を許可する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "COACH",
++              status: "SUSPENDED",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: true,
++        });
++      },
++    );
++
++    it(
++      "INVITEDのroleをOWNER以外へ変更できる",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status: "INVITED",
++            },
++            next: {
++              role: "COACH",
++              status: "INVITED",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: true,
++        });
++      },
++    );
++
++    it(
++      "INVITEDメンバーのOWNER昇格を拒否する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status: "INVITED",
++            },
++            next: {
++              role: "OWNER",
++              status: "INVITED",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: false,
++          violation:
++            "INVITED_OWNER_NOT_ALLOWED",
++        });
++      },
++    );
++
++    it(
++      "INVITEDからACTIVEへの変更を拒否する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status: "INVITED",
++            },
++            next: {
++              role: "MEMBER",
++              status: "ACTIVE",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: false,
++          violation:
++            "INVITATION_STATUS_CHANGE_NOT_ALLOWED",
++        });
++      },
++    );
++
++    it.each([
++      "ACTIVE",
++      "SUSPENDED",
++      "WITHDRAWN",
++    ] as const)(
++      "%sからINVITEDへの変更を拒否する",
++      (currentStatus) => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status:
++                currentStatus,
++            },
++            next: {
++              role: "MEMBER",
++              status: "INVITED",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: false,
++          violation:
++            "INVITATION_STATUS_CHANGE_NOT_ALLOWED",
++        });
++      },
++    );
++
++    it(
++      "最後のACTIVE OWNERの降格を拒否する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "OWNER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "COACH",
++              status: "ACTIVE",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: false,
++          violation:
++            "LAST_ACTIVE_OWNER",
++        });
++      },
++    );
++
++    it(
++      "最後のACTIVE OWNERでもACTIVE OWNERのままなら許可する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "OWNER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "OWNER",
++              status: "ACTIVE",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: true,
++        });
++      },
++    );
++
++    it.each([
++      "SUSPENDED",
++      "WITHDRAWN",
++    ] as const)(
++      "最後のACTIVE OWNERを%sへ変更できない",
++      (status) => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "OWNER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "OWNER",
++              status,
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: false,
++          violation:
++            "LAST_ACTIVE_OWNER",
++        });
++      },
++    );
++
++    it(
++      "ACTIVE OWNERが2人いれば1人の降格を許可する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "OWNER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "MEMBER",
++              status: "ACTIVE",
++            },
++            activeOwnerCount: 2,
++          }),
++        ).toEqual({
++          allowed: true,
++        });
++      },
++    );
++
++    it(
++      "ACTIVEメンバーのOWNER昇格を許可する",
++      () => {
++        expect(
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "OWNER",
++              status: "ACTIVE",
++            },
++            activeOwnerCount: 1,
++          }),
++        ).toEqual({
++          allowed: true,
++        });
++      },
++    );
++
++    it.each([
++      -1,
++      1.5,
++      Number.NaN,
++    ])(
++      "不正なACTIVE OWNER数を拒否する: %p",
++      (activeOwnerCount) => {
++        expect(() =>
++          evaluateClubMembershipUpdate({
++            current: {
++              role: "MEMBER",
++              status: "ACTIVE",
++            },
++            next: {
++              role: "MEMBER",
++              status: "ACTIVE",
++            },
++            activeOwnerCount,
++          }),
++        ).toThrow(
++          "ACTIVE OWNER数が正しくありません。",
++        );
++      },
++    );
++  },
++);
+diff --git a/domain/club/member/member-toast.ts b/domain/club/member/member-toast.ts
+new file mode 100644
+index 0000000..32870f2
+--- /dev/null
++++ b/domain/club/member/member-toast.ts
+@@ -0,0 +1,20 @@
++// domain/club/member/member-toast.ts
++// メンバー管理ページのURL識別子を固定メッセージへ変換する
++
++export type ClubMembersToastCode =
++  "member-updated";
++
++export function getClubMembersToastMessage(
++  value:
++    | string
++    | string[]
++    | undefined,
++): string | null {
++  if (
++    value === "member-updated"
++  ) {
++    return "メンバー情報を変更しました。";
++  }
++
++  return null;
++}
+diff --git a/domain/club/member/member-toast.test.ts b/domain/club/member/member-toast.test.ts
+new file mode 100644
+index 0000000..306c351
+--- /dev/null
++++ b/domain/club/member/member-toast.test.ts
+@@ -0,0 +1,48 @@
++// domain/club/member/member-toast.test.ts
++
++import {
++  describe,
++  expect,
++  it,
++} from "vitest";
++
++import {
++  getClubMembersToastMessage,
++} from "./member-toast";
++
++describe(
++  "getClubMembersToastMessage",
++  () => {
++    it(
++      "許可した識別子を固定メッセージへ変換する",
++      () => {
++        expect(
++          getClubMembersToastMessage(
++            "member-updated",
++          ),
++        ).toBe(
++          "メンバー情報を変更しました。",
++        );
++      },
++    );
++
++    it.each([
++      undefined,
++      "",
++      "member-created",
++      "<script>alert(1)</script>",
++      [
++        "member-updated",
++      ],
++    ])(
++      "未許可の値を表示しない: %p",
++      (value) => {
++        expect(
++          getClubMembersToastMessage(
++            value,
++          ),
++        ).toBeNull();
++      },
++    );
++  },
++);

@@ -13,7 +13,7 @@ export type FieldErrors<
 //フォーム送信後のステイト
 export type ActionState<
   TValues,
-  TField extends string = Extract<
+  TField extends string = Extract<//もし2番目の型（入力欄の型）が省略されたら、1番目の型（TValues）のプロパティ名を自動的に入力欄の名前として使いなさいというコード
     keyof TValues,
     string
   >,

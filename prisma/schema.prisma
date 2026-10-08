@@ -930,13 +930,13 @@ enum LineDeliveryContentType {
 }
 
 enum ClubInvitationStatus {
-  PREPARING
-  READY_TO_SEND
-  SENT
-  EMAIL_FAILED
-  ACCEPTED
-  CANCELLED
-  EXPIRED
+  PREPARING//準備中
+  READY_TO_SEND//送信待ち
+  SENT//送信済み
+  EMAIL_FAILED//送信失敗
+  ACCEPTED//承諾済み
+  CANCELLED//キャンセル
+  EXPIRED//期限切れ
 }
 
 enum StorageDeletionSourceType {
