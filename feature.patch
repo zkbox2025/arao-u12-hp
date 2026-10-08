@@ -1,1299 +1,1355 @@
-diff --git a/package.json b/package.json
---- a/package.json
-+++ b/package.json
-@@ -10,7 +10,7 @@
-     "typecheck": "tsc --noEmit",
-     "test": "vitest run",
-     "test:watch": "vitest",
--    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts",
-+    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts",
-     "prisma:validate": "prisma validate",
-     "env:validate": "node scripts/validate-env.mjs",
-     "predev": "npm run env:validate",
-diff --git a/src/infrastructure/prisma/repositories/club-membership-repository.ts b/src/infrastructure/prisma/repositories/club-membership-repository.ts
+diff --git a/app/(club-app)/club/[clubSlug]/admin/members/actions.ts b/app/(club-app)/club/[clubSlug]/admin/members/actions.ts
 new file mode 100644
-index 0000000..e79e889
+index 0000000..cd4099e
 --- /dev/null
-+++ b/src/infrastructure/prisma/repositories/club-membership-repository.ts
-@@ -0,0 +1,355 @@
-+// src/infrastructure/prisma/repositories/club-membership-repository.ts
-+// OWNER用メンバー一覧取得と、権限・在籍状態の安全な更新
++++ b/app/(club-app)/club/[clubSlug]/admin/members/actions.ts
+@@ -0,0 +1,280 @@
++// app/(club-app)/club/[clubSlug]/admin/members/actions.ts
++// OWNER用メンバー管理の更新Server Action
 +
-+import "server-only";
-+
-+import {
-+  Prisma,
-+} from "@prisma/client";
++"use server";
 +
 +import {
-+  evaluateClubMembershipUpdate,
-+  isActiveClubOwner,
-+  type ClubMembershipUpdateViolation,
-+} from "@/domain/club/member/member-update-policy";
-+
-+import type {
-+  ClubInvitationStatus,
-+  ClubMemberRole,
-+  ClubMembershipStatus,
-+} from "@/types/prisma";
++  notFound,
++  redirect,
++} from "next/navigation";
 +
 +import {
-+  prisma,
-+} from "@/src/infrastructure/prisma/client";
++  requireClubAppOwnerAccess,
++} from "@/app/(club-app)/club/club-app-authorization";
 +
-+const NOT_REGISTERED_LABEL =
-+  "未登録";
++import {
++  revalidateClubMemberPaths,
++} from "@/app/(club-app)/club/revalidate-club-paths";
 +
-+/*
-+ * 最初の実行後、最大3回まで再試行する。
-+ * 再試行対象はSerializable競合のP2034だけ。
++import {
++  buildClubMemberUpdateFormValues,
++  validateClubMemberUpdateFormValues,
++  type ClubMemberUpdateActionState,
++} from "@/domain/club/member/member-update-form";
++
++import {
++  isRequestId,
++} from "@/domain/shared/request-id";
++
++import {
++  convertPrismaError,
++} from "@/src/infrastructure/prisma/prisma-error";
++
++import {
++  updateClubMembershipForOwner,
++} from "@/src/infrastructure/prisma/repositories/club-membership-repository";
++
++const EXPIRED_FORM_MESSAGE =
++  "フォームの有効期限が切れました。もう一度お試しください。";
++
++const INVITED_OWNER_NOT_ALLOWED_MESSAGE =
++  "招待中のメンバーをOWNERに変更できません。";
++
++const INVITATION_STATUS_CHANGE_NOT_ALLOWED_MESSAGE =
++  "招待中の在籍状態はこの画面から変更できません。";
++
++const LAST_ACTIVE_OWNER_MESSAGE =
++  "最後の有効なOWNERは降格・利用停止・退会扱いにできません。先に別のメンバーをOWNERに設定してください。";
++
++/**
++ * OWNERが同じクラブのMembershipのrole・statusを更新する。
++ * page側の認可とは別に、Action自身でも必ずOWNER認可する。
 + */
-+const SERIALIZABLE_TRANSACTION_MAX_RETRIES =
-+  3;
++export async function updateClubMembershipAction(
++  clubSlug: string,
++  targetMembershipId: string,
++  previousState:
++    ClubMemberUpdateActionState,
++  formData: FormData,
++): Promise<ClubMemberUpdateActionState> {
++  /*
++   * 【追加】
++   * FormDataの読取りより先にOWNER認可する。
++   * Repositoryでもtransaction内において操作者を再確認する。
++   */
++  const access =
++    await requireClubAppOwnerAccess(
++      clubSlug,
++    );
 +
-+export type ClubMembershipForOwner = {
-+  id: string;
-+  role: ClubMemberRole;
-+  status: ClubMembershipStatus;
-+  createdAt: Date;
-+  updatedAt: Date;
-+  displayName: string;
-+  displayEmail: string;
-+  invitationStatus:
-+    ClubInvitationStatus | null;
-+};
++  const values =
++    buildClubMemberUpdateFormValues(
++      formData,
++    );
 +
-+export type UpdateClubMembershipResult =
-+  | {
-+      outcome: "UPDATED";
-+      membership: {
-+        id: string;
-+        role: ClubMemberRole;
-+        status:
-+          ClubMembershipStatus;
-+      };
-+    }
-+  | {
-+      outcome: "NOT_FOUND";
-+    }
-+  | {
-+      outcome:
-+        "ACTOR_NOT_ACTIVE_OWNER";
-+    }
-+  | {
-+      outcome: "RULE_VIOLATION";
-+      reason:
-+        ClubMembershipUpdateViolation;
++  const requestId =
++    formData.get("requestId");
++
++  if (
++    !isRequestId(requestId) ||
++    requestId !==
++      previousState.requestId
++  ) {
++    return {
++      status: "error",
++      values,
++      fieldErrors: {},
++      formError:
++        EXPIRED_FORM_MESSAGE,
++      requestId:
++        previousState.requestId,
 +    };
++  }
 +
-+type UpdateClubMembershipForOwnerInput = {
-+  clubId: string;
-+  actorMembershipId: string;
-+  targetMembershipId: string;
-+  role: ClubMemberRole;
-+  status: ClubMembershipStatus;
-+};
++  const validation =
++    validateClubMemberUpdateFormValues(
++      values,
++    );
 +
-+function getFirstStoredValue(
-+  ...values:
-+    ReadonlyArray<
-+      string | null | undefined
-+    >
-+): string {
-+  for (const value of values) {
-+    if (typeof value !== "string") {
-+      continue;
-+    }
++  if (!validation.success) {
++    return {
++      status: "error",
++      values,
++      fieldErrors:
++        validation.fieldErrors,
++      formError: null,
++      requestId:
++        previousState.requestId,
++    };
++  }
 +
-+    const normalized =
-+      value.trim();
++  let updateResult:
++    Awaited<
++      ReturnType<
++        typeof updateClubMembershipForOwner
++      >
++    >;
 +
-+    if (normalized) {
-+      return normalized;
++  try {
++    updateResult =
++      await updateClubMembershipForOwner({
++        /*
++         * 【追加・重要】
++         * clubIdとactorMembershipIdはクライアントから受け取らず、
++         * OWNER認可結果だけを使用する。
++         */
++        clubId:
++          access.club.id,
++        actorMembershipId:
++          access.membership.id,
++        targetMembershipId,
++        role:
++          validation.data.role,
++        status:
++          validation.data.status,
++      });
++  } catch (error) {
++    const domainError =
++      convertPrismaError(error);
++
++    /*
++     * 氏名・メールアドレス・フォーム入力値はログへ出さない。
++     */
++    console.error(
++      "updateClubMembershipAction failed",
++      {
++        clubId:
++          access.club.id,
++        targetMembershipId,
++        actorMembershipId:
++          access.membership.id,
++        requestId,
++        code:
++          domainError.code,
++      },
++    );
++
++    return {
++      status: "error",
++      values,
++      fieldErrors: {},
++      formError:
++        domainError.publicMessage,
++      requestId:
++        previousState.requestId,
++    };
++  }
++
++  /*
++   * 【追加】
++   * 対象や操作者の存在・権限の差を外部へ漏らさず404に統一する。
++   * notFound()は内部例外を使うため、DB用try/catchの外で呼ぶ。
++   */
++  if (
++    updateResult.outcome ===
++      "NOT_FOUND" ||
++    updateResult.outcome ===
++      "ACTOR_NOT_ACTIVE_OWNER"
++  ) {
++    notFound();
++  }
++
++  if (
++    updateResult.outcome ===
++    "RULE_VIOLATION"
++  ) {
++    const violationReason =
++      updateResult.reason;
++
++    switch (violationReason) {
++      case "INVITED_OWNER_NOT_ALLOWED":
++        return {
++          status: "error",
++          values,
++          fieldErrors: {
++            role: [
++              INVITED_OWNER_NOT_ALLOWED_MESSAGE,
++            ],
++          },
++          formError: null,
++          requestId:
++            previousState.requestId,
++        };
++
++      case "INVITATION_STATUS_CHANGE_NOT_ALLOWED":
++        return {
++          status: "error",
++          values,
++          fieldErrors: {
++            status: [
++              INVITATION_STATUS_CHANGE_NOT_ALLOWED_MESSAGE,
++            ],
++          },
++          formError: null,
++          requestId:
++            previousState.requestId,
++        };
++
++      case "LAST_ACTIVE_OWNER":
++        return {
++          status: "error",
++          values,
++          fieldErrors: {},
++          formError:
++            LAST_ACTIVE_OWNER_MESSAGE,
++          requestId:
++            previousState.requestId,
++        };
++
++      default: {
++        /*
++         * Domainへ違反種別が追加された際に、
++         * Action側の変換漏れを型エラーで検出する。
++         */
++        const exhaustiveReason:
++          never =
++            violationReason;
++
++        return exhaustiveReason;
++      }
 +    }
 +  }
 +
-+  return NOT_REGISTERED_LABEL;
-+}
-+
-+function isSerializableConflict(
-+  error: unknown,
-+): boolean {
-+  return (
-+    error instanceof
-+      Prisma.PrismaClientKnownRequestError &&
-+    error.code === "P2034"
++  revalidateClubMemberPaths(
++    access.club.slug,
 +  );
-+}
 +
-+/**
-+ * OWNER用一覧へ表示する最小限のデータだけを取得する。
-+ * tokenHash、authUserId、emailSendErrorなどはselectしない。
-+ */
-+export async function findClubMembershipsForOwner(
-+  input: {
-+    clubId: string;
-+  },
-+): Promise<ClubMembershipForOwner[]> {
-+  const memberships =
-+    await prisma.clubMembership.findMany({
-+      where: {
-+        clubId: input.clubId,
-+      },
++  const updatedSelf =
++    updateResult.membership.id ===
++    access.membership.id;
 +
-+      orderBy: [
-+        {
-+          createdAt: "asc",
-+        },
-+        {
-+          id: "asc",
-+        },
-+      ],
++  const selfIsNoLongerActiveOwner =
++    updatedSelf &&
++    (
++      updateResult.membership.role !==
++        "OWNER" ||
++      updateResult.membership.status !==
++        "ACTIVE"
++    );
 +
-+      select: {
-+        id: true,
-+        role: true,
-+        status: true,
-+        createdAt: true,
-+        updatedAt: true,
++  /*
++   * 【追加】
++   * 自分自身がACTIVE OWNERではなくなった場合、
++   * 以後利用できない管理ページへ戻さずクラブ選択へ移動する。
++   */
++  if (selfIsNoLongerActiveOwner) {
++    redirect("/club/select");
++  }
 +
-+        user: {
-+          select: {
-+            name: true,
-+            email: true,
-+          },
-+        },
-+
-+        invitation: {
-+          select: {
-+            status: true,
-+            name: true,
-+            email: true,
-+          },
-+        },
-+      },
++  const query =
++    new URLSearchParams({
++      toast: "member-updated",
++      toastId: requestId,
 +    });
 +
-+  return memberships.map(
-+    (membership) => ({
-+      id: membership.id,
-+      role: membership.role,
-+      status: membership.status,
-+      createdAt:
-+        membership.createdAt,
-+      updatedAt:
-+        membership.updatedAt,
-+
-+      displayName:
-+        getFirstStoredValue(
-+          membership.user.name,
-+          membership.invitation
-+            ?.name,
-+        ),
-+
-+      displayEmail:
-+        getFirstStoredValue(
-+          membership.user.email,
-+          membership.invitation
-+            ?.email,
-+        ),
-+
-+      invitationStatus:
-+        membership.invitation
-+          ?.status ?? null,
-+    }),
++  redirect(
++    `/club/${encodeURIComponent(
++      access.club.slug,
++    )}/admin/members?${query.toString()}`,
 +  );
 +}
-+
-+/**
-+ * OWNERが同じクラブのMembershipだけを更新する。
-+ * 操作者確認、対象取得、ACTIVE OWNER数確認、更新は
-+ * Serializable transaction内で一体として行う。
-+ */
-+export async function updateClubMembershipForOwner(
-+  input:
-+    UpdateClubMembershipForOwnerInput,
-+): Promise<UpdateClubMembershipResult> {
-+  let retryCount = 0;
-+
-+  while (true) {
-+    try {
-+      return await prisma.$transaction(
-+        async (
-+          transaction,
-+        ): Promise<UpdateClubMembershipResult> => {
-+          const actor =
-+            await transaction
-+              .clubMembership
-+              .findFirst({
-+                where: {
-+                  id:
-+                    input
-+                      .actorMembershipId,
-+                  clubId:
-+                    input.clubId,
-+                },
-+
-+                select: {
-+                  role: true,
-+                  status: true,
-+                },
-+              });
-+
-+          /*
-+           * 操作者が見つからない場合も同じ結果にし、
-+           * 他クラブMembershipの存在を区別して漏らさない。
-+           */
-+          if (
-+            !actor ||
-+            !isActiveClubOwner(
-+              actor,
-+            )
-+          ) {
-+            return {
-+              outcome:
-+                "ACTOR_NOT_ACTIVE_OWNER",
-+            };
-+          }
-+
-+          const target =
-+            await transaction
-+              .clubMembership
-+              .findFirst({
-+                where: {
-+                  id:
-+                    input
-+                      .targetMembershipId,
-+                  clubId:
-+                    input.clubId,
-+                },
-+
-+                select: {
-+                  id: true,
-+                  role: true,
-+                  status: true,
-+                },
-+              });
-+
-+          if (!target) {
-+            return {
-+              outcome: "NOT_FOUND",
-+            };
-+          }
-+
-+          const activeOwnerCount =
-+            await transaction
-+              .clubMembership
-+              .count({
-+                where: {
-+                  clubId:
-+                    input.clubId,
-+                  role: "OWNER",
-+                  status: "ACTIVE",
-+                },
-+              });
-+
-+          const evaluation =
-+            evaluateClubMembershipUpdate({
-+              current: {
-+                role: target.role,
-+                status:
-+                  target.status,
-+              },
-+              next: {
-+                role: input.role,
-+                status:
-+                  input.status,
-+              },
-+              activeOwnerCount,
-+            });
-+
-+          if (!evaluation.allowed) {
-+            return {
-+              outcome:
-+                "RULE_VIOLATION",
-+              reason:
-+                evaluation.violation,
-+            };
-+          }
-+
-+          const updated =
-+            await transaction
-+              .clubMembership
-+              .updateMany({
-+                where: {
-+                  id: target.id,
-+                  clubId:
-+                    input.clubId,
-+                },
-+
-+                data: {
-+                  role: input.role,
-+                  status:
-+                    input.status,
-+                },
-+              });
-+
-+          if (updated.count !== 1) {
-+            return {
-+              outcome: "NOT_FOUND",
-+            };
-+          }
-+
-+          return {
-+            outcome: "UPDATED",
-+            membership: {
-+              id: target.id,
-+              role: input.role,
-+              status: input.status,
-+            },
-+          };
-+        },
-+        {
-+          isolationLevel:
-+            Prisma
-+              .TransactionIsolationLevel
-+              .Serializable,
-+        },
-+      );
-+    } catch (error) {
-+      if (
-+        !isSerializableConflict(
-+          error,
-+        ) ||
-+        retryCount >=
-+          SERIALIZABLE_TRANSACTION_MAX_RETRIES
-+      ) {
-+        throw error;
-+      }
-+
-+      retryCount += 1;
-+    }
-+  }
-+}
-diff --git a/tests/club-membership-repository.integration.test.ts b/tests/club-membership-repository.integration.test.ts
+diff --git a/tests/club-members-actions.test.ts b/tests/club-members-actions.test.ts
 new file mode 100644
-index 0000000..404ab21
+index 0000000..e45cb52
 --- /dev/null
-+++ b/tests/club-membership-repository.integration.test.ts
-@@ -0,0 +1,921 @@
-+// tests/club-membership-repository.integration.test.ts
-+// Membership Repositoryのクラブ境界・状態遷移・OWNER不変条件
++++ b/tests/club-members-actions.test.ts
+@@ -0,0 +1,731 @@
++// tests/club-members-actions.test.ts
++// OWNER用メンバー更新Actionの認可・入力検証・遷移先を確認する
 +
 +import {
-+  randomUUID,
-+} from "node:crypto";
-+
-+import {
-+  afterAll,
++  afterEach,
++  beforeEach,
 +  describe,
 +  expect,
 +  it,
 +  vi,
 +} from "vitest";
 +
++const mocks =
++  vi.hoisted(
++    () => ({
++      requireClubAppOwnerAccess:
++        vi.fn(),
++      revalidateClubMemberPaths:
++        vi.fn(),
++      updateClubMembershipForOwner:
++        vi.fn(),
++      convertPrismaError:
++        vi.fn(),
++      redirect:
++        vi.fn(),
++      notFound:
++        vi.fn(),
++    }),
++  );
++
++vi.mock(
++  "@/app/(club-app)/club/club-app-authorization",
++  () => ({
++    requireClubAppOwnerAccess:
++      mocks
++        .requireClubAppOwnerAccess,
++  }),
++);
++
++vi.mock(
++  "@/app/(club-app)/club/revalidate-club-paths",
++  () => ({
++    revalidateClubMemberPaths:
++      mocks
++        .revalidateClubMemberPaths,
++  }),
++);
++
++vi.mock(
++  "@/src/infrastructure/prisma/repositories/club-membership-repository",
++  () => ({
++    updateClubMembershipForOwner:
++      mocks
++        .updateClubMembershipForOwner,
++  }),
++);
++
++vi.mock(
++  "@/src/infrastructure/prisma/prisma-error",
++  () => ({
++    convertPrismaError:
++      mocks.convertPrismaError,
++  }),
++);
++
++vi.mock(
++  "next/navigation",
++  () => ({
++    redirect:
++      mocks.redirect,
++    notFound:
++      mocks.notFound,
++  }),
++);
++
++import {
++  updateClubMembershipAction,
++} from "@/app/(club-app)/club/[clubSlug]/admin/members/actions";
++
 +import type {
-+  ClubMemberRole,
-+  ClubMembershipStatus,
-+} from "@/types/prisma";
++  ClubMemberUpdateActionState,
++} from "@/domain/club/member/member-update-form";
++
++const REQUESTED_CLUB_SLUG =
++  "club-a";
++
++const CANONICAL_CLUB_SLUG =
++  "club-a";
++
++const CLUB_ID =
++  "11111111-1111-4111-8111-111111111111";
++
++const ACTOR_MEMBERSHIP_ID =
++  "22222222-2222-4222-8222-222222222222";
++
++const TARGET_MEMBERSHIP_ID =
++  "33333333-3333-4333-8333-333333333333";
++
++const REQUEST_ID =
++  "44444444-4444-4444-8444-444444444444";
++
++function buildState():
++  ClubMemberUpdateActionState {
++  return {
++    status: "idle",
++    values: {
++      role: "MEMBER",
++      status: "ACTIVE",
++    },
++    fieldErrors: {},
++    formError: null,
++    requestId: REQUEST_ID,
++  };
++}
++
++function buildValidFormData():
++  FormData {
++  const formData =
++    new FormData();
++
++  formData.set(
++    "requestId",
++    REQUEST_ID,
++  );
++  formData.set(
++    "role",
++    "COACH",
++  );
++  formData.set(
++    "status",
++    "ACTIVE",
++  );
++
++  return formData;
++}
++
++beforeEach(() => {
++  vi.clearAllMocks();
++
++  mocks
++    .requireClubAppOwnerAccess
++    .mockResolvedValue({
++      userId: "user-a",
++      club: {
++        id: CLUB_ID,
++        name: "Club A",
++        slug:
++          CANONICAL_CLUB_SLUG,
++        timezone:
++          "Asia/Tokyo",
++        planType: "STANDARD",
++      },
++      membership: {
++        id:
++          ACTOR_MEMBERSHIP_ID,
++        role: "OWNER",
++      },
++    });
++
++  mocks
++    .updateClubMembershipForOwner
++    .mockResolvedValue({
++      outcome: "UPDATED",
++      membership: {
++        id:
++          TARGET_MEMBERSHIP_ID,
++        role: "COACH",
++        status: "ACTIVE",
++      },
++    });
++
++  mocks
++    .convertPrismaError
++    .mockReturnValue({
++      code: "INTERNAL",
++      publicMessage:
++        "処理に失敗しました。",
++    });
++
++  mocks.redirect.mockImplementation(
++    () => {
++      throw new Error(
++        "NEXT_REDIRECT",
++      );
++    },
++  );
++
++  mocks.notFound.mockImplementation(
++    () => {
++      throw new Error(
++        "NEXT_NOT_FOUND",
++      );
++    },
++  );
++});
++
++afterEach(() => {
++  vi.restoreAllMocks();
++});
++
++describe(
++  "updateClubMembershipAction",
++  () => {
++    it(
++      "入力検証より先にOWNER認可する",
++      async () => {
++        const authorizationError =
++          new Error(
++            "OWNER_REQUIRED",
++          );
++
++        mocks
++          .requireClubAppOwnerAccess
++          .mockRejectedValue(
++            authorizationError,
++          );
++
++        const invalidFormData =
++          new FormData();
++
++        await expect(
++          updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            invalidFormData,
++          ),
++        ).rejects.toBe(
++          authorizationError,
++        );
++
++        expect(
++          mocks
++            .requireClubAppOwnerAccess,
++        ).toHaveBeenCalledWith(
++          REQUESTED_CLUB_SLUG,
++        );
++        expect(
++          mocks
++            .updateClubMembershipForOwner,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "MEMBERがActionを直接呼んでもRepositoryを実行しない",
++      async () => {
++        mocks
++          .requireClubAppOwnerAccess
++          .mockRejectedValue(
++            new Error(
++              "NEXT_NOT_FOUND",
++            ),
++          );
++
++        await expect(
++          updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            buildValidFormData(),
++          ),
++        ).rejects.toThrow(
++          "NEXT_NOT_FOUND",
++        );
++
++        expect(
++          mocks
++            .updateClubMembershipForOwner,
++        ).not.toHaveBeenCalled();
++        expect(
++          mocks
++            .revalidateClubMemberPaths,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "不正なrequestIdを拒否する",
++      async () => {
++        const formData =
++          buildValidFormData();
++
++        formData.set(
++          "requestId",
++          "invalid-request-id",
++        );
++
++        const result =
++          await updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            formData,
++          );
++
++        expect(result).toEqual({
++          status: "error",
++          values: {
++            role: "COACH",
++            status: "ACTIVE",
++          },
++          fieldErrors: {},
++          formError:
++            "フォームの有効期限が切れました。もう一度お試しください。",
++          requestId: REQUEST_ID,
++        });
++
++        expect(
++          mocks
++            .updateClubMembershipForOwner,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "改ざんされたroleを拒否する",
++      async () => {
++        const formData =
++          buildValidFormData();
++
++        formData.set(
++          "role",
++          "SUPER_ADMIN",
++        );
++
++        const result =
++          await updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            formData,
++          );
++
++        expect(result).toEqual(
++          expect.objectContaining({
++            status: "error",
++            values: {
++              role: "SUPER_ADMIN",
++              status: "ACTIVE",
++            },
++            fieldErrors: {
++              role: [
++                "権限を確認してください。",
++              ],
++            },
++            formError: null,
++          }),
++        );
++
++        expect(
++          mocks
++            .updateClubMembershipForOwner,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "改ざんされたstatusを拒否する",
++      async () => {
++        const formData =
++          buildValidFormData();
++
++        formData.set(
++          "status",
++          "DELETED",
++        );
++
++        const result =
++          await updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            formData,
++          );
++
++        expect(result).toEqual(
++          expect.objectContaining({
++            status: "error",
++            values: {
++              role: "COACH",
++              status: "DELETED",
++            },
++            fieldErrors: {
++              status: [
++                "在籍状態を確認してください。",
++              ],
++            },
++            formError: null,
++          }),
++        );
++
++        expect(
++          mocks
++            .updateClubMembershipForOwner,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "認可結果のclubIdと操作者Membership IDだけをRepositoryへ渡す",
++      async () => {
++        const formData =
++          buildValidFormData();
++
++        /*
++         * クライアントが同名の値を追加しても、
++         * Actionは認可結果だけを使用する。
++         */
++        formData.set(
++          "clubId",
++          "attacker-club-id",
++        );
++        formData.set(
++          "actorMembershipId",
++          "attacker-membership-id",
++        );
++
++        await expect(
++          updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            formData,
++          ),
++        ).rejects.toThrow(
++          "NEXT_REDIRECT",
++        );
++
++        expect(
++          mocks
++            .updateClubMembershipForOwner,
++        ).toHaveBeenCalledWith({
++          clubId: CLUB_ID,
++          actorMembershipId:
++            ACTOR_MEMBERSHIP_ID,
++          targetMembershipId:
++            TARGET_MEMBERSHIP_ID,
++          role: "COACH",
++          status: "ACTIVE",
++        });
++      },
++    );
++
++    it.each([
++      "NOT_FOUND",
++      "ACTOR_NOT_ACTIVE_OWNER",
++    ] as const)(
++      "%sを404にし、再検証もredirectもしない",
++      async (outcome) => {
++        mocks
++          .updateClubMembershipForOwner
++          .mockResolvedValue({
++            outcome,
++          });
++
++        await expect(
++          updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            buildValidFormData(),
++          ),
++        ).rejects.toThrow(
++          "NEXT_NOT_FOUND",
++        );
++
++        expect(
++          mocks.notFound,
++        ).toHaveBeenCalledTimes(1);
++        expect(
++          mocks
++            .revalidateClubMemberPaths,
++        ).not.toHaveBeenCalled();
++        expect(
++          mocks.redirect,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it.each([
++      {
++        reason:
++          "INVITED_OWNER_NOT_ALLOWED",
++        field: "role",
++        message:
++          "招待中のメンバーをOWNERに変更できません。",
++      },
++      {
++        reason:
++          "INVITATION_STATUS_CHANGE_NOT_ALLOWED",
++        field: "status",
++        message:
++          "招待中の在籍状態はこの画面から変更できません。",
++      },
++    ] as const)(
++      "$reasonを$fieldの入力エラーへ変換する",
++      async ({
++        reason,
++        field,
++        message,
++      }) => {
++        mocks
++          .updateClubMembershipForOwner
++          .mockResolvedValue({
++            outcome:
++              "RULE_VIOLATION",
++            reason,
++          });
++
++        const result =
++          await updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            buildValidFormData(),
++          );
++
++        expect(result).toEqual(
++          expect.objectContaining({
++            status: "error",
++            fieldErrors: {
++              [field]: [
++                message,
++              ],
++            },
++            formError: null,
++          }),
++        );
++
++        expect(
++          mocks
++            .revalidateClubMemberPaths,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "最後のACTIVE OWNER違反を固定のフォーム全体エラーへ変換する",
++      async () => {
++        mocks
++          .updateClubMembershipForOwner
++          .mockResolvedValue({
++            outcome:
++              "RULE_VIOLATION",
++            reason:
++              "LAST_ACTIVE_OWNER",
++          });
++
++        const result =
++          await updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            ACTOR_MEMBERSHIP_ID,
++            buildState(),
++            buildValidFormData(),
++          );
++
++        expect(result).toEqual(
++          expect.objectContaining({
++            status: "error",
++            fieldErrors: {},
++            formError:
++              "最後の有効なOWNERは降格・利用停止・退会扱いにできません。先に別のメンバーをOWNERに設定してください。",
++          }),
++        );
++
++        expect(
++          mocks.redirect,
++        ).not.toHaveBeenCalled();
++      },
++    );
++
++    it(
++      "DB障害を安全なエラーへ変換し氏名やメールをログへ出さない",
++      async () => {
++        const consoleError =
++          vi.spyOn(
++            console,
++            "error",
++          ).mockImplementation(
++            () => undefined,
++          );
++
++        mocks
++          .updateClubMembershipForOwner
++          .mockRejectedValue(
++            new Error(
++              "database details",
++            ),
++          );
++
++        const formData =
++          buildValidFormData();
++
++        formData.set(
++          "name",
++          "秘密の氏名",
++        );
++        formData.set(
++          "email",
++          "secret@example.com",
++        );
++
++        const result =
++          await updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            formData,
++          );
++
++        expect(result.formError).toBe(
++          "処理に失敗しました。",
++        );
++
++        expect(
++          consoleError,
++        ).toHaveBeenCalledWith(
++          "updateClubMembershipAction failed",
++          {
++            clubId: CLUB_ID,
++            targetMembershipId:
++              TARGET_MEMBERSHIP_ID,
++            actorMembershipId:
++              ACTOR_MEMBERSHIP_ID,
++            requestId: REQUEST_ID,
++            code: "INTERNAL",
++          },
++        );
++
++        const serializedLog =
++          JSON.stringify(
++            consoleError.mock.calls,
++          );
++
++        expect(
++          serializedLog,
++        ).not.toContain(
++          "秘密の氏名",
++        );
++        expect(
++          serializedLog,
++        ).not.toContain(
++          "secret@example.com",
++        );
++      },
++    );
++
++    it(
++      "他人の更新後に再検証して固定toast付きメンバー一覧へ移動する",
++      async () => {
++        await expect(
++          updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            TARGET_MEMBERSHIP_ID,
++            buildState(),
++            buildValidFormData(),
++          ),
++        ).rejects.toThrow(
++          "NEXT_REDIRECT",
++        );
++
++        expect(
++          mocks
++            .revalidateClubMemberPaths,
++        ).toHaveBeenCalledWith(
++          CANONICAL_CLUB_SLUG,
++        );
++
++        expect(
++          mocks.redirect,
++        ).toHaveBeenCalledWith(
++          `/club/${CANONICAL_CLUB_SLUG}/admin/members?toast=member-updated&toastId=${REQUEST_ID}`,
++        );
++
++        expect(
++          mocks
++            .revalidateClubMemberPaths
++            .mock
++            .invocationCallOrder[0],
++        ).toBeLessThan(
++          mocks.redirect.mock
++            .invocationCallOrder[0],
++        );
++      },
++    );
++
++    it(
++      "自分自身の降格後は再検証してクラブ選択へ移動する",
++      async () => {
++        mocks
++          .updateClubMembershipForOwner
++          .mockResolvedValue({
++            outcome: "UPDATED",
++            membership: {
++              id:
++                ACTOR_MEMBERSHIP_ID,
++              role: "COACH",
++              status: "ACTIVE",
++            },
++          });
++
++        await expect(
++          updateClubMembershipAction(
++            REQUESTED_CLUB_SLUG,
++            ACTOR_MEMBERSHIP_ID,
++            buildState(),
++            buildValidFormData(),
++          ),
++        ).rejects.toThrow(
++          "NEXT_REDIRECT",
++        );
++
++        expect(
++          mocks
++            .revalidateClubMemberPaths,
++        ).toHaveBeenCalledWith(
++          CANONICAL_CLUB_SLUG,
++        );
++        expect(
++          mocks.redirect,
++        ).toHaveBeenCalledTimes(1);
++        expect(
++          mocks.redirect,
++        ).toHaveBeenCalledWith(
++          "/club/select",
++        );
++      },
++    );
++  },
++);
+diff --git a/tests/club-membership-authorization.test.ts b/tests/club-membership-authorization.test.ts
+new file mode 100644
+index 0000000..8a684e3
+--- /dev/null
++++ b/tests/club-membership-authorization.test.ts
+@@ -0,0 +1,327 @@
++// tests/club-membership-authorization.test.ts
++// DB上の最新Membership状態を使った認可を確認する
++
++import {
++  beforeEach,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
++
++const mocks =
++  vi.hoisted(
++    () => ({
++      createClient:
++        vi.fn(),
++      getUser:
++        vi.fn(),
++      findFirstMembership:
++        vi.fn(),
++      redirect:
++        vi.fn(),
++      notFound:
++        vi.fn(),
++    }),
++  );
 +
 +vi.mock(
 +  "server-only",
 +  () => ({}),
 +);
 +
-+import {
-+  findClubMembershipsForOwner,
-+  updateClubMembershipForOwner,
-+} from "@/src/infrastructure/prisma/repositories/club-membership-repository";
++vi.mock(
++  "@/src/infrastructure/supabase/server",
++  () => ({
++    createClient:
++      mocks.createClient,
++  }),
++);
++
++vi.mock(
++  "@/src/infrastructure/prisma/client",
++  () => ({
++    prisma: {
++      clubMembership: {
++        findFirst:
++          mocks
++            .findFirstMembership,
++      },
++    },
++  }),
++);
++
++vi.mock(
++  "next/navigation",
++  () => ({
++    redirect:
++      mocks.redirect,
++    notFound:
++      mocks.notFound,
++  }),
++);
 +
 +import {
-+  prisma,
-+} from "@/src/infrastructure/prisma/client";
++  requireActiveClubMembership,
++  requireClubOwner,
++} from "@/app/(club-app)/club/club-membership-authorization";
 +
-+const describeDatabase =
-+  process.env
-+    .RUN_DB_INTEGRATION_TESTS ===
-+  "1"
-+    ? describe
-+    : describe.skip;
++import type {
++  ClubMemberRole,
++  ClubMembershipStatus,
++} from "@/types/prisma";
 +
-+type MemberSeed = {
-+  role?: ClubMemberRole;
-+  status?: ClubMembershipStatus;
-+  name?: string | null;
-+  email?: string | null;
++const CLUB_SLUG =
++  "club-a";
++
++const USER_ID =
++  "user-a";
++
++const MEMBERSHIP_ID =
++  "22222222-2222-4222-8222-222222222222";
++
++type StoredMembership = {
++  role: ClubMemberRole;
++  status: ClubMembershipStatus;
 +};
 +
-+describeDatabase(
-+  "ClubMembership Repository",
-+  () => {
-+    const createdClubIds =
-+      new Set<string>();
++/**
++ * DBにあるstatusと、認可クエリのwhere.statusが一致した場合だけ
++ * Membershipを返す簡易DBモック。
++ */
++function mockStoredMembership(
++  stored:
++    StoredMembership,
++): void {
++  mocks
++    .findFirstMembership
++    .mockImplementation(
++      async (input: unknown) => {
++        const where =
++          (
++            input as {
++              where: {
++                userId: string;
++                status:
++                  ClubMembershipStatus;
++                club: {
++                  is: {
++                    slug: string;
++                  };
++                };
++              };
++            }
++          ).where;
 +
-+    const createdUserIds =
-+      new Set<string>();
++        if (
++          where.userId !== USER_ID ||
++          where.status !==
++            stored.status ||
++          where.club.is.slug !==
++            CLUB_SLUG
++        ) {
++          return null;
++        }
 +
-+    async function createClubFixture(
-+      memberSeeds:
-+        readonly MemberSeed[],
-+    ) {
-+      const clubId =
-+        randomUUID();
-+
-+      const members =
-+        memberSeeds.map(
-+          (seed) => {
-+            const userId =
-+              randomUUID();
-+
-+            const membershipId =
-+              randomUUID();
-+
-+            createdUserIds.add(
-+              userId,
-+            );
-+
-+            return {
-+              membershipId,
-+              userId,
-+              role:
-+                seed.role ??
-+                "MEMBER",
-+              status:
-+                seed.status ??
-+                "ACTIVE",
-+              name:
-+                seed.name ?? null,
-+              email:
-+                seed.email ===
-+                undefined
-+                  ? `${userId}@example.test`
-+                  : seed.email,
-+            };
++        return {
++          id: MEMBERSHIP_ID,
++          role: stored.role,
++          club: {
++            id:
++              "11111111-1111-4111-8111-111111111111",
++            name: "Club A",
++            slug: CLUB_SLUG,
++            timezone:
++              "Asia/Tokyo",
++            planType:
++              "STANDARD",
 +          },
-+        );
++        };
++      },
++    );
++}
 +
-+      createdClubIds.add(
-+        clubId,
++beforeEach(() => {
++  vi.clearAllMocks();
++
++  mocks
++    .createClient
++    .mockResolvedValue({
++      auth: {
++        getUser:
++          mocks.getUser,
++      },
++    });
++
++  /*
++   * Supabaseの既存セッション自体は、全テストで有効なままにする。
++   * 許可・拒否はDB上のMembership状態だけで変わる。
++   */
++  mocks.getUser.mockResolvedValue({
++    data: {
++      user: {
++        id: USER_ID,
++      },
++    },
++    error: null,
++  });
++
++  mocks.redirect.mockImplementation(
++    () => {
++      throw new Error(
++        "NEXT_REDIRECT",
 +      );
++    },
++  );
 +
-+      await prisma.appUser.createMany({
-+        data: members.map(
-+          (member) => ({
-+            id: member.userId,
-+            name: member.name,
-+            email: member.email,
-+          }),
-+        ),
-+      });
++  mocks.notFound.mockImplementation(
++    () => {
++      throw new Error(
++        "NEXT_NOT_FOUND",
++      );
++    },
++  );
++});
 +
-+      await prisma.club.create({
-+        data: {
-+          id: clubId,
-+          name:
-+            `F04 Club ${clubId}`,
-+          slug:
-+            `f04-${clubId}`,
-+        },
-+      });
-+
-+      await prisma
-+        .clubMembership
-+        .createMany({
-+          data: members.map(
-+            (member) => ({
-+              id:
-+                member.membershipId,
-+              clubId,
-+              userId:
-+                member.userId,
-+              role: member.role,
-+              status:
-+                member.status,
-+            }),
-+          ),
-+        });
-+
-+      return {
-+        clubId,
-+        members,
-+      };
-+    }
-+
-+    afterAll(
-+      async () => {
-+        await prisma.club.deleteMany({
-+          where: {
-+            id: {
-+              in: [
-+                ...createdClubIds,
-+              ],
-+            },
-+          },
-+        });
-+
-+        await prisma.appUser.deleteMany({
-+          where: {
-+            id: {
-+              in: [
-+                ...createdUserIds,
-+              ],
-+            },
-+          },
-+        });
-+
-+        await prisma.$disconnect();
-+      },
-+    );
-+
++describe(
++  "requireActiveClubMembership",
++  () => {
 +    it(
-+      "同じクラブのMembershipを更新できる",
++      "DB上でACTIVEなら既存セッションを認可する",
 +      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const [
-+          actor,
-+          target,
-+        ] = fixture.members;
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              actor.membershipId,
-+            targetMembershipId:
-+              target.membershipId,
-+            role: "COACH",
-+            status: "SUSPENDED",
-+          });
-+
-+        expect(result).toEqual({
-+          outcome: "UPDATED",
-+          membership: {
-+            id: target.membershipId,
-+            role: "COACH",
-+            status: "SUSPENDED",
-+          },
-+        });
-+
-+        await expect(
-+          prisma.clubMembership.findUnique({
-+            where: {
-+              id:
-+                target.membershipId,
-+            },
-+            select: {
-+              role: true,
-+              status: true,
-+            },
-+          }),
-+        ).resolves.toEqual({
-+          role: "COACH",
-+          status: "SUSPENDED",
-+        });
-+      },
-+    );
-+
-+    it(
-+      "別クラブのMembership IDを更新できない",
-+      async () => {
-+        const clubA =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const clubB =
-+          await createClubFixture([
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId: clubA.clubId,
-+            actorMembershipId:
-+              clubA.members[0]
-+                .membershipId,
-+            targetMembershipId:
-+              clubB.members[0]
-+                .membershipId,
-+            role: "COACH",
-+            status: "ACTIVE",
-+          });
-+
-+        expect(result).toEqual({
-+          outcome: "NOT_FOUND",
-+        });
-+
-+        await expect(
-+          prisma.clubMembership.findUnique({
-+            where: {
-+              id:
-+                clubB.members[0]
-+                  .membershipId,
-+            },
-+            select: {
-+              role: true,
-+              status: true,
-+            },
-+          }),
-+        ).resolves.toEqual({
++        mockStoredMembership({
 +          role: "MEMBER",
 +          status: "ACTIVE",
 +        });
-+      },
-+    );
 +
-+    it(
-+      "ACTIVEではない操作者は更新できない",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "OWNER",
-+              status: "SUSPENDED",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              fixture.members[1]
-+                .membershipId,
-+            targetMembershipId:
-+              fixture.members[2]
-+                .membershipId,
-+            role: "COACH",
-+            status: "ACTIVE",
-+          });
-+
-+        expect(result).toEqual({
-+          outcome:
-+            "ACTOR_NOT_ACTIVE_OWNER",
-+        });
-+      },
-+    );
-+
-+    it(
-+      "OWNERではない操作者は更新できない",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "COACH",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              fixture.members[1]
-+                .membershipId,
-+            targetMembershipId:
-+              fixture.members[2]
-+                .membershipId,
-+            role: "OFFICER",
-+            status: "ACTIVE",
-+          });
-+
-+        expect(result).toEqual({
-+          outcome:
-+            "ACTOR_NOT_ACTIVE_OWNER",
-+        });
-+      },
-+    );
-+
-+    it(
-+      "INVITEDをOWNERにできない",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "INVITED",
-+            },
-+          ]);
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              fixture.members[0]
-+                .membershipId,
-+            targetMembershipId:
-+              fixture.members[1]
-+                .membershipId,
-+            role: "OWNER",
-+            status: "INVITED",
-+          });
-+
-+        expect(result).toEqual({
-+          outcome:
-+            "RULE_VIOLATION",
-+          reason:
-+            "INVITED_OWNER_NOT_ALLOWED",
-+        });
-+      },
-+    );
-+
-+    it(
-+      "INVITEDを管理画面から直接ACTIVEにできない",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "INVITED",
-+            },
-+          ]);
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              fixture.members[0]
-+                .membershipId,
-+            targetMembershipId:
-+              fixture.members[1]
-+                .membershipId,
++        await expect(
++          requireActiveClubMembership(
++            CLUB_SLUG,
++          ),
++        ).resolves.toEqual({
++          userId: USER_ID,
++          club: {
++            id:
++              "11111111-1111-4111-8111-111111111111",
++            name: "Club A",
++            slug: CLUB_SLUG,
++            timezone:
++              "Asia/Tokyo",
++            planType:
++              "STANDARD",
++          },
++          membership: {
++            id: MEMBERSHIP_ID,
 +            role: "MEMBER",
-+            status: "ACTIVE",
-+          });
-+
-+        expect(result).toEqual({
-+          outcome:
-+            "RULE_VIOLATION",
-+          reason:
-+            "INVITATION_STATUS_CHANGE_NOT_ALLOWED",
++          },
 +        });
++
++        expect(
++          mocks
++            .findFirstMembership,
++        ).toHaveBeenCalledWith(
++          expect.objectContaining({
++            where: {
++              userId: USER_ID,
++              status: "ACTIVE",
++              club: {
++                is: {
++                  slug: CLUB_SLUG,
++                },
++              },
++            },
++          }),
++        );
 +      },
 +    );
 +
 +    it.each([
-+      {
-+        label: "降格",
-+        role: "MEMBER",
-+        status: "ACTIVE",
-+      },
-+      {
-+        label: "利用停止",
-+        role: "OWNER",
-+        status: "SUSPENDED",
-+      },
-+      {
-+        label: "退会",
-+        role: "OWNER",
-+        status: "WITHDRAWN",
-+      },
++      "SUSPENDED",
++      "WITHDRAWN",
 +    ] as const)(
-+      "最後のACTIVE OWNERを$labelできない",
-+      async ({
-+        role,
-+        status,
-+      }) => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const membership =
-+          fixture.members[0];
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              membership.membershipId,
-+            targetMembershipId:
-+              membership.membershipId,
-+            role,
-+            status,
-+          });
-+
-+        expect(result).toEqual({
-+          outcome:
-+            "RULE_VIOLATION",
-+          reason:
-+            "LAST_ACTIVE_OWNER",
-+        });
-+      },
-+    );
-+
-+    it(
-+      "2人目をOWNERにした後なら元OWNERを降格できる",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const [
-+          originalOwner,
-+          nextOwner,
-+        ] = fixture.members;
-+
-+        const promoted =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              originalOwner
-+                .membershipId,
-+            targetMembershipId:
-+              nextOwner.membershipId,
-+            role: "OWNER",
-+            status: "ACTIVE",
-+          });
-+
-+        expect(
-+          promoted.outcome,
-+        ).toBe("UPDATED");
-+
-+        const demoted =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              nextOwner.membershipId,
-+            targetMembershipId:
-+              originalOwner
-+                .membershipId,
-+            role: "MEMBER",
-+            status: "ACTIVE",
-+          });
-+
-+        expect(demoted).toEqual({
-+          outcome: "UPDATED",
-+          membership: {
-+            id:
-+              originalOwner
-+                .membershipId,
-+            role: "MEMBER",
-+            status: "ACTIVE",
-+          },
++      "既存セッションがあってもDB上で%sなら拒否する",
++      async (status) => {
++        mockStoredMembership({
++          role: "OWNER",
++          status,
 +        });
 +
 +        await expect(
-+          prisma.clubMembership.count({
-+            where: {
-+              clubId:
-+                fixture.clubId,
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+          }),
-+        ).resolves.toBe(1);
-+      },
-+    );
-+
-+    it(
-+      "2人のOWNERを並列で降格してもACTIVE OWNERが0人にならない",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const [
-+          ownerA,
-+          ownerB,
-+        ] = fixture.members;
-+
-+        const results =
-+          await Promise.allSettled([
-+            updateClubMembershipForOwner({
-+              clubId:
-+                fixture.clubId,
-+              actorMembershipId:
-+                ownerB.membershipId,
-+              targetMembershipId:
-+                ownerA.membershipId,
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            }),
-+            updateClubMembershipForOwner({
-+              clubId:
-+                fixture.clubId,
-+              actorMembershipId:
-+                ownerA.membershipId,
-+              targetMembershipId:
-+                ownerB.membershipId,
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            }),
-+          ]);
-+
-+        const updatedCount =
-+          results.filter(
-+            (result) =>
-+              result.status ===
-+                "fulfilled" &&
-+              result.value.outcome ===
-+                "UPDATED",
-+          ).length;
-+
-+        expect(updatedCount).toBe(1);
-+
-+        await expect(
-+          prisma.clubMembership.count({
-+            where: {
-+              clubId:
-+                fixture.clubId,
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+          }),
-+        ).resolves.toBe(1);
-+      },
-+    );
-+
-+    it(
-+      "WITHDRAWNにしてもAppUserを削除しない",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+            },
-+          ]);
-+
-+        const [
-+          actor,
-+          target,
-+        ] = fixture.members;
-+
-+        const result =
-+          await updateClubMembershipForOwner({
-+            clubId:
-+              fixture.clubId,
-+            actorMembershipId:
-+              actor.membershipId,
-+            targetMembershipId:
-+              target.membershipId,
-+            role: "MEMBER",
-+            status: "WITHDRAWN",
-+          });
-+
-+        expect(
-+          result.outcome,
-+        ).toBe("UPDATED");
-+
-+        await expect(
-+          prisma.appUser.findUnique({
-+            where: {
-+              id: target.userId,
-+            },
-+            select: {
-+              id: true,
-+            },
-+          }),
-+        ).resolves.toEqual({
-+          id: target.userId,
-+        });
-+
-+        await expect(
-+          prisma.clubMembership.findUnique({
-+            where: {
-+              id:
-+                target.membershipId,
-+            },
-+            select: {
-+              status: true,
-+            },
-+          }),
-+        ).resolves.toEqual({
-+          status: "WITHDRAWN",
-+        });
-+      },
-+    );
-+
-+    it(
-+      "一覧ではAppUserを優先し、未設定ならInvitationへフォールバックする",
-+      async () => {
-+        const fixture =
-+          await createClubFixture([
-+            {
-+              role: "OWNER",
-+              status: "ACTIVE",
-+              name: "代表者",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "INVITED",
-+              name: "App User Name",
-+              email:
-+                "app-user@example.test",
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "INVITED",
-+              name: null,
-+              email: null,
-+            },
-+            {
-+              role: "MEMBER",
-+              status: "ACTIVE",
-+              name: null,
-+              email: null,
-+            },
-+          ]);
-+
-+        const [
-+          actor,
-+          preferred,
-+          fallback,
-+          missing,
-+        ] = fixture.members;
-+
-+        const preferredTokenHash =
-+          `preferred-${randomUUID()}`;
-+
-+        const fallbackTokenHash =
-+          `fallback-${randomUUID()}`;
-+
-+        const preferredAuthUserId =
-+          `auth-${randomUUID()}`;
-+
-+        const secretError =
-+          `secret-error-${randomUUID()}`;
-+
-+        await prisma
-+          .clubInvitation
-+          .createMany({
-+            data: [
-+              {
-+                clubId:
-+                  fixture.clubId,
-+                email:
-+                  "invitation-preferred@example.test",
-+                name:
-+                  "Invitation Preferred Name",
-+                role: "MEMBER",
-+                status: "EMAIL_FAILED",
-+                tokenHash:
-+                  preferredTokenHash,
-+                expiresAt:
-+                  new Date(
-+                    Date.now() +
-+                      86_400_000,
-+                  ),
-+                membershipId:
-+                  preferred.membershipId,
-+                authUserId:
-+                  preferredAuthUserId,
-+                invitedByMembershipId:
-+                  actor.membershipId,
-+                emailSendError:
-+                  secretError,
-+              },
-+              {
-+                clubId:
-+                  fixture.clubId,
-+                email:
-+                  "invitation-fallback@example.test",
-+                name:
-+                  "Invitation Fallback Name",
-+                role: "MEMBER",
-+                status: "SENT",
-+                tokenHash:
-+                  fallbackTokenHash,
-+                expiresAt:
-+                  new Date(
-+                    Date.now() +
-+                      86_400_000,
-+                  ),
-+                membershipId:
-+                  fallback.membershipId,
-+                invitedByMembershipId:
-+                  actor.membershipId,
-+              },
-+            ],
-+          });
-+
-+        const memberships =
-+          await findClubMembershipsForOwner({
-+            clubId:
-+              fixture.clubId,
-+          });
-+
-+        const preferredMembership =
-+          memberships.find(
-+            (membership) =>
-+              membership.id ===
-+              preferred.membershipId,
-+          );
-+
-+        expect(
-+          preferredMembership,
-+        ).toEqual(
-+          expect.objectContaining({
-+            displayName:
-+              "App User Name",
-+            displayEmail:
-+              "app-user@example.test",
-+            invitationStatus:
-+              "EMAIL_FAILED",
-+          }),
-+        );
-+
-+        expect(
-+          Object.keys(
-+            preferredMembership ?? {},
-+          ).sort(),
-+        ).toEqual([
-+          "createdAt",
-+          "displayEmail",
-+          "displayName",
-+          "id",
-+          "invitationStatus",
-+          "role",
-+          "status",
-+          "updatedAt",
-+        ]);
-+
-+        expect(
-+          preferredMembership
-+            ?.createdAt,
-+        ).toBeInstanceOf(Date);
-+
-+        expect(
-+          preferredMembership
-+            ?.updatedAt,
-+        ).toBeInstanceOf(Date);
-+
-+        expect(
-+          memberships.find(
-+            (membership) =>
-+              membership.id ===
-+              fallback.membershipId,
++          requireActiveClubMembership(
++            CLUB_SLUG,
 +          ),
-+        ).toEqual(
-+          expect.objectContaining({
-+            displayName:
-+              "Invitation Fallback Name",
-+            displayEmail:
-+              "invitation-fallback@example.test",
-+            invitationStatus: "SENT",
-+          }),
++        ).rejects.toThrow(
++          "NEXT_NOT_FOUND",
 +        );
 +
 +        expect(
-+          memberships.find(
-+            (membership) =>
-+              membership.id ===
-+              missing.membershipId,
-+          ),
-+        ).toEqual(
++          mocks.getUser,
++        ).toHaveBeenCalledTimes(1);
++        expect(
++          mocks
++            .findFirstMembership,
++        ).toHaveBeenCalledWith(
 +          expect.objectContaining({
-+            displayName: "未登録",
-+            displayEmail: "未登録",
-+            invitationStatus: null,
++            where:
++              expect.objectContaining({
++                status: "ACTIVE",
++              }),
 +          }),
 +        );
++        expect(
++          mocks.notFound,
++        ).toHaveBeenCalledTimes(1);
++      },
++    );
++  },
++);
 +
-+        const serialized =
-+          JSON.stringify(
-+            memberships,
-+          );
++describe(
++  "requireClubOwner",
++  () => {
++    it(
++      "DB上でACTIVE OWNERなら認可する",
++      async () => {
++        mockStoredMembership({
++          role: "OWNER",
++          status: "ACTIVE",
++        });
 +
-+        expect(serialized).not.toContain(
-+          preferredTokenHash,
++        await expect(
++          requireClubOwner(
++            CLUB_SLUG,
++          ),
++        ).resolves.toEqual(
++          expect.objectContaining({
++            membership: {
++              id: MEMBERSHIP_ID,
++              role: "OWNER",
++            },
++          }),
++        );
++      },
++    );
++
++    it(
++      "DB上でACTIVEでもMEMBERならOWNERページを拒否する",
++      async () => {
++        mockStoredMembership({
++          role: "MEMBER",
++          status: "ACTIVE",
++        });
++
++        await expect(
++          requireClubOwner(
++            CLUB_SLUG,
++          ),
++        ).rejects.toThrow(
++          "NEXT_NOT_FOUND",
 +        );
 +
-+        expect(serialized).not.toContain(
-+          fallbackTokenHash,
-+        );
-+
-+        expect(serialized).not.toContain(
-+          preferredAuthUserId,
-+        );
-+
-+        expect(serialized).not.toContain(
-+          secretError,
-+        );
-+
-+        expect(serialized).not.toContain(
-+          "tokenHash",
-+        );
-+
-+        expect(serialized).not.toContain(
-+          "authUserId",
-+        );
-+
-+        expect(serialized).not.toContain(
-+          "emailSendError",
-+        );
++        expect(
++          mocks.notFound,
++        ).toHaveBeenCalledTimes(1);
 +      },
 +    );
 +  },
