@@ -6,19 +6,34 @@
     "dev": "next dev",
     "build": "prisma generate && next build",
     "start": "next start",
-    "lint": "eslint",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts",
+    "prisma:validate": "prisma validate",
+    "env:validate": "node scripts/validate-env.mjs",
+    "predev": "npm run env:validate",
+    "prebuild": "npm run env:validate",
+    "prestart": "npm run env:validate",
+    "verify": "npm run env:validate && npm run prisma:validate && npm run lint && npm run typecheck && npm run test && npm run build",
+    "verify:local": "dotenv -e .env.local -- npm run verify && dotenv -e .env.local -- npm run test:db",
     "db:seed:local": "dotenv -e .env.local -- prisma db seed",
-    "db:seed:prod": "dotenv -e .env.prod -- tsx prisma/seed.ts"
+    "db:seed:prod": "dotenv -e .env.prod -- tsx prisma/seed.ts",
+    "db:seed:app:local": "dotenv -e .env.local -- tsx prisma/seed-app-local.ts",
+    "club:line:init": "node --conditions=react-server --import tsx scripts/initialize-club-line-setting.ts"
   },
   "dependencies": {
     "@axiomhq/js": "^1.8.0",
     "@axiomhq/logging": "^0.3.0",
     "@axiomhq/nextjs": "^0.3.0",
+    "@date-fns/tz": "^1.5.0",
     "@hookform/resolvers": "^5.4.0",
     "@line/liff": "^2.29.0",
+    "@next/env": "^16.3.1",
     "@prisma/client": "^7.8.0",
     "@supabase/ssr": "^0.10.3",
-    "@supabase/supabase-js": "^2.106.2",
+    "@supabase/supabase-js": "^2.112.3",
     "clsx": "^2.1.1",
     "date-fns": "^4.3.0",
     "lucide-react": "^1.17.0",
@@ -30,6 +45,7 @@
     "react-hook-form": "^7.76.1",
     "react-icons": "^5.6.0",
     "resend": "^6.12.4",
+    "server-only": "^0.0.1",
     "tailwind-merge": "^3.6.0",
     "zod": "^4.4.3"
   },
@@ -45,7 +61,8 @@
     "eslint-config-next": "16.2.6",
     "supabase": "^2.101.0",
     "tailwindcss": "^4",
-    "tsx": "^4.22.4",
-    "typescript": "^5"
+    "tsx": "^4.23.12",
+    "typescript": "^5",
+    "vitest": "^4.1.10"
   }
 }

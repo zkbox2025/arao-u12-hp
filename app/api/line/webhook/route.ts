@@ -1,5 +1,8 @@
 // app/api/line/webhook/route.ts
-// LINE Messaging APIから送信されるWebhookを受信する
+// （移行後に削除すること）LINE Messaging APIから送信されるWebhookを受信する
+///api/line/webhook/[webhookKey]が本命
+//LINE Developersの新しいWebhook URLは、/api/line/webhook/[webhookKey]になるので以下のURLを設定する。
+//https://本番ドメイン/api/line/webhook/クラブ固有のwebhookKey
 
 import "server-only";
 
@@ -135,41 +138,38 @@ export async function POST(request: NextRequest) {
     );
   }
 
-  const events = Array.isArray(body.events) ? body.events : [];
+    const events =
+    Array.isArray(body.events)
+      ? body.events
+      : [];
 
-// LINE Developersの「検証」ではeventsが空のPOSTが届くことがある
-if (events.length === 0) {
-  logInfo("LINE webhook: 検証リクエストを受信しました", {
-    eventCount: 0,
-    destination: body.destination,
-  });
+  // LINE Developersの「検証」では、
+  // eventsが空のPOSTが届くことがある
+  if (events.length === 0) {
+    logInfo(
+      "LINE webhook: 検証リクエストを受信しました",
+      {
+        eventCount: 0,
+      },
+    );
 
-  await flushLogs();
+    await flushLogs();
 
-  return NextResponse.json({ ok: true });
-}
-
-// 初回のgroupId確認期間だけtrueにする
-const isGroupIdLoggingEnabled =
-  process.env.LINE_GROUP_ID_LOG_ENABLED === "true";
-
-for (const event of events) {
-  if (
-    isGroupIdLoggingEnabled &&
-    event.source?.type === "group" &&
-    event.source.groupId
-  ) {
-    logInfo("LINE groupId確認用", {
-      lineGroupId: event.source.groupId,
-      eventType: event.type,
-      webhookEventId: event.webhookEventId,
-      sourceType: event.source.type,
-      destination: body.destination,
+    return NextResponse.json({
+      ok: true,
     });
   }
-}
 
-await flushLogs();
+  /*
+   * 【粒度5修正】
+   * 旧Webhookは移行期間中だけ残す。
+   *
+   * 完全なgroupIdやdestinationを出していた
+   * 確認用ログは削除する。
+   */
+  await flushLogs();
 
-return NextResponse.json({ ok: true });
+  return NextResponse.json({
+    ok: true,
+  });
 }
