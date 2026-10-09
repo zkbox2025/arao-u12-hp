@@ -53,6 +53,12 @@ npx dotenv-cli -e .env.local -- npx prisma migrate dev
 
 npx dotenv-cli -e .env.prod -- npx prisma migrate deploy
 
+※すでにパッチの中にマイグレーションファイル（SQL）が含まれていて、patchを反映させる場合は、既存のマイグレーション（SQL）をローカルDBに適用するコマンドでOK。以下の通り。
+◯npx dotenv-cli -e .env.local -- npx prisma migrate deploy
+◯npx dotenv-cli -e .env.local -- npx prisma generate
+◯npx dotenv-cli -e .env.local -- npx prisma validate
+
+
 ◯本番DBを変更前にバックアップをする
 
 ◯cronについて
