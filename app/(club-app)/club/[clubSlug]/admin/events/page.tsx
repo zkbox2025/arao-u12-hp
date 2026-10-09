@@ -324,6 +324,24 @@ const adminCalendarEvents:
         >
           日別一覧へ
         </Link>
+
+        {/* 【追加】OWNERだけにメンバー・LINE設定への導線を表示する。 */}
+        {context.membership.role === "OWNER" ? (
+          <>
+            <Link
+              href={`${basePath}/admin/members`}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            >
+              メンバー管理
+            </Link>
+            <Link
+              href={`${basePath}/admin/settings/line`}
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+            >
+              LINE通知設定
+            </Link>
+          </>
+        ) : null}
       </div>
 
     

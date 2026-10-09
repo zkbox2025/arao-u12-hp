@@ -1,1356 +1,983 @@
-diff --git a/app/(club-app)/club/[clubSlug]/admin/members/actions.ts b/app/(club-app)/club/[clubSlug]/admin/members/actions.ts
+diff --git a/domain/club/invitation/invitation-form.test.ts b/domain/club/invitation/invitation-form.test.ts
 new file mode 100644
-index 0000000..cd4099e
+index 0000000000000000000000000000000000000000..630d8781d7f92d9a59cb51b3c71beef562e1d1ed
 --- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/admin/members/actions.ts
-@@ -0,0 +1,280 @@
-+// app/(club-app)/club/[clubSlug]/admin/members/actions.ts
-+// OWNER用メンバー管理の更新Server Action
++++ b/domain/club/invitation/invitation-form.test.ts
+@@ -0,0 +1,198 @@
++// domain/club/invitation/invitation-form.test.ts
++// 【追加：F05粒度1】正規化・入力境界・権限改ざんのテスト。
 +
-+"use server";
-+
-+import {
-+  notFound,
-+  redirect,
-+} from "next/navigation";
++import { describe, expect, it } from "vitest";
 +
 +import {
-+  requireClubAppOwnerAccess,
-+} from "@/app/(club-app)/club/club-app-authorization";
++  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
++  CLUB_MEMBER_INVITE_NAME_MAX_LENGTH,
++  CLUB_MEMBER_INVITE_ROLES,
++  buildClubMemberInviteFormValues,
++  validateClubMemberInviteFormValues,
++  type ClubMemberInviteFormValues,
++} from "./invitation-form";
 +
-+import {
-+  revalidateClubMemberPaths,
-+} from "@/app/(club-app)/club/revalidate-club-paths";
++const VALID_VALUES: ClubMemberInviteFormValues = {
++  email: "parent@example.com",
++  name: "山田 太郎",
++  role: "MEMBER",
++};
 +
-+import {
-+  buildClubMemberUpdateFormValues,
-+  validateClubMemberUpdateFormValues,
-+  type ClubMemberUpdateActionState,
-+} from "@/domain/club/member/member-update-form";
++// ラベルを63文字以内に保った、形式も有効な254文字のemail。
++const MAX_LENGTH_EMAIL =
++  `${"a".repeat(64)}@${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(58)}.jp`;
 +
-+import {
-+  isRequestId,
-+} from "@/domain/shared/request-id";
++describe("buildClubMemberInviteFormValues", () => {
++  it("emailをNFKC・trim・小文字化し、氏名とroleをtrimする", () => {
++    const formData = new FormData();
++    formData.set("email", "  ＰＡＲＥＮＴ＠ＥＸＡＭＰＬＥ．ＣＯＭ  ");
++    formData.set("name", "  山田 太郎  ");
++    formData.set("role", " COACH ");
 +
-+import {
-+  convertPrismaError,
-+} from "@/src/infrastructure/prisma/prisma-error";
-+
-+import {
-+  updateClubMembershipForOwner,
-+} from "@/src/infrastructure/prisma/repositories/club-membership-repository";
-+
-+const EXPIRED_FORM_MESSAGE =
-+  "フォームの有効期限が切れました。もう一度お試しください。";
-+
-+const INVITED_OWNER_NOT_ALLOWED_MESSAGE =
-+  "招待中のメンバーをOWNERに変更できません。";
-+
-+const INVITATION_STATUS_CHANGE_NOT_ALLOWED_MESSAGE =
-+  "招待中の在籍状態はこの画面から変更できません。";
-+
-+const LAST_ACTIVE_OWNER_MESSAGE =
-+  "最後の有効なOWNERは降格・利用停止・退会扱いにできません。先に別のメンバーをOWNERに設定してください。";
-+
-+/**
-+ * OWNERが同じクラブのMembershipのrole・statusを更新する。
-+ * page側の認可とは別に、Action自身でも必ずOWNER認可する。
-+ */
-+export async function updateClubMembershipAction(
-+  clubSlug: string,
-+  targetMembershipId: string,
-+  previousState:
-+    ClubMemberUpdateActionState,
-+  formData: FormData,
-+): Promise<ClubMemberUpdateActionState> {
-+  /*
-+   * 【追加】
-+   * FormDataの読取りより先にOWNER認可する。
-+   * Repositoryでもtransaction内において操作者を再確認する。
-+   */
-+  const access =
-+    await requireClubAppOwnerAccess(
-+      clubSlug,
-+    );
-+
-+  const values =
-+    buildClubMemberUpdateFormValues(
-+      formData,
-+    );
-+
-+  const requestId =
-+    formData.get("requestId");
-+
-+  if (
-+    !isRequestId(requestId) ||
-+    requestId !==
-+      previousState.requestId
-+  ) {
-+    return {
-+      status: "error",
-+      values,
-+      fieldErrors: {},
-+      formError:
-+        EXPIRED_FORM_MESSAGE,
-+      requestId:
-+        previousState.requestId,
-+    };
-+  }
-+
-+  const validation =
-+    validateClubMemberUpdateFormValues(
-+      values,
-+    );
-+
-+  if (!validation.success) {
-+    return {
-+      status: "error",
-+      values,
-+      fieldErrors:
-+        validation.fieldErrors,
-+      formError: null,
-+      requestId:
-+        previousState.requestId,
-+    };
-+  }
-+
-+  let updateResult:
-+    Awaited<
-+      ReturnType<
-+        typeof updateClubMembershipForOwner
-+      >
-+    >;
-+
-+  try {
-+    updateResult =
-+      await updateClubMembershipForOwner({
-+        /*
-+         * 【追加・重要】
-+         * clubIdとactorMembershipIdはクライアントから受け取らず、
-+         * OWNER認可結果だけを使用する。
-+         */
-+        clubId:
-+          access.club.id,
-+        actorMembershipId:
-+          access.membership.id,
-+        targetMembershipId,
-+        role:
-+          validation.data.role,
-+        status:
-+          validation.data.status,
-+      });
-+  } catch (error) {
-+    const domainError =
-+      convertPrismaError(error);
-+
-+    /*
-+     * 氏名・メールアドレス・フォーム入力値はログへ出さない。
-+     */
-+    console.error(
-+      "updateClubMembershipAction failed",
-+      {
-+        clubId:
-+          access.club.id,
-+        targetMembershipId,
-+        actorMembershipId:
-+          access.membership.id,
-+        requestId,
-+        code:
-+          domainError.code,
-+      },
-+    );
-+
-+    return {
-+      status: "error",
-+      values,
-+      fieldErrors: {},
-+      formError:
-+        domainError.publicMessage,
-+      requestId:
-+        previousState.requestId,
-+    };
-+  }
-+
-+  /*
-+   * 【追加】
-+   * 対象や操作者の存在・権限の差を外部へ漏らさず404に統一する。
-+   * notFound()は内部例外を使うため、DB用try/catchの外で呼ぶ。
-+   */
-+  if (
-+    updateResult.outcome ===
-+      "NOT_FOUND" ||
-+    updateResult.outcome ===
-+      "ACTOR_NOT_ACTIVE_OWNER"
-+  ) {
-+    notFound();
-+  }
-+
-+  if (
-+    updateResult.outcome ===
-+    "RULE_VIOLATION"
-+  ) {
-+    const violationReason =
-+      updateResult.reason;
-+
-+    switch (violationReason) {
-+      case "INVITED_OWNER_NOT_ALLOWED":
-+        return {
-+          status: "error",
-+          values,
-+          fieldErrors: {
-+            role: [
-+              INVITED_OWNER_NOT_ALLOWED_MESSAGE,
-+            ],
-+          },
-+          formError: null,
-+          requestId:
-+            previousState.requestId,
-+        };
-+
-+      case "INVITATION_STATUS_CHANGE_NOT_ALLOWED":
-+        return {
-+          status: "error",
-+          values,
-+          fieldErrors: {
-+            status: [
-+              INVITATION_STATUS_CHANGE_NOT_ALLOWED_MESSAGE,
-+            ],
-+          },
-+          formError: null,
-+          requestId:
-+            previousState.requestId,
-+        };
-+
-+      case "LAST_ACTIVE_OWNER":
-+        return {
-+          status: "error",
-+          values,
-+          fieldErrors: {},
-+          formError:
-+            LAST_ACTIVE_OWNER_MESSAGE,
-+          requestId:
-+            previousState.requestId,
-+        };
-+
-+      default: {
-+        /*
-+         * Domainへ違反種別が追加された際に、
-+         * Action側の変換漏れを型エラーで検出する。
-+         */
-+        const exhaustiveReason:
-+          never =
-+            violationReason;
-+
-+        return exhaustiveReason;
-+      }
-+    }
-+  }
-+
-+  revalidateClubMemberPaths(
-+    access.club.slug,
-+  );
-+
-+  const updatedSelf =
-+    updateResult.membership.id ===
-+    access.membership.id;
-+
-+  const selfIsNoLongerActiveOwner =
-+    updatedSelf &&
-+    (
-+      updateResult.membership.role !==
-+        "OWNER" ||
-+      updateResult.membership.status !==
-+        "ACTIVE"
-+    );
-+
-+  /*
-+   * 【追加】
-+   * 自分自身がACTIVE OWNERではなくなった場合、
-+   * 以後利用できない管理ページへ戻さずクラブ選択へ移動する。
-+   */
-+  if (selfIsNoLongerActiveOwner) {
-+    redirect("/club/select");
-+  }
-+
-+  const query =
-+    new URLSearchParams({
-+      toast: "member-updated",
-+      toastId: requestId,
++    expect(buildClubMemberInviteFormValues(formData)).toEqual({
++      email: "parent@example.com",
++      name: "山田 太郎",
++      role: "COACH",
 +    });
++  });
 +
-+  redirect(
-+    `/club/${encodeURIComponent(
-+      access.club.slug,
-+    )}/admin/members?${query.toString()}`,
++  it("未入力roleをMEMBERへ変換しない", () => {
++    expect(buildClubMemberInviteFormValues(new FormData())).toEqual({
++      email: "",
++      name: "",
++      role: "",
++    });
++  });
++
++  it("Fileを文字列へ強制変換しない", () => {
++    const formData = new FormData();
++    const file = new File(["MEMBER"], "input.txt");
++    formData.set("email", file);
++    formData.set("name", file);
++    formData.set("role", file);
++
++    expect(buildClubMemberInviteFormValues(formData)).toEqual({
++      email: "",
++      name: "",
++      role: "",
++    });
++  });
++
++  it("不正なroleを保持し、後続の検証で拒否する", () => {
++    const formData = new FormData();
++    formData.set("email", VALID_VALUES.email);
++    formData.set("name", VALID_VALUES.name);
++    formData.set("role", "OWNER");
++    const values = buildClubMemberInviteFormValues(formData);
++
++    expect(values.role).toBe("OWNER");
++    expect(validateClubMemberInviteFormValues(values).success).toBe(false);
++  });
++
++  it("status・clubId・authUserIdなどを表示用値へ取り込まない", () => {
++    const formData = new FormData();
++    for (const [key, value] of Object.entries(VALID_VALUES)) {
++      formData.set(key, value);
++    }
++    formData.set("status", "ACTIVE");
++    formData.set("clubId", "another-club");
++    formData.set("authUserId", "another-user");
++
++    expect(buildClubMemberInviteFormValues(formData)).toEqual(VALID_VALUES);
++  });
++});
++
++describe("validateClubMemberInviteFormValues", () => {
++  it.each(CLUB_MEMBER_INVITE_ROLES)("%sで招待できる", (role) => {
++    expect(
++      validateClubMemberInviteFormValues({ ...VALID_VALUES, role }),
++    ).toEqual({ success: true, data: { ...VALID_VALUES, role } });
++  });
++
++  it("build関数を経由しなくてもemail・氏名を正規化する", () => {
++    const values = {
++      ...VALID_VALUES,
++      email: "  ＰＡＲＥＮＴ＠ＥＸＡＭＰＬＥ．ＣＯＭ  ",
++      name: "  山田 太郎  ",
++    };
++    const original = { ...values };
++
++    expect(validateClubMemberInviteFormValues(values)).toEqual({
++      success: true,
++      data: VALID_VALUES,
++    });
++    expect(values).toEqual(original);
++  });
++
++  it("未入力の全項目についてフィールドエラーを返す", () => {
++    expect(
++      validateClubMemberInviteFormValues({ email: " ", name: " ", role: "" }),
++    ).toEqual({
++      success: false,
++      fieldErrors: {
++        email: ["メールアドレスを入力してください。"],
++        name: ["氏名を入力してください。"],
++        role: ["招待する権限は指導者・役員・会員から選択してください。"],
++      },
++    });
++  });
++
++  it.each([
++    "not-an-email",
++    "parent@",
++    "@example.com",
++    "parent@localhost",
++    "parent..name@example.com",
++    "山田 <parent@example.com>",
++    "parent@example.com\r\nBcc: other@example.com",
++  ])("不正なemailを拒否する: %p", (email) => {
++    expect(
++      validateClubMemberInviteFormValues({ ...VALID_VALUES, email }),
++    ).toEqual({
++      success: false,
++      fieldErrors: { email: ["正しいメールアドレスを入力してください。"] },
++    });
++  });
++
++  it("emailは254文字まで受け付ける", () => {
++    expect(MAX_LENGTH_EMAIL.length).toBe(CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH);
++    expect(
++      validateClubMemberInviteFormValues({
++        ...VALID_VALUES,
++        email: MAX_LENGTH_EMAIL,
++      }).success,
++    ).toBe(true);
++  });
++
++  it("長すぎるemailを拒否する", () => {
++    const email = MAX_LENGTH_EMAIL.replace(/\.jp$/, "a.jp");
++    expect(email.length).toBe(CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH + 1);
++    expect(
++      validateClubMemberInviteFormValues({ ...VALID_VALUES, email }),
++    ).toEqual({
++      success: false,
++      fieldErrors: {
++        email: [
++          `メールアドレスは${CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH}文字以内で入力してください。`,
++        ],
++      },
++    });
++  });
++
++  it("氏名は100文字まで受け付ける", () => {
++    expect(
++      validateClubMemberInviteFormValues({
++        ...VALID_VALUES,
++        name: "あ".repeat(CLUB_MEMBER_INVITE_NAME_MAX_LENGTH),
++      }).success,
++    ).toBe(true);
++  });
++
++  it("長すぎる氏名を拒否する", () => {
++    expect(
++      validateClubMemberInviteFormValues({
++        ...VALID_VALUES,
++        name: "あ".repeat(CLUB_MEMBER_INVITE_NAME_MAX_LENGTH + 1),
++      }),
++    ).toEqual({
++      success: false,
++      fieldErrors: {
++        name: [`氏名は${CLUB_MEMBER_INVITE_NAME_MAX_LENGTH}文字以内で入力してください。`],
++      },
++    });
++  });
++
++  it.each(["OWNER", "ADMIN", "member", "COACH,MEMBER", "__proto__", ""])(
++    "招待できないroleを拒否する: %p",
++    (role) => {
++      expect(
++        validateClubMemberInviteFormValues({ ...VALID_VALUES, role }),
++      ).toEqual({
++        success: false,
++        fieldErrors: {
++          role: ["招待する権限は指導者・役員・会員から選択してください。"],
++        },
++      });
++    },
 +  );
-+}
-diff --git a/tests/club-members-actions.test.ts b/tests/club-members-actions.test.ts
++});
+diff --git a/domain/club/invitation/invitation-form.ts b/domain/club/invitation/invitation-form.ts
 new file mode 100644
-index 0000000..e45cb52
+index 0000000000000000000000000000000000000000..77308c6492b919378166baad64f8ddd35ae59b1e
 --- /dev/null
-+++ b/tests/club-members-actions.test.ts
-@@ -0,0 +1,731 @@
-+// tests/club-members-actions.test.ts
-+// OWNER用メンバー更新Actionの認可・入力検証・遷移先を確認する
++++ b/domain/club/invitation/invitation-form.ts
+@@ -0,0 +1,124 @@
++// domain/club/invitation/invitation-form.ts
++// 【追加：F05粒度1】招待フォームの値構築・検証。DBや外部サービスを呼ばない。
 +
-+import {
-+  afterEach,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+const mocks =
-+  vi.hoisted(
-+    () => ({
-+      requireClubAppOwnerAccess:
-+        vi.fn(),
-+      revalidateClubMemberPaths:
-+        vi.fn(),
-+      updateClubMembershipForOwner:
-+        vi.fn(),
-+      convertPrismaError:
-+        vi.fn(),
-+      redirect:
-+        vi.fn(),
-+      notFound:
-+        vi.fn(),
-+    }),
-+  );
-+
-+vi.mock(
-+  "@/app/(club-app)/club/club-app-authorization",
-+  () => ({
-+    requireClubAppOwnerAccess:
-+      mocks
-+        .requireClubAppOwnerAccess,
-+  }),
-+);
-+
-+vi.mock(
-+  "@/app/(club-app)/club/revalidate-club-paths",
-+  () => ({
-+    revalidateClubMemberPaths:
-+      mocks
-+        .revalidateClubMemberPaths,
-+  }),
-+);
-+
-+vi.mock(
-+  "@/src/infrastructure/prisma/repositories/club-membership-repository",
-+  () => ({
-+    updateClubMembershipForOwner:
-+      mocks
-+        .updateClubMembershipForOwner,
-+  }),
-+);
-+
-+vi.mock(
-+  "@/src/infrastructure/prisma/prisma-error",
-+  () => ({
-+    convertPrismaError:
-+      mocks.convertPrismaError,
-+  }),
-+);
-+
-+vi.mock(
-+  "next/navigation",
-+  () => ({
-+    redirect:
-+      mocks.redirect,
-+    notFound:
-+      mocks.notFound,
-+  }),
-+);
-+
-+import {
-+  updateClubMembershipAction,
-+} from "@/app/(club-app)/club/[clubSlug]/admin/members/actions";
++import { z } from "zod";
 +
 +import type {
-+  ClubMemberUpdateActionState,
-+} from "@/domain/club/member/member-update-form";
++  ActionState,
++  FieldErrors,
++} from "@/domain/shared/action-state";
++import { normalizeEmail } from "@/domain/shared/email";
++import type { ClubMemberRole } from "@/types/prisma";
 +
-+const REQUESTED_CLUB_SLUG =
-+  "club-a";
++export const CLUB_MEMBER_INVITE_NAME_MAX_LENGTH = 100;
++export const CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH = 254;
 +
-+const CANONICAL_CLUB_SLUG =
-+  "club-a";
++export const CLUB_MEMBER_INVITE_ROLES = [
++  "COACH",
++  "OFFICER",
++  "MEMBER",
++] as const satisfies readonly ClubMemberRole[];
 +
-+const CLUB_ID =
-+  "11111111-1111-4111-8111-111111111111";
++export type ClubMemberInviteRole =
++  (typeof CLUB_MEMBER_INVITE_ROLES)[number];
 +
-+const ACTOR_MEMBERSHIP_ID =
-+  "22222222-2222-4222-8222-222222222222";
++export type ClubMemberInviteFormValues = {
++  email: string;
++  name: string;
++  role: string;
++};
 +
-+const TARGET_MEMBERSHIP_ID =
-+  "33333333-3333-4333-8333-333333333333";
++export type ClubMemberInviteFormField =
++  keyof ClubMemberInviteFormValues;
 +
-+const REQUEST_ID =
-+  "44444444-4444-4444-8444-444444444444";
++export type ValidClubMemberInviteInput = {
++  email: string;
++  name: string;
++  role: ClubMemberInviteRole;
++};
 +
-+function buildState():
-+  ClubMemberUpdateActionState {
++export type ClubMemberInviteActionState = ActionState<
++  ClubMemberInviteFormValues,
++  ClubMemberInviteFormField
++>;
++
++export type ClubMemberInviteValidationResult =
++  | { success: true; data: ValidClubMemberInviteInput }
++  | {
++      success: false;
++      fieldErrors: FieldErrors<ClubMemberInviteFormField>;
++    };
++
++const emailSchema = z.email();
++
++function getString(formData: FormData, name: string): string {
++  const value = formData.get(name);
++  return typeof value === "string" ? value : "";
++}
++
++function isClubMemberInviteRole(
++  value: string,
++): value is ClubMemberInviteRole {
++  return CLUB_MEMBER_INVITE_ROLES.some((role) => role === value);
++}
++
++/**
++ * エラー時にフォームへ戻す値を作る。
++ * roleの未入力・不正値をMEMBERへ置き換えない。
++ * clubId、status、authUserIdなど、招待入力以外の値は取り込まない。
++ */
++export function buildClubMemberInviteFormValues(
++  formData: FormData,
++): ClubMemberInviteFormValues {
 +  return {
-+    status: "idle",
-+    values: {
-+      role: "MEMBER",
-+      status: "ACTIVE",
-+    },
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: REQUEST_ID,
++    email: normalizeEmail(getString(formData, "email")),
++    name: getString(formData, "name").trim(),
++    role: getString(formData, "role").trim(),
 +  };
 +}
 +
-+function buildValidFormData():
-+  FormData {
-+  const formData =
-+    new FormData();
++/**
++ * build関数を経由しない呼び出しでも、emailと氏名を正規化して検証する。
++ * 重複招待・既存Membership・操作者の認可は後続のRepositoryで確認する。
++ */
++export function validateClubMemberInviteFormValues(
++  values: ClubMemberInviteFormValues,
++): ClubMemberInviteValidationResult {
++  const email = normalizeEmail(values.email);
++  const name = values.name.trim();
++  const role = isClubMemberInviteRole(values.role) ? values.role : null;
++  const fieldErrors: FieldErrors<ClubMemberInviteFormField> = {};
 +
-+  formData.set(
-+    "requestId",
-+    REQUEST_ID,
-+  );
-+  formData.set(
-+    "role",
-+    "COACH",
-+  );
-+  formData.set(
-+    "status",
-+    "ACTIVE",
-+  );
++  if (!email) {
++    fieldErrors.email = ["メールアドレスを入力してください。"];
++  } else if (email.length > CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH) {
++    fieldErrors.email = [
++      `メールアドレスは${CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH}文字以内で入力してください。`,
++    ];
++  } else if (!emailSchema.safeParse(email).success) {
++    fieldErrors.email = ["正しいメールアドレスを入力してください。"];
++  }
 +
-+  return formData;
++  if (!name) {
++    fieldErrors.name = ["氏名を入力してください。"];
++  } else if (name.length > CLUB_MEMBER_INVITE_NAME_MAX_LENGTH) {
++    fieldErrors.name = [
++      `氏名は${CLUB_MEMBER_INVITE_NAME_MAX_LENGTH}文字以内で入力してください。`,
++    ];
++  }
++
++  if (role === null) {
++    fieldErrors.role = [
++      "招待する権限は指導者・役員・会員から選択してください。",
++    ];
++  }
++
++  if (Object.keys(fieldErrors).length > 0 || role === null) {
++    return { success: false, fieldErrors };
++  }
++
++  return {
++    success: true,
++    data: { email, name, role },
++  };
 +}
-+
-+beforeEach(() => {
-+  vi.clearAllMocks();
-+
-+  mocks
-+    .requireClubAppOwnerAccess
-+    .mockResolvedValue({
-+      userId: "user-a",
-+      club: {
-+        id: CLUB_ID,
-+        name: "Club A",
-+        slug:
-+          CANONICAL_CLUB_SLUG,
-+        timezone:
-+          "Asia/Tokyo",
-+        planType: "STANDARD",
-+      },
-+      membership: {
-+        id:
-+          ACTOR_MEMBERSHIP_ID,
-+        role: "OWNER",
-+      },
-+    });
-+
-+  mocks
-+    .updateClubMembershipForOwner
-+    .mockResolvedValue({
-+      outcome: "UPDATED",
-+      membership: {
-+        id:
-+          TARGET_MEMBERSHIP_ID,
-+        role: "COACH",
-+        status: "ACTIVE",
-+      },
-+    });
-+
-+  mocks
-+    .convertPrismaError
-+    .mockReturnValue({
-+      code: "INTERNAL",
-+      publicMessage:
-+        "処理に失敗しました。",
-+    });
-+
-+  mocks.redirect.mockImplementation(
-+    () => {
-+      throw new Error(
-+        "NEXT_REDIRECT",
-+      );
-+    },
-+  );
-+
-+  mocks.notFound.mockImplementation(
-+    () => {
-+      throw new Error(
-+        "NEXT_NOT_FOUND",
-+      );
-+    },
-+  );
-+});
-+
-+afterEach(() => {
-+  vi.restoreAllMocks();
-+});
-+
-+describe(
-+  "updateClubMembershipAction",
-+  () => {
-+    it(
-+      "入力検証より先にOWNER認可する",
-+      async () => {
-+        const authorizationError =
-+          new Error(
-+            "OWNER_REQUIRED",
-+          );
-+
-+        mocks
-+          .requireClubAppOwnerAccess
-+          .mockRejectedValue(
-+            authorizationError,
-+          );
-+
-+        const invalidFormData =
-+          new FormData();
-+
-+        await expect(
-+          updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            invalidFormData,
-+          ),
-+        ).rejects.toBe(
-+          authorizationError,
-+        );
-+
-+        expect(
-+          mocks
-+            .requireClubAppOwnerAccess,
-+        ).toHaveBeenCalledWith(
-+          REQUESTED_CLUB_SLUG,
-+        );
-+        expect(
-+          mocks
-+            .updateClubMembershipForOwner,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "MEMBERがActionを直接呼んでもRepositoryを実行しない",
-+      async () => {
-+        mocks
-+          .requireClubAppOwnerAccess
-+          .mockRejectedValue(
-+            new Error(
-+              "NEXT_NOT_FOUND",
-+            ),
-+          );
-+
-+        await expect(
-+          updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            buildValidFormData(),
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_NOT_FOUND",
-+        );
-+
-+        expect(
-+          mocks
-+            .updateClubMembershipForOwner,
-+        ).not.toHaveBeenCalled();
-+        expect(
-+          mocks
-+            .revalidateClubMemberPaths,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "不正なrequestIdを拒否する",
-+      async () => {
-+        const formData =
-+          buildValidFormData();
-+
-+        formData.set(
-+          "requestId",
-+          "invalid-request-id",
-+        );
-+
-+        const result =
-+          await updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            formData,
-+          );
-+
-+        expect(result).toEqual({
-+          status: "error",
-+          values: {
-+            role: "COACH",
-+            status: "ACTIVE",
-+          },
-+          fieldErrors: {},
-+          formError:
-+            "フォームの有効期限が切れました。もう一度お試しください。",
-+          requestId: REQUEST_ID,
-+        });
-+
-+        expect(
-+          mocks
-+            .updateClubMembershipForOwner,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "改ざんされたroleを拒否する",
-+      async () => {
-+        const formData =
-+          buildValidFormData();
-+
-+        formData.set(
-+          "role",
-+          "SUPER_ADMIN",
-+        );
-+
-+        const result =
-+          await updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            formData,
-+          );
-+
-+        expect(result).toEqual(
-+          expect.objectContaining({
-+            status: "error",
-+            values: {
-+              role: "SUPER_ADMIN",
-+              status: "ACTIVE",
-+            },
-+            fieldErrors: {
-+              role: [
-+                "権限を確認してください。",
-+              ],
-+            },
-+            formError: null,
-+          }),
-+        );
-+
-+        expect(
-+          mocks
-+            .updateClubMembershipForOwner,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "改ざんされたstatusを拒否する",
-+      async () => {
-+        const formData =
-+          buildValidFormData();
-+
-+        formData.set(
-+          "status",
-+          "DELETED",
-+        );
-+
-+        const result =
-+          await updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            formData,
-+          );
-+
-+        expect(result).toEqual(
-+          expect.objectContaining({
-+            status: "error",
-+            values: {
-+              role: "COACH",
-+              status: "DELETED",
-+            },
-+            fieldErrors: {
-+              status: [
-+                "在籍状態を確認してください。",
-+              ],
-+            },
-+            formError: null,
-+          }),
-+        );
-+
-+        expect(
-+          mocks
-+            .updateClubMembershipForOwner,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "認可結果のclubIdと操作者Membership IDだけをRepositoryへ渡す",
-+      async () => {
-+        const formData =
-+          buildValidFormData();
-+
-+        /*
-+         * クライアントが同名の値を追加しても、
-+         * Actionは認可結果だけを使用する。
-+         */
-+        formData.set(
-+          "clubId",
-+          "attacker-club-id",
-+        );
-+        formData.set(
-+          "actorMembershipId",
-+          "attacker-membership-id",
-+        );
-+
-+        await expect(
-+          updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            formData,
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_REDIRECT",
-+        );
-+
-+        expect(
-+          mocks
-+            .updateClubMembershipForOwner,
-+        ).toHaveBeenCalledWith({
-+          clubId: CLUB_ID,
-+          actorMembershipId:
-+            ACTOR_MEMBERSHIP_ID,
-+          targetMembershipId:
-+            TARGET_MEMBERSHIP_ID,
-+          role: "COACH",
-+          status: "ACTIVE",
-+        });
-+      },
-+    );
-+
-+    it.each([
-+      "NOT_FOUND",
-+      "ACTOR_NOT_ACTIVE_OWNER",
-+    ] as const)(
-+      "%sを404にし、再検証もredirectもしない",
-+      async (outcome) => {
-+        mocks
-+          .updateClubMembershipForOwner
-+          .mockResolvedValue({
-+            outcome,
-+          });
-+
-+        await expect(
-+          updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            buildValidFormData(),
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_NOT_FOUND",
-+        );
-+
-+        expect(
-+          mocks.notFound,
-+        ).toHaveBeenCalledTimes(1);
-+        expect(
-+          mocks
-+            .revalidateClubMemberPaths,
-+        ).not.toHaveBeenCalled();
-+        expect(
-+          mocks.redirect,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it.each([
-+      {
-+        reason:
-+          "INVITED_OWNER_NOT_ALLOWED",
-+        field: "role",
-+        message:
-+          "招待中のメンバーをOWNERに変更できません。",
-+      },
-+      {
-+        reason:
-+          "INVITATION_STATUS_CHANGE_NOT_ALLOWED",
-+        field: "status",
-+        message:
-+          "招待中の在籍状態はこの画面から変更できません。",
-+      },
-+    ] as const)(
-+      "$reasonを$fieldの入力エラーへ変換する",
-+      async ({
-+        reason,
-+        field,
-+        message,
-+      }) => {
-+        mocks
-+          .updateClubMembershipForOwner
-+          .mockResolvedValue({
-+            outcome:
-+              "RULE_VIOLATION",
-+            reason,
-+          });
-+
-+        const result =
-+          await updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            buildValidFormData(),
-+          );
-+
-+        expect(result).toEqual(
-+          expect.objectContaining({
-+            status: "error",
-+            fieldErrors: {
-+              [field]: [
-+                message,
-+              ],
-+            },
-+            formError: null,
-+          }),
-+        );
-+
-+        expect(
-+          mocks
-+            .revalidateClubMemberPaths,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "最後のACTIVE OWNER違反を固定のフォーム全体エラーへ変換する",
-+      async () => {
-+        mocks
-+          .updateClubMembershipForOwner
-+          .mockResolvedValue({
-+            outcome:
-+              "RULE_VIOLATION",
-+            reason:
-+              "LAST_ACTIVE_OWNER",
-+          });
-+
-+        const result =
-+          await updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            ACTOR_MEMBERSHIP_ID,
-+            buildState(),
-+            buildValidFormData(),
-+          );
-+
-+        expect(result).toEqual(
-+          expect.objectContaining({
-+            status: "error",
-+            fieldErrors: {},
-+            formError:
-+              "最後の有効なOWNERは降格・利用停止・退会扱いにできません。先に別のメンバーをOWNERに設定してください。",
-+          }),
-+        );
-+
-+        expect(
-+          mocks.redirect,
-+        ).not.toHaveBeenCalled();
-+      },
-+    );
-+
-+    it(
-+      "DB障害を安全なエラーへ変換し氏名やメールをログへ出さない",
-+      async () => {
-+        const consoleError =
-+          vi.spyOn(
-+            console,
-+            "error",
-+          ).mockImplementation(
-+            () => undefined,
-+          );
-+
-+        mocks
-+          .updateClubMembershipForOwner
-+          .mockRejectedValue(
-+            new Error(
-+              "database details",
-+            ),
-+          );
-+
-+        const formData =
-+          buildValidFormData();
-+
-+        formData.set(
-+          "name",
-+          "秘密の氏名",
-+        );
-+        formData.set(
-+          "email",
-+          "secret@example.com",
-+        );
-+
-+        const result =
-+          await updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            formData,
-+          );
-+
-+        expect(result.formError).toBe(
-+          "処理に失敗しました。",
-+        );
-+
-+        expect(
-+          consoleError,
-+        ).toHaveBeenCalledWith(
-+          "updateClubMembershipAction failed",
-+          {
-+            clubId: CLUB_ID,
-+            targetMembershipId:
-+              TARGET_MEMBERSHIP_ID,
-+            actorMembershipId:
-+              ACTOR_MEMBERSHIP_ID,
-+            requestId: REQUEST_ID,
-+            code: "INTERNAL",
-+          },
-+        );
-+
-+        const serializedLog =
-+          JSON.stringify(
-+            consoleError.mock.calls,
-+          );
-+
-+        expect(
-+          serializedLog,
-+        ).not.toContain(
-+          "秘密の氏名",
-+        );
-+        expect(
-+          serializedLog,
-+        ).not.toContain(
-+          "secret@example.com",
-+        );
-+      },
-+    );
-+
-+    it(
-+      "他人の更新後に再検証して固定toast付きメンバー一覧へ移動する",
-+      async () => {
-+        await expect(
-+          updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            TARGET_MEMBERSHIP_ID,
-+            buildState(),
-+            buildValidFormData(),
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_REDIRECT",
-+        );
-+
-+        expect(
-+          mocks
-+            .revalidateClubMemberPaths,
-+        ).toHaveBeenCalledWith(
-+          CANONICAL_CLUB_SLUG,
-+        );
-+
-+        expect(
-+          mocks.redirect,
-+        ).toHaveBeenCalledWith(
-+          `/club/${CANONICAL_CLUB_SLUG}/admin/members?toast=member-updated&toastId=${REQUEST_ID}`,
-+        );
-+
-+        expect(
-+          mocks
-+            .revalidateClubMemberPaths
-+            .mock
-+            .invocationCallOrder[0],
-+        ).toBeLessThan(
-+          mocks.redirect.mock
-+            .invocationCallOrder[0],
-+        );
-+      },
-+    );
-+
-+    it(
-+      "自分自身の降格後は再検証してクラブ選択へ移動する",
-+      async () => {
-+        mocks
-+          .updateClubMembershipForOwner
-+          .mockResolvedValue({
-+            outcome: "UPDATED",
-+            membership: {
-+              id:
-+                ACTOR_MEMBERSHIP_ID,
-+              role: "COACH",
-+              status: "ACTIVE",
-+            },
-+          });
-+
-+        await expect(
-+          updateClubMembershipAction(
-+            REQUESTED_CLUB_SLUG,
-+            ACTOR_MEMBERSHIP_ID,
-+            buildState(),
-+            buildValidFormData(),
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_REDIRECT",
-+        );
-+
-+        expect(
-+          mocks
-+            .revalidateClubMemberPaths,
-+        ).toHaveBeenCalledWith(
-+          CANONICAL_CLUB_SLUG,
-+        );
-+        expect(
-+          mocks.redirect,
-+        ).toHaveBeenCalledTimes(1);
-+        expect(
-+          mocks.redirect,
-+        ).toHaveBeenCalledWith(
-+          "/club/select",
-+        );
-+      },
-+    );
-+  },
-+);
-diff --git a/tests/club-membership-authorization.test.ts b/tests/club-membership-authorization.test.ts
+diff --git a/domain/club/invitation/invitation-policy.test.ts b/domain/club/invitation/invitation-policy.test.ts
 new file mode 100644
-index 0000000..8a684e3
+index 0000000000000000000000000000000000000000..f87ca9e0f3fed32d1d2fac170feb4ad386beb95f
 --- /dev/null
-+++ b/tests/club-membership-authorization.test.ts
-@@ -0,0 +1,327 @@
-+// tests/club-membership-authorization.test.ts
-+// DB上の最新Membership状態を使った認可を確認する
++++ b/domain/club/invitation/invitation-policy.test.ts
+@@ -0,0 +1,328 @@
++// domain/club/invitation/invitation-policy.test.ts
++// 【追加：F05粒度1】招待状態・期限・処理権・再送間隔の境界テスト。
 +
-+import {
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+const mocks =
-+  vi.hoisted(
-+    () => ({
-+      createClient:
-+        vi.fn(),
-+      getUser:
-+        vi.fn(),
-+      findFirstMembership:
-+        vi.fn(),
-+      redirect:
-+        vi.fn(),
-+      notFound:
-+        vi.fn(),
-+    }),
-+  );
-+
-+vi.mock(
-+  "server-only",
-+  () => ({}),
-+);
-+
-+vi.mock(
-+  "@/src/infrastructure/supabase/server",
-+  () => ({
-+    createClient:
-+      mocks.createClient,
-+  }),
-+);
-+
-+vi.mock(
-+  "@/src/infrastructure/prisma/client",
-+  () => ({
-+    prisma: {
-+      clubMembership: {
-+        findFirst:
-+          mocks
-+            .findFirstMembership,
-+      },
-+    },
-+  }),
-+);
-+
-+vi.mock(
-+  "next/navigation",
-+  () => ({
-+    redirect:
-+      mocks.redirect,
-+    notFound:
-+      mocks.notFound,
-+  }),
-+);
-+
-+import {
-+  requireActiveClubMembership,
-+  requireClubOwner,
-+} from "@/app/(club-app)/club/club-membership-authorization";
++import { describe, expect, it } from "vitest";
 +
 +import type {
-+  ClubMemberRole,
++  ClubInvitationStatus,
++  ClubMembershipStatus,
++} from "@/types/prisma";
++import {
++  CLUB_INVITATION_RESEND_COOLDOWN_MILLISECONDS,
++  CLUB_INVITATION_TTL_MILLISECONDS,
++  buildClubInvitationExpiresAt,
++  evaluateClubInvitationCancellation,
++  evaluateClubInvitationResend,
++  isUsableClubInvitation,
++  type ClubInvitationResendState,
++} from "./invitation-policy";
++
++const NOW = new Date("2026-10-09T00:00:00.000Z");
++const INVITED = { status: "INVITED" } as const;
++const NON_INVITED_STATUSES = [
++  "ACTIVE", "SUSPENDED", "WITHDRAWN",
++] as const satisfies readonly ClubMembershipStatus[];
++
++function buildInvitation(
++  overrides: Partial<ClubInvitationResendState> = {},
++): ClubInvitationResendState {
++  return {
++    status: "SENT",
++    acceptedAt: null,
++    expiresAt: new Date("2026-10-10T00:00:00.000Z"),
++    lastAttemptAt: new Date(NOW.getTime() - 120_000),
++    leaseExpiresAt: null,
++    ...overrides,
++  };
++}
++
++describe("buildClubInvitationExpiresAt", () => {
++  it("発行日時から24時間後を返し、入力Dateを変更しない", () => {
++    const now = new Date("2026-10-31T15:30:00.000Z");
++    const original = now.getTime();
++    const expiresAt = buildClubInvitationExpiresAt(now);
++
++    expect(expiresAt.toISOString()).toBe("2026-11-01T15:30:00.000Z");
++    expect(expiresAt.getTime() - original).toBe(CLUB_INVITATION_TTL_MILLISECONDS);
++    expect(CLUB_INVITATION_TTL_MILLISECONDS).toBe(86_400_000);
++    expect(now.getTime()).toBe(original);
++    expect(expiresAt).not.toBe(now);
++  });
++
++  it("不正な発行日時を拒否する", () => {
++    expect(() => buildClubInvitationExpiresAt(new Date(Number.NaN))).toThrow(
++      "招待の発行日時が正しくありません。",
++    );
++  });
++
++  it("Dateの最大値を超える期限を返さない", () => {
++    expect(() => buildClubInvitationExpiresAt(new Date(8_640_000_000_000_000)))
++      .toThrow("招待の有効期限を作成できません。");
++  });
++});
++
++describe("evaluateClubInvitationResend", () => {
++  it.each([
++    "PREPARING", "READY_TO_SEND", "SENT", "EMAIL_FAILED", "EXPIRED",
++  ] as const satisfies readonly ClubInvitationStatus[])(
++    "%sの未承諾INVITEDを再送できる",
++    (status) => {
++      expect(evaluateClubInvitationResend({
++        invitation: buildInvitation({ status }),
++        membership: INVITED,
++        now: NOW,
++      })).toEqual({ allowed: true });
++    },
++  );
++
++  it("status更新前でも、期限到達済みINVITEDを再発行できる", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({ expiresAt: new Date(NOW) }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: true });
++  });
++
++  it("Membership未作成のPREPARINGを再試行できる", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({ status: "PREPARING", lastAttemptAt: null }),
++      membership: null,
++      now: NOW,
++    })).toEqual({ allowed: true });
++  });
++
++  it("PREPARING以外でMembershipがない場合は拒否する", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation(), membership: null, now: NOW,
++    })).toEqual({ allowed: false, violation: "MEMBERSHIP_NOT_FOUND" });
++  });
++
++  it.each(NON_INVITED_STATUSES)("Membership=%sを拒否する", (status) => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation(), membership: { status }, now: NOW,
++    })).toEqual({ allowed: false, violation: "MEMBERSHIP_NOT_INVITED" });
++  });
++
++  it("ACCEPTEDを拒否する", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({ status: "ACCEPTED" }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: false, violation: "INVITATION_ALREADY_ACCEPTED" });
++  });
++
++  it("statusに関係なくacceptedAt設定済みなら拒否する", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({ acceptedAt: new Date(NOW) }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: false, violation: "INVITATION_ALREADY_ACCEPTED" });
++  });
++
++  it("CANCELLEDを拒否する", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({ status: "CANCELLED" }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: false, violation: "INVITATION_CANCELLED" });
++  });
++
++  it("有効なleaseの処理中は再送できない", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({
++        leaseExpiresAt: new Date(NOW.getTime() + 1),
++      }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: false, violation: "INVITATION_PROCESSING" });
++  });
++
++  it.each([0, -1])("lease期限がnowから%dmsなら再取得可能", (offset) => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({
++        leaseExpiresAt: new Date(NOW.getTime() + offset),
++      }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: true });
++  });
++
++  it("再送間隔の1ms前は拒否する", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({
++        lastAttemptAt: new Date(
++          NOW.getTime() - CLUB_INVITATION_RESEND_COOLDOWN_MILLISECONDS + 1,
++        ),
++      }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: false, violation: "RESEND_COOLDOWN" });
++  });
++
++  it("再送間隔ちょうどの時刻から許可する", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({
++        lastAttemptAt: new Date(
++          NOW.getTime() - CLUB_INVITATION_RESEND_COOLDOWN_MILLISECONDS,
++        ),
++      }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: true });
++  });
++
++  it("最終試行が未来なら間隔チェックを迂回させない", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation({ lastAttemptAt: new Date(NOW.getTime() + 1) }),
++      membership: INVITED,
++      now: NOW,
++    })).toEqual({ allowed: false, violation: "RESEND_COOLDOWN" });
++  });
++
++  it.each(["expiresAt", "lastAttemptAt", "leaseExpiresAt"] as const)(
++    "不正な%sを許可しない",
++    (field) => {
++      expect(evaluateClubInvitationResend({
++        invitation: buildInvitation({ [field]: new Date(Number.NaN) }),
++        membership: INVITED,
++        now: NOW,
++      })).toEqual({ allowed: false, violation: "INVALID_INVITATION_STATE" });
++    },
++  );
++
++  it("不正な現在日時を許可しない", () => {
++    expect(evaluateClubInvitationResend({
++      invitation: buildInvitation(), membership: INVITED, now: new Date(Number.NaN),
++    })).toEqual({ allowed: false, violation: "INVALID_INVITATION_STATE" });
++  });
++
++  it("入力の日時・状態を変更しない", () => {
++    const invitation = buildInvitation({ status: "EMAIL_FAILED" });
++    const before = JSON.stringify(invitation);
++    evaluateClubInvitationResend({ invitation, membership: INVITED, now: NOW });
++    expect(JSON.stringify(invitation)).toBe(before);
++  });
++});
++
++describe("evaluateClubInvitationCancellation", () => {
++  it.each([
++    "PREPARING", "READY_TO_SEND", "SENT", "EMAIL_FAILED", "EXPIRED",
++  ] as const satisfies readonly ClubInvitationStatus[])(
++    "%sの未承諾INVITEDを取消できる",
++    (status) => {
++      expect(evaluateClubInvitationCancellation({
++        invitation: buildInvitation({ status }), membership: INVITED,
++      })).toEqual({ allowed: true });
++    },
++  );
++
++  it("Membership未作成のPREPARINGは通常の取消対象にしない", () => {
++    expect(evaluateClubInvitationCancellation({
++      invitation: buildInvitation({ status: "PREPARING" }), membership: null,
++    })).toEqual({ allowed: false, violation: "MEMBERSHIP_NOT_FOUND" });
++  });
++
++  it.each(NON_INVITED_STATUSES)("Membership=%sを取消できない", (status) => {
++    expect(evaluateClubInvitationCancellation({
++      invitation: buildInvitation(), membership: { status },
++    })).toEqual({ allowed: false, violation: "MEMBERSHIP_NOT_INVITED" });
++  });
++
++  it("ACCEPTEDを取消できない", () => {
++    expect(evaluateClubInvitationCancellation({
++      invitation: buildInvitation({ status: "ACCEPTED" }), membership: INVITED,
++    })).toEqual({ allowed: false, violation: "INVITATION_ALREADY_ACCEPTED" });
++  });
++
++  it("acceptedAt設定済みならstatusがSENTでも取消できない", () => {
++    expect(evaluateClubInvitationCancellation({
++      invitation: buildInvitation({ acceptedAt: new Date(NOW) }), membership: INVITED,
++    })).toEqual({ allowed: false, violation: "INVITATION_ALREADY_ACCEPTED" });
++  });
++
++  it("取消済みを再度取消できない", () => {
++    expect(evaluateClubInvitationCancellation({
++      invitation: buildInvitation({ status: "CANCELLED" }), membership: INVITED,
++    })).toEqual({ allowed: false, violation: "INVITATION_CANCELLED" });
++  });
++
++  it("処理中でも未承諾INVITEDの取消を妨げない", () => {
++    expect(evaluateClubInvitationCancellation({
++      invitation: buildInvitation({
++        status: "READY_TO_SEND",
++        leaseExpiresAt: new Date(NOW.getTime() + 300_000),
++      }),
++      membership: INVITED,
++    })).toEqual({ allowed: true });
++  });
++});
++
++describe("isUsableClubInvitation", () => {
++  it.each(["READY_TO_SEND", "SENT", "EMAIL_FAILED"] as const)(
++    "%sでも有効な未承諾INVITEDなら利用可能",
++    (status) => {
++      expect(isUsableClubInvitation({
++        invitation: buildInvitation({ status }), membership: INVITED, now: NOW,
++      })).toBe(true);
++    },
++  );
++
++  it.each(["PREPARING", "ACCEPTED", "CANCELLED", "EXPIRED"] as const)(
++    "%sは期限内でも利用不可",
++    (status) => {
++      expect(isUsableClubInvitation({
++        invitation: buildInvitation({ status }), membership: INVITED, now: NOW,
++      })).toBe(false);
++    },
++  );
++
++  it.each([0, -1])("有効期限がnowから%dmsなら利用不可", (offset) => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation({ expiresAt: new Date(NOW.getTime() + offset) }),
++      membership: INVITED,
++      now: NOW,
++    })).toBe(false);
++  });
++
++  it("期限の1ms前までは利用可能", () => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation({ expiresAt: new Date(NOW.getTime() + 1) }),
++      membership: INVITED,
++      now: NOW,
++    })).toBe(true);
++  });
++
++  it("acceptedAt設定済みなら利用不可", () => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation({ acceptedAt: new Date(NOW) }),
++      membership: INVITED,
++      now: NOW,
++    })).toBe(false);
++  });
++
++  it("Membershipがない招待は利用不可", () => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation(), membership: null, now: NOW,
++    })).toBe(false);
++  });
++
++  it.each(NON_INVITED_STATUSES)("Membership=%sなら利用不可", (status) => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation(), membership: { status }, now: NOW,
++    })).toBe(false);
++  });
++
++  it("不正な有効期限は利用不可", () => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation({ expiresAt: new Date(Number.NaN) }),
++      membership: INVITED,
++      now: NOW,
++    })).toBe(false);
++  });
++
++  it("不正な現在日時は利用不可", () => {
++    expect(isUsableClubInvitation({
++      invitation: buildInvitation(), membership: INVITED, now: new Date(Number.NaN),
++    })).toBe(false);
++  });
++});
+diff --git a/domain/club/invitation/invitation-policy.ts b/domain/club/invitation/invitation-policy.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..32f6c8563ce3cbc045a7027f9efc5ec8dd64761f
+--- /dev/null
++++ b/domain/club/invitation/invitation-policy.ts
+@@ -0,0 +1,206 @@
++// domain/club/invitation/invitation-policy.ts
++// 【追加：F05粒度1】招待の期限・再送・取消・利用可否を判定する純粋関数。
++
++import type {
++  ClubInvitationStatus,
 +  ClubMembershipStatus,
 +} from "@/types/prisma";
 +
-+const CLUB_SLUG =
-+  "club-a";
++export const CLUB_INVITATION_TTL_MILLISECONDS = 24 * 60 * 60 * 1_000;
++export const CLUB_INVITATION_RESEND_COOLDOWN_MILLISECONDS = 60 * 1_000;
 +
-+const USER_ID =
-+  "user-a";
++export type ClubInvitationState = {
++  status: ClubInvitationStatus;
++  acceptedAt: Date | null;
++};
 +
-+const MEMBERSHIP_ID =
-+  "22222222-2222-4222-8222-222222222222";
++export type ClubInvitationValidityState = ClubInvitationState & {
++  expiresAt: Date;
++};
 +
-+type StoredMembership = {
-+  role: ClubMemberRole;
++export type ClubInvitationResendState = ClubInvitationValidityState & {
++  lastAttemptAt: Date | null;
++  leaseExpiresAt: Date | null;
++};
++
++export type ClubInvitationMembershipState = {
 +  status: ClubMembershipStatus;
 +};
 +
-+/**
-+ * DBにあるstatusと、認可クエリのwhere.statusが一致した場合だけ
-+ * Membershipを返す簡易DBモック。
-+ */
-+function mockStoredMembership(
-+  stored:
-+    StoredMembership,
-+): void {
-+  mocks
-+    .findFirstMembership
-+    .mockImplementation(
-+      async (input: unknown) => {
-+        const where =
-+          (
-+            input as {
-+              where: {
-+                userId: string;
-+                status:
-+                  ClubMembershipStatus;
-+                club: {
-+                  is: {
-+                    slug: string;
-+                  };
-+                };
-+              };
-+            }
-+          ).where;
++export type ClubInvitationOperationViolation =
++  | "INVITATION_ALREADY_ACCEPTED"
++  | "INVITATION_CANCELLED"
++  | "MEMBERSHIP_NOT_FOUND"
++  | "MEMBERSHIP_NOT_INVITED"
++  | "INVITATION_PROCESSING"
++  | "RESEND_COOLDOWN"
++  | "INVALID_INVITATION_STATE";
 +
-+        if (
-+          where.userId !== USER_ID ||
-+          where.status !==
-+            stored.status ||
-+          where.club.is.slug !==
-+            CLUB_SLUG
-+        ) {
-+          return null;
-+        }
++export type ClubInvitationOperationEvaluation =
++  | { allowed: true }
++  | {
++      allowed: false;
++      violation: ClubInvitationOperationViolation;
++    };
 +
-+        return {
-+          id: MEMBERSHIP_ID,
-+          role: stored.role,
-+          club: {
-+            id:
-+              "11111111-1111-4111-8111-111111111111",
-+            name: "Club A",
-+            slug: CLUB_SLUG,
-+            timezone:
-+              "Asia/Tokyo",
-+            planType:
-+              "STANDARD",
-+          },
-+        };
-+      },
-+    );
++// enumに状態を追加した際、この表にも判断を追加しなければ型エラーになる。
++const INVITATION_STATUS_RULES = {
++  PREPARING: { resend: true, cancel: true, usable: false },
++  READY_TO_SEND: { resend: true, cancel: true, usable: true },
++  SENT: { resend: true, cancel: true, usable: true },
++  EMAIL_FAILED: { resend: true, cancel: true, usable: true },
++  ACCEPTED: { resend: false, cancel: false, usable: false },
++  CANCELLED: { resend: false, cancel: false, usable: false },
++  EXPIRED: { resend: true, cancel: true, usable: false },
++} as const satisfies Record<
++  ClubInvitationStatus,
++  { resend: boolean; cancel: boolean; usable: boolean }
++>;
++
++function isValidDate(value: Date): boolean {
++  return Number.isFinite(value.getTime());
 +}
 +
-+beforeEach(() => {
-+  vi.clearAllMocks();
++function reject(
++  violation: ClubInvitationOperationViolation,
++): ClubInvitationOperationEvaluation {
++  return { allowed: false, violation };
++}
 +
-+  mocks
-+    .createClient
-+    .mockResolvedValue({
-+      auth: {
-+        getUser:
-+          mocks.getUser,
-+      },
-+    });
++/** 発行・再発行日時から24時間後を返す。入力のDateは変更しない。 */
++export function buildClubInvitationExpiresAt(now: Date): Date {
++  if (!isValidDate(now)) {
++    throw new RangeError("招待の発行日時が正しくありません。");
++  }
 +
-+  /*
-+   * Supabaseの既存セッション自体は、全テストで有効なままにする。
-+   * 許可・拒否はDB上のMembership状態だけで変わる。
-+   */
-+  mocks.getUser.mockResolvedValue({
-+    data: {
-+      user: {
-+        id: USER_ID,
-+      },
-+    },
-+    error: null,
-+  });
-+
-+  mocks.redirect.mockImplementation(
-+    () => {
-+      throw new Error(
-+        "NEXT_REDIRECT",
-+      );
-+    },
++  const expiresAt = new Date(
++    now.getTime() + CLUB_INVITATION_TTL_MILLISECONDS,
 +  );
 +
-+  mocks.notFound.mockImplementation(
-+    () => {
-+      throw new Error(
-+        "NEXT_NOT_FOUND",
-+      );
-+    },
++  if (!isValidDate(expiresAt)) {
++    throw new RangeError("招待の有効期限を作成できません。");
++  }
++
++  return expiresAt;
++}
++
++/**
++ * 再送・準備の再試行可否。
++ * PREPARINGだけはMembership未作成でも準備を再試行できる。
++ * EXPIREDや期限到達済みの招待も、INVITEDなら新しいtokenで再発行できる。
++ * nowは呼び出し側で一度取得し、Repositoryではtransaction内で再判定する。
++ */
++export function evaluateClubInvitationResend({
++  invitation,
++  membership,
++  now,
++}: {
++  invitation: ClubInvitationResendState;
++  membership: ClubInvitationMembershipState | null;
++  now: Date;
++}): ClubInvitationOperationEvaluation {
++  if (invitation.acceptedAt !== null || invitation.status === "ACCEPTED") {
++    return reject("INVITATION_ALREADY_ACCEPTED");
++  }
++
++  if (invitation.status === "CANCELLED") {
++    return reject("INVITATION_CANCELLED");
++  }
++
++  if (
++    !INVITATION_STATUS_RULES[invitation.status]?.resend ||
++    !isValidDate(now) ||
++    !isValidDate(invitation.expiresAt) ||
++    (invitation.lastAttemptAt !== null &&
++      !isValidDate(invitation.lastAttemptAt)) ||
++    (invitation.leaseExpiresAt !== null &&
++      !isValidDate(invitation.leaseExpiresAt))
++  ) {
++    return reject("INVALID_INVITATION_STATE");
++  }
++
++  if (!membership && invitation.status !== "PREPARING") {
++    return reject("MEMBERSHIP_NOT_FOUND");
++  }
++
++  if (membership && membership.status !== "INVITED") {
++    return reject("MEMBERSHIP_NOT_INVITED");
++  }
++
++  if (
++    invitation.leaseExpiresAt !== null &&
++    invitation.leaseExpiresAt.getTime() > now.getTime()
++  ) {
++    return reject("INVITATION_PROCESSING");
++  }
++
++  if (
++    invitation.lastAttemptAt !== null &&
++    now.getTime() - invitation.lastAttemptAt.getTime() <
++      CLUB_INVITATION_RESEND_COOLDOWN_MILLISECONDS
++  ) {
++    return reject("RESEND_COOLDOWN");
++  }
++
++  return { allowed: true };
++}
++
++/**
++ * 招待取消は未承諾のINVITEDだけに許可する。
++ * 処理中でも取消を許可し、古い処理の更新はRepositoryのclaim照合で防ぐ。
++ * 期限切れのINVITEDも取消可能。Auth・AppUserの削除可否は判定しない。
++ */
++export function evaluateClubInvitationCancellation({
++  invitation,
++  membership,
++}: {
++  invitation: ClubInvitationState;
++  membership: ClubInvitationMembershipState | null;
++}): ClubInvitationOperationEvaluation {
++  if (invitation.acceptedAt !== null || invitation.status === "ACCEPTED") {
++    return reject("INVITATION_ALREADY_ACCEPTED");
++  }
++
++  if (invitation.status === "CANCELLED") {
++    return reject("INVITATION_CANCELLED");
++  }
++
++  if (!INVITATION_STATUS_RULES[invitation.status]?.cancel) {
++    return reject("INVALID_INVITATION_STATE");
++  }
++
++  if (!membership) {
++    return reject("MEMBERSHIP_NOT_FOUND");
++  }
++
++  if (membership.status !== "INVITED") {
++    return reject("MEMBERSHIP_NOT_INVITED");
++  }
++
++  return { allowed: true };
++}
++
++/**
++ * 状態・期限・未承諾・INVITEDだけを判定する。
++ * tokenHash一致、clubId一致、認証済みuser.id一致は別途必須。
++ * メール受付成功後のDB更新失敗を考慮し、READY_TO_SEND/EMAIL_FAILEDも対象。
++ * この関数だけで招待を承諾したり、ACTIVEに変更したりしてはいけない。
++ */
++export function isUsableClubInvitation({
++  invitation,
++  membership,
++  now,
++}: {
++  invitation: ClubInvitationValidityState;
++  membership: ClubInvitationMembershipState | null;
++  now: Date;
++}): boolean {
++  return (
++    !!INVITATION_STATUS_RULES[invitation.status]?.usable &&
++    invitation.acceptedAt === null &&
++    membership?.status === "INVITED" &&
++    isValidDate(now) &&
++    isValidDate(invitation.expiresAt) &&
++    invitation.expiresAt.getTime() > now.getTime()
 +  );
-+});
-+
-+describe(
-+  "requireActiveClubMembership",
-+  () => {
-+    it(
-+      "DB上でACTIVEなら既存セッションを認可する",
-+      async () => {
-+        mockStoredMembership({
-+          role: "MEMBER",
-+          status: "ACTIVE",
-+        });
-+
-+        await expect(
-+          requireActiveClubMembership(
-+            CLUB_SLUG,
-+          ),
-+        ).resolves.toEqual({
-+          userId: USER_ID,
-+          club: {
-+            id:
-+              "11111111-1111-4111-8111-111111111111",
-+            name: "Club A",
-+            slug: CLUB_SLUG,
-+            timezone:
-+              "Asia/Tokyo",
-+            planType:
-+              "STANDARD",
-+          },
-+          membership: {
-+            id: MEMBERSHIP_ID,
-+            role: "MEMBER",
-+          },
-+        });
-+
-+        expect(
-+          mocks
-+            .findFirstMembership,
-+        ).toHaveBeenCalledWith(
-+          expect.objectContaining({
-+            where: {
-+              userId: USER_ID,
-+              status: "ACTIVE",
-+              club: {
-+                is: {
-+                  slug: CLUB_SLUG,
-+                },
-+              },
-+            },
-+          }),
-+        );
-+      },
-+    );
-+
++}
+diff --git a/domain/club/member/member-toast.test.ts b/domain/club/member/member-toast.test.ts
+index 306c35188f51f60ba6dc9422b342b760725d3318..45d7172009dc14c29347d1f381a0d28900945b4b 100644
+--- a/domain/club/member/member-toast.test.ts
++++ b/domain/club/member/member-toast.test.ts
+@@ -26,17 +26,44 @@ describe(
+       },
+     );
+ 
++    // 【追加：F05粒度1】招待用の固定識別子だけを文言へ変換する。
 +    it.each([
-+      "SUSPENDED",
-+      "WITHDRAWN",
++      ["member-invited", "招待メールを送信しました。"],
++      ["member-invitation-resent", "招待メールを再送しました。"],
++      ["member-invitation-cancelled", "招待を取り消しました。"],
++      [
++        "member-invitation-email-failed",
++        "招待情報は保存しましたが、メールを送信できませんでした。招待状況から再送してください。",
++      ],
++      [
++        "member-invitation-recovery-required",
++        "招待の準備が完了していません。招待状況を確認してください。",
++      ],
 +    ] as const)(
-+      "既存セッションがあってもDB上で%sなら拒否する",
-+      async (status) => {
-+        mockStoredMembership({
-+          role: "OWNER",
-+          status,
-+        });
-+
-+        await expect(
-+          requireActiveClubMembership(
-+            CLUB_SLUG,
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_NOT_FOUND",
-+        );
-+
-+        expect(
-+          mocks.getUser,
-+        ).toHaveBeenCalledTimes(1);
-+        expect(
-+          mocks
-+            .findFirstMembership,
-+        ).toHaveBeenCalledWith(
-+          expect.objectContaining({
-+            where:
-+              expect.objectContaining({
-+                status: "ACTIVE",
-+              }),
-+          }),
-+        );
-+        expect(
-+          mocks.notFound,
-+        ).toHaveBeenCalledTimes(1);
-+      },
-+    );
-+  },
-+);
-+
-+describe(
-+  "requireClubOwner",
-+  () => {
-+    it(
-+      "DB上でACTIVE OWNERなら認可する",
-+      async () => {
-+        mockStoredMembership({
-+          role: "OWNER",
-+          status: "ACTIVE",
-+        });
-+
-+        await expect(
-+          requireClubOwner(
-+            CLUB_SLUG,
-+          ),
-+        ).resolves.toEqual(
-+          expect.objectContaining({
-+            membership: {
-+              id: MEMBERSHIP_ID,
-+              role: "OWNER",
-+            },
-+          }),
-+        );
++      "%sを固定文言へ変換する",
++      (code, message) => {
++        expect(getClubMembersToastMessage(code)).toBe(message);
 +      },
 +    );
 +
-+    it(
-+      "DB上でACTIVEでもMEMBERならOWNERページを拒否する",
-+      async () => {
-+        mockStoredMembership({
-+          role: "MEMBER",
-+          status: "ACTIVE",
-+        });
+     it.each([
+       undefined,
+       "",
+       "member-created",
++      "member-invitation-unknown",
++      "__proto__",
++      "constructor",
++      "member-invited ",
++      "member-invited<script>alert(1)</script>",
+       "<script>alert(1)</script>",
+       [
+         "member-updated",
+       ],
+-    ])(
++      ["member-invited"],
++      ["member-invited", "member-invitation-cancelled"],
++    ].map((value) => ({ value })))(
+       "未許可の値を表示しない: %p",
+-      (value) => {
++      ({ value }) => {
+         expect(
+           getClubMembersToastMessage(
+             value,
+diff --git a/domain/club/member/member-toast.ts b/domain/club/member/member-toast.ts
+index 1da64e5f1503d6555e222cbcdf86a59b2e6904d6..05e73d4faca1acc01edd98b94701c398f8b7ea09 100644
+--- a/domain/club/member/member-toast.ts
++++ b/domain/club/member/member-toast.ts
+@@ -1,17 +1,44 @@
+ // domain/club/member/member-toast.ts
+-// メンバー管理ページのURL識別子（"member-updated"）を固定メッセージ（"メンバー情報を変更しました。";）へ変換する
++// メンバー管理ページのURL識別子を、許可した固定メッセージへ変換する。
+ 
+ //メンバー情報を更新した際(新規会員追加など)のトーストコード
++// 【追加：F05粒度1】招待の送信・再送・取消・失敗・復旧待ち。
+ export type ClubMembersToastCode =
+-  "member-updated";
++  | "member-updated"
++  | "member-invited"
++  | "member-invitation-resent"
++  | "member-invitation-cancelled"
++  | "member-invitation-email-failed"
++  | "member-invitation-recovery-required";
+ 
+-  // メンバー管理ページのURL識別子（"member-updated"）を固定メッセージ（"メンバー情報を変更しました。";）へ変換する関数
++// メンバー管理ページのURL識別子を固定メッセージへ変換する。
+ export function getClubMembersToastMessage(
+   value:
+     | string
+     | string[]
+     | undefined,
+ ): string | null {
++  // 【追加：F05粒度1】URLの値自体を表示しない。配列や未許可値も一致しない。
++  if (value === "member-invited") {
++    return "招待メールを送信しました。";
++  }
 +
-+        await expect(
-+          requireClubOwner(
-+            CLUB_SLUG,
-+          ),
-+        ).rejects.toThrow(
-+          "NEXT_NOT_FOUND",
-+        );
++  if (value === "member-invitation-resent") {
++    return "招待メールを再送しました。";
++  }
 +
-+        expect(
-+          mocks.notFound,
-+        ).toHaveBeenCalledTimes(1);
-+      },
-+    );
-+  },
-+);
++  if (value === "member-invitation-cancelled") {
++    return "招待を取り消しました。";
++  }
++
++  if (value === "member-invitation-email-failed") {
++    return "招待情報は保存しましたが、メールを送信できませんでした。招待状況から再送してください。";
++  }
++
++  if (value === "member-invitation-recovery-required") {
++    return "招待の準備が完了していません。招待状況を確認してください。";
++  }
++
+   if (
+     value === "member-updated"
+   ) {

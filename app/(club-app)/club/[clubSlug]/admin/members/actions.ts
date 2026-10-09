@@ -117,7 +117,6 @@ export async function updateClubMembershipAction(
     updateResult =
       await updateClubMembershipForOwner({//OWNERが同じクラブのMembershipだけを更新する。操作者確認、対象取得、ACTIVE OWNER数確認、更新は Serializable transaction内で一体として行う。
         /*
-         * 【追加・重要】
          * clubIdとactorMembershipIdはクライアントから受け取らず、
          * OWNER認可結果だけを使用する。
          */

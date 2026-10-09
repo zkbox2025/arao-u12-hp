@@ -167,19 +167,10 @@ planType = PRO：入れない
 ・マーブルジムのHPようにHPのトップに画面いっぱい（画面の下が少しはみ出るくらい）に写真を設けてやや少し引きになる
 動作にする（写真は３〜４枚くらい）。それに加えて、トップ見出しはしたからスッと上がってくる感じ、トップ写真は左右からフェードインするような動きを加えること
 
-・イベント作成時のトーストがないのでお知らせのように作成する
 
 ・requestReconfirmationからshouldMarkAsUnreadへ変更
 
-・以下、イベントの新規作成・編集ページとそのアクション関数、そのフォームがないので作成する
-app/(club-app)/club/[clubSlug]/admin/events/new/page.tsx
-app/(club-app)/club/[clubSlug]/admin/events/new/actions.ts
 
-app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/page.tsx
-app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/actions.ts
-
-app/(club-app)/club/[clubSlug]/admin/events/new/EventCreateForm.ts
-app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/EventEditForm.ts
 
 ◯練習変更なら練習変更を押すとテンプレが本文に入力される仕様にする
 
@@ -231,9 +222,6 @@ function handleRetry(): void {
 
 管理者用も同じ変更です。それ以外のコードは変更不要です。
 
-◯未読お知らせ０件の場合は表示しないようにする
-
-◯お知らせ・イベント新規作成ページのPDF添付欄：このPDFを削除するにチェックを入れて保存ボタンを押しても画面遷移しない（新たなPDFを追加しないと削除されない）。新しいPDFを追加ボタンが一つずつしか追加できない。新しいPDFを追加するボタンにカーソルを乗せるまたはクリックすると表示が変わるようにする（クリックされたことがわかりにくいため）
 
 ⭐️マルチテナント化した場合、本番のsupabase cronのSupabase Vaultに登録されてあるclub_app_production_base_urlの値が、現在、ARAO CLUBのドメイン（https://本番の独自ドメイン）
 になってるから、新しく取得した本丸のドメイン（HP＆アプリの自社サービスのドメイン）に書き換えること
@@ -357,3 +345,9 @@ LINE_CHANNEL_SECRET
 LINE_CHANNEL_ACCESS_TOKEN
 LINE_ADMIN_GROUP_ID
 LINE_CREDENTIAL_ENCRYPTION_KEY
+
+
+⭐️メンバー管理ページのメンバーシップ一覧について
+・在籍状態と権限絞り込みを作る。
+・名前検索ボックスを作る
+・HPの管理者ページのトップのお問い合わせ、体験/見学申し込みの一覧のように横スクロールで全体が見れるようにしたい。
