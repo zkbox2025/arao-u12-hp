@@ -1,3 +1,4 @@
+//docs/implementation/phases/F05-granular-plan.md
 F05実装粒度計画
 
 F05は、9つのpatch単位に分けて実装するのがよいです。添付の現行コードを確認したうえで、F04・既存HP・LINE通知を維持する構成にします。

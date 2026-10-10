@@ -202,3 +202,8 @@ Webhook登録
 8.allowed: trueの場合だけClubMembershipを更新
 9.?toast=member-updatedへリダイレクト
 10.getClubMembersToastMessage()で固定メッセージへ変換
+
+⭐️クラブ招待メールのリース期限と有効期限
+1. leaseExpiresAt（5分間）：サーバーが処理を独占するためのロック期間。
+2. expiresAt（例：7日間）：招待状そのものの有効期限（受取人がリンクを踏める賞味期限）。
+今回

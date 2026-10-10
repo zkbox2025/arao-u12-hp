@@ -5,484 +5,1007 @@ diff --git a/package.json b/package.json
      "typecheck": "tsc --noEmit",
      "test": "vitest run",
      "test:watch": "vitest",
--    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts",
-+    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts",
+-    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts",
++    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts",
      "prisma:validate": "prisma validate",
      "env:validate": "node scripts/validate-env.mjs",
      "predev": "npm run env:validate",
-diff --git a/prisma/schema.prisma b/prisma/schema.prisma
---- a/prisma/schema.prisma
-+++ b/prisma/schema.prisma
-@@ -349,6 +349,10 @@
-   attemptCount  Int       @default(0)
-   lastAttemptAt DateTime?
- 
-+  claimToken     String?   @unique
-+  leaseExpiresAt DateTime?
-+
-+  @@index([clubId, status, expiresAt])
-   @@index([clubId, email])
-   @@index([expiresAt])
-   @@index([acceptedAt])
-diff --git a/prisma/migrations/20261009000000_f05_invitation_processing_lease/migration.sql b/prisma/migrations/20261009000000_f05_invitation_processing_lease/migration.sql
+diff --git a/src/infrastructure/prisma/repositories/club-invitation-repository.ts b/src/infrastructure/prisma/repositories/club-invitation-repository.ts
 new file mode 100644
 --- /dev/null
-+++ b/prisma/migrations/20261009000000_f05_invitation_processing_lease/migration.sql
-@@ -0,0 +1,49 @@
-+BEGIN;
++++ b/src/infrastructure/prisma/repositories/club-invitation-repository.ts
+@@ -0,0 +1,437 @@
++import "server-only";
 +
-+-- 既存emailを自動修正せず、不整合があれば値を出力せずに停止する。
-+-- normalizeEmail()と同じNFKC・trim・小文字化を確認する。
-+DO $f05_email_preflight$
-+DECLARE
-+  trim_characters CONSTANT TEXT :=
-+    U&'\0009\000A\000B\000C\000D\0020\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF';
-+BEGIN
-+  IF EXISTS (
-+    SELECT 1
-+    FROM "AppUser"
-+    WHERE "email" IS NOT NULL
-+      AND "email" IS DISTINCT FROM
-+        lower(btrim(normalize("email", NFKC), trim_characters))
-+  ) THEN
-+    RAISE EXCEPTION USING
-+      ERRCODE = '23514',
-+      MESSAGE = 'F05 email normalization preflight failed for AppUser',
-+      CONSTRAINT = 'F05_AppUser_email_normalization';
-+  END IF;
-+
-+  IF EXISTS (
-+    SELECT 1
-+    FROM "ClubInvitation"
-+    WHERE "email" IS DISTINCT FROM
-+      lower(btrim(normalize("email", NFKC), trim_characters))
-+  ) THEN
-+    RAISE EXCEPTION USING
-+      ERRCODE = '23514',
-+      MESSAGE = 'F05 email normalization preflight failed for ClubInvitation',
-+      CONSTRAINT = 'F05_ClubInvitation_email_normalization';
-+  END IF;
-+END
-+$f05_email_preflight$;
-+
-+ALTER TABLE "ClubInvitation"
-+  ADD COLUMN "claimToken" TEXT,
-+  ADD COLUMN "leaseExpiresAt" TIMESTAMP(3),
-+  ADD CONSTRAINT "ClubInvitation_claim_pair_check"
-+    CHECK (("claimToken" IS NULL) = ("leaseExpiresAt" IS NULL));
-+
-+CREATE UNIQUE INDEX "ClubInvitation_claimToken_key"
-+  ON "ClubInvitation" ("claimToken");
-+
-+CREATE INDEX "ClubInvitation_clubId_status_expiresAt_idx"
-+  ON "ClubInvitation" ("clubId", "status", "expiresAt");
-+
-+COMMIT;
-diff --git a/tests/club-invitation-schema.integration.test.ts b/tests/club-invitation-schema.integration.test.ts
-new file mode 100644
---- /dev/null
-+++ b/tests/club-invitation-schema.integration.test.ts
-@@ -0,0 +1,403 @@
-+// tests/club-invitation-schema.integration.test.ts
-+// 招待のDB制約を、環境変数ファイルの読み込み・Prisma原文ログなしで検証する。
-+
-+import { randomBytes, randomUUID } from "node:crypto";
-+import { readFileSync } from "node:fs";
-+import { Client, DatabaseError } from "pg";
-+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
-+
++import { randomUUID } from "node:crypto";
++import { Prisma } from "@prisma/client";
++import {
++  validateClubMemberInviteFormValues,
++  type ValidClubMemberInviteInput,
++} from "@/domain/club/invitation/invitation-form";
++import {
++  buildClubInvitationExpiresAt,
++  evaluateClubInvitationCancellation,
++  evaluateClubInvitationResend,
++  isUsableClubInvitation,
++  type ClubInvitationOperationViolation,
++} from "@/domain/club/invitation/invitation-policy";
 +import { normalizeEmail } from "@/domain/shared/email";
-+import type { ClubInvitationStatus } from "@/types/prisma";
++import { DomainError } from "@/domain/shared/domain-error";
++import { convertPrismaError } from "@/src/infrastructure/prisma/prisma-error";
++import { prisma } from "@/src/infrastructure/prisma/client";
++import type { ClubInvitationStatus, ClubMemberRole, ClubMembershipStatus } from "@/types/prisma";
 +
-+const describeDatabase =
-+  process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
++const ACTIVE_STATUSES: ClubInvitationStatus[] = ["PREPARING", "READY_TO_SEND", "SENT", "EMAIL_FAILED"];
++const LEASE_MILLISECONDS = 5 * 60 * 1_000;
++const MAX_TRANSACTION_RETRIES = 3;
 +
-+const activeStatuses = [
-+  "PREPARING", "READY_TO_SEND", "SENT", "EMAIL_FAILED",
-+] as const satisfies readonly ClubInvitationStatus[];
++type OwnerInput = { clubId: string; actorMembershipId: string; now?: Date };
++type InvitationInput = OwnerInput & { invitationId: string };
++type ClaimInput = InvitationInput & { claimToken: string };
++type VerifiedAuthUser = { id: string; email: string };
++type DuplicateReason = "ACTIVE_INVITATION" | "TOKEN_HASH" | "CLAIM_TOKEN" | "MEMBERSHIP" | "APP_USER";
++type RuleViolation = ClubInvitationOperationViolation | "AUTH_USER_MISMATCH" | "TOKEN_NOT_ROTATED";
 +
-+type InvitationSeed = {
-+  id: string;
-+  clubId: string;
-+  email: string;
-+  status: ClubInvitationStatus;
-+  tokenHash: string;
-+  expiresAt: Date;
-+  membershipId: string | null;
-+  invitedByMembershipId: string;
-+  claimToken: string | null;
-+  leaseExpiresAt: Date | null;
++export type ClubInvitationFailure =
++  | { outcome: "ACTOR_NOT_ACTIVE_OWNER" }
++  | { outcome: "NOT_FOUND" }
++  | { outcome: "CLAIM_LOST" }
++  | { outcome: "RULE_VIOLATION"; reason: RuleViolation }
++  | { outcome: "MEMBERSHIP_EXISTS"; membershipStatus: ClubMembershipStatus }
++  | { outcome: "DUPLICATE"; reason: DuplicateReason };
++
++// This DTO is only for server-side preparation and delivery, never for a Page.
++export type ClubInvitationProcessing = {
++  id: string; clubId: string; email: string; name: string | null;
++  role: ClubMemberRole; status: ClubInvitationStatus;
++  authUserId: string | null; existingUserId: string | null;
++  membershipId: string | null; claimToken: string;
++  leaseExpiresAt: Date; expiresAt: Date; attemptCount: number;
 +};
 +
-+describeDatabase("ClubInvitation DB制約", () => {
-+  const clubAId = randomUUID();
-+  const clubBId = randomUUID();
-+  const ownerAId = randomUUID();
-+  const ownerBId = randomUUID();
-+  const ownerAMembershipId = randomUUID();
-+  const ownerBMembershipId = randomUUID();
-+  const future = new Date("2099-01-01T00:00:00.000Z");
-+  let db: Client | undefined;
-+  let connected = false;
-+  let testSavepointActive = false;
-+  let preflightSql: string;
++export type ClubInvitationForOwner = {
++  id: string; name: string | null; email: string; role: ClubMemberRole;
++  status: ClubInvitationStatus; hasMembership: boolean;
++  membershipStatus: ClubMembershipStatus | null;
++  createdAt: Date; expiresAt: Date; emailSentAt: Date | null;
++  lastAttemptAt: Date | null; leaseExpiresAt: Date | null;
++  canResend: boolean; canCancel: boolean; needsPreparationRetry: boolean;
++};
 +
-+  function connection(): Client {
-+    if (!db) throw new Error("DBテスト接続が準備されていません。");
-+    return db;
++type StoredInvitation = Prisma.ClubInvitationGetPayload<{
++  include: { membership: { select: { id: true; clubId: true; userId: true; role: true; status: true } } };
++}>;
++
++class TransactionAbort extends Error {
++  constructor(readonly result: ClubInvitationFailure) { super("Invitation transaction aborted"); }
++}
++
++function object(value: unknown): Record<string, unknown> | null {
++  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
++}
++
++// Prisma 7 adapter-pg can expose expression-index fields through driverAdapterError,
++// including "lower(email" without a closing parenthesis. Never inspect error messages.
++function duplicateReason(error: Prisma.PrismaClientKnownRequestError): DuplicateReason | null {
++  const meta = object(error.meta);
++  const cause = object(object(meta?.driverAdapterError)?.cause);
++  const constraint = object(cause?.constraint);
++  const target = meta?.target ?? constraint?.fields ?? constraint?.index;
++  const names: Record<string, DuplicateReason> = {
++    ClubInvitation_active_email_key: "ACTIVE_INVITATION",
++    ClubInvitation_tokenHash_key: "TOKEN_HASH",
++    ClubInvitation_claimToken_key: "CLAIM_TOKEN",
++    ClubInvitation_membershipId_key: "MEMBERSHIP",
++    ClubMembership_clubId_userId_key: "MEMBERSHIP",
++    AppUser_email_key: "APP_USER",
++  };
++  if (typeof target === "string") return names[target] ?? null;
++  if (!Array.isArray(target) || !target.every((field) => typeof field === "string")) return null;
++  const fields = target.map((field: string) => field.replaceAll('"', ""));
++  const model = meta?.modelName;
++  if ((model === "ClubInvitation" || model === undefined) && fields.length === 2 &&
++      fields.includes("clubId") && fields.some((field) => ["email", "lower(email", "lower(email)"].includes(field))) {
++    return "ACTIVE_INVITATION";
 +  }
-+
-+  async function createInvitation(overrides: Partial<InvitationSeed> = {}) {
-+    const data: InvitationSeed = {
-+      id: randomUUID(),
-+      clubId: clubAId,
-+      email: `${randomUUID()}@example.test`,
-+      status: "PREPARING",
-+      tokenHash: randomBytes(32).toString("hex"),
-+      expiresAt: future,
-+      membershipId: null,
-+      invitedByMembershipId: ownerAMembershipId,
-+      claimToken: null,
-+      leaseExpiresAt: null,
-+      ...overrides,
-+    };
-+    await connection().query(`
-+      INSERT INTO "ClubInvitation" (
-+        "id", "clubId", "email", "role", "status", "tokenHash", "expiresAt",
-+        "membershipId", "invitedByMembershipId", "claimToken", "leaseExpiresAt", "updatedAt"
-+      ) VALUES ($1, $2, $3, 'MEMBER', $4, $5, $6, $7, $8, $9, $10, now())
-+    `, [
-+      data.id, data.clubId, data.email, data.status, data.tokenHash, data.expiresAt,
-+      data.membershipId, data.invitedByMembershipId, data.claimToken, data.leaseExpiresAt,
-+    ]);
-+    return data;
++  if (fields.length === 1) {
++    if (fields[0] === "tokenHash") return "TOKEN_HASH";
++    if (fields[0] === "claimToken") return "CLAIM_TOKEN";
++    if (fields[0] === "membershipId") return "MEMBERSHIP";
++    if (fields[0] === "email" && (model === "AppUser" || model === undefined)) return "APP_USER";
 +  }
++  if ((model === "ClubMembership" || model === undefined) &&
++      fields.length === 2 && fields.includes("clubId") && fields.includes("userId")) return "MEMBERSHIP";
++  return null;
++}
 +
-+  async function createInvitedMembership(clubId = clubAId) {
-+    const userId = randomUUID();
-+    const id = randomUUID();
-+    await connection().query(`
-+      INSERT INTO "AppUser" ("id", "email", "updatedAt") VALUES ($1, $2, now())
-+    `, [userId, `${userId}@example.test`]);
-+    await connection().query(`
-+      INSERT INTO "ClubMembership" ("id", "clubId", "userId", "role", "status", "updatedAt")
-+      VALUES ($1, $2, $3, 'MEMBER', 'INVITED', now())
-+    `, [id, clubId, userId]);
-+    return { id, userId };
++function time(input: { now?: Date }): Date {
++  const now = input.now ?? new Date();
++  if (!Number.isFinite(now.getTime())) throw new DomainError("VALIDATION", "処理日時が正しくありません。");
++  return now;
++}
++
++function assertTokenHash(tokenHash: string): void {
++  if (!/^[a-f0-9]{64}$/.test(tokenHash)) {
++    throw new DomainError("VALIDATION", "招待トークンの形式が正しくありません。");
 +  }
++}
 +
-+  // 予期した違反の原文・detail・入力値をアサーションへ渡さない。
-+  // SAVEPOINTで制約違反後も同じテストtransactionを利用できるようにする。
-+  async function expectConstraintViolation(
-+    operation: () => Promise<unknown>,
-+    code: string,
-+    constraint: string,
-+  ) {
-+    await connection().query("SAVEPOINT constraint_check");
-+    let failure: { code: string | undefined; constraint: string | undefined } | null = null;
++async function ownerTransaction<T>(
++  input: OwnerInput,
++  operation: (tx: Prisma.TransactionClient, now: Date) => Promise<T>,
++): Promise<T | ClubInvitationFailure> {
++  for (let attempt = 0; ; attempt += 1) {
 +    try {
-+      await operation();
++      return await prisma.$transaction(async (tx) => {
++        const now = time(input);
++        const actor = await tx.clubMembership.findFirst({
++          where: { id: input.actorMembershipId, clubId: input.clubId, role: "OWNER", status: "ACTIVE" },
++          select: { id: true },
++        });
++        if (!actor) return { outcome: "ACTOR_NOT_ACTIVE_OWNER" as const };
++        return operation(tx, now);
++      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 +    } catch (error) {
-+      if (error instanceof DatabaseError) {
-+        failure = { code: error.code, constraint: error.constraint };
-+      } else {
-+        throw new Error("DB制約テストで想定外のエラーが発生しました。");
++      if (error instanceof TransactionAbort) return error.result;
++      if (error instanceof Prisma.PrismaClientKnownRequestError) {
++        if (error.code === "P2034" && attempt < MAX_TRANSACTION_RETRIES) continue;
++        if (error.code === "P2002") {
++          const reason = duplicateReason(error);
++          if (reason) return { outcome: "DUPLICATE", reason };
++        }
 +      }
-+    } finally {
-+      await connection().query("ROLLBACK TO SAVEPOINT constraint_check");
-+      await connection().query("RELEASE SAVEPOINT constraint_check");
++      const safe = convertPrismaError(error);
++      // Preserve the fixed public error, without retaining DB messages or input in cause.
++      throw new DomainError(safe.code, safe.publicMessage);
 +    }
-+    expect(failure).toEqual({ code, constraint });
 +  }
++}
++
++async function stored(tx: Prisma.TransactionClient, input: InvitationInput): Promise<StoredInvitation | null> {
++  const row = await tx.clubInvitation.findFirst({
++    where: { id: input.invitationId, clubId: input.clubId },
++    include: { membership: { select: { id: true, clubId: true, userId: true, role: true, status: true } } },
++  });
++  if (row?.membership && row.membership.clubId !== input.clubId) {
++    throw new DomainError("INVALID_REFERENCE", "関連するデータの組み合わせを確認できません。");
++  }
++  return row;
++}
++
++function claimWhere(input: ClaimInput, now: Date, statuses: ClubInvitationStatus[]): Prisma.ClubInvitationWhereInput {
++  return {
++    id: input.invitationId, clubId: input.clubId, claimToken: input.claimToken,
++    acceptedAt: null, status: { in: statuses },
++    leaseExpiresAt: { gt: now }, expiresAt: { gt: now },
++  };
++}
++
++function ownsClaim(row: StoredInvitation, input: ClaimInput, now: Date, statuses: ClubInvitationStatus[]): boolean {
++  return input.claimToken.length > 0 && row.claimToken === input.claimToken &&
++    row.acceptedAt === null && statuses.includes(row.status) &&
++    row.leaseExpiresAt !== null && row.leaseExpiresAt > now && row.expiresAt > now &&
++    (!row.membership || row.membership.status === "INVITED");
++}
++
++async function processing(tx: Prisma.TransactionClient, row: StoredInvitation): Promise<ClubInvitationProcessing> {
++  if (!row.claimToken || !row.leaseExpiresAt) throw new DomainError("INTERNAL", "招待の処理権を確認できません。");
++  const user = row.membership ? null : await tx.appUser.findUnique({ where: { email: row.email }, select: { id: true } });
++  return {
++    id: row.id, clubId: row.clubId, email: row.email, name: row.name,
++    role: row.membership?.role ?? row.role, status: row.status,
++    authUserId: row.authUserId, existingUserId: row.membership?.userId ?? user?.id ?? null,
++    membershipId: row.membershipId, claimToken: row.claimToken,
++    leaseExpiresAt: row.leaseExpiresAt, expiresAt: row.expiresAt, attemptCount: row.attemptCount,
++  };
++}
++
++async function expire(tx: Prisma.TransactionClient, clubId: string, now: Date, excludeId?: string): Promise<number> {
++  const updated = await tx.clubInvitation.updateMany({
++    where: { clubId, ...(excludeId ? { id: { not: excludeId } } : {}), status: { in: ACTIVE_STATUSES }, acceptedAt: null, expiresAt: { lte: now } },
++    data: { status: "EXPIRED", claimToken: null, leaseExpiresAt: null },
++  });
++  return updated.count;
++}
++
++export async function findClubInvitationsForOwner(input: OwnerInput) {
++  return ownerTransaction(input, async (tx, now) => {
++    const rows = await tx.clubInvitation.findMany({
++      where: { clubId: input.clubId },
++      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
++      select: {
++        id: true, name: true, email: true, role: true, status: true, acceptedAt: true,
++        createdAt: true, expiresAt: true, emailSentAt: true, lastAttemptAt: true, leaseExpiresAt: true,
++        membership: { select: { clubId: true, role: true, status: true } },
++      },
++    });
++    const invitations: ClubInvitationForOwner[] = rows.map((row) => {
++      if (row.membership && row.membership.clubId !== input.clubId) {
++        throw new DomainError("INVALID_REFERENCE", "関連するデータの組み合わせを確認できません。");
++      }
++      return {
++        id: row.id, name: row.name, email: row.email, role: row.membership?.role ?? row.role,
++        status: row.status, hasMembership: row.membership !== null,
++        membershipStatus: row.membership?.status ?? null,
++        createdAt: row.createdAt, expiresAt: row.expiresAt, emailSentAt: row.emailSentAt,
++        lastAttemptAt: row.lastAttemptAt, leaseExpiresAt: row.leaseExpiresAt,
++        canResend: evaluateClubInvitationResend({ invitation: row, membership: row.membership, now }).allowed,
++        canCancel: evaluateClubInvitationCancellation({ invitation: row, membership: row.membership }).allowed,
++        needsPreparationRetry: row.status === "PREPARING" && row.acceptedAt === null &&
++          (row.leaseExpiresAt === null || row.leaseExpiresAt <= now),
++      };
++    });
++    return { outcome: "FOUND" as const, invitations };
++  });
++}
++
++export async function reserveClubInvitation(
++  input: OwnerInput & ValidClubMemberInviteInput & { tokenHash: string },
++) {
++  assertTokenHash(input.tokenHash);
++  const validation = validateClubMemberInviteFormValues(input);
++  if (!validation.success) throw new DomainError("VALIDATION", "招待する入力値を確認してください。");
++  return ownerTransaction(input, async (tx, now) => {
++    await expire(tx, input.clubId, now);
++    const user = await tx.appUser.findUnique({ where: { email: validation.data.email }, select: { id: true } });
++    const membership = user && await tx.clubMembership.findUnique({
++      where: { clubId_userId: { clubId: input.clubId, userId: user.id } }, select: { status: true },
++    });
++    if (membership) return { outcome: "MEMBERSHIP_EXISTS" as const, membershipStatus: membership.status };
++    const duplicate = await tx.clubInvitation.findFirst({
++      where: { clubId: input.clubId, email: validation.data.email, status: { in: ACTIVE_STATUSES } },
++      select: { id: true },
++    });
++    if (duplicate) return { outcome: "DUPLICATE" as const, reason: "ACTIVE_INVITATION" as const };
++    const row = await tx.clubInvitation.create({
++      data: {
++        clubId: input.clubId, ...validation.data, tokenHash: input.tokenHash,
++        status: "PREPARING", expiresAt: buildClubInvitationExpiresAt(now),
++        invitedByMembershipId: input.actorMembershipId, attemptCount: 1, lastAttemptAt: now,
++        claimToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + LEASE_MILLISECONDS),
++      },
++      include: { membership: { select: { id: true, clubId: true, userId: true, role: true, status: true } } },
++    });
++    return { outcome: "RESERVED" as const, invitation: await processing(tx, row) };
++  });
++}
++
++export async function claimClubInvitationResend(input: InvitationInput & { tokenHash: string }) {
++  assertTokenHash(input.tokenHash);
++  return ownerTransaction(input, async (tx, now) => {
++    const row = await stored(tx, input);
++    if (!row) return { outcome: "NOT_FOUND" as const };
++    const evaluation = evaluateClubInvitationResend({ invitation: row, membership: row.membership, now });
++    if (!evaluation.allowed) return { outcome: "RULE_VIOLATION" as const, reason: evaluation.violation };
++    if (row.tokenHash === input.tokenHash) return { outcome: "RULE_VIOLATION" as const, reason: "TOKEN_NOT_ROTATED" as const };
++    // Keep a still-PREPARING target eligible for the Domain preparation retry.
++    await expire(tx, input.clubId, now, row.id);
++    const duplicate = await tx.clubInvitation.findFirst({
++      where: { clubId: input.clubId, email: row.email, id: { not: row.id }, status: { in: ACTIVE_STATUSES } },
++      select: { id: true },
++    });
++    if (duplicate) return { outcome: "DUPLICATE" as const, reason: "ACTIVE_INVITATION" as const };
++    const updated = await tx.clubInvitation.updateMany({
++      where: {
++        id: row.id, clubId: input.clubId, acceptedAt: null,
++        status: row.status, claimToken: row.claimToken,
++        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
++      },
++      data: {
++        status: "PREPARING", tokenHash: input.tokenHash, expiresAt: buildClubInvitationExpiresAt(now),
++        claimToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + LEASE_MILLISECONDS),
++        attemptCount: { increment: 1 }, lastAttemptAt: now, emailSendError: null,
++      },
++    });
++    if (updated.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
++    const claimed = await stored(tx, input);
++    if (!claimed) throw new TransactionAbort({ outcome: "NOT_FOUND" });
++    return { outcome: "CLAIMED" as const, invitation: await processing(tx, claimed) };
++  });
++}
++
++async function matchesAuthUser(tx: Prisma.TransactionClient, row: StoredInvitation, user: VerifiedAuthUser): Promise<boolean> {
++  if (!user.id || normalizeEmail(user.email) !== row.email ||
++      (row.authUserId !== null && row.authUserId !== user.id) ||
++      (row.membership !== null && row.membership.userId !== user.id)) return false;
++  const byEmail = await tx.appUser.findUnique({ where: { email: row.email }, select: { id: true } });
++  const byId = await tx.appUser.findUnique({ where: { id: user.id }, select: { email: true } });
++  return (!byEmail || byEmail.id === user.id) &&
++    (!byId || byId.email === null || normalizeEmail(byId.email) === row.email);
++}
++
++export async function recordClubInvitationAuthUser(input: ClaimInput & { verifiedAuthUser: VerifiedAuthUser }) {
++  return ownerTransaction(input, async (tx, now) => {
++    const row = await stored(tx, input);
++    if (!row) return { outcome: "NOT_FOUND" as const };
++    if (!ownsClaim(row, input, now, ["PREPARING"])) return { outcome: "CLAIM_LOST" as const };
++    if (!await matchesAuthUser(tx, row, input.verifiedAuthUser)) {
++      return { outcome: "RULE_VIOLATION" as const, reason: "AUTH_USER_MISMATCH" as const };
++    }
++    const updated = await tx.clubInvitation.updateMany({
++      where: { ...claimWhere(input, now, ["PREPARING"]), authUserId: row.authUserId },
++      data: { authUserId: input.verifiedAuthUser.id },
++    });
++    return updated.count === 1 ? { outcome: "UPDATED" as const } : { outcome: "CLAIM_LOST" as const };
++  });
++}
++
++// verifiedAuthUser must come from the server-side Auth adapter, never from a browser.
++export async function completeClubInvitationPreparation(input: ClaimInput & { verifiedAuthUser: VerifiedAuthUser }) {
++  return ownerTransaction(input, async (tx, now) => {
++    const row = await stored(tx, input);
++    if (!row) return { outcome: "NOT_FOUND" as const };
++    if (!ownsClaim(row, input, now, ["PREPARING"])) return { outcome: "CLAIM_LOST" as const };
++    if (row.authUserId !== input.verifiedAuthUser.id || !await matchesAuthUser(tx, row, input.verifiedAuthUser)) {
++      return { outcome: "RULE_VIOLATION" as const, reason: "AUTH_USER_MISMATCH" as const };
++    }
++    const existing = await tx.clubMembership.findUnique({
++      where: { clubId_userId: { clubId: input.clubId, userId: row.authUserId } },
++      select: { id: true, status: true },
++    });
++    if (existing && (existing.id !== row.membershipId || existing.status !== "INVITED")) {
++      return { outcome: "MEMBERSHIP_EXISTS" as const, membershipStatus: existing.status };
++    }
++    if (row.membershipId !== null && (!existing || existing.id !== row.membershipId)) {
++      throw new TransactionAbort({ outcome: "CLAIM_LOST" });
++    }
++    const user = await tx.appUser.findUnique({ where: { id: row.authUserId }, select: { id: true } });
++    if (!user) await tx.appUser.create({ data: { id: row.authUserId, email: row.email, name: row.name }, select: { id: true } });
++    const membership = existing ?? await tx.clubMembership.create({
++      data: { clubId: input.clubId, userId: row.authUserId, role: row.role, status: "INVITED" },
++      select: { id: true, status: true },
++    });
++    const updated = await tx.clubInvitation.updateMany({
++      where: { ...claimWhere(input, now, ["PREPARING"]), authUserId: row.authUserId, membershipId: row.membershipId },
++      data: { membershipId: membership.id, status: "READY_TO_SEND", emailSendError: null },
++    });
++    if (updated.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
++    const prepared = await stored(tx, input);
++    if (!prepared) throw new TransactionAbort({ outcome: "NOT_FOUND" });
++    return { outcome: "PREPARED" as const, invitation: await processing(tx, prepared) };
++  });
++}
++
++async function markEmail(input: ClaimInput, status: "SENT" | "EMAIL_FAILED") {
++  return ownerTransaction(input, async (tx, now) => {
++    const row = await stored(tx, input);
++    if (!row) return { outcome: "NOT_FOUND" as const };
++    if (!ownsClaim(row, input, now, ["READY_TO_SEND"]) || !row.membership) return { outcome: "CLAIM_LOST" as const };
++    const updated = await tx.clubInvitation.updateMany({
++      where: {
++        ...claimWhere(input, now, ["READY_TO_SEND"]),
++        membership: { is: { clubId: input.clubId, status: "INVITED" } },
++      },
++      data: {
++        status, ...(status === "SENT" ? { emailSentAt: now } : {}),
++        emailSendError: status === "EMAIL_FAILED" ? "EMAIL_SEND_FAILED" : null,
++        claimToken: null, leaseExpiresAt: null,
++      },
++    });
++    return updated.count === 1 ? { outcome: "UPDATED" as const } : { outcome: "CLAIM_LOST" as const };
++  });
++}
++
++export async function markClubInvitationEmailSent(input: ClaimInput) { return markEmail(input, "SENT"); }
++export async function markClubInvitationEmailFailed(input: ClaimInput) { return markEmail(input, "EMAIL_FAILED"); }
++
++export async function releaseClubInvitationClaim(input: ClaimInput) {
++  return ownerTransaction(input, async (tx, now) => {
++    const row = await stored(tx, input);
++    if (!row) return { outcome: "NOT_FOUND" as const };
++    if (!ownsClaim(row, input, now, ["PREPARING", "READY_TO_SEND"])) return { outcome: "CLAIM_LOST" as const };
++    const updated = await tx.clubInvitation.updateMany({
++      where: claimWhere(input, now, ["PREPARING", "READY_TO_SEND"]),
++      data: { claimToken: null, leaseExpiresAt: null },
++    });
++    return updated.count === 1 ? { outcome: "UPDATED" as const } : { outcome: "CLAIM_LOST" as const };
++  });
++}
++
++export async function cancelClubInvitation(input: InvitationInput) {
++  return ownerTransaction(input, async (tx) => {
++    const row = await stored(tx, input);
++    if (!row) return { outcome: "NOT_FOUND" as const };
++    const evaluation = evaluateClubInvitationCancellation({ invitation: row, membership: row.membership });
++    if (!evaluation.allowed) return { outcome: "RULE_VIOLATION" as const, reason: evaluation.violation };
++    if (!row.membershipId) throw new TransactionAbort({ outcome: "NOT_FOUND" });
++    const updated = await tx.clubInvitation.updateMany({
++      where: { id: row.id, clubId: input.clubId, status: row.status, acceptedAt: null, membershipId: row.membershipId },
++      data: { status: "CANCELLED", claimToken: null, leaseExpiresAt: null },
++    });
++    if (updated.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
++    const deleted = await tx.clubMembership.deleteMany({
++      where: { id: row.membershipId, clubId: input.clubId, status: "INVITED" },
++    });
++    if (deleted.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
++    return { outcome: "CANCELLED" as const };
++  });
++}
++
++export async function expireClubInvitations(input: OwnerInput) {
++  return ownerTransaction(input, async (tx, now) => ({ outcome: "EXPIRED" as const, count: await expire(tx, input.clubId, now) }));
++}
++
++// authenticatedUserId is supplied by server-side authentication; this only reads.
++export async function findUsableClubInvitationByTokenHash(
++  input: { clubId: string; tokenHash: string; authenticatedUserId: string; now?: Date },
++) {
++  assertTokenHash(input.tokenHash);
++  const now = time(input);
++  if (!input.authenticatedUserId) return null;
++  try {
++    const row = await prisma.clubInvitation.findFirst({
++      where: {
++        clubId: input.clubId, tokenHash: input.tokenHash, authUserId: input.authenticatedUserId,
++        status: { in: ["READY_TO_SEND", "SENT", "EMAIL_FAILED"] }, acceptedAt: null, expiresAt: { gt: now },
++        membership: { is: { clubId: input.clubId, userId: input.authenticatedUserId, status: "INVITED" } },
++      },
++      select: {
++        id: true, clubId: true, status: true, acceptedAt: true, expiresAt: true,
++        membership: { select: { id: true, role: true, status: true } },
++      },
++    });
++    if (!row?.membership || !isUsableClubInvitation({ invitation: row, membership: row.membership, now })) return null;
++    return { id: row.id, clubId: row.clubId, membershipId: row.membership.id, role: row.membership.role, expiresAt: row.expiresAt };
++  } catch (error) {
++    const safe = convertPrismaError(error);
++    throw new DomainError(safe.code, safe.publicMessage);
++  }
++}
+diff --git a/tests/club-invitation-repository.integration.test.ts b/tests/club-invitation-repository.integration.test.ts
+new file mode 100644
+--- /dev/null
++++ b/tests/club-invitation-repository.integration.test.ts
+@@ -0,0 +1,552 @@
++import { randomBytes, randomUUID } from "node:crypto";
++import { Prisma, PrismaClient } from "@prisma/client";
++import { PrismaPg } from "@prisma/adapter-pg";
++import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
++
++import type { ClubMemberRole, ClubMembershipStatus } from "@/types/prisma";
++import type { ClubInvitationProcessing } from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++
++vi.mock("server-only", () => ({}));
++const describeDatabase = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
++const now = new Date("2026-10-10T03:00:00.000Z");
++const later = (milliseconds: number) => new Date(now.getTime() + milliseconds);
++const digest = () => randomBytes(32).toString("hex");
++type Repository = typeof import("@/src/infrastructure/prisma/repositories/club-invitation-repository");
++
++describeDatabase("ClubInvitation Repository", () => {
++  let db: PrismaClient;
++  let repository: Repository;
++  const clubs = new Set<string>();
++  const users = new Set<string>();
 +
 +  beforeAll(async () => {
 +    const databaseUrl = process.env.DATABASE_URL;
-+    if (!databaseUrl) throw new Error("DBテストにはDATABASE_URLの設定が必要です。");
-+    db = new Client({ connectionString: databaseUrl });
-+    try {
-+      await db.connect();
-+    } catch {
-+      throw new Error("DBテスト接続に失敗しました。");
-+    }
-+    connected = true;
-+    await db.query("BEGIN");
-+
-+    // DBのlocaleとJavaScriptの小文字化の差も含め、既存データを先に確認する。
-+    const existing = await db.query<{ email: string }>(`
-+      SELECT "email" FROM "AppUser" WHERE "email" IS NOT NULL
-+      UNION ALL
-+      SELECT "email" FROM "ClubInvitation"
-+    `);
-+    const inconsistentCount = existing.rows.reduce(
-+      (count, row) => count + Number(row.email !== normalizeEmail(row.email)), 0,
-+    );
-+    expect(inconsistentCount, "既存emailの正規化不整合件数").toBe(0);
-+
-+    const migration = readFileSync(new URL(
-+      "../prisma/migrations/20261009000000_f05_invitation_processing_lease/migration.sql",
-+      import.meta.url,
-+    ), "utf8");
-+    const preflight = migration.match(/DO \$f05_email_preflight\$[\s\S]*?\$f05_email_preflight\$;/)?.[0];
-+    if (!preflight) throw new Error("migrationのemail事前確認を取得できません。");
-+    preflightSql = preflight;
-+    await db.query(preflightSql);
-+
-+    await db.query(`
-+      INSERT INTO "AppUser" ("id", "email", "updatedAt")
-+      VALUES ($1, $2, now()), ($3, $4, now())
-+    `, [ownerAId, `${ownerAId}@example.test`, ownerBId, `${ownerBId}@example.test`]);
-+    await db.query(`
-+      INSERT INTO "Club" ("id", "name", "slug", "updatedAt")
-+      VALUES ($1, 'F05 Club A', $2, now()), ($3, 'F05 Club B', $4, now())
-+    `, [clubAId, `f05-a-${clubAId}`, clubBId, `f05-b-${clubBId}`]);
-+    await db.query(`
-+      INSERT INTO "ClubMembership" ("id", "clubId", "userId", "role", "status", "updatedAt")
-+      VALUES ($1, $2, $3, 'OWNER', 'ACTIVE', now()), ($4, $5, $6, 'OWNER', 'ACTIVE', now())
-+    `, [ownerAMembershipId, clubAId, ownerAId, ownerBMembershipId, clubBId, ownerBId]);
++    if (!databaseUrl) throw new Error("DBテストにはDATABASE_URLが必要です。");
++    // Import only when DB tests run; do not load dotenv/config or use production error logs.
++    db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl, max: 10 }), log: [] });
++    vi.doMock("@/src/infrastructure/prisma/client", () => ({ prisma: db }));
++    repository = await import("@/src/infrastructure/prisma/repositories/club-invitation-repository");
 +  });
 +
-+  // suite全体もtransactionで囲み、setup途中の失敗でもfixtureを残さない。
-+  beforeEach(async () => {
-+    await connection().query("SAVEPOINT invitation_test");
-+    testSavepointActive = true;
-+  });
-+  afterEach(async () => {
-+    if (!testSavepointActive) return;
-+    try {
-+      await connection().query("ROLLBACK TO SAVEPOINT invitation_test");
-+      await connection().query("RELEASE SAVEPOINT invitation_test");
-+    } finally {
-+      testSavepointActive = false;
-+    }
-+  });
-+
++  afterEach(() => { vi.restoreAllMocks(); });
 +  afterAll(async () => {
 +    if (!db) return;
 +    try {
-+      if (connected) await db.query("ROLLBACK");
++      await db.club.deleteMany({ where: { id: { in: [...clubs] } } });
++      await db.appUser.deleteMany({ where: { id: { in: [...users] } } });
 +    } finally {
-+      await db.end();
++      vi.doUnmock("@/src/infrastructure/prisma/client");
++      await db.$disconnect();
 +    }
 +  });
 +
-+  it("CHECK・index・同一クラブtrigger・RLS・公開API制限が維持される", async () => {
-+    const indexes = await connection().query<{ indexname: string; indexdef: string }>(`
-+      SELECT indexname, indexdef FROM pg_indexes
-+      WHERE schemaname = 'public' AND tablename = 'ClubInvitation'
-+    `);
-+    const definitions = new Map(indexes.rows.map((row) => [row.indexname, row.indexdef]));
-+    for (const name of [
-+      "ClubInvitation_active_email_key", "ClubInvitation_claimToken_key",
-+      "ClubInvitation_tokenHash_key", "ClubInvitation_membershipId_key",
-+    ]) {
-+      expect(definitions.get(name)).toContain("CREATE UNIQUE INDEX");
-+    }
-+    const activeIndex = definitions.get("ClubInvitation_active_email_key") ?? "";
-+    expect(activeIndex).toContain("lower(email)");
-+    expect(activeIndex).toContain("WHERE");
-+    for (const status of activeStatuses) expect(activeIndex).toContain(`'${status}'`);
-+    for (const status of ["ACCEPTED", "CANCELLED", "EXPIRED"]) {
-+      expect(activeIndex).not.toContain(`'${status}'`);
-+    }
-+    expect(definitions.get("ClubInvitation_clubId_status_expiresAt_idx"))
-+      .toMatch(/\("clubId", status, "expiresAt"\)/);
-+
-+    const check = await connection().query<{ convalidated: boolean }>(`
-+      SELECT convalidated FROM pg_constraint
-+      WHERE conrelid = 'public."ClubInvitation"'::regclass
-+        AND conname = 'ClubInvitation_claim_pair_check' AND contype = 'c'
-+    `);
-+    expect(check.rows).toEqual([{ convalidated: true }]);
-+    const triggers = await connection().query<{ tgname: string }>(`
-+      SELECT tgname FROM pg_trigger
-+      WHERE tgrelid = 'public."ClubInvitation"'::regclass
-+        AND NOT tgisinternal AND tgenabled IN ('O', 'A')
-+    `);
-+    expect(triggers.rows.map((row) => row.tgname)).toEqual(expect.arrayContaining([
-+      "ClubInvitation_membership_club_match", "ClubInvitation_club_id_immutable",
-+    ]));
-+    const rls = await connection().query<{ relrowsecurity: boolean }>(`
-+      SELECT relrowsecurity FROM pg_class WHERE oid = 'public."ClubInvitation"'::regclass
-+    `);
-+    expect(rls.rows).toEqual([{ relrowsecurity: true }]);
-+    const privileges = await connection().query<{
-+      role_name: string; table_access: boolean; column_access: boolean;
-+    }>(`
-+      SELECT role_name,
-+        has_table_privilege(role_name, 'public."ClubInvitation"',
-+          'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS table_access,
-+        has_any_column_privilege(role_name, 'public."ClubInvitation"',
-+          'SELECT,INSERT,UPDATE,REFERENCES') AS column_access
-+      FROM unnest(ARRAY['anon', 'authenticated']) AS roles(role_name)
-+      ORDER BY role_name
-+    `);
-+    expect(privileges.rows).toEqual([
-+      { role_name: "anon", table_access: false, column_access: false },
-+      { role_name: "authenticated", table_access: false, column_access: false },
-+    ]);
-+  });
-+
-+  it.each(activeStatuses)("%sは同クラブ・同emailの有効招待と重複できない", async (status) => {
-+    const original = await createInvitation({ status });
-+    await expectConstraintViolation(
-+      () => createInvitation({ email: original.email }),
-+      "23505", "ClubInvitation_active_email_key",
-+    );
-+  });
-+
-+  it("大小文字だけ異なるemailも既存の部分uniqueで拒否する", async () => {
-+    const original = await createInvitation();
-+    await expectConstraintViolation(
-+      () => createInvitation({ email: original.email.toUpperCase() }),
-+      "23505", "ClubInvitation_active_email_key",
-+    );
-+  });
-+
-+  it("同emailでも別クラブには招待できる", async () => {
-+    const original = await createInvitation();
-+    await createInvitation({
-+      clubId: clubBId, email: original.email, invitedByMembershipId: ownerBMembershipId,
++  async function fixture(role: ClubMemberRole = "OWNER", status: ClubMembershipStatus = "ACTIVE") {
++    const clubId = randomUUID(), userId = randomUUID(), actorMembershipId = randomUUID();
++    clubs.add(clubId); users.add(userId);
++    // Commit fixtures so separate transaction connections can exercise real races.
++    await db.$transaction(async (tx) => {
++      await tx.appUser.create({ data: { id: userId, email: userId + "@example.test", name: "Owner" } });
++      await tx.club.create({ data: { id: clubId, slug: "f05-" + clubId, name: "F05 Test Club" } });
++      await tx.clubMembership.create({ data: { id: actorMembershipId, clubId, userId, role, status } });
 +    });
++    return { clubId, actorMembershipId, now };
++  }
++
++  async function reserve() {
++    const owner = await fixture();
++    const tokenHash = digest();
++    const input = { ...owner, email: randomUUID() + "@example.test", name: "Invitation Name", role: "MEMBER" as const, tokenHash };
++    const result = await repository.reserveClubInvitation(input);
++    if (result.outcome !== "RESERVED") throw new Error("予約fixtureの作成に失敗しました。");
++    return { owner, input, invitation: result.invitation };
++  }
++
++  function claim(owner: Awaited<ReturnType<typeof fixture>>, invitation: ClubInvitationProcessing, at = now) {
++    return { ...owner, invitationId: invitation.id, claimToken: invitation.claimToken, now: at };
++  }
++
++  async function prepare() {
++    const value = await reserve();
++    const userId = randomUUID(); users.add(userId);
++    const verifiedAuthUser = { id: userId, email: value.input.email };
++    const context = claim(value.owner, value.invitation);
++    expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser })).toEqual({ outcome: "UPDATED" });
++    const result = await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser });
++    if (result.outcome !== "PREPARED") throw new Error("準備fixtureの作成に失敗しました。");
++    return { ...value, invitation: result.invitation, verifiedAuthUser, context };
++  }
++
++  function known(code: string, meta?: Record<string, unknown>) {
++    return new Prisma.PrismaClientKnownRequestError("Synthetic DB failure", {
++      code, meta, clientVersion: Prisma.prismaVersion.client,
++    });
++  }
++
++  // Fault injection still uses a real transaction, so rollback assertions reach the DB.
++  function interceptTransaction(change: (tx: Prisma.TransactionClient) => void) {
++    const original = db.$transaction.bind(db);
++    const replacement = async (
++      operation: (tx: Prisma.TransactionClient) => Promise<unknown>,
++      options?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel },
++    ) => original(async (tx) => { change(tx); return operation(tx); }, options);
++    vi.spyOn(db, "$transaction").mockImplementationOnce(replacement as typeof db.$transaction);
++  }
++
++  it("並列予約でも正規化emailの有効招待は1件だけ", async () => {
++    const owner = await fixture();
++    const email = randomUUID() + "@example.test";
++    const results = await Promise.all([email, email.toUpperCase(), " " + email + " "].map((value) =>
++      repository.reserveClubInvitation({ ...owner, email: value, name: "Member", role: "COACH", tokenHash: digest() }),
++    ));
++    expect(results.filter((result) => result.outcome === "RESERVED")).toHaveLength(1);
++    expect(results.filter((result) => result.outcome === "DUPLICATE")).toHaveLength(2);
++    expect(await db.clubInvitation.count({ where: { clubId: owner.clubId, email } })).toBe(1);
 +  });
 +
-+  it.each(["CANCELLED", "EXPIRED", "ACCEPTED"] as const)(
-+    "%sの履歴は新しい有効招待を妨げない", async (status) => {
-+      const history = await createInvitation({ status });
-+      await createInvitation({ email: history.email });
++  it.each(["INVITED", "ACTIVE", "SUSPENDED", "WITHDRAWN"] as const)(
++    "同クラブの既存%s Membershipを新規招待で置換しない", async (status) => {
++      const owner = await fixture(), userId = randomUUID();
++      users.add(userId);
++      const email = userId + "@example.test";
++      await db.appUser.create({ data: { id: userId, email } });
++      await db.clubMembership.create({ data: { clubId: owner.clubId, userId, status } });
++      expect(await repository.reserveClubInvitation({ ...owner, email, name: "Member", role: "MEMBER", tokenHash: digest() }))
++        .toEqual({ outcome: "MEMBERSHIP_EXISTS", membershipStatus: status });
++      expect(await db.clubInvitation.count({ where: { clubId: owner.clubId } })).toBe(0);
 +    },
 +  );
 +
-+  it("期限を過ぎただけのSENTはstatus変更まで部分uniqueの対象である", async () => {
-+    const original = await createInvitation({ status: "SENT", expiresAt: new Date(0) });
-+    await expectConstraintViolation(
-+      () => createInvitation({ email: original.email }),
-+      "23505", "ClubInvitation_active_email_key",
-+    );
-+    await connection().query('UPDATE "ClubInvitation" SET "status" = \'EXPIRED\' WHERE "id" = $1', [original.id]);
-+    await createInvitation({ email: original.email });
++  it.each([
++    ["MEMBER", "ACTIVE"], ["COACH", "ACTIVE"], ["OFFICER", "ACTIVE"], ["OWNER", "INVITED"], ["OWNER", "SUSPENDED"],
++  ] as const)("操作者%s/%sは全OWNER操作を実行できない", async (role, status) => {
++    const owner = await fixture(role, status);
++    const context = { ...owner, invitationId: randomUUID(), claimToken: randomUUID() };
++    const verifiedAuthUser = { id: randomUUID(), email: "member@example.test" };
++    const operations = [
++      repository.findClubInvitationsForOwner(owner),
++      repository.reserveClubInvitation({ ...owner, email: verifiedAuthUser.email, name: "Member", role: "MEMBER", tokenHash: digest() }),
++      repository.claimClubInvitationResend({ ...context, tokenHash: digest() }),
++      repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser }),
++      repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }),
++      repository.markClubInvitationEmailSent(context), repository.markClubInvitationEmailFailed(context),
++      repository.releaseClubInvitationClaim(context), repository.cancelClubInvitation(context),
++      repository.expireClubInvitations(owner),
++    ];
++    for (const result of await Promise.all(operations)) expect(result).toEqual({ outcome: "ACTOR_NOT_ACTIVE_OWNER" });
++    expect(await db.clubInvitation.count({ where: { clubId: owner.clubId } })).toBe(0);
 +  });
 +
-+  it("claim両方NULL・両方設定・両方解除を許可する", async () => {
-+    const unclaimed = await createInvitation();
-+    await createInvitation();
-+    await createInvitation({ claimToken: randomUUID(), leaseExpiresAt: future });
-+    await connection().query(`
-+      UPDATE "ClubInvitation" SET "claimToken" = $1, "leaseExpiresAt" = $2 WHERE "id" = $3
-+    `, [randomUUID(), future, unclaimed.id]);
-+    await connection().query(`
-+      UPDATE "ClubInvitation" SET "claimToken" = NULL, "leaseExpiresAt" = NULL WHERE "id" = $1
-+    `, [unclaimed.id]);
-+    const saved = await connection().query<{ claimToken: string | null; leaseExpiresAt: Date | null }>(`
-+      SELECT "claimToken", "leaseExpiresAt" FROM "ClubInvitation" WHERE "id" = $1
-+    `, [unclaimed.id]);
-+    expect(saved.rows).toEqual([{ claimToken: null, leaseExpiresAt: null }]);
++  it("再認可で失効したOWNERと別クラブactorを拒否する", async () => {
++    const value = await reserve(), other = await fixture();
++    const context = claim(value.owner, value.invitation);
++    expect(await repository.releaseClubInvitationClaim({ ...context, actorMembershipId: other.actorMembershipId }))
++      .toEqual({ outcome: "ACTOR_NOT_ACTIVE_OWNER" });
++    await db.clubMembership.update({ where: { id: value.owner.actorMembershipId }, data: { role: "MEMBER" } });
++    expect(await repository.releaseClubInvitationClaim(context)).toEqual({ outcome: "ACTOR_NOT_ACTIVE_OWNER" });
 +  });
 +
-+  it.each(["claimToken", "leaseExpiresAt"] as const)("%sだけのINSERT・UPDATE・片側解除を拒否する", async (field) => {
-+    const pair = field === "claimToken"
-+      ? { claimToken: randomUUID(), leaseExpiresAt: null }
-+      : { claimToken: null, leaseExpiresAt: future };
-+    await expectConstraintViolation(
-+      () => createInvitation(pair), "23514", "ClubInvitation_claim_pair_check",
-+    );
-+    const unclaimed = await createInvitation();
-+    const claimed = await createInvitation({ claimToken: randomUUID(), leaseExpiresAt: future });
-+    for (const id of [unclaimed.id, claimed.id]) {
-+      await expectConstraintViolation(
-+        () => connection().query(`
-+          UPDATE "ClubInvitation" SET "claimToken" = $1, "leaseExpiresAt" = $2 WHERE "id" = $3
-+        `, [pair.claimToken, pair.leaseExpiresAt, id]),
-+        "23514", "ClubInvitation_claim_pair_check",
-+      );
-+    }
++  it("並列再送でclaim取得は1件だけ、古いtoken・claimは無効", async () => {
++    const value = await prepare(), at = later(6 * 60_000);
++    const results = await Promise.all([1, 2].map(() => repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: at,
++    })));
++    expect(results.filter((result) => result.outcome === "CLAIMED")).toHaveLength(1);
++    expect(results.filter((result) => result.outcome === "RULE_VIOLATION")).toHaveLength(1);
++    const winner = results.find((result) => result.outcome === "CLAIMED");
++    if (!winner || winner.outcome !== "CLAIMED") throw new Error("claimを取得できません。");
++    expect(winner.invitation.id).toBe(value.invitation.id);
++    expect(winner.invitation.attemptCount).toBe(2);
++    const old = { ...value.context, now: at };
++    for (const result of await Promise.all([
++      repository.recordClubInvitationAuthUser({ ...old, verifiedAuthUser: value.verifiedAuthUser }),
++      repository.completeClubInvitationPreparation({ ...old, verifiedAuthUser: value.verifiedAuthUser }),
++      repository.markClubInvitationEmailSent(old), repository.markClubInvitationEmailFailed(old),
++      repository.releaseClubInvitationClaim(old),
++    ])) expect(result).toEqual({ outcome: "CLAIM_LOST" });
++    expect(await repository.findUsableClubInvitationByTokenHash({
++      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now: at,
++    })).toBeNull();
++    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++    expect(saved.status).toBe("PREPARING");
++    expect(saved.claimToken).toBe(winner.invitation.claimToken);
 +  });
 +
-+  it("claimTokenの重複を拒否する", async () => {
-+    const claimToken = randomUUID();
-+    await createInvitation({ claimToken, leaseExpiresAt: future });
-+    await expectConstraintViolation(
-+      () => createInvitation({ claimToken, leaseExpiresAt: future }),
-+      "23505", "ClubInvitation_claimToken_key",
-+    );
-+  });
-+
-+  it("tokenHashのuniqueを維持する", async () => {
-+    const original = await createInvitation();
-+    await expectConstraintViolation(
-+      () => createInvitation({ tokenHash: original.tokenHash }),
-+      "23505", "ClubInvitation_tokenHash_key",
-+    );
-+  });
-+
-+  it("membershipIdとMembershipのclubId/userIdのuniqueを維持する", async () => {
-+    const member = await createInvitedMembership();
-+    await createInvitation({ membershipId: member.id });
-+    await expectConstraintViolation(
-+      () => createInvitation({ membershipId: member.id }),
-+      "23505", "ClubInvitation_membershipId_key",
-+    );
-+    await expectConstraintViolation(
-+      () => connection().query(`
-+        INSERT INTO "ClubMembership" ("id", "clubId", "userId", "updatedAt")
-+        VALUES ($1, $2, $3, now())
-+      `, [randomUUID(), clubAId, member.userId]),
-+      "23505", "ClubMembership_clubId_userId_key",
-+    );
-+  });
-+
-+  it("別クラブMembershipのINSERT・UPDATE紐付けを拒否する", async () => {
-+    await expectConstraintViolation(
-+      () => createInvitation({ membershipId: ownerBMembershipId }),
-+      "23514", "ClubInvitation_membership_club_match",
-+    );
-+    const original = await createInvitation();
-+    await expectConstraintViolation(
-+      () => connection().query('UPDATE "ClubInvitation" SET "membershipId" = $1 WHERE "id" = $2', [ownerBMembershipId, original.id]),
-+      "23514", "ClubInvitation_membership_club_match",
-+    );
-+  });
-+
-+  it("別クラブの招待者とclubId変更を拒否する", async () => {
-+    await expectConstraintViolation(
-+      () => createInvitation({ invitedByMembershipId: ownerBMembershipId }),
-+      "23503", "ClubInvitation_invitedByMembershipId_clubId_fkey",
-+    );
-+    const original = await createInvitation();
-+    await expectConstraintViolation(
-+      () => connection().query('UPDATE "ClubInvitation" SET "clubId" = $1 WHERE "id" = $2', [clubBId, original.id]),
-+      "23514", "ClubInvitation_club_id_immutable",
-+    );
-+  });
-+
-+  it("招待先INVITED Membership削除後も履歴とAppUserを残す", async () => {
-+    const member = await createInvitedMembership();
-+    const invitation = await createInvitation({ membershipId: member.id, status: "CANCELLED" });
-+    await connection().query('DELETE FROM "ClubMembership" WHERE "id" = $1', [member.id]);
-+    const saved = await connection().query<{ membershipId: string | null; status: ClubInvitationStatus }>(`
-+      SELECT "membershipId", "status" FROM "ClubInvitation" WHERE "id" = $1
-+    `, [invitation.id]);
-+    expect(saved.rows).toEqual([{ membershipId: null, status: "CANCELLED" }]);
-+    const user = await connection().query<{ exists: boolean }>(`
-+      SELECT EXISTS(SELECT 1 FROM "AppUser" WHERE "id" = $1) AS exists
-+    `, [member.userId]);
-+    expect(user.rows).toEqual([{ exists: true }]);
-+  });
-+
-+  describe.each(["AppUser", "ClubInvitation"] as const)("%sのmigration事前確認", (table) => {
-+    it.each(["uppercase", "fullwidth", "whitespace"] as const)("%sの不整合を値の出力なしで拒否する", async (variant) => {
-+      const canonical = `${randomUUID()}@example.test`;
-+      const email = variant === "uppercase" ? canonical.toUpperCase()
-+        : variant === "fullwidth" ? canonical.replace(/[!-~]/g, (char) => String.fromCharCode(char.charCodeAt(0) + 0xfee0))
-+        : `\t\r\n\u1680\u2028\u2029\uFEFF${canonical}\uFEFF\u3000\n`;
-+      if (table === "AppUser") {
-+        await connection().query('INSERT INTO "AppUser" ("id", "email", "updatedAt") VALUES ($1, $2, now())', [randomUUID(), email]);
-+      } else {
-+        await createInvitation({ email });
-+      }
-+      await expectConstraintViolation(
-+        () => connection().query(preflightSql),
-+        "23514", `F05_${table}_email_normalization`,
-+      );
++  it("lease期限切れ後の未完了PREPARINGを再取得できる", async () => {
++    const value = await reserve();
++    expect(await repository.markClubInvitationEmailSent(claim(value.owner, value.invitation, later(5 * 60_000))))
++      .toEqual({ outcome: "CLAIM_LOST" });
++    const result = await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(6 * 60_000),
 +    });
++    expect(result.outcome).toBe("CLAIMED");
 +  });
++
++  it("期限到達PREPARINGはDomain許可を保って再取得、EXPIREDで未紐付けは拒否", async () => {
++    const value = await reserve(), at = later(25 * 60 * 60_000);
++    const result = await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: at,
++    });
++    expect(result.outcome).toBe("CLAIMED");
++    await repository.expireClubInvitations({ ...value.owner, now: later(50 * 60 * 60_000) });
++    expect(await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(50 * 60 * 60_000),
++    })).toEqual({ outcome: "RULE_VIOLATION", reason: "MEMBERSHIP_NOT_FOUND" });
++  });
++
++  it("送信直後の再送cooldownとtoken再利用を拒否する", async () => {
++    const value = await prepare();
++    expect(await repository.markClubInvitationEmailSent(value.context)).toEqual({ outcome: "UPDATED" });
++    expect(await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(30_000),
++    })).toEqual({ outcome: "RULE_VIOLATION", reason: "RESEND_COOLDOWN" });
++    expect(await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: value.input.tokenHash, now: later(60_000),
++    })).toEqual({ outcome: "RULE_VIOLATION", reason: "TOKEN_NOT_ROTATED" });
++  });
++
++  it("Auth記録後の復旧で同じIDを使用し、別IDやemailを拒否する", async () => {
++    const value = await reserve(), userId = randomUUID(); users.add(userId);
++    const context = claim(value.owner, value.invitation);
++    const verifiedAuthUser = { id: userId, email: value.input.email };
++    expect(await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }))
++      .toEqual({ outcome: "RULE_VIOLATION", reason: "AUTH_USER_MISMATCH" });
++    expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser })).toEqual({ outcome: "UPDATED" });
++    expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser })).toEqual({ outcome: "UPDATED" });
++    for (const user of [{ id: randomUUID(), email: value.input.email }, { id: userId, email: "other@example.test" }]) {
++      expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser: user }))
++        .toEqual({ outcome: "RULE_VIOLATION", reason: "AUTH_USER_MISMATCH" });
++    }
++    expect((await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser })).outcome).toBe("PREPARED");
++    expect(await db.clubMembership.count({ where: { clubId: value.owner.clubId, userId, status: "INVITED" } })).toBe(1);
++  });
++
++  it("既存AppUserの氏名を保ち、F04で変更したMembership.roleも再送後に保つ", async () => {
++    const value = await reserve(), userId = randomUUID(); users.add(userId);
++    await db.appUser.create({ data: { id: userId, email: value.input.email, name: "Existing Name" } });
++    const verifiedAuthUser = { id: userId, email: value.input.email };
++    const context = claim(value.owner, value.invitation);
++    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
++    const prepared = await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser });
++    if (prepared.outcome !== "PREPARED" || !prepared.invitation.membershipId) throw new Error("準備に失敗しました。");
++    await db.clubMembership.update({ where: { id: prepared.invitation.membershipId }, data: { role: "COACH" } });
++    const resent = await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(6 * 60_000),
++    });
++    if (resent.outcome !== "CLAIMED") throw new Error("再送に失敗しました。");
++    expect(resent.invitation.role).toBe("COACH");
++    const completed = await repository.completeClubInvitationPreparation({
++      ...claim(value.owner, resent.invitation, later(6 * 60_000)), verifiedAuthUser,
++    });
++    expect(completed.outcome).toBe("PREPARED");
++    expect(await db.appUser.findUnique({ where: { id: userId }, select: { name: true, email: true } }))
++      .toEqual({ name: "Existing Name", email: value.input.email });
++    expect(await db.clubMembership.findUnique({ where: { id: prepared.invitation.membershipId }, select: { role: true, status: true } }))
++      .toEqual({ role: "COACH", status: "INVITED" });
++  });
++
++  it("他クラブInvitationや認証済みuserIdを混ぜられない", async () => {
++    const value = await prepare(), other = await fixture();
++    const foreign = { ...value.context, ...other };
++    for (const result of await Promise.all([
++      repository.claimClubInvitationResend({ ...foreign, tokenHash: digest() }),
++      repository.recordClubInvitationAuthUser({ ...foreign, verifiedAuthUser: value.verifiedAuthUser }),
++      repository.completeClubInvitationPreparation({ ...foreign, verifiedAuthUser: value.verifiedAuthUser }),
++      repository.markClubInvitationEmailSent(foreign), repository.markClubInvitationEmailFailed(foreign),
++      repository.releaseClubInvitationClaim(foreign), repository.cancelClubInvitation(foreign),
++    ])) expect(result).toEqual({ outcome: "NOT_FOUND" });
++    expect(await repository.findUsableClubInvitationByTokenHash({
++      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: randomUUID(), now,
++    })).toBeNull();
++    expect(await repository.findUsableClubInvitationByTokenHash({
++      clubId: other.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
++    })).toBeNull();
++    await repository.expireClubInvitations({ ...other, now: later(25 * 60 * 60_000) });
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("READY_TO_SEND");
++  });
++
++  it("同じAppUserを別クラブへ招待でき、既存クラブMembershipを変更しない", async () => {
++    const value = await prepare(), other = await fixture();
++    const result = await repository.reserveClubInvitation({
++      ...other, email: value.input.email, name: "Other Name", role: "OFFICER", tokenHash: digest(),
++    });
++    if (result.outcome !== "RESERVED") throw new Error("別クラブ予約に失敗しました。");
++    const context = claim(other, result.invitation);
++    expect(result.invitation.existingUserId).toBe(value.verifiedAuthUser.id);
++    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser: value.verifiedAuthUser });
++    expect((await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser: value.verifiedAuthUser })).outcome).toBe("PREPARED");
++    expect(await db.clubMembership.count({ where: { userId: value.verifiedAuthUser.id } })).toBe(2);
++    expect((await db.appUser.findUniqueOrThrow({ where: { id: value.verifiedAuthUser.id } })).name).toBe("Invitation Name");
++  });
++
++  it.each(["membership failure", "invitation CAS failure"] as const)(
++    "%sでAppUser・Membershipの先行保存もrollbackする", async (failure) => {
++      const value = await reserve(), userId = randomUUID(); users.add(userId);
++      const context = claim(value.owner, value.invitation), verifiedAuthUser = { id: userId, email: value.input.email };
++      await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
++      interceptTransaction((tx) => {
++        if (failure === "membership failure") vi.spyOn(tx.clubMembership, "create").mockRejectedValueOnce(new Error("Synthetic failure"));
++        else vi.spyOn(tx.clubInvitation, "updateMany").mockResolvedValueOnce({ count: 0 });
++      });
++      if (failure === "membership failure") {
++        await expect(repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }))
++          .rejects.toMatchObject({ code: "INTERNAL", cause: undefined });
++      } else {
++        expect(await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser })).toEqual({ outcome: "CLAIM_LOST" });
++      }
++      expect(await db.appUser.findUnique({ where: { id: userId } })).toBeNull();
++      expect(await db.clubMembership.count({ where: { clubId: value.owner.clubId, userId } })).toBe(0);
++      const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++      expect(saved.status).toBe("PREPARING");
++      expect(saved.membershipId).toBeNull();
++      expect(saved.authUserId).toBe(userId);
++    },
++  );
++
++  it("取消は履歴・AppUserを残してINVITED Membershipだけを削除し、旧処理を拒否", async () => {
++    const value = await prepare();
++    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "CANCELLED" });
++    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++    expect(saved.status).toBe("CANCELLED"); expect(saved.membershipId).toBeNull();
++    expect(saved.claimToken).toBeNull(); expect(saved.leaseExpiresAt).toBeNull();
++    expect(await db.appUser.count({ where: { id: value.verifiedAuthUser.id } })).toBe(1);
++    expect(await repository.markClubInvitationEmailSent(value.context)).toEqual({ outcome: "CLAIM_LOST" });
++    expect(await repository.findUsableClubInvitationByTokenHash({
++      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
++    })).toBeNull();
++  });
++
++  it("取消のMembership削除失敗でCANCELLED更新もrollbackする", async () => {
++    const value = await prepare();
++    interceptTransaction((tx) => { vi.spyOn(tx.clubMembership, "deleteMany").mockResolvedValueOnce({ count: 0 }); });
++    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "CLAIM_LOST" });
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("READY_TO_SEND");
++    expect(await db.clubMembership.count({ where: { id: value.invitation.membershipId! } })).toBe(1);
++  });
++
++  it.each(["ACTIVE", "SUSPENDED", "WITHDRAWN"] as const)("変更済み%s Membershipの再準備・取消を拒否する", async (status) => {
++    const value = await prepare();
++    await db.clubMembership.update({ where: { id: value.invitation.membershipId! }, data: { status } });
++    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "RULE_VIOLATION", reason: "MEMBERSHIP_NOT_INVITED" });
++    expect(await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(6 * 60_000),
++    })).toEqual({ outcome: "RULE_VIOLATION", reason: "MEMBERSHIP_NOT_INVITED" });
++    expect(await repository.markClubInvitationEmailSent(value.context)).toEqual({ outcome: "CLAIM_LOST" });
++  });
++
++  it("期限到達でtokenを拒否し、EXPIRED後もINVITED Membershipを残して再発行できる", async () => {
++    const value = await prepare(), at = later(24 * 60 * 60_000);
++    expect(await repository.findUsableClubInvitationByTokenHash({
++      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now: at,
++    })).toBeNull();
++    expect(await repository.expireClubInvitations({ ...value.owner, now: at })).toEqual({ outcome: "EXPIRED", count: 1 });
++    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++    expect(saved.status).toBe("EXPIRED"); expect(saved.claimToken).toBeNull();
++    expect(saved.membershipId).toBe(value.invitation.membershipId);
++    expect(await repository.markClubInvitationEmailSent({ ...value.context, now: at })).toEqual({ outcome: "CLAIM_LOST" });
++    expect((await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: at,
++    })).outcome).toBe("CLAIMED");
++  });
++
++  it("予約内で期限切れを更新し、期限切れ履歴の再送は別の有効招待と重複しない", async () => {
++    const value = await prepare();
++    const next = await repository.reserveClubInvitation({
++      ...value.input, tokenHash: digest(), now: later(25 * 60 * 60_000),
++    });
++    expect(next.outcome).toBe("MEMBERSHIP_EXISTS");
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("EXPIRED");
++    await db.clubInvitation.create({ data: {
++      clubId: value.owner.clubId, email: value.input.email, role: "MEMBER", status: "PREPARING",
++      tokenHash: digest(), expiresAt: later(48 * 60 * 60_000), invitedByMembershipId: value.owner.actorMembershipId,
++    } });
++    expect(await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(25 * 60 * 60_000),
++    })).toEqual({ outcome: "DUPLICATE", reason: "ACTIVE_INVITATION" });
++  });
++
++  it("メール失敗は固定識別子だけを保存し、再送後SENTを記録できる", async () => {
++    const value = await prepare();
++    expect(await repository.markClubInvitationEmailFailed(value.context)).toEqual({ outcome: "UPDATED" });
++    const failed = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++    expect(failed.emailSendError).toBe("EMAIL_SEND_FAILED");
++    expect(failed.membershipId).toBe(value.invitation.membershipId);
++    const result = await repository.claimClubInvitationResend({
++      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(60_000),
++    });
++    if (result.outcome !== "CLAIMED") throw new Error("再送に失敗しました。");
++    const context = claim(value.owner, result.invitation, later(60_000));
++    expect((await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser: value.verifiedAuthUser })).outcome).toBe("PREPARED");
++    expect(await repository.markClubInvitationEmailSent(context)).toEqual({ outcome: "UPDATED" });
++    const sent = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++    expect(sent.status).toBe("SENT"); expect(sent.emailSendError).toBeNull(); expect(sent.emailSentAt).toEqual(later(60_000));
++  });
++
++  it("解除はPREPARINGを残し、READY_TO_SEND/EMAIL_FAILED/SENTの有効tokenは読める", async () => {
++    const pending = await reserve();
++    expect(await repository.releaseClubInvitationClaim(claim(pending.owner, pending.invitation))).toEqual({ outcome: "UPDATED" });
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: pending.invitation.id } })).status).toBe("PREPARING");
++    const value = await prepare();
++    for (const status of ["READY_TO_SEND", "EMAIL_FAILED", "SENT"] as const) {
++      await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { status } });
++      expect(await repository.findUsableClubInvitationByTokenHash({
++        clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
++      })).toMatchObject({ id: value.invitation.id, role: "MEMBER" });
++    }
++    await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { acceptedAt: now } });
++    expect(await repository.findUsableClubInvitationByTokenHash({
++      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
++    })).toBeNull();
++    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "RULE_VIOLATION", reason: "INVITATION_ALREADY_ACCEPTED" });
++  });
++
++  it("OWNER一覧はPREPARINGを含む最小DTOで、取得中に期限切れ更新しない", async () => {
++    const value = await reserve();
++    const result = await repository.findClubInvitationsForOwner({ ...value.owner, now: later(25 * 60 * 60_000) });
++    if (result.outcome !== "FOUND") throw new Error("一覧取得に失敗しました。");
++    expect(result.invitations).toHaveLength(1);
++    const row = result.invitations[0];
++    expect(row.status).toBe("PREPARING"); expect(row.hasMembership).toBe(false);
++    for (const field of ["tokenHash", "authUserId", "claimToken", "emailSendError", "existingUserId", "membershipId"]) {
++      expect(row).not.toHaveProperty(field);
++    }
++    expect(row.needsPreparationRetry).toBe(true);
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("PREPARING");
++  });
++
++  it("P2034だけ最大3回再試行して予約を完了する", async () => {
++    const owner = await fixture();
++    const spy = vi.spyOn(db, "$transaction");
++    for (let attempt = 0; attempt < 3; attempt += 1) spy.mockRejectedValueOnce(known("P2034"));
++    const result = await repository.reserveClubInvitation({
++      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
++    });
++    expect(result.outcome).toBe("RESERVED"); expect(spy).toHaveBeenCalledTimes(4);
++  });
++
++  it.each([
++    ["ClubInvitation", ["clubId", "lower(email"], "ACTIVE_INVITATION"],
++    ["ClubInvitation", ["tokenHash"], "TOKEN_HASH"], ["ClubInvitation", ["claimToken"], "CLAIM_TOKEN"],
++    ["ClubInvitation", ["membershipId"], "MEMBERSHIP"], ["ClubMembership", ["clubId", "userId"], "MEMBERSHIP"],
++    ["AppUser", ["email"], "APP_USER"],
++  ] as const)("adapter-pg P2002 %s/%sを制約別に識別し再試行しない", async (modelName, fields, reason) => {
++    const owner = await fixture();
++    const spy = vi.spyOn(db, "$transaction").mockRejectedValueOnce(known("P2002", {
++      modelName, driverAdapterError: { cause: { kind: "UniqueConstraintViolation", constraint: { fields } } },
++    }));
++    expect(await repository.reserveClubInvitation({
++      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
++    })).toEqual({ outcome: "DUPLICATE", reason });
++    expect(spy).toHaveBeenCalledTimes(1);
++  });
++
++  it.each(["unknown unique", "retry limit", "unexpected error"] as const)("%sは安全な例外で停止する", async (failure) => {
++    const owner = await fixture();
++    const error = failure === "unknown unique" ? known("P2002", { modelName: "ClubInvitation", target: ["id"] })
++      : failure === "retry limit" ? known("P2034") : new Error("Synthetic sensitive error");
++    const spy = vi.spyOn(db, "$transaction").mockRejectedValue(error);
++    await expect(repository.reserveClubInvitation({
++      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
++    })).rejects.toMatchObject({ code: failure === "unexpected error" ? "INTERNAL" : "CONFLICT", cause: undefined });
++    expect(spy).toHaveBeenCalledTimes(failure === "retry limit" ? 4 : 1);
++  });
++
++  it.each(["cancel", "expire"] as const)("並列%sと旧送信処理でも終了状態へ巻き戻らない", async (operation) => {
++    const value = await prepare();
++    const lifecycle = operation === "cancel"
++      ? repository.cancelClubInvitation(value.context)
++      : repository.expireClubInvitations({ ...value.owner, now: later(25 * 60 * 60_000) });
++    await Promise.all([lifecycle, repository.markClubInvitationEmailSent(value.context)]);
++    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
++    expect(saved.status).toBe(operation === "cancel" ? "CANCELLED" : "EXPIRED");
++    expect(saved.claimToken).toBeNull(); expect(saved.leaseExpiresAt).toBeNull();
++  });
++
++  it("平文token形式の入力を保存せず拒否する", async () => {
++    const owner = await fixture();
++    await expect(repository.reserveClubInvitation({
++      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: "raw-token",
++    })).rejects.toMatchObject({ code: "VALIDATION" });
++    expect(await db.clubInvitation.count({ where: { clubId: owner.clubId } })).toBe(0);
++  });
++
++  it("有効な同claimでもlease期限ちょうどで準備・送信・解除を拒否する", async () => {
++    const pending = await reserve(), userId = randomUUID(); users.add(userId);
++    const verifiedAuthUser = { id: userId, email: pending.input.email };
++    const context = claim(pending.owner, pending.invitation);
++    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
++    const expired = { ...context, now: later(5 * 60_000) };
++    for (const result of await Promise.all([
++      repository.recordClubInvitationAuthUser({ ...expired, verifiedAuthUser }),
++      repository.completeClubInvitationPreparation({ ...expired, verifiedAuthUser }),
++      repository.releaseClubInvitationClaim(expired),
++    ])) expect(result).toEqual({ outcome: "CLAIM_LOST" });
++    const ready = await prepare(), readyExpired = { ...ready.context, now: later(5 * 60_000) };
++    expect(await repository.markClubInvitationEmailSent(readyExpired)).toEqual({ outcome: "CLAIM_LOST" });
++    expect(await repository.markClubInvitationEmailFailed(readyExpired)).toEqual({ outcome: "CLAIM_LOST" });
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: ready.invitation.id } })).status).toBe("READY_TO_SEND");
++  });
++
++  it.each(["email belongs to another id", "id has another email"] as const)(
++    "最初のAuth記録で%sを拒否し既存AppUserを保護する", async (failure) => {
++      const value = await reserve(), userId = randomUUID(); users.add(userId);
++      await db.appUser.create({ data: {
++        id: userId, name: "Existing User",
++        email: failure === "email belongs to another id" ? value.input.email : userId + "@example.test",
++      } });
++      const verifiedAuthUser = {
++        id: failure === "email belongs to another id" ? randomUUID() : userId,
++        email: value.input.email,
++      };
++      expect(await repository.recordClubInvitationAuthUser({
++        ...claim(value.owner, value.invitation), verifiedAuthUser,
++      })).toEqual({ outcome: "RULE_VIOLATION", reason: "AUTH_USER_MISMATCH" });
++      expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).authUserId).toBeNull();
++      expect((await db.appUser.findUniqueOrThrow({ where: { id: userId } })).name).toBe("Existing User");
++    },
++  );
++
++  it("準備時に見つかった未紐付けINVITED Membershipも勝手に再利用しない", async () => {
++    const value = await reserve(), userId = randomUUID(); users.add(userId);
++    const verifiedAuthUser = { id: userId, email: value.input.email };
++    const context = claim(value.owner, value.invitation);
++    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
++    await db.appUser.create({ data: { id: userId, email: value.input.email } });
++    const membership = await db.clubMembership.create({ data: { clubId: value.owner.clubId, userId, status: "INVITED", role: "COACH" } });
++    expect(await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }))
++      .toEqual({ outcome: "MEMBERSHIP_EXISTS", membershipStatus: "INVITED" });
++    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).membershipId).toBeNull();
++    expect((await db.clubMembership.findUniqueOrThrow({ where: { id: membership.id } })).role).toBe("COACH");
++  });
++
++  it("PREPARINGと非INVITED Membershipの正しいtokenも使用できない", async () => {
++    const value = await prepare();
++    const lookup = { clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now };
++    await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { status: "PREPARING" } });
++    expect(await repository.findUsableClubInvitationByTokenHash(lookup)).toBeNull();
++    await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { status: "SENT" } });
++    await db.clubMembership.update({ where: { id: value.invitation.membershipId! }, data: { status: "ACTIVE" } });
++    expect(await repository.findUsableClubInvitationByTokenHash(lookup)).toBeNull();
++  });
++
++  it.each([
++    { target: "ClubInvitation_active_email_key" },
++    { modelName: "ClubInvitation", target: ["clubId", "lower(email)"] },
++    { driverAdapterError: { cause: { constraint: { fields: ["clubId", "lower(email"] } } } },
++  ])("旧target形式・modelName無しの部分uniqueも識別する %#", async (meta) => {
++    const owner = await fixture();
++    const spy = vi.spyOn(db, "$transaction").mockRejectedValueOnce(known("P2002", meta));
++    expect(await repository.reserveClubInvitation({
++      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
++    })).toEqual({ outcome: "DUPLICATE", reason: "ACTIVE_INVITATION" });
++    expect(spy).toHaveBeenCalledTimes(1);
++  });
++
++  it("token検索のDB原文を固定例外へ変換しcauseを保持しない", async () => {
++    const value = await prepare();
++    vi.spyOn(db.clubInvitation, "findFirst").mockRejectedValueOnce(new Error("Synthetic sensitive error"));
++    await expect(repository.findUsableClubInvitationByTokenHash({
++      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
++    })).rejects.toMatchObject({ code: "INTERNAL", message: "処理に失敗しました。", cause: undefined });
++  });
++
 +});

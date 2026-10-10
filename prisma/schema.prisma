@@ -349,7 +349,7 @@ model ClubInvitation {
   attemptCount  Int       @default(0)
   lastAttemptAt DateTime?
 
-  claimToken     String?   @unique//運営者の claimTokenを使って、会員向けに安全に招待メールを発行・送信する。
+  claimToken     String?   @unique//運営者の claimTokenを使って、メール送信処理時間を確保する
   leaseExpiresAt DateTime?//「画面で送信ボタンが1回押された後、裏側のプログラムたちが引き起こす衝突」を防ぐために設ける
 
   @@index([clubId, status, expiresAt])
@@ -737,7 +737,7 @@ model ClubLineDelivery {
   idempotencyKey String @unique
   requestId      String
 
-  claimedAt      DateTime?
+  claimedAt      DateTime?//5分の処理権を確保した時間
   claimToken     String?   @unique//運営者がLINE配信を行った際、誰（どの運営者）の権限で送信されたかを識別・記録する
   leaseExpiresAt DateTime? //「画面で送信ボタンが1回押された後、裏側のプログラムたちが引き起こす衝突」を防ぐために設ける
 
@@ -793,7 +793,7 @@ model StorageDeletionJob {
   nextAttemptAt DateTime?
   lastError     String?   @db.Text
 
-  claimedAt      DateTime?
+  claimedAt      DateTime?//リースを確保した時間
   claimToken     String?   @unique//このトークンを持っていることで、対象のクラブや配信システムを操作する正当な権限があることを証明する
   leaseExpiresAt DateTime?//「画面で送信ボタンが1回押された後、裏側のプログラムたちが引き起こす衝突」を防ぐために設ける
 

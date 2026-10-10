@@ -51,6 +51,15 @@
 - 現在のワークツリーへ適用可能なpatchにする。
 - patch作成後にgit apply --checkで検証する。
 
+
+## コードルール：
+- 1行へ複数の型プロパティや処理を詰め込まない
+- import、型定義、オブジェクト、関数引数、複合条件を適切に改行する
+- 1行100文字以内を目安にする
+- 既存のPrettier・ESLint設定を優先する
+- ファイルのトップにファイルパスをつける（例：//src/infrastructure/prisma/repositories/club-invitation-repository.ts）
+- インラインコメントは日本語にし、関数ごとにインラインコメントを書くこと
+
 ## 完了報告
 
 - 変更対象ファイルと役割
