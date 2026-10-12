@@ -1,1011 +1,1504 @@
-diff --git a/package.json b/package.json
---- a/package.json
-+++ b/package.json
-@@ -10,7 +10,7 @@
-     "typecheck": "tsc --noEmit",
-     "test": "vitest run",
-     "test:watch": "vitest",
--    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts",
-+    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts",
-     "prisma:validate": "prisma validate",
-     "env:validate": "node scripts/validate-env.mjs",
-     "predev": "npm run env:validate",
-diff --git a/src/infrastructure/prisma/repositories/club-invitation-repository.ts b/src/infrastructure/prisma/repositories/club-invitation-repository.ts
+diff --git a/src/infrastructure/supabase/club-invitation-auth.ts b/src/infrastructure/supabase/club-invitation-auth.ts
 new file mode 100644
 --- /dev/null
-+++ b/src/infrastructure/prisma/repositories/club-invitation-repository.ts
-@@ -0,0 +1,437 @@
++++ b/src/infrastructure/supabase/club-invitation-auth.ts
+@@ -0,0 +1,248 @@
++// src/infrastructure/supabase/club-invitation-auth.ts
++// 招待用Auth操作の返却値を絞り、ID・メールを照合するサーバー専用接続部。
++
 +import "server-only";
 +
-+import { randomUUID } from "node:crypto";
-+import { Prisma } from "@prisma/client";
 +import {
-+  validateClubMemberInviteFormValues,
-+  type ValidClubMemberInviteInput,
++  isAuthApiError,
++  type User,
++} from "@supabase/supabase-js";
++import { z } from "zod";
++
++import {
++  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
 +} from "@/domain/club/invitation/invitation-form";
-+import {
-+  buildClubInvitationExpiresAt,
-+  evaluateClubInvitationCancellation,
-+  evaluateClubInvitationResend,
-+  isUsableClubInvitation,
-+  type ClubInvitationOperationViolation,
-+} from "@/domain/club/invitation/invitation-policy";
-+import { normalizeEmail } from "@/domain/shared/email";
 +import { DomainError } from "@/domain/shared/domain-error";
-+import { convertPrismaError } from "@/src/infrastructure/prisma/prisma-error";
-+import { prisma } from "@/src/infrastructure/prisma/client";
-+import type { ClubInvitationStatus, ClubMemberRole, ClubMembershipStatus } from "@/types/prisma";
++import { normalizeEmail } from "@/domain/shared/email";
++import {
++  createSupabaseAdminClient,
++} from "@/src/infrastructure/supabase/admin";
 +
-+const ACTIVE_STATUSES: ClubInvitationStatus[] = ["PREPARING", "READY_TO_SEND", "SENT", "EMAIL_FAILED"];
-+const LEASE_MILLISECONDS = 5 * 60 * 1_000;
-+const MAX_TRANSACTION_RETRIES = 3;
-+
-+type OwnerInput = { clubId: string; actorMembershipId: string; now?: Date };
-+type InvitationInput = OwnerInput & { invitationId: string };
-+type ClaimInput = InvitationInput & { claimToken: string };
-+type VerifiedAuthUser = { id: string; email: string };
-+type DuplicateReason = "ACTIVE_INVITATION" | "TOKEN_HASH" | "CLAIM_TOKEN" | "MEMBERSHIP" | "APP_USER";
-+type RuleViolation = ClubInvitationOperationViolation | "AUTH_USER_MISMATCH" | "TOKEN_NOT_ROTATED";
-+
-+export type ClubInvitationFailure =
-+  | { outcome: "ACTOR_NOT_ACTIVE_OWNER" }
-+  | { outcome: "NOT_FOUND" }
-+  | { outcome: "CLAIM_LOST" }
-+  | { outcome: "RULE_VIOLATION"; reason: RuleViolation }
-+  | { outcome: "MEMBERSHIP_EXISTS"; membershipStatus: ClubMembershipStatus }
-+  | { outcome: "DUPLICATE"; reason: DuplicateReason };
-+
-+// This DTO is only for server-side preparation and delivery, never for a Page.
-+export type ClubInvitationProcessing = {
-+  id: string; clubId: string; email: string; name: string | null;
-+  role: ClubMemberRole; status: ClubInvitationStatus;
-+  authUserId: string | null; existingUserId: string | null;
-+  membershipId: string | null; claimToken: string;
-+  leaseExpiresAt: Date; expiresAt: Date; attemptCount: number;
++export type ClubInvitationAuthUser = {
++  id: string;
++  email: string;
++  isEmailConfirmed: boolean;
 +};
 +
-+export type ClubInvitationForOwner = {
-+  id: string; name: string | null; email: string; role: ClubMemberRole;
-+  status: ClubInvitationStatus; hasMembership: boolean;
-+  membershipStatus: ClubMembershipStatus | null;
-+  createdAt: Date; expiresAt: Date; emailSentAt: Date | null;
-+  lastAttemptAt: Date | null; leaseExpiresAt: Date | null;
-+  canResend: boolean; canCancel: boolean; needsPreparationRetry: boolean;
++export type ClubInvitationAuthLink = {
++  user: ClubInvitationAuthUser;
++  actionLink: string;
 +};
 +
-+type StoredInvitation = Prisma.ClubInvitationGetPayload<{
-+  include: { membership: { select: { id: true; clubId: true; userId: true; role: true; status: true } } };
-+}>;
++const emailSchema = z.email().max(
++  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
++);
++const userIdSchema = z.uuid();
 +
-+class TransactionAbort extends Error {
-+  constructor(readonly result: ClubInvitationFailure) { super("Invitation transaction aborted"); }
-+}
++// 呼び出し元のメールを正規化し、外部APIへ送る前に検証する。
++function expectedEmail(value: string): string {
++  const email = normalizeEmail(value);
 +
-+function object(value: unknown): Record<string, unknown> | null {
-+  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
-+}
-+
-+// Prisma 7 adapter-pg can expose expression-index fields through driverAdapterError,
-+// including "lower(email" without a closing parenthesis. Never inspect error messages.
-+function duplicateReason(error: Prisma.PrismaClientKnownRequestError): DuplicateReason | null {
-+  const meta = object(error.meta);
-+  const cause = object(object(meta?.driverAdapterError)?.cause);
-+  const constraint = object(cause?.constraint);
-+  const target = meta?.target ?? constraint?.fields ?? constraint?.index;
-+  const names: Record<string, DuplicateReason> = {
-+    ClubInvitation_active_email_key: "ACTIVE_INVITATION",
-+    ClubInvitation_tokenHash_key: "TOKEN_HASH",
-+    ClubInvitation_claimToken_key: "CLAIM_TOKEN",
-+    ClubInvitation_membershipId_key: "MEMBERSHIP",
-+    ClubMembership_clubId_userId_key: "MEMBERSHIP",
-+    AppUser_email_key: "APP_USER",
-+  };
-+  if (typeof target === "string") return names[target] ?? null;
-+  if (!Array.isArray(target) || !target.every((field) => typeof field === "string")) return null;
-+  const fields = target.map((field: string) => field.replaceAll('"', ""));
-+  const model = meta?.modelName;
-+  if ((model === "ClubInvitation" || model === undefined) && fields.length === 2 &&
-+      fields.includes("clubId") && fields.some((field) => ["email", "lower(email", "lower(email)"].includes(field))) {
-+    return "ACTIVE_INVITATION";
++  if (!emailSchema.safeParse(email).success) {
++    throw new DomainError(
++      "VALIDATION",
++      "招待対象のメールアドレスを確認してください。",
++    );
 +  }
-+  if (fields.length === 1) {
-+    if (fields[0] === "tokenHash") return "TOKEN_HASH";
-+    if (fields[0] === "claimToken") return "CLAIM_TOKEN";
-+    if (fields[0] === "membershipId") return "MEMBERSHIP";
-+    if (fields[0] === "email" && (model === "AppUser" || model === undefined)) return "APP_USER";
-+  }
-+  if ((model === "ClubMembership" || model === undefined) &&
-+      fields.length === 2 && fields.includes("clubId") && fields.includes("userId")) return "MEMBERSHIP";
-+  return null;
++
++  return email;
 +}
 +
-+function time(input: { now?: Date }): Date {
-+  const now = input.now ?? new Date();
-+  if (!Number.isFinite(now.getTime())) throw new DomainError("VALIDATION", "処理日時が正しくありません。");
-+  return now;
-+}
-+
-+function assertTokenHash(tokenHash: string): void {
-+  if (!/^[a-f0-9]{64}$/.test(tokenHash)) {
-+    throw new DomainError("VALIDATION", "招待トークンの形式が正しくありません。");
++// SDKのUUID検証と同じく、不正なIDを外部APIへ渡さない。
++function assertUserId(value: string): void {
++  if (!userIdSchema.safeParse(value).success) {
++    throw new DomainError(
++      "VALIDATION",
++      "招待対象の認証ユーザーを確認してください。",
++    );
 +  }
 +}
 +
-+async function ownerTransaction<T>(
-+  input: OwnerInput,
-+  operation: (tx: Prisma.TransactionClient, now: Date) => Promise<T>,
-+): Promise<T | ClubInvitationFailure> {
-+  for (let attempt = 0; ; attempt += 1) {
-+    try {
-+      return await prisma.$transaction(async (tx) => {
-+        const now = time(input);
-+        const actor = await tx.clubMembership.findFirst({
-+          where: { id: input.actorMembershipId, clubId: input.clubId, role: "OWNER", status: "ACTIVE" },
-+          select: { id: true },
-+        });
-+        if (!actor) return { outcome: "ACTOR_NOT_ACTIVE_OWNER" as const };
-+        return operation(tx, now);
-+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
-+    } catch (error) {
-+      if (error instanceof TransactionAbort) return error.result;
-+      if (error instanceof Prisma.PrismaClientKnownRequestError) {
-+        if (error.code === "P2034" && attempt < MAX_TRANSACTION_RETRIES) continue;
-+        if (error.code === "P2002") {
-+          const reason = duplicateReason(error);
-+          if (reason) return { outcome: "DUPLICATE", reason };
-+        }
-+      }
-+      const safe = convertPrismaError(error);
-+      // Preserve the fixed public error, without retaining DB messages or input in cause.
-+      throw new DomainError(safe.code, safe.publicMessage);
-+    }
++// サーバーで構築したURLだけを受け取り、危険なschemeや資格情報を拒否する。
++function webUrl(value: string): string {
++  const url = new URL(value);
++
++  if (
++    /[\r\n]/u.test(value) ||
++    (
++      url.protocol !== "https:" &&
++      url.protocol !== "http:"
++    ) ||
++    url.username ||
++    url.password
++  ) {
++    throw new Error("Invalid invitation URL");
 +  }
++
++  return url.toString();
 +}
 +
-+async function stored(tx: Prisma.TransactionClient, input: InvitationInput): Promise<StoredInvitation | null> {
-+  const row = await tx.clubInvitation.findFirst({
-+    where: { id: input.invitationId, clubId: input.clubId },
-+    include: { membership: { select: { id: true, clubId: true, userId: true, role: true, status: true } } },
-+  });
-+  if (row?.membership && row.membership.clubId !== input.clubId) {
-+    throw new DomainError("INVALID_REFERENCE", "関連するデータの組み合わせを確認できません。");
++// Authレスポンス全体を返さず、期待するID・正規化メールとの一致を確認する。
++function verifiedUser(
++  user: User | null,
++  email: string,
++  authUserId?: string,
++): ClubInvitationAuthUser {
++  if (
++    !user ||
++    !userIdSchema.safeParse(user.id).success ||
++    !user.email ||
++    normalizeEmail(user.email) !== email ||
++    (
++      authUserId !== undefined &&
++      user.id !== authUserId
++    )
++  ) {
++    throw new Error("Invitation Auth user mismatch");
 +  }
-+  return row;
-+}
 +
-+function claimWhere(input: ClaimInput, now: Date, statuses: ClubInvitationStatus[]): Prisma.ClubInvitationWhereInput {
 +  return {
-+    id: input.invitationId, clubId: input.clubId, claimToken: input.claimToken,
-+    acceptedAt: null, status: { in: statuses },
-+    leaseExpiresAt: { gt: now }, expiresAt: { gt: now },
++    id: user.id,
++    email,
++    isEmailConfirmed: Boolean(
++      user.email_confirmed_at,
++    ),
 +  };
 +}
 +
-+function ownsClaim(row: StoredInvitation, input: ClaimInput, now: Date, statuses: ClubInvitationStatus[]): boolean {
-+  return input.claimToken.length > 0 && row.claimToken === input.claimToken &&
-+    row.acceptedAt === null && statuses.includes(row.status) &&
-+    row.leaseExpiresAt !== null && row.leaseExpiresAt > now && row.expiresAt > now &&
-+    (!row.membership || row.membership.status === "INVITED");
-+}
++// 既知のAuth IDを照合し、未確認アカウントと利用可能な既存アカウントを区別する。
++export async function getClubInvitationAuthUserById(
++  input: {
++    authUserId: string;
++    email: string;
++  },
++): Promise<ClubInvitationAuthUser | null> {
++  const email = expectedEmail(input.email);
++  assertUserId(input.authUserId);
 +
-+async function processing(tx: Prisma.TransactionClient, row: StoredInvitation): Promise<ClubInvitationProcessing> {
-+  if (!row.claimToken || !row.leaseExpiresAt) throw new DomainError("INTERNAL", "招待の処理権を確認できません。");
-+  const user = row.membership ? null : await tx.appUser.findUnique({ where: { email: row.email }, select: { id: true } });
-+  return {
-+    id: row.id, clubId: row.clubId, email: row.email, name: row.name,
-+    role: row.membership?.role ?? row.role, status: row.status,
-+    authUserId: row.authUserId, existingUserId: row.membership?.userId ?? user?.id ?? null,
-+    membershipId: row.membershipId, claimToken: row.claimToken,
-+    leaseExpiresAt: row.leaseExpiresAt, expiresAt: row.expiresAt, attemptCount: row.attemptCount,
-+  };
-+}
-+
-+async function expire(tx: Prisma.TransactionClient, clubId: string, now: Date, excludeId?: string): Promise<number> {
-+  const updated = await tx.clubInvitation.updateMany({
-+    where: { clubId, ...(excludeId ? { id: { not: excludeId } } : {}), status: { in: ACTIVE_STATUSES }, acceptedAt: null, expiresAt: { lte: now } },
-+    data: { status: "EXPIRED", claimToken: null, leaseExpiresAt: null },
-+  });
-+  return updated.count;
-+}
-+
-+export async function findClubInvitationsForOwner(input: OwnerInput) {
-+  return ownerTransaction(input, async (tx, now) => {
-+    const rows = await tx.clubInvitation.findMany({
-+      where: { clubId: input.clubId },
-+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-+      select: {
-+        id: true, name: true, email: true, role: true, status: true, acceptedAt: true,
-+        createdAt: true, expiresAt: true, emailSentAt: true, lastAttemptAt: true, leaseExpiresAt: true,
-+        membership: { select: { clubId: true, role: true, status: true } },
-+      },
-+    });
-+    const invitations: ClubInvitationForOwner[] = rows.map((row) => {
-+      if (row.membership && row.membership.clubId !== input.clubId) {
-+        throw new DomainError("INVALID_REFERENCE", "関連するデータの組み合わせを確認できません。");
-+      }
-+      return {
-+        id: row.id, name: row.name, email: row.email, role: row.membership?.role ?? row.role,
-+        status: row.status, hasMembership: row.membership !== null,
-+        membershipStatus: row.membership?.status ?? null,
-+        createdAt: row.createdAt, expiresAt: row.expiresAt, emailSentAt: row.emailSentAt,
-+        lastAttemptAt: row.lastAttemptAt, leaseExpiresAt: row.leaseExpiresAt,
-+        canResend: evaluateClubInvitationResend({ invitation: row, membership: row.membership, now }).allowed,
-+        canCancel: evaluateClubInvitationCancellation({ invitation: row, membership: row.membership }).allowed,
-+        needsPreparationRetry: row.status === "PREPARING" && row.acceptedAt === null &&
-+          (row.leaseExpiresAt === null || row.leaseExpiresAt <= now),
-+      };
-+    });
-+    return { outcome: "FOUND" as const, invitations };
-+  });
-+}
-+
-+export async function reserveClubInvitation(
-+  input: OwnerInput & ValidClubMemberInviteInput & { tokenHash: string },
-+) {
-+  assertTokenHash(input.tokenHash);
-+  const validation = validateClubMemberInviteFormValues(input);
-+  if (!validation.success) throw new DomainError("VALIDATION", "招待する入力値を確認してください。");
-+  return ownerTransaction(input, async (tx, now) => {
-+    await expire(tx, input.clubId, now);
-+    const user = await tx.appUser.findUnique({ where: { email: validation.data.email }, select: { id: true } });
-+    const membership = user && await tx.clubMembership.findUnique({
-+      where: { clubId_userId: { clubId: input.clubId, userId: user.id } }, select: { status: true },
-+    });
-+    if (membership) return { outcome: "MEMBERSHIP_EXISTS" as const, membershipStatus: membership.status };
-+    const duplicate = await tx.clubInvitation.findFirst({
-+      where: { clubId: input.clubId, email: validation.data.email, status: { in: ACTIVE_STATUSES } },
-+      select: { id: true },
-+    });
-+    if (duplicate) return { outcome: "DUPLICATE" as const, reason: "ACTIVE_INVITATION" as const };
-+    const row = await tx.clubInvitation.create({
-+      data: {
-+        clubId: input.clubId, ...validation.data, tokenHash: input.tokenHash,
-+        status: "PREPARING", expiresAt: buildClubInvitationExpiresAt(now),
-+        invitedByMembershipId: input.actorMembershipId, attemptCount: 1, lastAttemptAt: now,
-+        claimToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + LEASE_MILLISECONDS),
-+      },
-+      include: { membership: { select: { id: true, clubId: true, userId: true, role: true, status: true } } },
-+    });
-+    return { outcome: "RESERVED" as const, invitation: await processing(tx, row) };
-+  });
-+}
-+
-+export async function claimClubInvitationResend(input: InvitationInput & { tokenHash: string }) {
-+  assertTokenHash(input.tokenHash);
-+  return ownerTransaction(input, async (tx, now) => {
-+    const row = await stored(tx, input);
-+    if (!row) return { outcome: "NOT_FOUND" as const };
-+    const evaluation = evaluateClubInvitationResend({ invitation: row, membership: row.membership, now });
-+    if (!evaluation.allowed) return { outcome: "RULE_VIOLATION" as const, reason: evaluation.violation };
-+    if (row.tokenHash === input.tokenHash) return { outcome: "RULE_VIOLATION" as const, reason: "TOKEN_NOT_ROTATED" as const };
-+    // Keep a still-PREPARING target eligible for the Domain preparation retry.
-+    await expire(tx, input.clubId, now, row.id);
-+    const duplicate = await tx.clubInvitation.findFirst({
-+      where: { clubId: input.clubId, email: row.email, id: { not: row.id }, status: { in: ACTIVE_STATUSES } },
-+      select: { id: true },
-+    });
-+    if (duplicate) return { outcome: "DUPLICATE" as const, reason: "ACTIVE_INVITATION" as const };
-+    const updated = await tx.clubInvitation.updateMany({
-+      where: {
-+        id: row.id, clubId: input.clubId, acceptedAt: null,
-+        status: row.status, claimToken: row.claimToken,
-+        OR: [{ leaseExpiresAt: null }, { leaseExpiresAt: { lte: now } }],
-+      },
-+      data: {
-+        status: "PREPARING", tokenHash: input.tokenHash, expiresAt: buildClubInvitationExpiresAt(now),
-+        claimToken: randomUUID(), leaseExpiresAt: new Date(now.getTime() + LEASE_MILLISECONDS),
-+        attemptCount: { increment: 1 }, lastAttemptAt: now, emailSendError: null,
-+      },
-+    });
-+    if (updated.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
-+    const claimed = await stored(tx, input);
-+    if (!claimed) throw new TransactionAbort({ outcome: "NOT_FOUND" });
-+    return { outcome: "CLAIMED" as const, invitation: await processing(tx, claimed) };
-+  });
-+}
-+
-+async function matchesAuthUser(tx: Prisma.TransactionClient, row: StoredInvitation, user: VerifiedAuthUser): Promise<boolean> {
-+  if (!user.id || normalizeEmail(user.email) !== row.email ||
-+      (row.authUserId !== null && row.authUserId !== user.id) ||
-+      (row.membership !== null && row.membership.userId !== user.id)) return false;
-+  const byEmail = await tx.appUser.findUnique({ where: { email: row.email }, select: { id: true } });
-+  const byId = await tx.appUser.findUnique({ where: { id: user.id }, select: { email: true } });
-+  return (!byEmail || byEmail.id === user.id) &&
-+    (!byId || byId.email === null || normalizeEmail(byId.email) === row.email);
-+}
-+
-+export async function recordClubInvitationAuthUser(input: ClaimInput & { verifiedAuthUser: VerifiedAuthUser }) {
-+  return ownerTransaction(input, async (tx, now) => {
-+    const row = await stored(tx, input);
-+    if (!row) return { outcome: "NOT_FOUND" as const };
-+    if (!ownsClaim(row, input, now, ["PREPARING"])) return { outcome: "CLAIM_LOST" as const };
-+    if (!await matchesAuthUser(tx, row, input.verifiedAuthUser)) {
-+      return { outcome: "RULE_VIOLATION" as const, reason: "AUTH_USER_MISMATCH" as const };
-+    }
-+    const updated = await tx.clubInvitation.updateMany({
-+      where: { ...claimWhere(input, now, ["PREPARING"]), authUserId: row.authUserId },
-+      data: { authUserId: input.verifiedAuthUser.id },
-+    });
-+    return updated.count === 1 ? { outcome: "UPDATED" as const } : { outcome: "CLAIM_LOST" as const };
-+  });
-+}
-+
-+// verifiedAuthUser must come from the server-side Auth adapter, never from a browser.
-+export async function completeClubInvitationPreparation(input: ClaimInput & { verifiedAuthUser: VerifiedAuthUser }) {
-+  return ownerTransaction(input, async (tx, now) => {
-+    const row = await stored(tx, input);
-+    if (!row) return { outcome: "NOT_FOUND" as const };
-+    if (!ownsClaim(row, input, now, ["PREPARING"])) return { outcome: "CLAIM_LOST" as const };
-+    if (row.authUserId !== input.verifiedAuthUser.id || !await matchesAuthUser(tx, row, input.verifiedAuthUser)) {
-+      return { outcome: "RULE_VIOLATION" as const, reason: "AUTH_USER_MISMATCH" as const };
-+    }
-+    const existing = await tx.clubMembership.findUnique({
-+      where: { clubId_userId: { clubId: input.clubId, userId: row.authUserId } },
-+      select: { id: true, status: true },
-+    });
-+    if (existing && (existing.id !== row.membershipId || existing.status !== "INVITED")) {
-+      return { outcome: "MEMBERSHIP_EXISTS" as const, membershipStatus: existing.status };
-+    }
-+    if (row.membershipId !== null && (!existing || existing.id !== row.membershipId)) {
-+      throw new TransactionAbort({ outcome: "CLAIM_LOST" });
-+    }
-+    const user = await tx.appUser.findUnique({ where: { id: row.authUserId }, select: { id: true } });
-+    if (!user) await tx.appUser.create({ data: { id: row.authUserId, email: row.email, name: row.name }, select: { id: true } });
-+    const membership = existing ?? await tx.clubMembership.create({
-+      data: { clubId: input.clubId, userId: row.authUserId, role: row.role, status: "INVITED" },
-+      select: { id: true, status: true },
-+    });
-+    const updated = await tx.clubInvitation.updateMany({
-+      where: { ...claimWhere(input, now, ["PREPARING"]), authUserId: row.authUserId, membershipId: row.membershipId },
-+      data: { membershipId: membership.id, status: "READY_TO_SEND", emailSendError: null },
-+    });
-+    if (updated.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
-+    const prepared = await stored(tx, input);
-+    if (!prepared) throw new TransactionAbort({ outcome: "NOT_FOUND" });
-+    return { outcome: "PREPARED" as const, invitation: await processing(tx, prepared) };
-+  });
-+}
-+
-+async function markEmail(input: ClaimInput, status: "SENT" | "EMAIL_FAILED") {
-+  return ownerTransaction(input, async (tx, now) => {
-+    const row = await stored(tx, input);
-+    if (!row) return { outcome: "NOT_FOUND" as const };
-+    if (!ownsClaim(row, input, now, ["READY_TO_SEND"]) || !row.membership) return { outcome: "CLAIM_LOST" as const };
-+    const updated = await tx.clubInvitation.updateMany({
-+      where: {
-+        ...claimWhere(input, now, ["READY_TO_SEND"]),
-+        membership: { is: { clubId: input.clubId, status: "INVITED" } },
-+      },
-+      data: {
-+        status, ...(status === "SENT" ? { emailSentAt: now } : {}),
-+        emailSendError: status === "EMAIL_FAILED" ? "EMAIL_SEND_FAILED" : null,
-+        claimToken: null, leaseExpiresAt: null,
-+      },
-+    });
-+    return updated.count === 1 ? { outcome: "UPDATED" as const } : { outcome: "CLAIM_LOST" as const };
-+  });
-+}
-+
-+export async function markClubInvitationEmailSent(input: ClaimInput) { return markEmail(input, "SENT"); }
-+export async function markClubInvitationEmailFailed(input: ClaimInput) { return markEmail(input, "EMAIL_FAILED"); }
-+
-+export async function releaseClubInvitationClaim(input: ClaimInput) {
-+  return ownerTransaction(input, async (tx, now) => {
-+    const row = await stored(tx, input);
-+    if (!row) return { outcome: "NOT_FOUND" as const };
-+    if (!ownsClaim(row, input, now, ["PREPARING", "READY_TO_SEND"])) return { outcome: "CLAIM_LOST" as const };
-+    const updated = await tx.clubInvitation.updateMany({
-+      where: claimWhere(input, now, ["PREPARING", "READY_TO_SEND"]),
-+      data: { claimToken: null, leaseExpiresAt: null },
-+    });
-+    return updated.count === 1 ? { outcome: "UPDATED" as const } : { outcome: "CLAIM_LOST" as const };
-+  });
-+}
-+
-+export async function cancelClubInvitation(input: InvitationInput) {
-+  return ownerTransaction(input, async (tx) => {
-+    const row = await stored(tx, input);
-+    if (!row) return { outcome: "NOT_FOUND" as const };
-+    const evaluation = evaluateClubInvitationCancellation({ invitation: row, membership: row.membership });
-+    if (!evaluation.allowed) return { outcome: "RULE_VIOLATION" as const, reason: evaluation.violation };
-+    if (!row.membershipId) throw new TransactionAbort({ outcome: "NOT_FOUND" });
-+    const updated = await tx.clubInvitation.updateMany({
-+      where: { id: row.id, clubId: input.clubId, status: row.status, acceptedAt: null, membershipId: row.membershipId },
-+      data: { status: "CANCELLED", claimToken: null, leaseExpiresAt: null },
-+    });
-+    if (updated.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
-+    const deleted = await tx.clubMembership.deleteMany({
-+      where: { id: row.membershipId, clubId: input.clubId, status: "INVITED" },
-+    });
-+    if (deleted.count !== 1) throw new TransactionAbort({ outcome: "CLAIM_LOST" });
-+    return { outcome: "CANCELLED" as const };
-+  });
-+}
-+
-+export async function expireClubInvitations(input: OwnerInput) {
-+  return ownerTransaction(input, async (tx, now) => ({ outcome: "EXPIRED" as const, count: await expire(tx, input.clubId, now) }));
-+}
-+
-+// authenticatedUserId is supplied by server-side authentication; this only reads.
-+export async function findUsableClubInvitationByTokenHash(
-+  input: { clubId: string; tokenHash: string; authenticatedUserId: string; now?: Date },
-+) {
-+  assertTokenHash(input.tokenHash);
-+  const now = time(input);
-+  if (!input.authenticatedUserId) return null;
 +  try {
-+    const row = await prisma.clubInvitation.findFirst({
-+      where: {
-+        clubId: input.clubId, tokenHash: input.tokenHash, authUserId: input.authenticatedUserId,
-+        status: { in: ["READY_TO_SEND", "SENT", "EMAIL_FAILED"] }, acceptedAt: null, expiresAt: { gt: now },
-+        membership: { is: { clubId: input.clubId, userId: input.authenticatedUserId, status: "INVITED" } },
-+      },
-+      select: {
-+        id: true, clubId: true, status: true, acceptedAt: true, expiresAt: true,
-+        membership: { select: { id: true, role: true, status: true } },
-+      },
-+    });
-+    if (!row?.membership || !isUsableClubInvitation({ invitation: row, membership: row.membership, now })) return null;
-+    return { id: row.id, clubId: row.clubId, membershipId: row.membership.id, role: row.membership.role, expiresAt: row.expiresAt };
-+  } catch (error) {
-+    const safe = convertPrismaError(error);
-+    throw new DomainError(safe.code, safe.publicMessage);
++    const supabase = createSupabaseAdminClient();
++    const {
++      data,
++      error,
++    } =
++      await supabase.auth.admin.getUserById(
++        input.authUserId,
++      );
++
++    if (error) {
++      if (
++        isAuthApiError(error) &&
++        error.status === 404 &&
++        error.code === "user_not_found"
++      ) {
++        return null;
++      }
++
++      throw error;
++    }
++
++    return verifiedUser(
++      data.user,
++      email,
++      input.authUserId,
++    );
++  } catch {
++    throw new DomainError(
++      "EXTERNAL_SERVICE",
++      "招待対象の認証ユーザーを確認できませんでした。",
++    );
 +  }
 +}
-diff --git a/tests/club-invitation-repository.integration.test.ts b/tests/club-invitation-repository.integration.test.ts
++
++// 新規・未確認ユーザーのリンクだけを生成し、メール配送はResend側へ委ねる。
++export async function generateClubInvitationAuthLink(
++  input: {
++    email: string;
++    redirectTo: string;
++    expectedAuthUserId?: string;
++  },
++): Promise<ClubInvitationAuthLink> {
++  const email = expectedEmail(input.email);
++  let redirectTo: string;
++
++  try {
++    redirectTo = webUrl(input.redirectTo);
++  } catch {
++    throw new DomainError(
++      "VALIDATION",
++      "招待後の移動先を確認してください。",
++    );
++  }
++
++  if (input.expectedAuthUserId !== undefined) {
++    assertUserId(input.expectedAuthUserId);
++  }
++
++  try {
++    // 復旧では同じIDを事前確認し、確認済みアカウントへinviteを再発行しない。
++    if (input.expectedAuthUserId !== undefined) {
++      const existing =
++        await getClubInvitationAuthUserById({
++          authUserId: input.expectedAuthUserId,
++          email,
++        });
++
++      if (
++        !existing ||
++        existing.isEmailConfirmed
++      ) {
++        throw new Error("Auth invitation is not available");
++      }
++    }
++
++    const supabase = createSupabaseAdminClient();
++    const {
++      data,
++      error,
++    } =
++      await supabase.auth.admin.generateLink({
++        type: "invite",
++        email,
++        options: {
++          redirectTo,
++        },
++      });
++
++    if (
++      error ||
++      !data.properties ||
++      data.properties.verification_type !== "invite"
++    ) {
++      throw new Error("Auth invitation link is not available");
++    }
++
++    const user = verifiedUser(
++      data.user,
++      email,
++      input.expectedAuthUserId,
++    );
++    const actionLink = webUrl(
++      data.properties.action_link,
++    );
++    const linkRedirectTo =
++      new URL(actionLink).searchParams.get(
++        "redirect_to",
++      );
++
++    if (
++      user.isEmailConfirmed ||
++      webUrl(data.properties.redirect_to) !== redirectTo ||
++      !linkRedirectTo ||
++      webUrl(linkRedirectTo) !== redirectTo
++    ) {
++      throw new Error("Auth invitation link mismatch");
++    }
++
++    return {
++      user,
++      actionLink,
++    };
++  } catch {
++    // 外部エラーやAuthレスポンスをcauseへ残さず、固定メッセージへ変換する。
++    throw new DomainError(
++      "EXTERNAL_SERVICE",
++      "招待用の認証リンクを準備できませんでした。",
++    );
++  }
++}
+diff --git a/src/infrastructure/supabase/club-invitation-auth.test.ts b/src/infrastructure/supabase/club-invitation-auth.test.ts
 new file mode 100644
 --- /dev/null
-+++ b/tests/club-invitation-repository.integration.test.ts
-@@ -0,0 +1,552 @@
-+import { randomBytes, randomUUID } from "node:crypto";
-+import { Prisma, PrismaClient } from "@prisma/client";
-+import { PrismaPg } from "@prisma/adapter-pg";
-+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
++++ b/src/infrastructure/supabase/club-invitation-auth.test.ts
+@@ -0,0 +1,486 @@
++// src/infrastructure/supabase/club-invitation-auth.test.ts
++// AuthのID・メール照合、復旧条件、返却値とエラーの安全性を検証する。
 +
-+import type { ClubMemberRole, ClubMembershipStatus } from "@/types/prisma";
-+import type { ClubInvitationProcessing } from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++import {
++  afterEach,
++  beforeEach,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
++import {
++  AuthApiError,
++} from "@supabase/supabase-js";
++
++import { DomainError } from "@/domain/shared/domain-error";
++import {
++  generateClubInvitationAuthLink,
++  getClubInvitationAuthUserById,
++} from "@/src/infrastructure/supabase/club-invitation-auth";
++
++const mocks = vi.hoisted(() => ({
++  generateLink: vi.fn(),
++  getUserById: vi.fn(),
++  createAdmin: vi.fn(),
++  createClient: vi.fn(),
++}));
 +
 +vi.mock("server-only", () => ({}));
-+const describeDatabase = process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
-+const now = new Date("2026-10-10T03:00:00.000Z");
-+const later = (milliseconds: number) => new Date(now.getTime() + milliseconds);
-+const digest = () => randomBytes(32).toString("hex");
-+type Repository = typeof import("@/src/infrastructure/prisma/repositories/club-invitation-repository");
++vi.mock(
++  "@/src/infrastructure/supabase/admin",
++  () => ({
++    createSupabaseAdminClient:
++      mocks.createAdmin,
++  }),
++);
++vi.mock(
++  "@supabase/supabase-js",
++  async (importOriginal) => ({
++    ...await importOriginal<
++      typeof import("@supabase/supabase-js")
++    >(),
++    createClient: mocks.createClient,
++  }),
++);
 +
-+describeDatabase("ClubInvitation Repository", () => {
-+  let db: PrismaClient;
-+  let repository: Repository;
-+  const clubs = new Set<string>();
-+  const users = new Set<string>();
++const USER_ID =
++  "11111111-1111-4111-8111-111111111111";
++const OTHER_USER_ID =
++  "22222222-2222-4222-8222-222222222222";
++const EMAIL = "member@example.test";
++const REDIRECT_TO =
++  "https://app.example.test/auth/confirm?next=%2Fclub%2Ftest";
++const ACTION_LINK =
++  "https://auth.example.test/auth/v1/verify?type=invite&token=test-token" +
++  `&redirect_to=${encodeURIComponent(REDIRECT_TO)}`;
++const PRIVATE_ERROR =
++  "private@example.test test-service-role-key test-token";
 +
-+  beforeAll(async () => {
-+    const databaseUrl = process.env.DATABASE_URL;
-+    if (!databaseUrl) throw new Error("DBテストにはDATABASE_URLが必要です。");
-+    // Import only when DB tests run; do not load dotenv/config or use production error logs.
-+    db = new PrismaClient({ adapter: new PrismaPg({ connectionString: databaseUrl, max: 10 }), log: [] });
-+    vi.doMock("@/src/infrastructure/prisma/client", () => ({ prisma: db }));
-+    repository = await import("@/src/infrastructure/prisma/repositories/club-invitation-repository");
-+  });
-+
-+  afterEach(() => { vi.restoreAllMocks(); });
-+  afterAll(async () => {
-+    if (!db) return;
-+    try {
-+      await db.club.deleteMany({ where: { id: { in: [...clubs] } } });
-+      await db.appUser.deleteMany({ where: { id: { in: [...users] } } });
-+    } finally {
-+      vi.doUnmock("@/src/infrastructure/prisma/client");
-+      await db.$disconnect();
-+    }
-+  });
-+
-+  async function fixture(role: ClubMemberRole = "OWNER", status: ClubMembershipStatus = "ACTIVE") {
-+    const clubId = randomUUID(), userId = randomUUID(), actorMembershipId = randomUUID();
-+    clubs.add(clubId); users.add(userId);
-+    // Commit fixtures so separate transaction connections can exercise real races.
-+    await db.$transaction(async (tx) => {
-+      await tx.appUser.create({ data: { id: userId, email: userId + "@example.test", name: "Owner" } });
-+      await tx.club.create({ data: { id: clubId, slug: "f05-" + clubId, name: "F05 Test Club" } });
-+      await tx.clubMembership.create({ data: { id: actorMembershipId, clubId, userId, role, status } });
-+    });
-+    return { clubId, actorMembershipId, now };
-+  }
-+
-+  async function reserve() {
-+    const owner = await fixture();
-+    const tokenHash = digest();
-+    const input = { ...owner, email: randomUUID() + "@example.test", name: "Invitation Name", role: "MEMBER" as const, tokenHash };
-+    const result = await repository.reserveClubInvitation(input);
-+    if (result.outcome !== "RESERVED") throw new Error("予約fixtureの作成に失敗しました。");
-+    return { owner, input, invitation: result.invitation };
-+  }
-+
-+  function claim(owner: Awaited<ReturnType<typeof fixture>>, invitation: ClubInvitationProcessing, at = now) {
-+    return { ...owner, invitationId: invitation.id, claimToken: invitation.claimToken, now: at };
-+  }
-+
-+  async function prepare() {
-+    const value = await reserve();
-+    const userId = randomUUID(); users.add(userId);
-+    const verifiedAuthUser = { id: userId, email: value.input.email };
-+    const context = claim(value.owner, value.invitation);
-+    expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser })).toEqual({ outcome: "UPDATED" });
-+    const result = await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser });
-+    if (result.outcome !== "PREPARED") throw new Error("準備fixtureの作成に失敗しました。");
-+    return { ...value, invitation: result.invitation, verifiedAuthUser, context };
-+  }
-+
-+  function known(code: string, meta?: Record<string, unknown>) {
-+    return new Prisma.PrismaClientKnownRequestError("Synthetic DB failure", {
-+      code, meta, clientVersion: Prisma.prismaVersion.client,
-+    });
-+  }
-+
-+  // Fault injection still uses a real transaction, so rollback assertions reach the DB.
-+  function interceptTransaction(change: (tx: Prisma.TransactionClient) => void) {
-+    const original = db.$transaction.bind(db);
-+    const replacement = async (
-+      operation: (tx: Prisma.TransactionClient) => Promise<unknown>,
-+      options?: { maxWait?: number; timeout?: number; isolationLevel?: Prisma.TransactionIsolationLevel },
-+    ) => original(async (tx) => { change(tx); return operation(tx); }, options);
-+    vi.spyOn(db, "$transaction").mockImplementationOnce(replacement as typeof db.$transaction);
-+  }
-+
-+  it("並列予約でも正規化emailの有効招待は1件だけ", async () => {
-+    const owner = await fixture();
-+    const email = randomUUID() + "@example.test";
-+    const results = await Promise.all([email, email.toUpperCase(), " " + email + " "].map((value) =>
-+      repository.reserveClubInvitation({ ...owner, email: value, name: "Member", role: "COACH", tokenHash: digest() }),
-+    ));
-+    expect(results.filter((result) => result.outcome === "RESERVED")).toHaveLength(1);
-+    expect(results.filter((result) => result.outcome === "DUPLICATE")).toHaveLength(2);
-+    expect(await db.clubInvitation.count({ where: { clubId: owner.clubId, email } })).toBe(1);
-+  });
-+
-+  it.each(["INVITED", "ACTIVE", "SUSPENDED", "WITHDRAWN"] as const)(
-+    "同クラブの既存%s Membershipを新規招待で置換しない", async (status) => {
-+      const owner = await fixture(), userId = randomUUID();
-+      users.add(userId);
-+      const email = userId + "@example.test";
-+      await db.appUser.create({ data: { id: userId, email } });
-+      await db.clubMembership.create({ data: { clubId: owner.clubId, userId, status } });
-+      expect(await repository.reserveClubInvitation({ ...owner, email, name: "Member", role: "MEMBER", tokenHash: digest() }))
-+        .toEqual({ outcome: "MEMBERSHIP_EXISTS", membershipStatus: status });
-+      expect(await db.clubInvitation.count({ where: { clubId: owner.clubId } })).toBe(0);
++// 必要項目以外に機密情報を持つAuthレスポンスを用意する。
++function authUser() {
++  return {
++    id: USER_ID,
++    email: EMAIL,
++    email_confirmed_at: undefined,
++    user_metadata: {
++      privateValue: PRIVATE_ERROR,
 +    },
++    app_metadata: {
++      privateValue: PRIVATE_ERROR,
++    },
++    identities: [],
++  };
++}
++
++// リンク・OTP・ハッシュを含むSDKレスポンスから、必要な値だけを返せるか検証する。
++function linkResponse() {
++  return {
++    data: {
++      user: authUser(),
++      properties: {
++        action_link: ACTION_LINK,
++        redirect_to: REDIRECT_TO,
++        verification_type: "invite",
++        hashed_token: "test-hashed-token",
++        email_otp: "test-otp",
++      },
++    },
++    error: null,
++  };
++}
++
++// 外部エラーの原文やcauseを保持せず、固定のDomainErrorだけを返すか確認する。
++async function expectSafeExternal(
++  operation: Promise<unknown>,
++): Promise<void> {
++  const error = await operation.catch(
++    (value: unknown) => value,
 +  );
 +
-+  it.each([
-+    ["MEMBER", "ACTIVE"], ["COACH", "ACTIVE"], ["OFFICER", "ACTIVE"], ["OWNER", "INVITED"], ["OWNER", "SUSPENDED"],
-+  ] as const)("操作者%s/%sは全OWNER操作を実行できない", async (role, status) => {
-+    const owner = await fixture(role, status);
-+    const context = { ...owner, invitationId: randomUUID(), claimToken: randomUUID() };
-+    const verifiedAuthUser = { id: randomUUID(), email: "member@example.test" };
-+    const operations = [
-+      repository.findClubInvitationsForOwner(owner),
-+      repository.reserveClubInvitation({ ...owner, email: verifiedAuthUser.email, name: "Member", role: "MEMBER", tokenHash: digest() }),
-+      repository.claimClubInvitationResend({ ...context, tokenHash: digest() }),
-+      repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser }),
-+      repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }),
-+      repository.markClubInvitationEmailSent(context), repository.markClubInvitationEmailFailed(context),
-+      repository.releaseClubInvitationClaim(context), repository.cancelClubInvitation(context),
-+      repository.expireClubInvitations(owner),
-+    ];
-+    for (const result of await Promise.all(operations)) expect(result).toEqual({ outcome: "ACTOR_NOT_ACTIVE_OWNER" });
-+    expect(await db.clubInvitation.count({ where: { clubId: owner.clubId } })).toBe(0);
++  expect(error).toBeInstanceOf(DomainError);
++  expect(error).toMatchObject({
++    code: "EXTERNAL_SERVICE",
++    cause: undefined,
 +  });
-+
-+  it("再認可で失効したOWNERと別クラブactorを拒否する", async () => {
-+    const value = await reserve(), other = await fixture();
-+    const context = claim(value.owner, value.invitation);
-+    expect(await repository.releaseClubInvitationClaim({ ...context, actorMembershipId: other.actorMembershipId }))
-+      .toEqual({ outcome: "ACTOR_NOT_ACTIVE_OWNER" });
-+    await db.clubMembership.update({ where: { id: value.owner.actorMembershipId }, data: { role: "MEMBER" } });
-+    expect(await repository.releaseClubInvitationClaim(context)).toEqual({ outcome: "ACTOR_NOT_ACTIVE_OWNER" });
-+  });
-+
-+  it("並列再送でclaim取得は1件だけ、古いtoken・claimは無効", async () => {
-+    const value = await prepare(), at = later(6 * 60_000);
-+    const results = await Promise.all([1, 2].map(() => repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: at,
-+    })));
-+    expect(results.filter((result) => result.outcome === "CLAIMED")).toHaveLength(1);
-+    expect(results.filter((result) => result.outcome === "RULE_VIOLATION")).toHaveLength(1);
-+    const winner = results.find((result) => result.outcome === "CLAIMED");
-+    if (!winner || winner.outcome !== "CLAIMED") throw new Error("claimを取得できません。");
-+    expect(winner.invitation.id).toBe(value.invitation.id);
-+    expect(winner.invitation.attemptCount).toBe(2);
-+    const old = { ...value.context, now: at };
-+    for (const result of await Promise.all([
-+      repository.recordClubInvitationAuthUser({ ...old, verifiedAuthUser: value.verifiedAuthUser }),
-+      repository.completeClubInvitationPreparation({ ...old, verifiedAuthUser: value.verifiedAuthUser }),
-+      repository.markClubInvitationEmailSent(old), repository.markClubInvitationEmailFailed(old),
-+      repository.releaseClubInvitationClaim(old),
-+    ])) expect(result).toEqual({ outcome: "CLAIM_LOST" });
-+    expect(await repository.findUsableClubInvitationByTokenHash({
-+      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now: at,
-+    })).toBeNull();
-+    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+    expect(saved.status).toBe("PREPARING");
-+    expect(saved.claimToken).toBe(winner.invitation.claimToken);
-+  });
-+
-+  it("lease期限切れ後の未完了PREPARINGを再取得できる", async () => {
-+    const value = await reserve();
-+    expect(await repository.markClubInvitationEmailSent(claim(value.owner, value.invitation, later(5 * 60_000))))
-+      .toEqual({ outcome: "CLAIM_LOST" });
-+    const result = await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(6 * 60_000),
-+    });
-+    expect(result.outcome).toBe("CLAIMED");
-+  });
-+
-+  it("期限到達PREPARINGはDomain許可を保って再取得、EXPIREDで未紐付けは拒否", async () => {
-+    const value = await reserve(), at = later(25 * 60 * 60_000);
-+    const result = await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: at,
-+    });
-+    expect(result.outcome).toBe("CLAIMED");
-+    await repository.expireClubInvitations({ ...value.owner, now: later(50 * 60 * 60_000) });
-+    expect(await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(50 * 60 * 60_000),
-+    })).toEqual({ outcome: "RULE_VIOLATION", reason: "MEMBERSHIP_NOT_FOUND" });
-+  });
-+
-+  it("送信直後の再送cooldownとtoken再利用を拒否する", async () => {
-+    const value = await prepare();
-+    expect(await repository.markClubInvitationEmailSent(value.context)).toEqual({ outcome: "UPDATED" });
-+    expect(await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(30_000),
-+    })).toEqual({ outcome: "RULE_VIOLATION", reason: "RESEND_COOLDOWN" });
-+    expect(await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: value.input.tokenHash, now: later(60_000),
-+    })).toEqual({ outcome: "RULE_VIOLATION", reason: "TOKEN_NOT_ROTATED" });
-+  });
-+
-+  it("Auth記録後の復旧で同じIDを使用し、別IDやemailを拒否する", async () => {
-+    const value = await reserve(), userId = randomUUID(); users.add(userId);
-+    const context = claim(value.owner, value.invitation);
-+    const verifiedAuthUser = { id: userId, email: value.input.email };
-+    expect(await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }))
-+      .toEqual({ outcome: "RULE_VIOLATION", reason: "AUTH_USER_MISMATCH" });
-+    expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser })).toEqual({ outcome: "UPDATED" });
-+    expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser })).toEqual({ outcome: "UPDATED" });
-+    for (const user of [{ id: randomUUID(), email: value.input.email }, { id: userId, email: "other@example.test" }]) {
-+      expect(await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser: user }))
-+        .toEqual({ outcome: "RULE_VIOLATION", reason: "AUTH_USER_MISMATCH" });
-+    }
-+    expect((await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser })).outcome).toBe("PREPARED");
-+    expect(await db.clubMembership.count({ where: { clubId: value.owner.clubId, userId, status: "INVITED" } })).toBe(1);
-+  });
-+
-+  it("既存AppUserの氏名を保ち、F04で変更したMembership.roleも再送後に保つ", async () => {
-+    const value = await reserve(), userId = randomUUID(); users.add(userId);
-+    await db.appUser.create({ data: { id: userId, email: value.input.email, name: "Existing Name" } });
-+    const verifiedAuthUser = { id: userId, email: value.input.email };
-+    const context = claim(value.owner, value.invitation);
-+    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
-+    const prepared = await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser });
-+    if (prepared.outcome !== "PREPARED" || !prepared.invitation.membershipId) throw new Error("準備に失敗しました。");
-+    await db.clubMembership.update({ where: { id: prepared.invitation.membershipId }, data: { role: "COACH" } });
-+    const resent = await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(6 * 60_000),
-+    });
-+    if (resent.outcome !== "CLAIMED") throw new Error("再送に失敗しました。");
-+    expect(resent.invitation.role).toBe("COACH");
-+    const completed = await repository.completeClubInvitationPreparation({
-+      ...claim(value.owner, resent.invitation, later(6 * 60_000)), verifiedAuthUser,
-+    });
-+    expect(completed.outcome).toBe("PREPARED");
-+    expect(await db.appUser.findUnique({ where: { id: userId }, select: { name: true, email: true } }))
-+      .toEqual({ name: "Existing Name", email: value.input.email });
-+    expect(await db.clubMembership.findUnique({ where: { id: prepared.invitation.membershipId }, select: { role: true, status: true } }))
-+      .toEqual({ role: "COACH", status: "INVITED" });
-+  });
-+
-+  it("他クラブInvitationや認証済みuserIdを混ぜられない", async () => {
-+    const value = await prepare(), other = await fixture();
-+    const foreign = { ...value.context, ...other };
-+    for (const result of await Promise.all([
-+      repository.claimClubInvitationResend({ ...foreign, tokenHash: digest() }),
-+      repository.recordClubInvitationAuthUser({ ...foreign, verifiedAuthUser: value.verifiedAuthUser }),
-+      repository.completeClubInvitationPreparation({ ...foreign, verifiedAuthUser: value.verifiedAuthUser }),
-+      repository.markClubInvitationEmailSent(foreign), repository.markClubInvitationEmailFailed(foreign),
-+      repository.releaseClubInvitationClaim(foreign), repository.cancelClubInvitation(foreign),
-+    ])) expect(result).toEqual({ outcome: "NOT_FOUND" });
-+    expect(await repository.findUsableClubInvitationByTokenHash({
-+      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: randomUUID(), now,
-+    })).toBeNull();
-+    expect(await repository.findUsableClubInvitationByTokenHash({
-+      clubId: other.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
-+    })).toBeNull();
-+    await repository.expireClubInvitations({ ...other, now: later(25 * 60 * 60_000) });
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("READY_TO_SEND");
-+  });
-+
-+  it("同じAppUserを別クラブへ招待でき、既存クラブMembershipを変更しない", async () => {
-+    const value = await prepare(), other = await fixture();
-+    const result = await repository.reserveClubInvitation({
-+      ...other, email: value.input.email, name: "Other Name", role: "OFFICER", tokenHash: digest(),
-+    });
-+    if (result.outcome !== "RESERVED") throw new Error("別クラブ予約に失敗しました。");
-+    const context = claim(other, result.invitation);
-+    expect(result.invitation.existingUserId).toBe(value.verifiedAuthUser.id);
-+    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser: value.verifiedAuthUser });
-+    expect((await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser: value.verifiedAuthUser })).outcome).toBe("PREPARED");
-+    expect(await db.clubMembership.count({ where: { userId: value.verifiedAuthUser.id } })).toBe(2);
-+    expect((await db.appUser.findUniqueOrThrow({ where: { id: value.verifiedAuthUser.id } })).name).toBe("Invitation Name");
-+  });
-+
-+  it.each(["membership failure", "invitation CAS failure"] as const)(
-+    "%sでAppUser・Membershipの先行保存もrollbackする", async (failure) => {
-+      const value = await reserve(), userId = randomUUID(); users.add(userId);
-+      const context = claim(value.owner, value.invitation), verifiedAuthUser = { id: userId, email: value.input.email };
-+      await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
-+      interceptTransaction((tx) => {
-+        if (failure === "membership failure") vi.spyOn(tx.clubMembership, "create").mockRejectedValueOnce(new Error("Synthetic failure"));
-+        else vi.spyOn(tx.clubInvitation, "updateMany").mockResolvedValueOnce({ count: 0 });
-+      });
-+      if (failure === "membership failure") {
-+        await expect(repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }))
-+          .rejects.toMatchObject({ code: "INTERNAL", cause: undefined });
-+      } else {
-+        expect(await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser })).toEqual({ outcome: "CLAIM_LOST" });
-+      }
-+      expect(await db.appUser.findUnique({ where: { id: userId } })).toBeNull();
-+      expect(await db.clubMembership.count({ where: { clubId: value.owner.clubId, userId } })).toBe(0);
-+      const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+      expect(saved.status).toBe("PREPARING");
-+      expect(saved.membershipId).toBeNull();
-+      expect(saved.authUserId).toBe(userId);
-+    },
++  expect(String(error)).not.toContain(
++    PRIVATE_ERROR,
 +  );
++}
 +
-+  it("取消は履歴・AppUserを残してINVITED Membershipだけを削除し、旧処理を拒否", async () => {
-+    const value = await prepare();
-+    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "CANCELLED" });
-+    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+    expect(saved.status).toBe("CANCELLED"); expect(saved.membershipId).toBeNull();
-+    expect(saved.claimToken).toBeNull(); expect(saved.leaseExpiresAt).toBeNull();
-+    expect(await db.appUser.count({ where: { id: value.verifiedAuthUser.id } })).toBe(1);
-+    expect(await repository.markClubInvitationEmailSent(value.context)).toEqual({ outcome: "CLAIM_LOST" });
-+    expect(await repository.findUsableClubInvitationByTokenHash({
-+      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
-+    })).toBeNull();
-+  });
-+
-+  it("取消のMembership削除失敗でCANCELLED更新もrollbackする", async () => {
-+    const value = await prepare();
-+    interceptTransaction((tx) => { vi.spyOn(tx.clubMembership, "deleteMany").mockResolvedValueOnce({ count: 0 }); });
-+    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "CLAIM_LOST" });
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("READY_TO_SEND");
-+    expect(await db.clubMembership.count({ where: { id: value.invitation.membershipId! } })).toBe(1);
-+  });
-+
-+  it.each(["ACTIVE", "SUSPENDED", "WITHDRAWN"] as const)("変更済み%s Membershipの再準備・取消を拒否する", async (status) => {
-+    const value = await prepare();
-+    await db.clubMembership.update({ where: { id: value.invitation.membershipId! }, data: { status } });
-+    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "RULE_VIOLATION", reason: "MEMBERSHIP_NOT_INVITED" });
-+    expect(await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(6 * 60_000),
-+    })).toEqual({ outcome: "RULE_VIOLATION", reason: "MEMBERSHIP_NOT_INVITED" });
-+    expect(await repository.markClubInvitationEmailSent(value.context)).toEqual({ outcome: "CLAIM_LOST" });
-+  });
-+
-+  it("期限到達でtokenを拒否し、EXPIRED後もINVITED Membershipを残して再発行できる", async () => {
-+    const value = await prepare(), at = later(24 * 60 * 60_000);
-+    expect(await repository.findUsableClubInvitationByTokenHash({
-+      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now: at,
-+    })).toBeNull();
-+    expect(await repository.expireClubInvitations({ ...value.owner, now: at })).toEqual({ outcome: "EXPIRED", count: 1 });
-+    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+    expect(saved.status).toBe("EXPIRED"); expect(saved.claimToken).toBeNull();
-+    expect(saved.membershipId).toBe(value.invitation.membershipId);
-+    expect(await repository.markClubInvitationEmailSent({ ...value.context, now: at })).toEqual({ outcome: "CLAIM_LOST" });
-+    expect((await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: at,
-+    })).outcome).toBe("CLAIMED");
-+  });
-+
-+  it("予約内で期限切れを更新し、期限切れ履歴の再送は別の有効招待と重複しない", async () => {
-+    const value = await prepare();
-+    const next = await repository.reserveClubInvitation({
-+      ...value.input, tokenHash: digest(), now: later(25 * 60 * 60_000),
-+    });
-+    expect(next.outcome).toBe("MEMBERSHIP_EXISTS");
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("EXPIRED");
-+    await db.clubInvitation.create({ data: {
-+      clubId: value.owner.clubId, email: value.input.email, role: "MEMBER", status: "PREPARING",
-+      tokenHash: digest(), expiresAt: later(48 * 60 * 60_000), invitedByMembershipId: value.owner.actorMembershipId,
-+    } });
-+    expect(await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(25 * 60 * 60_000),
-+    })).toEqual({ outcome: "DUPLICATE", reason: "ACTIVE_INVITATION" });
-+  });
-+
-+  it("メール失敗は固定識別子だけを保存し、再送後SENTを記録できる", async () => {
-+    const value = await prepare();
-+    expect(await repository.markClubInvitationEmailFailed(value.context)).toEqual({ outcome: "UPDATED" });
-+    const failed = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+    expect(failed.emailSendError).toBe("EMAIL_SEND_FAILED");
-+    expect(failed.membershipId).toBe(value.invitation.membershipId);
-+    const result = await repository.claimClubInvitationResend({
-+      ...value.owner, invitationId: value.invitation.id, tokenHash: digest(), now: later(60_000),
-+    });
-+    if (result.outcome !== "CLAIMED") throw new Error("再送に失敗しました。");
-+    const context = claim(value.owner, result.invitation, later(60_000));
-+    expect((await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser: value.verifiedAuthUser })).outcome).toBe("PREPARED");
-+    expect(await repository.markClubInvitationEmailSent(context)).toEqual({ outcome: "UPDATED" });
-+    const sent = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+    expect(sent.status).toBe("SENT"); expect(sent.emailSendError).toBeNull(); expect(sent.emailSentAt).toEqual(later(60_000));
-+  });
-+
-+  it("解除はPREPARINGを残し、READY_TO_SEND/EMAIL_FAILED/SENTの有効tokenは読める", async () => {
-+    const pending = await reserve();
-+    expect(await repository.releaseClubInvitationClaim(claim(pending.owner, pending.invitation))).toEqual({ outcome: "UPDATED" });
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: pending.invitation.id } })).status).toBe("PREPARING");
-+    const value = await prepare();
-+    for (const status of ["READY_TO_SEND", "EMAIL_FAILED", "SENT"] as const) {
-+      await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { status } });
-+      expect(await repository.findUsableClubInvitationByTokenHash({
-+        clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
-+      })).toMatchObject({ id: value.invitation.id, role: "MEMBER" });
-+    }
-+    await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { acceptedAt: now } });
-+    expect(await repository.findUsableClubInvitationByTokenHash({
-+      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
-+    })).toBeNull();
-+    expect(await repository.cancelClubInvitation(value.context)).toEqual({ outcome: "RULE_VIOLATION", reason: "INVITATION_ALREADY_ACCEPTED" });
-+  });
-+
-+  it("OWNER一覧はPREPARINGを含む最小DTOで、取得中に期限切れ更新しない", async () => {
-+    const value = await reserve();
-+    const result = await repository.findClubInvitationsForOwner({ ...value.owner, now: later(25 * 60 * 60_000) });
-+    if (result.outcome !== "FOUND") throw new Error("一覧取得に失敗しました。");
-+    expect(result.invitations).toHaveLength(1);
-+    const row = result.invitations[0];
-+    expect(row.status).toBe("PREPARING"); expect(row.hasMembership).toBe(false);
-+    for (const field of ["tokenHash", "authUserId", "claimToken", "emailSendError", "existingUserId", "membershipId"]) {
-+      expect(row).not.toHaveProperty(field);
-+    }
-+    expect(row.needsPreparationRetry).toBe(true);
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).status).toBe("PREPARING");
-+  });
-+
-+  it("P2034だけ最大3回再試行して予約を完了する", async () => {
-+    const owner = await fixture();
-+    const spy = vi.spyOn(db, "$transaction");
-+    for (let attempt = 0; attempt < 3; attempt += 1) spy.mockRejectedValueOnce(known("P2034"));
-+    const result = await repository.reserveClubInvitation({
-+      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
-+    });
-+    expect(result.outcome).toBe("RESERVED"); expect(spy).toHaveBeenCalledTimes(4);
-+  });
-+
-+  it.each([
-+    ["ClubInvitation", ["clubId", "lower(email"], "ACTIVE_INVITATION"],
-+    ["ClubInvitation", ["tokenHash"], "TOKEN_HASH"], ["ClubInvitation", ["claimToken"], "CLAIM_TOKEN"],
-+    ["ClubInvitation", ["membershipId"], "MEMBERSHIP"], ["ClubMembership", ["clubId", "userId"], "MEMBERSHIP"],
-+    ["AppUser", ["email"], "APP_USER"],
-+  ] as const)("adapter-pg P2002 %s/%sを制約別に識別し再試行しない", async (modelName, fields, reason) => {
-+    const owner = await fixture();
-+    const spy = vi.spyOn(db, "$transaction").mockRejectedValueOnce(known("P2002", {
-+      modelName, driverAdapterError: { cause: { kind: "UniqueConstraintViolation", constraint: { fields } } },
-+    }));
-+    expect(await repository.reserveClubInvitation({
-+      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
-+    })).toEqual({ outcome: "DUPLICATE", reason });
-+    expect(spy).toHaveBeenCalledTimes(1);
-+  });
-+
-+  it.each(["unknown unique", "retry limit", "unexpected error"] as const)("%sは安全な例外で停止する", async (failure) => {
-+    const owner = await fixture();
-+    const error = failure === "unknown unique" ? known("P2002", { modelName: "ClubInvitation", target: ["id"] })
-+      : failure === "retry limit" ? known("P2034") : new Error("Synthetic sensitive error");
-+    const spy = vi.spyOn(db, "$transaction").mockRejectedValue(error);
-+    await expect(repository.reserveClubInvitation({
-+      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
-+    })).rejects.toMatchObject({ code: failure === "unexpected error" ? "INTERNAL" : "CONFLICT", cause: undefined });
-+    expect(spy).toHaveBeenCalledTimes(failure === "retry limit" ? 4 : 1);
-+  });
-+
-+  it.each(["cancel", "expire"] as const)("並列%sと旧送信処理でも終了状態へ巻き戻らない", async (operation) => {
-+    const value = await prepare();
-+    const lifecycle = operation === "cancel"
-+      ? repository.cancelClubInvitation(value.context)
-+      : repository.expireClubInvitations({ ...value.owner, now: later(25 * 60 * 60_000) });
-+    await Promise.all([lifecycle, repository.markClubInvitationEmailSent(value.context)]);
-+    const saved = await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } });
-+    expect(saved.status).toBe(operation === "cancel" ? "CANCELLED" : "EXPIRED");
-+    expect(saved.claimToken).toBeNull(); expect(saved.leaseExpiresAt).toBeNull();
-+  });
-+
-+  it("平文token形式の入力を保存せず拒否する", async () => {
-+    const owner = await fixture();
-+    await expect(repository.reserveClubInvitation({
-+      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: "raw-token",
-+    })).rejects.toMatchObject({ code: "VALIDATION" });
-+    expect(await db.clubInvitation.count({ where: { clubId: owner.clubId } })).toBe(0);
-+  });
-+
-+  it("有効な同claimでもlease期限ちょうどで準備・送信・解除を拒否する", async () => {
-+    const pending = await reserve(), userId = randomUUID(); users.add(userId);
-+    const verifiedAuthUser = { id: userId, email: pending.input.email };
-+    const context = claim(pending.owner, pending.invitation);
-+    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
-+    const expired = { ...context, now: later(5 * 60_000) };
-+    for (const result of await Promise.all([
-+      repository.recordClubInvitationAuthUser({ ...expired, verifiedAuthUser }),
-+      repository.completeClubInvitationPreparation({ ...expired, verifiedAuthUser }),
-+      repository.releaseClubInvitationClaim(expired),
-+    ])) expect(result).toEqual({ outcome: "CLAIM_LOST" });
-+    const ready = await prepare(), readyExpired = { ...ready.context, now: later(5 * 60_000) };
-+    expect(await repository.markClubInvitationEmailSent(readyExpired)).toEqual({ outcome: "CLAIM_LOST" });
-+    expect(await repository.markClubInvitationEmailFailed(readyExpired)).toEqual({ outcome: "CLAIM_LOST" });
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: ready.invitation.id } })).status).toBe("READY_TO_SEND");
-+  });
-+
-+  it.each(["email belongs to another id", "id has another email"] as const)(
-+    "最初のAuth記録で%sを拒否し既存AppUserを保護する", async (failure) => {
-+      const value = await reserve(), userId = randomUUID(); users.add(userId);
-+      await db.appUser.create({ data: {
-+        id: userId, name: "Existing User",
-+        email: failure === "email belongs to another id" ? value.input.email : userId + "@example.test",
-+      } });
-+      const verifiedAuthUser = {
-+        id: failure === "email belongs to another id" ? randomUUID() : userId,
-+        email: value.input.email,
-+      };
-+      expect(await repository.recordClubInvitationAuthUser({
-+        ...claim(value.owner, value.invitation), verifiedAuthUser,
-+      })).toEqual({ outcome: "RULE_VIOLATION", reason: "AUTH_USER_MISMATCH" });
-+      expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).authUserId).toBeNull();
-+      expect((await db.appUser.findUniqueOrThrow({ where: { id: userId } })).name).toBe("Existing User");
++// 各テストでSDKを独立させ、実際のAuth・環境変数ファイルへ接続しない。
++beforeEach(() => {
++  vi.resetAllMocks();
++  mocks.createAdmin.mockReturnValue({
++    auth: {
++      admin: {
++        generateLink: mocks.generateLink,
++        getUserById: mocks.getUserById,
++      },
 +    },
++  });
++  mocks.generateLink.mockResolvedValue(
++    linkResponse(),
 +  );
-+
-+  it("準備時に見つかった未紐付けINVITED Membershipも勝手に再利用しない", async () => {
-+    const value = await reserve(), userId = randomUUID(); users.add(userId);
-+    const verifiedAuthUser = { id: userId, email: value.input.email };
-+    const context = claim(value.owner, value.invitation);
-+    await repository.recordClubInvitationAuthUser({ ...context, verifiedAuthUser });
-+    await db.appUser.create({ data: { id: userId, email: value.input.email } });
-+    const membership = await db.clubMembership.create({ data: { clubId: value.owner.clubId, userId, status: "INVITED", role: "COACH" } });
-+    expect(await repository.completeClubInvitationPreparation({ ...context, verifiedAuthUser }))
-+      .toEqual({ outcome: "MEMBERSHIP_EXISTS", membershipStatus: "INVITED" });
-+    expect((await db.clubInvitation.findUniqueOrThrow({ where: { id: value.invitation.id } })).membershipId).toBeNull();
-+    expect((await db.clubMembership.findUniqueOrThrow({ where: { id: membership.id } })).role).toBe("COACH");
++  mocks.getUserById.mockResolvedValue({
++    data: {
++      user: authUser(),
++    },
++    error: null,
 +  });
-+
-+  it("PREPARINGと非INVITED Membershipの正しいtokenも使用できない", async () => {
-+    const value = await prepare();
-+    const lookup = { clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now };
-+    await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { status: "PREPARING" } });
-+    expect(await repository.findUsableClubInvitationByTokenHash(lookup)).toBeNull();
-+    await db.clubInvitation.update({ where: { id: value.invitation.id }, data: { status: "SENT" } });
-+    await db.clubMembership.update({ where: { id: value.invitation.membershipId! }, data: { status: "ACTIVE" } });
-+    expect(await repository.findUsableClubInvitationByTokenHash(lookup)).toBeNull();
-+  });
-+
-+  it.each([
-+    { target: "ClubInvitation_active_email_key" },
-+    { modelName: "ClubInvitation", target: ["clubId", "lower(email)"] },
-+    { driverAdapterError: { cause: { constraint: { fields: ["clubId", "lower(email"] } } } },
-+  ])("旧target形式・modelName無しの部分uniqueも識別する %#", async (meta) => {
-+    const owner = await fixture();
-+    const spy = vi.spyOn(db, "$transaction").mockRejectedValueOnce(known("P2002", meta));
-+    expect(await repository.reserveClubInvitation({
-+      ...owner, email: randomUUID() + "@example.test", name: "Member", role: "MEMBER", tokenHash: digest(),
-+    })).toEqual({ outcome: "DUPLICATE", reason: "ACTIVE_INVITATION" });
-+    expect(spy).toHaveBeenCalledTimes(1);
-+  });
-+
-+  it("token検索のDB原文を固定例外へ変換しcauseを保持しない", async () => {
-+    const value = await prepare();
-+    vi.spyOn(db.clubInvitation, "findFirst").mockRejectedValueOnce(new Error("Synthetic sensitive error"));
-+    await expect(repository.findUsableClubInvitationByTokenHash({
-+      clubId: value.owner.clubId, tokenHash: value.input.tokenHash, authenticatedUserId: value.verifiedAuthUser.id, now,
-+    })).rejects.toMatchObject({ code: "INTERNAL", message: "処理に失敗しました。", cause: undefined });
-+  });
-+
++  vi.spyOn(console, "error").mockImplementation(
++    () => undefined,
++  );
++  vi.spyOn(console, "warn").mockImplementation(
++    () => undefined,
++  );
 +});
++
++// ログも機密情報を出していないことを確認してからmockと環境変数を戻す。
++afterEach(() => {
++  expect(console.error).not.toHaveBeenCalled();
++  expect(console.warn).not.toHaveBeenCalled();
++  vi.restoreAllMocks();
++  vi.unstubAllEnvs();
++});
++
++describe("club invitation Auth adapter", () => {
++  it("正規化emailでinviteリンクだけを生成し、返却値を絞る", async () => {
++    const result =
++      await generateClubInvitationAuthLink({
++        email: " ＭＥＭＢＥＲ＠ＥＸＡＭＰＬＥ．ＴＥＳＴ ",
++        redirectTo: REDIRECT_TO,
++      });
++
++    expect(mocks.generateLink).toHaveBeenCalledWith({
++      type: "invite",
++      email: EMAIL,
++      options: {
++        redirectTo: REDIRECT_TO,
++      },
++    });
++    expect(mocks.getUserById).not.toHaveBeenCalled();
++    expect(result).toEqual({
++      user: {
++        id: USER_ID,
++        email: EMAIL,
++        isEmailConfirmed: false,
++      },
++      actionLink: ACTION_LINK,
++    });
++    expect(JSON.stringify(result)).not.toContain(
++      PRIVATE_ERROR,
++    );
++    expect(JSON.stringify(result)).not.toContain(
++      "test-otp",
++    );
++    expect(JSON.stringify(result)).not.toContain(
++      "test-hashed-token",
++    );
++  });
++
++  it("復旧時は同じAuth IDを事前確認してリンクを再生成する", async () => {
++    const result =
++      await generateClubInvitationAuthLink({
++        email: EMAIL,
++        redirectTo: REDIRECT_TO,
++        expectedAuthUserId: USER_ID,
++      });
++
++    expect(mocks.getUserById).toHaveBeenCalledWith(
++      USER_ID,
++    );
++    expect(
++      mocks.getUserById.mock.invocationCallOrder[0],
++    ).toBeLessThan(
++      mocks.generateLink.mock.invocationCallOrder[0],
++    );
++    expect(result.user.id).toBe(USER_ID);
++  });
++
++  it("確認済みAuthを取得し、ID・正規化email・確認状態だけを返す", async () => {
++    mocks.getUserById.mockResolvedValue({
++      data: {
++        user: {
++          ...authUser(),
++          email: " MEMBER@EXAMPLE.TEST ",
++          email_confirmed_at:
++            "2026-10-10T03:00:00Z",
++        },
++      },
++      error: null,
++    });
++
++    expect(
++      await getClubInvitationAuthUserById({
++        authUserId: USER_ID,
++        email: EMAIL,
++      }),
++    ).toEqual({
++      id: USER_ID,
++      email: EMAIL,
++      isEmailConfirmed: true,
++    });
++  });
++
++  it("確認済みの既知Authへinviteを再生成しない", async () => {
++    mocks.getUserById.mockResolvedValue({
++      data: {
++        user: {
++          ...authUser(),
++          email_confirmed_at:
++            "2026-10-10T03:00:00Z",
++        },
++      },
++      error: null,
++    });
++
++    await expectSafeExternal(
++      generateClubInvitationAuthLink({
++        email: EMAIL,
++        redirectTo: REDIRECT_TO,
++        expectedAuthUserId: USER_ID,
++      }),
++    );
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    "email mismatch",
++    "id mismatch",
++    "missing email",
++    "missing user",
++  ])("Auth取得の%sを拒否する", async (failure) => {
++    const user = {
++      ...authUser(),
++      id: failure === "id mismatch"
++        ? OTHER_USER_ID
++        : USER_ID,
++      email: failure === "email mismatch"
++        ? "other@example.test"
++        : failure === "missing email"
++          ? undefined
++          : EMAIL,
++    };
++    mocks.getUserById.mockResolvedValue({
++      data: {
++        user: failure === "missing user"
++          ? null
++          : user,
++      },
++      error: null,
++    });
++
++    await expectSafeExternal(
++      getClubInvitationAuthUserById({
++        authUserId: USER_ID,
++        email: EMAIL,
++      }),
++    );
++  });
++
++  it("明確なuser_not_foundだけをnullとして扱い、復旧で新規作成しない", async () => {
++    mocks.getUserById.mockResolvedValue({
++      data: {
++        user: null,
++      },
++      error: new AuthApiError(
++        PRIVATE_ERROR,
++        404,
++        "user_not_found",
++      ),
++    });
++
++    expect(
++      await getClubInvitationAuthUserById({
++        authUserId: USER_ID,
++        email: EMAIL,
++      }),
++    ).toBeNull();
++    await expectSafeExternal(
++      generateClubInvitationAuthLink({
++        email: EMAIL,
++        redirectTo: REDIRECT_TO,
++        expectedAuthUserId: USER_ID,
++      }),
++    );
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    "generated email",
++    "generated id",
++    "verification type",
++    "confirmed user",
++    "redirect fallback",
++    "link redirect",
++    "unsafe link",
++    "missing properties",
++  ])("生成結果の%sを安全に拒否する", async (failure) => {
++    const response = linkResponse();
++
++    if (failure === "generated email") {
++      response.data.user.email = "other@example.test";
++    }
++    if (failure === "generated id") {
++      response.data.user.id = OTHER_USER_ID;
++    }
++    if (failure === "verification type") {
++      response.data.properties.verification_type = "magiclink";
++    }
++    if (failure === "confirmed user") {
++      Object.assign(response.data.user, {
++        email_confirmed_at:
++          "2026-10-10T03:00:00Z",
++      });
++    }
++    if (failure === "redirect fallback") {
++      response.data.properties.redirect_to =
++        "https://app.example.test/";
++    }
++    if (failure === "link redirect") {
++      response.data.properties.action_link =
++        "https://auth.example.test/auth/v1/verify?redirect_to=https://other.example.test/";
++    }
++    if (failure === "unsafe link") {
++      response.data.properties.action_link =
++        "javascript:alert(1)";
++    }
++    if (failure === "missing properties") {
++      Object.assign(response.data, {
++        properties: null,
++      });
++    }
++
++    mocks.generateLink.mockResolvedValue(response);
++    await expectSafeExternal(
++      generateClubInvitationAuthLink({
++        email: EMAIL,
++        redirectTo: REDIRECT_TO,
++        expectedAuthUserId: USER_ID,
++      }),
++    );
++  });
++
++  it.each([
++    "resolved API error",
++    "thrown API error",
++    "client configuration",
++  ])("%sの原文・causeを返さない", async (failure) => {
++    if (failure === "resolved API error") {
++      mocks.generateLink.mockResolvedValue({
++        data: {
++          user: null,
++          properties: null,
++        },
++        error: new Error(PRIVATE_ERROR),
++      });
++      mocks.getUserById.mockResolvedValue({
++        data: {
++          user: null,
++        },
++        error: new AuthApiError(
++          PRIVATE_ERROR,
++          404,
++          "unexpected_error",
++        ),
++      });
++    } else if (failure === "thrown API error") {
++      mocks.generateLink.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++      mocks.getUserById.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++    } else {
++      mocks.createAdmin.mockImplementation(() => {
++        throw new Error(PRIVATE_ERROR);
++      });
++    }
++
++    await expectSafeExternal(
++      generateClubInvitationAuthLink({
++        email: EMAIL,
++        redirectTo: REDIRECT_TO,
++      }),
++    );
++    await expectSafeExternal(
++      getClubInvitationAuthUserById({
++        authUserId: USER_ID,
++        email: EMAIL,
++      }),
++    );
++  });
++
++  it.each([
++    "javascript:alert(1)",
++    "https://user:password@app.example.test/",
++    "https://app.example.test/\r\n",
++    "/auth/confirm",
++  ])("不正なredirect URLをAPI呼び出し前に拒否する", async (redirectTo) => {
++    await expect(
++      generateClubInvitationAuthLink({
++        email: EMAIL,
++        redirectTo,
++      }),
++    ).rejects.toMatchObject({
++      code: "VALIDATION",
++      cause: undefined,
++    });
++    expect(mocks.createAdmin).not.toHaveBeenCalled();
++  });
++
++  it("不正なemail・Auth IDをAPI呼び出し前に拒否する", async () => {
++    await expect(
++      generateClubInvitationAuthLink({
++        email: "invalid",
++        redirectTo: REDIRECT_TO,
++      }),
++    ).rejects.toMatchObject({
++      code: "VALIDATION",
++    });
++    await expect(
++      getClubInvitationAuthUserById({
++        authUserId: "invalid",
++        email: EMAIL,
++      }),
++    ).rejects.toMatchObject({
++      code: "VALIDATION",
++    });
++    expect(mocks.createAdmin).not.toHaveBeenCalled();
++  });
++
++  it("管理クライアントはStorage・Auth共通のサーバー設定を維持する", async () => {
++    vi.stubEnv(
++      "NEXT_PUBLIC_SUPABASE_URL",
++      "https://auth.example.test",
++    );
++    vi.stubEnv(
++      "SUPABASE_SERVICE_ROLE_KEY",
++      "test-service-role-key",
++    );
++    const actual = await vi.importActual<
++      typeof import("@/src/infrastructure/supabase/admin")
++    >("@/src/infrastructure/supabase/admin");
++
++    actual.createSupabaseAdminClient();
++
++    expect(mocks.createClient).toHaveBeenCalledWith(
++      "https://auth.example.test",
++      "test-service-role-key",
++      {
++        auth: {
++          autoRefreshToken: false,
++          persistSession: false,
++        },
++      },
++    );
++
++    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "");
++    expect(
++      actual.createSupabaseAdminClient,
++    ).toThrow(
++      "Supabase管理操作用の環境変数が設定されていません。",
++    );
++  });
++});
+diff --git a/lib/mail/club-invitation-mail.ts b/lib/mail/club-invitation-mail.ts
+new file mode 100644
+--- /dev/null
++++ b/lib/mail/club-invitation-mail.ts
+@@ -0,0 +1,270 @@
++// lib/mail/club-invitation-mail.ts
++// 招待メールの本文を生成し、送信試行の冪等キー付きでResendへ渡す。
++
++import "server-only";
++
++import { z } from "zod";
++
++import {
++  getClubMemberRoleLabel,
++} from "@/domain/club/club-member-role";
++import {
++  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
++} from "@/domain/club/invitation/invitation-form";
++import {
++  formatClubDateTime,
++} from "@/domain/shared/date-time/club-date-time";
++import { DomainError } from "@/domain/shared/domain-error";
++import { normalizeEmail } from "@/domain/shared/email";
++import type { ClubMemberRole } from "@/types/prisma";
++
++import {
++  buildMailFrom,
++  resend,
++} from "./resend";
++
++export type ClubInvitationEmailInput = {
++  email: string;
++  name: string | null;
++  clubName: string;
++  role: ClubMemberRole;
++  expiresAt: Date;
++  timeZone?: string;
++} & (
++  | {
++      kind: "NEW_USER";
++      authLink: string;
++    }
++  | {
++      kind: "EXISTING_USER";
++      invitationUrl: string;
++    }
++);
++
++export type ClubInvitationEmail = {
++  to: string;
++  subject: string;
++  text: string;
++  html: string;
++};
++
++export type ClubInvitationEmailSendResult =
++  | {
++      outcome: "ACCEPTED";
++      emailId: string;
++    }
++  | {
++      outcome: "REJECTED";
++      errorCode: "EMAIL_SEND_FAILED";
++    }
++  | {
++      outcome: "UNKNOWN";
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN";
++    };
++
++const emailSchema = z.email().max(
++  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
++);
++const invitationIdSchema = z.uuid();
++
++// 氏名・クラブ名を本文用の一行へ揃え、件名への改行混入も防ぐ。
++function singleLine(value: string): string {
++  return value.replace(/\s+/gu, " ").trim();
++}
++
++// 本文・hrefへ埋め込む値をエスケープし、HTMLや属性の注入を防ぐ。
++function escapeHtml(value: string): string {
++  return value
++    .replaceAll("&", "&amp;")
++    .replaceAll("<", "&lt;")
++    .replaceAll(">", "&gt;")
++    .replaceAll('"', "&quot;")
++    .replaceAll("'", "&#39;");
++}
++
++// サーバーが構築した招待URLを検証し、危険なschemeや資格情報を拒否する。
++function invitationUrl(value: string): string {
++  let url: URL;
++
++  try {
++    url = new URL(value);
++  } catch {
++    throw new DomainError(
++      "VALIDATION",
++      "招待メールのリンクを確認してください。",
++    );
++  }
++
++  if (
++    /[\r\n]/u.test(value) ||
++    (
++      url.protocol !== "https:" &&
++      url.protocol !== "http:"
++    ) ||
++    url.username ||
++    url.password
++  ) {
++    throw new DomainError(
++      "VALIDATION",
++      "招待メールのリンクを確認してください。",
++    );
++  }
++
++  return url.toString();
++}
++
++// 新規ユーザー向けの初回設定案内と、既存ユーザー向けのクラブ参加案内を作る。
++export function buildClubInvitationEmail(
++  input: ClubInvitationEmailInput,
++): ClubInvitationEmail {
++  const email = normalizeEmail(input.email);
++  const name =
++    singleLine(input.name ?? "") ||
++    "ご招待者";
++  const clubName = singleLine(input.clubName);
++  const roleLabel = getClubMemberRoleLabel(
++    input.role,
++  );
++
++  if (
++    !emailSchema.safeParse(email).success ||
++    !clubName ||
++    !roleLabel ||
++    !Number.isFinite(input.expiresAt.getTime())
++  ) {
++    throw new DomainError(
++      "VALIDATION",
++      "招待メールの内容を確認してください。",
++    );
++  }
++
++  const url = invitationUrl(
++    input.kind === "NEW_USER"
++      ? input.authLink
++      : input.invitationUrl,
++  );
++  let expiresAt: string;
++
++  try {
++    expiresAt = formatClubDateTime(
++      input.expiresAt,
++      input.timeZone ?? "Asia/Tokyo",
++    );
++  } catch {
++    throw new DomainError(
++      "VALIDATION",
++      "招待メールの有効期限を確認してください。",
++    );
++  }
++
++  const instructions =
++    input.kind === "NEW_USER"
++      ? "認証リンクからメールアドレスを確認し、初回設定とクラブ参加を進めてください。"
++      : "既存のアカウントでログインし、参加案内からクラブへの参加を進めてください。";
++  const linkLabel =
++    input.kind === "NEW_USER"
++      ? "初回設定とクラブ参加へ進む"
++      : "クラブ参加案内を開く";
++  const deadline =
++    `招待の有効期限：${expiresAt}（${input.timeZone ?? "Asia/Tokyo"}）`;
++
++  return {
++    to: email,
++    subject: `【${clubName}】クラブ参加のご案内`,
++    text: [
++      `${name} 様`,
++      "",
++      `${clubName}から、${roleLabel}として招待されています。`,
++      instructions,
++      "",
++      linkLabel,
++      url,
++      "",
++      deadline,
++      "この招待に心当たりがない場合は、このメールを破棄してください。",
++    ].join("\n"),
++    html: [
++      `<p>${escapeHtml(name)} 様</p>`,
++      `<p>${escapeHtml(clubName)}から、${escapeHtml(roleLabel)}として招待されています。</p>`,
++      `<p>${escapeHtml(instructions)}</p>`,
++      `<p><a href="${escapeHtml(url)}">${escapeHtml(linkLabel)}</a></p>`,
++      `<p>${escapeHtml(deadline)}</p>`,
++      "<p>この招待に心当たりがない場合は、このメールを破棄してください。</p>",
++    ].join("\n"),
++  };
++}
++
++// 同じInvitation・attemptCountは同じキー、新tokenの再送は新しいattemptCountで送る。
++export async function sendClubInvitationEmail(
++  input: ClubInvitationEmailInput & {
++    invitationId: string;
++    attemptCount: number;
++  },
++): Promise<ClubInvitationEmailSendResult> {
++  if (
++    !invitationIdSchema.safeParse(
++      input.invitationId,
++    ).success ||
++    !Number.isSafeInteger(input.attemptCount) ||
++    input.attemptCount < 1
++  ) {
++    throw new DomainError(
++      "VALIDATION",
++      "招待メールの送信試行を確認してください。",
++    );
++  }
++
++  const email = buildClubInvitationEmail(input);
++  const idempotencyKey =
++    `club-invitation/${input.invitationId}/${input.attemptCount}`;
++
++  try {
++    const response = await resend.emails.send(
++      {
++        from: buildMailFrom(input.clubName),
++        to: email.to,
++        subject: email.subject,
++        text: email.text,
++        html: email.html,
++      },
++      {
++        idempotencyKey,
++      },
++    );
++
++    if (
++      !response.error &&
++      response.data?.id
++    ) {
++      return {
++        outcome: "ACCEPTED",
++        emailId: response.data.id,
++      };
++    }
++
++    // 4xxの明確な拒否だけを失敗扱いにし、timeout・競合・5xxは送信結果不明とする。
++    const statusCode =
++      response.error?.statusCode;
++
++    if (
++      typeof statusCode === "number" &&
++      statusCode >= 400 &&
++      statusCode < 500 &&
++      statusCode !== 408 &&
++      statusCode !== 409 &&
++      response.error?.name !== "application_error"
++    ) {
++      return {
++        outcome: "REJECTED",
++        errorCode: "EMAIL_SEND_FAILED",
++      };
++    }
++  } catch {
++    // 通信切断でも配送済みの可能性があるため、原文やcauseを返さず結果不明にする。
++  }
++
++  return {
++    outcome: "UNKNOWN",
++    errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
++  };
++}
+diff --git a/lib/mail/club-invitation-mail.test.ts b/lib/mail/club-invitation-mail.test.ts
+new file mode 100644
+--- /dev/null
++++ b/lib/mail/club-invitation-mail.test.ts
+@@ -0,0 +1,449 @@
++// lib/mail/club-invitation-mail.test.ts
++// 招待本文の安全性、宛先・From、冪等キー、配送結果の分類を検証する。
++
++import {
++  afterEach,
++  beforeEach,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
++
++import {
++  buildClubInvitationEmail,
++  sendClubInvitationEmail,
++  type ClubInvitationEmailInput,
++} from "@/lib/mail/club-invitation-mail";
++
++const mocks = vi.hoisted(() => ({
++  send: vi.fn(),
++  buildMailFrom: vi.fn(),
++}));
++
++vi.mock("server-only", () => ({}));
++vi.mock("@/lib/mail/resend", () => ({
++  resend: {
++    emails: {
++      send: mocks.send,
++    },
++  },
++  buildMailFrom: mocks.buildMailFrom,
++}));
++
++const INVITATION_ID =
++  "11111111-1111-4111-8111-111111111111";
++const AUTH_LINK =
++  "https://auth.example.test/verify?token=test-token&redirect_to=https%3A%2F%2Fapp.example.test";
++const INVITATION_URL =
++  "https://app.example.test/club/test/invitation?token=test-invitation-token";
++const PRIVATE_ERROR =
++  "private@example.test test-token test-api-key";
++
++// 新規ユーザー向けの固定入力を用意し、実メールや環境変数ファイルを使わない。
++function newUserInput(): ClubInvitationEmailInput {
++  return {
++    kind: "NEW_USER",
++    email: " MEMBER@EXAMPLE.TEST ",
++    name: " 招待者 ",
++    clubName: "テストクラブ",
++    role: "MEMBER",
++    expiresAt: new Date(
++      "2026-10-11T03:00:00Z",
++    ),
++    authLink: AUTH_LINK,
++  };
++}
++
++// 既存ユーザー向けにはAuthリンクではなく、クラブ参加案内URLだけを渡す。
++function existingUserInput(): ClubInvitationEmailInput {
++  return {
++    kind: "EXISTING_USER",
++    email: "member@example.test",
++    name: null,
++    clubName: "テストクラブ",
++    role: "COACH",
++    expiresAt: new Date(
++      "2026-10-11T03:00:00Z",
++    ),
++    invitationUrl: INVITATION_URL,
++  };
++}
++
++// SDKだけをmockし、本文生成と結果分類は実装を通して検証する。
++beforeEach(() => {
++  vi.resetAllMocks();
++  mocks.buildMailFrom.mockReturnValue(
++    "テストクラブ <from@example.test>",
++  );
++  mocks.send.mockResolvedValue({
++    data: {
++      id: "test-email-id",
++    },
++    error: null,
++    headers: {
++      privateValue: PRIVATE_ERROR,
++    },
++  });
++  vi.spyOn(console, "error").mockImplementation(
++    () => undefined,
++  );
++  vi.spyOn(console, "warn").mockImplementation(
++    () => undefined,
++  );
++});
++
++// 接続部から本文・宛先・外部エラーをログへ出していないことを確認する。
++afterEach(() => {
++  expect(console.error).not.toHaveBeenCalled();
++  expect(console.warn).not.toHaveBeenCalled();
++  vi.restoreAllMocks();
++});
++
++describe("buildClubInvitationEmail", () => {
++  it("新規ユーザーへ初回設定案内と認証リンクを生成する", () => {
++    const email = buildClubInvitationEmail(
++      newUserInput(),
++    );
++
++    expect(email.to).toBe(
++      "member@example.test",
++    );
++    expect(email.subject).toBe(
++      "【テストクラブ】クラブ参加のご案内",
++    );
++    expect(email.text).toContain(
++      "招待者 様",
++    );
++    expect(email.text).toContain(
++      "初回設定とクラブ参加",
++    );
++    expect(email.text).toContain(AUTH_LINK);
++    expect(email.html).toContain(
++      "&amp;redirect_to=",
++    );
++    expect(email.text).toContain(
++      "2026年10月11日",
++    );
++    expect(email.text).toContain(
++      "12:00（Asia/Tokyo）",
++    );
++  });
++
++  it("既存ユーザーへログインとクラブ参加を案内し、現在のroleを使う", () => {
++    const email = buildClubInvitationEmail(
++      existingUserInput(),
++    );
++
++    expect(email.text).toContain(
++      "ご招待者 様",
++    );
++    expect(email.text).toContain(
++      "指導者として招待",
++    );
++    expect(email.text).toContain(
++      "既存のアカウントでログイン",
++    );
++    expect(email.text).toContain(
++      INVITATION_URL,
++    );
++    expect(email.text).not.toContain(
++      AUTH_LINK,
++    );
++    expect(email.text).not.toContain(
++      "初回設定",
++    );
++  });
++
++  it("氏名・クラブ名・hrefのHTML注入と件名の改行混入を防ぐ", () => {
++    const email = buildClubInvitationEmail({
++      ...newUserInput(),
++      name: `<script>"&'</script>`,
++      clubName:
++        "<img src=x onerror=alert(1)>\r\nInjected",
++    });
++
++    expect(email.html).not.toContain(
++      "<script>",
++    );
++    expect(email.html).not.toContain(
++      "<img",
++    );
++    expect(email.html).toContain(
++      "&lt;script&gt;&quot;&amp;&#39;&lt;/script&gt;",
++    );
++    expect(email.html).toContain(
++      "&lt;img src=x onerror=alert(1)&gt; Injected",
++    );
++    expect(email.subject).not.toMatch(
++      /[\r\n]/u,
++    );
++    expect(email.html).toContain(
++      'href="https://auth.example.test/verify?token=test-token&amp;redirect_to=',
++    );
++  });
++
++  it("指定したクラブのタイムゾーンで期限を表示する", () => {
++    const email = buildClubInvitationEmail({
++      ...existingUserInput(),
++      timeZone: "UTC",
++    });
++
++    expect(email.text).toContain(
++      "03:00（UTC）",
++    );
++  });
++
++  it.each([
++    "javascript:alert(1)",
++    "data:text/html,unsafe",
++    "https://user:password@app.example.test/",
++    "https://app.example.test/\r\n",
++    "/club/test/invitation",
++  ])("危険な招待URLを拒否する", (authLink) => {
++    expect(() => buildClubInvitationEmail({
++      ...newUserInput(),
++      kind: "NEW_USER",
++      authLink,
++    })).toThrow(
++      "招待メールのリンクを確認してください。",
++    );
++  });
++
++  it.each([
++    "email",
++    "club name",
++    "expiration",
++    "time zone",
++  ])("不正な%sを固定エラーで拒否する", (failure) => {
++    const input = newUserInput();
++
++    if (failure === "email") {
++      input.email = "invalid";
++    }
++    if (failure === "club name") {
++      input.clubName = " ";
++    }
++    if (failure === "expiration") {
++      input.expiresAt = new Date(Number.NaN);
++    }
++    if (failure === "time zone") {
++      input.timeZone = PRIVATE_ERROR;
++    }
++
++    try {
++      buildClubInvitationEmail(input);
++      expect.fail("Validation must reject the input");
++    } catch (error) {
++      expect(error).toMatchObject({
++        code: "VALIDATION",
++        cause: undefined,
++      });
++      expect(String(error)).not.toContain(
++        PRIVATE_ERROR,
++      );
++    }
++  });
++});
++
++describe("sendClubInvitationEmail", () => {
++  it("招待対象だけへ設定済みFromで送り、受付IDだけを返す", async () => {
++    const result =
++      await sendClubInvitationEmail({
++        ...newUserInput(),
++        invitationId: INVITATION_ID,
++        attemptCount: 1,
++      });
++
++    expect(mocks.buildMailFrom).toHaveBeenCalledWith(
++      "テストクラブ",
++    );
++    const payload =
++      mocks.send.mock.calls[0][0];
++
++    expect(payload.from).toBe(
++      "テストクラブ <from@example.test>",
++    );
++    expect(payload.to).toBe(
++      "member@example.test",
++    );
++    expect(payload).not.toHaveProperty("cc");
++    expect(payload).not.toHaveProperty("bcc");
++    expect(payload.text).toContain(
++      AUTH_LINK,
++    );
++    expect(result).toEqual({
++      outcome: "ACCEPTED",
++      emailId: "test-email-id",
++    });
++  });
++
++  it("同じ試行は同じpayload・キー、新tokenの再送は別キーを使う", async () => {
++    const input = {
++      ...existingUserInput(),
++      invitationId: INVITATION_ID,
++      attemptCount: 1,
++    };
++
++    await sendClubInvitationEmail(input);
++    await sendClubInvitationEmail(input);
++    await sendClubInvitationEmail({
++      ...input,
++      kind: "EXISTING_USER",
++      invitationUrl:
++        "https://app.example.test/club/test/invitation?token=new-test-token",
++      attemptCount: 2,
++    });
++
++    expect(
++      mocks.send.mock.calls[0],
++    ).toEqual(
++      mocks.send.mock.calls[1],
++    );
++    expect(
++      mocks.send.mock.calls[0][1],
++    ).toEqual({
++      idempotencyKey:
++        `club-invitation/${INVITATION_ID}/1`,
++    });
++    expect(
++      mocks.send.mock.calls[2][1],
++    ).toEqual({
++      idempotencyKey:
++        `club-invitation/${INVITATION_ID}/2`,
++    });
++    expect(
++      JSON.stringify(mocks.send.mock.calls[2][1]),
++    ).not.toContain("new-test-token");
++  });
++
++  it.each([
++    400,
++    401,
++    403,
++    422,
++    429,
++  ])("明確なHTTP %s拒否は固定エラー識別子だけを返す", async (statusCode) => {
++    mocks.send.mockResolvedValue({
++      data: null,
++      error: {
++        name: "validation_error",
++        statusCode,
++        message: PRIVATE_ERROR,
++      },
++      headers: {
++        privateValue: PRIVATE_ERROR,
++      },
++    });
++
++    expect(
++      await sendClubInvitationEmail({
++        ...existingUserInput(),
++        invitationId: INVITATION_ID,
++        attemptCount: 1,
++      }),
++    ).toEqual({
++      outcome: "REJECTED",
++      errorCode: "EMAIL_SEND_FAILED",
++    });
++  });
++
++  it.each([
++    null,
++    408,
++    409,
++    500,
++    503,
++  ])("HTTP %sや通信障害は確実な未送信と扱わない", async (statusCode) => {
++    mocks.send.mockResolvedValue({
++      data: null,
++      error: {
++        name: "internal_server_error",
++        statusCode,
++        message: PRIVATE_ERROR,
++      },
++      headers: null,
++    });
++
++    expect(
++      await sendClubInvitationEmail({
++        ...newUserInput(),
++        invitationId: INVITATION_ID,
++        attemptCount: 1,
++      }),
++    ).toEqual({
++      outcome: "UNKNOWN",
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
++    });
++  });
++
++  it.each([
++    "application_error",
++    "missing result",
++    "thrown error",
++  ])("%sは原文を残さず結果不明を返す", async (failure) => {
++    if (failure === "application_error") {
++      mocks.send.mockResolvedValue({
++        data: null,
++        error: {
++          name: "application_error",
++          statusCode: 400,
++          message: PRIVATE_ERROR,
++        },
++      });
++    } else if (failure === "missing result") {
++      mocks.send.mockResolvedValue({
++        data: {},
++        error: null,
++      });
++    } else {
++      mocks.send.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++    }
++
++    expect(
++      await sendClubInvitationEmail({
++        ...newUserInput(),
++        invitationId: INVITATION_ID,
++        attemptCount: 1,
++      }),
++    ).toEqual({
++      outcome: "UNKNOWN",
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
++    });
++  });
++
++  it.each([
++    0,
++    -1,
++    1.5,
++    Number.NaN,
++    Number.POSITIVE_INFINITY,
++    Number.MAX_SAFE_INTEGER + 1,
++  ])("不正なattemptCountを送信前に拒否する", async (attemptCount) => {
++    await expect(
++      sendClubInvitationEmail({
++        ...newUserInput(),
++        invitationId: INVITATION_ID,
++        attemptCount,
++      }),
++    ).rejects.toMatchObject({
++      code: "VALIDATION",
++    });
++    expect(mocks.send).not.toHaveBeenCalled();
++  });
++
++  it("不正なInvitation IDを送信前に拒否する", async () => {
++    await expect(
++      sendClubInvitationEmail({
++        ...newUserInput(),
++        invitationId: "invalid",
++        attemptCount: 1,
++      }),
++    ).rejects.toMatchObject({
++      code: "VALIDATION",
++    });
++    expect(mocks.send).not.toHaveBeenCalled();
++  });
++});
+diff --git a/src/infrastructure/supabase/admin.ts b/src/infrastructure/supabase/admin.ts
+--- a/src/infrastructure/supabase/admin.ts
++++ b/src/infrastructure/supabase/admin.ts
+@@ -1,5 +1,5 @@
+ // src/infrastructure/supabase/admin.ts
+-// Storage操作専用のService Roleクライアント(アプリのPDFに使う)
++// Storage・Auth管理操作用のサーバー専用Service Roleクライアント
+ 
+ import "server-only";
+ 
+@@ -23,7 +23,7 @@
+     !serviceRoleKey
+   ) {
+     throw new Error(
+-      "Supabase Storage用の環境変数が設定されていません。",
++      "Supabase管理操作用の環境変数が設定されていません。",
+     );
+   }
+ 
+diff --git a/src/infrastructure/prisma/client.ts b/src/infrastructure/prisma/client.ts
+--- a/src/infrastructure/prisma/client.ts
++++ b/src/infrastructure/prisma/client.ts
+@@ -29,7 +29,7 @@
+   globalForPrisma.prisma ??
+   new PrismaClient({
+   adapter, // ★ ここでアダプターを渡すのが新ルール！
+-    log: ["error", "warn"],//エラーと警告だけターミナルにメッセージを表示する
++    log: [],//入力値を含み得るPrismaエラー原文を自動出力しない
+   });
+ 
+ if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;//本番環境（production）ではない時（＝開発中）だけ、倉庫に回線を保存しておく(本番環境では Next.js の挙動が異なるため、この使い回しテクニックは主に開発中のエラーを防ぐために使われる)

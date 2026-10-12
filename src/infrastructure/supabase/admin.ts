@@ -1,5 +1,5 @@
 // src/infrastructure/supabase/admin.ts
-// Storage操作専用のService Roleクライアント(アプリのPDFに使う)
+// Storage・Auth管理操作用のサーバー専用Service Roleクライアント
 
 import "server-only";
 
@@ -23,7 +23,7 @@ export function createSupabaseAdminClient() {
     !serviceRoleKey
   ) {
     throw new Error(
-      "Supabase Storage用の環境変数が設定されていません。",
+      "Supabase管理操作用の環境変数が設定されていません。",
     );
   }
 
