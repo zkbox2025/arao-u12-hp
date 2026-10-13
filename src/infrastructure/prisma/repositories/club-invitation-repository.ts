@@ -1377,7 +1377,7 @@ export async function completeClubInvitationPreparation(
   );
 }
 
-//送信完了もしくは送信失敗した際にクラブ招待テーブルのステータスをSENT（送信済み）またはEMAIL_FAILED（送信失敗）に変更する関数
+//サーバーからRESENDへのメール送信依頼を送信完了もしくは送信失敗した際にクラブ招待テーブルのステータスをSENT（送信済み）またはEMAIL_FAILED（送信失敗）に変更する関数
 async function markEmail(
   input: ClaimInput,//招待の引数（招待の引数＋claimToken）
   status:
@@ -1459,7 +1459,7 @@ async function markEmail(
   );
 }
 
-//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、招待メール送信の完了をDBに記録する関数
+//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、サーバーからRESENDへのメール送信依頼の完了をDBに記録する関数
 export async function markClubInvitationEmailSent(
   input: ClaimInput,//招待の引数（招待の引数＋claimToken）
 ) {
@@ -1469,7 +1469,7 @@ export async function markClubInvitationEmailSent(
   );
 }
 
-//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、招待メール送信の失敗をDBに記録する関数
+//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、サーバーからRESENDへのメール送信依頼の失敗をDBに記録する関数
 export async function markClubInvitationEmailFailed(
   input: ClaimInput,//招待の引数（招待の引数＋claimToken）
 ) {

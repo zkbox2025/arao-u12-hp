@@ -1,70 +1,112 @@
-diff --git a/src/infrastructure/supabase/club-invitation-auth.ts b/src/infrastructure/supabase/club-invitation-auth.ts
+diff --git a/src/application/club/invitation/send-club-invitation.ts b/src/application/club/invitation/send-club-invitation.ts
 new file mode 100644
 --- /dev/null
-+++ b/src/infrastructure/supabase/club-invitation-auth.ts
-@@ -0,0 +1,248 @@
-+// src/infrastructure/supabase/club-invitation-auth.ts
-+// 招待用Auth操作の返却値を絞り、ID・メールを照合するサーバー専用接続部。
++++ b/src/application/club/invitation/send-club-invitation.ts
+@@ -0,0 +1,548 @@
++// src/application/club/invitation/send-club-invitation.ts
++// OWNER認可結果を受け取り、招待の準備・DB保存・外部配送を順に進める。
 +
 +import "server-only";
 +
-+import {
-+  isAuthApiError,
-+  type User,
-+} from "@supabase/supabase-js";
 +import { z } from "zod";
 +
 +import {
 +  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
++  validateClubMemberInviteFormValues,
++  type ValidClubMemberInviteInput,
 +} from "@/domain/club/invitation/invitation-form";
 +import { DomainError } from "@/domain/shared/domain-error";
-+import { normalizeEmail } from "@/domain/shared/email";
++import type {
++  ClubInvitationEmailInput,
++  sendClubInvitationEmail,
++} from "@/lib/mail/club-invitation-mail";
 +import {
-+  createSupabaseAdminClient,
-+} from "@/src/infrastructure/supabase/admin";
++  claimClubInvitationResend,
++  completeClubInvitationPreparation,
++  markClubInvitationEmailFailed,
++  markClubInvitationEmailSent,
++  recordClubInvitationAuthUser,
++  releaseClubInvitationClaim,
++  reserveClubInvitation,
++  type ClubInvitationFailure,
++  type ClubInvitationProcessing,
++} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++import {
++  createSecureToken,
++  hashToken,
++} from "@/src/infrastructure/security/token";
++import {
++  generateClubInvitationAuthLink,
++  getClubInvitationAuthUserById,
++} from "@/src/infrastructure/supabase/club-invitation-auth";
++import type { Club } from "@/types/prisma";
 +
-+export type ClubInvitationAuthUser = {
-+  id: string;
-+  email: string;
-+  isEmailConfirmed: boolean;
++type InvitationClub = Pick<
++  Club,
++  "id" | "name" | "slug" | "timezone" | "appBaseUrl"
++>;
++
++type OwnerContext = {
++  club: InvitationClub;
++  actorMembershipId: string;
 +};
 +
-+export type ClubInvitationAuthLink = {
-+  user: ClubInvitationAuthUser;
-+  actionLink: string;
++export type ClubInvitationLinks = {
++  invitationUrl: string;
++  authRedirectTo: string;
++};
++
++// 後続の認可済み呼び出し元が実装済みルートに合わせて構築する。ブラウザ入力は禁止。
++export type ClubInvitationLinkBuilder = (
++  input: {
++    origin: string;
++    clubId: string;
++    clubSlug: string;
++    rawToken: string;
++  },
++) => ClubInvitationLinks;
++
++export type SendClubInvitationResult =
++  | ClubInvitationFailure
++  | {
++      outcome: "CONFIGURATION_ERROR";
++    }
++  | {
++      outcome: "RESERVATION_FAILED";
++    }
++  | {
++      outcome: "PREPARATION_FAILED";
++      invitationId: string;
++      stage: "AUTH" | "AUTH_RECORD" | "PREPARATION";
++      recovery: "RESEND" | "MANUAL";
++    }
++  | {
++      outcome: "SENT" | "EMAIL_FAILED" | "DELIVERY_UNKNOWN";
++      invitationId: string;
++    }
++  | {
++      outcome: "DELIVERY_RECORDING_FAILED";
++      invitationId: string;
++      delivery: "ACCEPTED" | "REJECTED";
++    };
++
++type Attempt = {
++  club: InvitationClub;
++  owner: {
++    clubId: string;
++    actorMembershipId: string;
++  };
++  tokenHash: string;
++  links: ClubInvitationLinks;
++  sendEmail: typeof sendClubInvitationEmail;
 +};
 +
 +const emailSchema = z.email().max(
 +  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
 +);
-+const userIdSchema = z.uuid();
 +
-+// 呼び出し元のメールを正規化し、外部APIへ送る前に検証する。
-+function expectedEmail(value: string): string {
-+  const email = normalizeEmail(value);
-+
-+  if (!emailSchema.safeParse(email).success) {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待対象のメールアドレスを確認してください。",
-+    );
-+  }
-+
-+  return email;
-+}
-+
-+// SDKのUUID検証と同じく、不正なIDを外部APIへ渡さない。
-+function assertUserId(value: string): void {
-+  if (!userIdSchema.safeParse(value).success) {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待対象の認証ユーザーを確認してください。",
-+    );
-+  }
-+}
-+
-+// サーバーで構築したURLだけを受け取り、危険なschemeや資格情報を拒否する。
-+function webUrl(value: string): string {
++// 設定・リンクのURLを検証する。エラーに元のURLやtokenを含めない。
++function webUrl(value: string): URL {
 +  const url = new URL(value);
 +
 +  if (
@@ -79,185 +121,443 @@ new file mode 100644
 +    throw new Error("Invalid invitation URL");
 +  }
 +
-+  return url.toString();
++  return url;
 +}
 +
-+// Authレスポンス全体を返さず、期待するID・正規化メールとの一致を確認する。
-+function verifiedUser(
-+  user: User | null,
-+  email: string,
-+  authUserId?: string,
-+): ClubInvitationAuthUser {
++// DB更新前に送信設定・クラブ情報・後続ルートへのリンクを確定する。
++async function prepareAttempt(
++  input: OwnerContext,
++  buildLinks: ClubInvitationLinkBuilder,
++): Promise<Attempt> {
++  const club = {
++    ...input.club,
++  };
++  const configuredFrom =
++    process.env.MAIL_FROM_ADDRESS?.trim();
++  const fromAddress =
++    configuredFrom ?? "onboarding@resend.dev";
++
 +  if (
-+    !user ||
-+    !userIdSchema.safeParse(user.id).success ||
-+    !user.email ||
-+    normalizeEmail(user.email) !== email ||
++    !process.env.RESEND_API_KEY?.trim() ||
++    !emailSchema.safeParse(fromAddress).success ||
 +    (
-+      authUserId !== undefined &&
-+      user.id !== authUserId
-+    )
++      process.env.NODE_ENV === "production" &&
++      !configuredFrom
++    ) ||
++    !process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
++    !process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
++    !club.name.trim() ||
++    !club.slug.trim() ||
++    !club.timezone.trim()
 +  ) {
-+    throw new Error("Invitation Auth user mismatch");
++    throw new Error("Invitation configuration is not available");
 +  }
 +
++  webUrl(process.env.NEXT_PUBLIC_SUPABASE_URL!.trim());
++
++  // クラブ別URLを優先し、未設定ならサーバーのAPP_BASE_URLを使う。
++  const configuredOrigin =
++    club.appBaseUrl?.trim() ||
++    process.env.APP_BASE_URL?.trim();
++  const origin = webUrl(configuredOrigin ?? "");
++
++  if (
++    origin.pathname !== "/" ||
++    origin.search ||
++    origin.hash ||
++    (
++      process.env.NODE_ENV === "production" &&
++      origin.protocol !== "https:"
++    )
++  ) {
++    throw new Error("Invalid invitation origin");
++  }
++
++  new Intl.DateTimeFormat("ja-JP", {
++    timeZone: club.timezone,
++  }).format(new Date(0));
++
++  const rawToken = createSecureToken();
++  // 実ルートを推測しない。呼び出し元は両URLに同じ招待tokenを引き継ぐこと。
++  const links = buildLinks({
++    origin: origin.origin,
++    clubId: club.id,
++    clubSlug: club.slug,
++    rawToken,
++  });
++  const invitationUrl = webUrl(
++    links.invitationUrl,
++  );
++  const authRedirectTo = webUrl(
++    links.authRedirectTo,
++  );
++
++  if (
++    invitationUrl.origin !== origin.origin ||
++    authRedirectTo.origin !== origin.origin ||
++    invitationUrl.hash ||
++    authRedirectTo.hash
++  ) {
++    throw new Error("Invitation link origin mismatch");
++  }
++
++  // 設定不足でモジュール初期化が失敗しても、PREPARINGを作成する前に止める。
++  const mail = await import(
++    "@/lib/mail/club-invitation-mail"
++  );
++
 +  return {
-+    id: user.id,
-+    email,
-+    isEmailConfirmed: Boolean(
-+      user.email_confirmed_at,
-+    ),
++    club,
++    owner: {
++      clubId: club.id,
++      actorMembershipId: input.actorMembershipId,
++    },
++    tokenHash: hashToken(rawToken),
++    links: {
++      invitationUrl: invitationUrl.toString(),
++      authRedirectTo: authRedirectTo.toString(),
++    },
++    sendEmail: mail.sendClubInvitationEmail,
 +  };
 +}
 +
-+// 既知のAuth IDを照合し、未確認アカウントと利用可能な既存アカウントを区別する。
-+export async function getClubInvitationAuthUserById(
-+  input: {
-+    authUserId: string;
-+    email: string;
-+  },
-+): Promise<ClubInvitationAuthUser | null> {
-+  const email = expectedEmail(input.email);
-+  assertUserId(input.authUserId);
++// 外部処理後も実時刻でlease・招待期限を確認し、古い処理から送信しない。
++function hasLiveClaim(
++  attempt: Attempt,
++  invitation: ClubInvitationProcessing,
++  status: "PREPARING" | "READY_TO_SEND",
++): boolean {
++  const now = Date.now();
 +
++  return (
++    invitation.clubId === attempt.owner.clubId &&
++    invitation.status === status &&
++    Boolean(invitation.claimToken) &&
++    invitation.leaseExpiresAt.getTime() > now &&
++    invitation.expiresAt.getTime() > now
++  );
++}
++
++// 配送前の失敗だけでclaim解除を試みる。失敗しても既存leaseの失効で再試行できる。
++async function releasePreparationClaim(
++  attempt: Attempt,
++  invitation: ClubInvitationProcessing,
++): Promise<void> {
 +  try {
-+    const supabase = createSupabaseAdminClient();
-+    const {
-+      data,
-+      error,
-+    } =
-+      await supabase.auth.admin.getUserById(
-+        input.authUserId,
-+      );
-+
-+    if (error) {
-+      if (
-+        isAuthApiError(error) &&
-+        error.status === 404 &&
-+        error.code === "user_not_found"
-+      ) {
-+        return null;
-+      }
-+
-+      throw error;
-+    }
-+
-+    return verifiedUser(
-+      data.user,
-+      email,
-+      input.authUserId,
-+    );
++    await releaseClubInvitationClaim({
++      ...attempt.owner,
++      invitationId: invitation.id,
++      claimToken: invitation.claimToken,
++    });
 +  } catch {
-+    throw new DomainError(
-+      "EXTERNAL_SERVICE",
-+      "招待対象の認証ユーザーを確認できませんでした。",
-+    );
++    // 解除失敗の原文を返さず、Auth IDやPREPARINGの復旧地点をそのまま残す。
 +  }
 +}
 +
-+// 新規・未確認ユーザーのリンクだけを生成し、メール配送はResend側へ委ねる。
-+export async function generateClubInvitationAuthLink(
-+  input: {
-+    email: string;
-+    redirectTo: string;
-+    expectedAuthUserId?: string;
-+  },
-+): Promise<ClubInvitationAuthLink> {
-+  const email = expectedEmail(input.email);
-+  let redirectTo: string;
++// 新規・再送で共通するAuth確認、DB準備、配送結果の記録を行う。
++async function prepareAndSend(
++  attempt: Attempt,
++  invitation: ClubInvitationProcessing,
++): Promise<SendClubInvitationResult> {
++  const claim = {
++    ...attempt.owner,
++    invitationId: invitation.id,
++    claimToken: invitation.claimToken,
++  };
++  const knownAuthUserId =
++    invitation.authUserId ??
++    invitation.existingUserId;
++  let stage: "AUTH" | "AUTH_RECORD" | "PREPARATION" =
++    "AUTH";
++  let recovery: "RESEND" | "MANUAL" =
++    knownAuthUserId ? "RESEND" : "MANUAL";
++  let prepared: ClubInvitationProcessing;
++  let emailKind:
++    | {
++        kind: "NEW_USER";
++        authLink: string;
++      }
++    | {
++        kind: "EXISTING_USER";
++        invitationUrl: string;
++      };
 +
 +  try {
-+    redirectTo = webUrl(input.redirectTo);
-+  } catch {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待後の移動先を確認してください。",
-+    );
-+  }
++    if (
++      !hasLiveClaim(attempt, invitation, "PREPARING") ||
++      (
++        invitation.authUserId &&
++        invitation.existingUserId &&
++        invitation.authUserId !== invitation.existingUserId
++      )
++    ) {
++      throw new Error("Invitation preparation mismatch");
++    }
 +
-+  if (input.expectedAuthUserId !== undefined) {
-+    assertUserId(input.expectedAuthUserId);
-+  }
++    // AppUserの有無だけで初回設定済みと判断せず、実際のAuth確認状態を使う。
++    const existing = knownAuthUserId
++      ? await getClubInvitationAuthUserById({
++          authUserId: knownAuthUserId,
++          email: invitation.email,
++        })
++      : null;
 +
-+  try {
-+    // 復旧では同じIDを事前確認し、確認済みアカウントへinviteを再発行しない。
-+    if (input.expectedAuthUserId !== undefined) {
-+      const existing =
-+        await getClubInvitationAuthUserById({
-+          authUserId: input.expectedAuthUserId,
-+          email,
++    if (
++      knownAuthUserId &&
++      !existing
++    ) {
++      recovery = "MANUAL";
++      throw new Error("Existing Auth user is not available");
++    }
++
++    let verifiedAuthUser;
++
++    if (existing?.isEmailConfirmed) {
++      verifiedAuthUser = existing;
++      emailKind = {
++        kind: "EXISTING_USER",
++        invitationUrl: attempt.links.invitationUrl,
++      };
++    } else {
++      const generated =
++        await generateClubInvitationAuthLink({
++          email: invitation.email,
++          redirectTo: attempt.links.authRedirectTo,
++          ...(knownAuthUserId
++            ? {
++                expectedAuthUserId: knownAuthUserId,
++              }
++            : {}),
 +        });
 +
-+      if (
-+        !existing ||
-+        existing.isEmailConfirmed
-+      ) {
-+        throw new Error("Auth invitation is not available");
-+      }
++      verifiedAuthUser = generated.user;
++      emailKind = {
++        kind: "NEW_USER",
++        authLink: generated.actionLink,
++      };
 +    }
 +
-+    const supabase = createSupabaseAdminClient();
-+    const {
-+      data,
-+      error,
-+    } =
-+      await supabase.auth.admin.generateLink({
-+        type: "invite",
-+        email,
-+        options: {
-+          redirectTo,
-+        },
++    stage = "AUTH_RECORD";
++    const recorded =
++      await recordClubInvitationAuthUser({
++        ...claim,
++        verifiedAuthUser,
 +      });
 +
-+    if (
-+      error ||
-+      !data.properties ||
-+      data.properties.verification_type !== "invite"
-+    ) {
-+      throw new Error("Auth invitation link is not available");
++    if (recorded.outcome !== "UPDATED") {
++      if (
++        recorded.outcome === "RULE_VIOLATION" ||
++        recorded.outcome === "MEMBERSHIP_EXISTS" ||
++        recorded.outcome === "NOT_FOUND"
++      ) {
++        recovery = "MANUAL";
++      }
++
++      throw new Error("Invitation Auth recording failed");
 +    }
 +
-+    const user = verifiedUser(
-+      data.user,
-+      email,
-+      input.expectedAuthUserId,
-+    );
-+    const actionLink = webUrl(
-+      data.properties.action_link,
-+    );
-+    const linkRedirectTo =
-+      new URL(actionLink).searchParams.get(
-+        "redirect_to",
-+      );
++    // ここまで保存できた場合は、同じAuth IDを使う再送で準備を復旧できる。
++    recovery = "RESEND";
++    stage = "PREPARATION";
++    const result =
++      await completeClubInvitationPreparation({
++        ...claim,
++        verifiedAuthUser,
++      });
++
++    if (result.outcome !== "PREPARED") {
++      if (
++        result.outcome === "RULE_VIOLATION" ||
++        result.outcome === "MEMBERSHIP_EXISTS" ||
++        result.outcome === "NOT_FOUND"
++      ) {
++        recovery = "MANUAL";
++      }
++
++      throw new Error("Invitation persistence failed");
++    }
++
++    prepared = result.invitation;
 +
 +    if (
-+      user.isEmailConfirmed ||
-+      webUrl(data.properties.redirect_to) !== redirectTo ||
-+      !linkRedirectTo ||
-+      webUrl(linkRedirectTo) !== redirectTo
++      prepared.id !== invitation.id ||
++      prepared.claimToken !== invitation.claimToken ||
++      !prepared.membershipId ||
++      !hasLiveClaim(attempt, prepared, "READY_TO_SEND")
 +    ) {
-+      throw new Error("Auth invitation link mismatch");
++      throw new Error("Invitation delivery claim is not available");
 +    }
++  } catch {
++    await releasePreparationClaim(
++      attempt,
++      invitation,
++    );
 +
 +    return {
-+      user,
-+      actionLink,
++      outcome: "PREPARATION_FAILED",
++      invitationId: invitation.id,
++      stage,
++      recovery,
 +    };
++  }
++
++  const email: ClubInvitationEmailInput = {
++    email: prepared.email,
++    name: prepared.name,
++    clubName: attempt.club.name,
++    role: prepared.role,
++    expiresAt: prepared.expiresAt,
++    timeZone: attempt.club.timezone,
++    ...emailKind,
++  };
++  let delivery;
++
++  try {
++    // transaction外で一度だけ送信する。同じ試行のpayloadを作り直して自動再送しない。
++    delivery = await attempt.sendEmail({
++      ...email,
++      invitationId: prepared.id,
++      attemptCount: prepared.attemptCount,
++    });
 +  } catch {
-+    // 外部エラーやAuthレスポンスをcauseへ残さず、固定メッセージへ変換する。
++    // 例外でも外部で受付済みの可能性があるため、EMAIL_FAILEDへ更新しない。
++    return {
++      outcome: "DELIVERY_UNKNOWN",
++      invitationId: prepared.id,
++    };
++  }
++
++  if (delivery.outcome === "UNKNOWN") {
++    // 同じtoken・payloadを別リクエストで復元するAPIはないため、leaseを保持する。
++    return {
++      outcome: "DELIVERY_UNKNOWN",
++      invitationId: prepared.id,
++    };
++  }
++
++  try {
++    const recorded = delivery.outcome === "ACCEPTED"
++      ? await markClubInvitationEmailSent(claim)
++      : await markClubInvitationEmailFailed(claim);
++
++    if (recorded.outcome === "UPDATED") {
++      return {
++        outcome: delivery.outcome === "ACCEPTED"
++          ? "SENT"
++          : "EMAIL_FAILED",
++        invitationId: prepared.id,
++      };
++    }
++  } catch {
++    // 受付後のDB障害を確実な未送信と扱わず、READY_TO_SENDとleaseを残す。
++  }
++
++  return {
++    outcome: "DELIVERY_RECORDING_FAILED",
++    invitationId: prepared.id,
++    delivery: delivery.outcome,
++  };
++}
++
++// 認可済みクラブ情報と検証済み入力から、新規招待を予約して準備・配送する。
++export async function inviteClubMember(
++  input: OwnerContext & ValidClubMemberInviteInput,
++  buildLinks: ClubInvitationLinkBuilder,
++): Promise<SendClubInvitationResult> {
++  const validation =
++    validateClubMemberInviteFormValues(input);
++
++  if (!validation.success) {
 +    throw new DomainError(
-+      "EXTERNAL_SERVICE",
-+      "招待用の認証リンクを準備できませんでした。",
++      "VALIDATION",
++      "招待する入力値を確認してください。",
 +    );
 +  }
++
++  let attempt: Attempt;
++
++  try {
++    attempt = await prepareAttempt(
++      input,
++      buildLinks,
++    );
++  } catch {
++    return {
++      outcome: "CONFIGURATION_ERROR",
++    };
++  }
++
++  try {
++    const result = await reserveClubInvitation({
++      ...attempt.owner,
++      ...validation.data,
++      tokenHash: attempt.tokenHash,
++    });
++
++    if (result.outcome !== "RESERVED") {
++      return result;
++    }
++
++    return prepareAndSend(
++      attempt,
++      result.invitation,
++    );
++  } catch {
++    return {
++      outcome: "RESERVATION_FAILED",
++    };
++  }
 +}
-diff --git a/src/infrastructure/supabase/club-invitation-auth.test.ts b/src/infrastructure/supabase/club-invitation-auth.test.ts
++
++// 再送ではRepositoryが未承諾・INVITED・cooldownを確認し、同じ招待のtokenを更新する。
++export async function resendClubInvitation(
++  input: OwnerContext & {
++    invitationId: string;
++  },
++  buildLinks: ClubInvitationLinkBuilder,
++): Promise<SendClubInvitationResult> {
++  let attempt: Attempt;
++
++  try {
++    attempt = await prepareAttempt(
++      input,
++      buildLinks,
++    );
++  } catch {
++    return {
++      outcome: "CONFIGURATION_ERROR",
++    };
++  }
++
++  try {
++    const result =
++      await claimClubInvitationResend({
++        ...attempt.owner,
++        invitationId: input.invitationId,
++        tokenHash: attempt.tokenHash,
++      });
++
++    if (result.outcome !== "CLAIMED") {
++      return result;
++    }
++
++    return prepareAndSend(
++      attempt,
++      result.invitation,
++    );
++  } catch {
++    return {
++      outcome: "RESERVATION_FAILED",
++    };
++  }
++}
+diff --git a/src/application/club/invitation/send-club-invitation.test.ts b/src/application/club/invitation/send-club-invitation.test.ts
 new file mode 100644
 --- /dev/null
-+++ b/src/infrastructure/supabase/club-invitation-auth.test.ts
-@@ -0,0 +1,486 @@
-+// src/infrastructure/supabase/club-invitation-auth.test.ts
-+// AuthのID・メール照合、復旧条件、返却値とエラーの安全性を検証する。
++++ b/src/application/club/invitation/send-club-invitation.test.ts
+@@ -0,0 +1,922 @@
++// src/application/club/invitation/send-club-invitation.test.ts
++// 実Repositoryのoutcomeを模したmockで、障害時の復旧地点と外部呼び出し順を検証する。
 +
 +import {
 +  afterEach,
@@ -267,124 +567,298 @@ new file mode 100644
 +  it,
 +  vi,
 +} from "vitest";
-+import {
-+  AuthApiError,
-+} from "@supabase/supabase-js";
 +
-+import { DomainError } from "@/domain/shared/domain-error";
 +import {
-+  generateClubInvitationAuthLink,
-+  getClubInvitationAuthUserById,
-+} from "@/src/infrastructure/supabase/club-invitation-auth";
++  inviteClubMember,
++  resendClubInvitation,
++  type ClubInvitationLinkBuilder,
++} from "@/src/application/club/invitation/send-club-invitation";
++import type {
++  ClubInvitationProcessing,
++} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
 +
 +const mocks = vi.hoisted(() => ({
++  reserve: vi.fn(),
++  claim: vi.fn(),
++  recordAuth: vi.fn(),
++  prepare: vi.fn(),
++  markSent: vi.fn(),
++  markFailed: vi.fn(),
++  release: vi.fn(),
++  getAuth: vi.fn(),
 +  generateLink: vi.fn(),
-+  getUserById: vi.fn(),
-+  createAdmin: vi.fn(),
-+  createClient: vi.fn(),
++  sendEmail: vi.fn(),
++  createToken: vi.fn(),
 +}));
 +
 +vi.mock("server-only", () => ({}));
 +vi.mock(
-+  "@/src/infrastructure/supabase/admin",
++  "@/src/infrastructure/prisma/repositories/club-invitation-repository",
 +  () => ({
-+    createSupabaseAdminClient:
-+      mocks.createAdmin,
++    reserveClubInvitation: mocks.reserve,
++    claimClubInvitationResend: mocks.claim,
++    recordClubInvitationAuthUser: mocks.recordAuth,
++    completeClubInvitationPreparation: mocks.prepare,
++    markClubInvitationEmailSent: mocks.markSent,
++    markClubInvitationEmailFailed: mocks.markFailed,
++    releaseClubInvitationClaim: mocks.release,
 +  }),
 +);
 +vi.mock(
-+  "@supabase/supabase-js",
++  "@/src/infrastructure/supabase/club-invitation-auth",
++  () => ({
++    getClubInvitationAuthUserById: mocks.getAuth,
++    generateClubInvitationAuthLink: mocks.generateLink,
++  }),
++);
++vi.mock(
++  "@/lib/mail/club-invitation-mail",
++  () => ({
++    sendClubInvitationEmail: mocks.sendEmail,
++  }),
++);
++vi.mock(
++  "@/src/infrastructure/security/token",
 +  async (importOriginal) => ({
 +    ...await importOriginal<
-+      typeof import("@supabase/supabase-js")
++      typeof import("@/src/infrastructure/security/token")
 +    >(),
-+    createClient: mocks.createClient,
++    createSecureToken: mocks.createToken,
 +  }),
 +);
 +
-+const USER_ID =
-+  "11111111-1111-4111-8111-111111111111";
-+const OTHER_USER_ID =
-+  "22222222-2222-4222-8222-222222222222";
-+const EMAIL = "member@example.test";
-+const REDIRECT_TO =
-+  "https://app.example.test/auth/confirm?next=%2Fclub%2Ftest";
-+const ACTION_LINK =
-+  "https://auth.example.test/auth/v1/verify?type=invite&token=test-token" +
-+  `&redirect_to=${encodeURIComponent(REDIRECT_TO)}`;
-+const PRIVATE_ERROR =
-+  "private@example.test test-service-role-key test-token";
++const NOW = new Date("2026-10-12T03:00:00Z");
++const CLUB_ID = "11111111-1111-4111-8111-111111111111";
++const INVITATION_ID = "22222222-2222-4222-8222-222222222222";
++const USER_ID = "33333333-3333-4333-8333-333333333333";
++const MEMBER_ID = "44444444-4444-4444-8444-444444444444";
++const RAW_TOKEN = "A".repeat(43);
++const NEW_TOKEN = "B".repeat(43);
++const AUTH_LINK = "https://auth.example.test/verify?token=test-auth-secret";
++const PRIVATE_ERROR = "private@example.test test-api-secret test-auth-secret";
++const owner = {
++  club: {
++    id: CLUB_ID,
++    name: "テストクラブ",
++    slug: "test",
++    timezone: "Asia/Tokyo",
++    appBaseUrl: "https://club.example.test",
++  },
++  actorMembershipId:
++    "55555555-5555-4555-8555-555555555555",
++};
 +
-+// 必要項目以外に機密情報を持つAuthレスポンスを用意する。
-+function authUser() {
++let saved: ClubInvitationProcessing | null;
++let userSaved: boolean;
++let membershipSaved: boolean;
++let claimReleased: boolean;
++let persistedHash: string | null;
++
++// パスは本番の未実装ルートを推測せず、テスト専用のサーバーURL生成関数で供給する。
++const buildLinks: ClubInvitationLinkBuilder = (
++  input,
++) => ({
++  invitationUrl:
++    `${input.origin}/test-accept?token=${input.rawToken}`,
++  authRedirectTo:
++    `${input.origin}/test-auth-return?token=${input.rawToken}`,
++});
++
++// Repositoryが返す処理用DTOと同じ項目だけでfixtureを作る。
++function processing(
++  overrides: Partial<ClubInvitationProcessing> = {},
++): ClubInvitationProcessing {
 +  return {
-+    id: USER_ID,
-+    email: EMAIL,
-+    email_confirmed_at: undefined,
-+    user_metadata: {
-+      privateValue: PRIVATE_ERROR,
-+    },
-+    app_metadata: {
-+      privateValue: PRIVATE_ERROR,
-+    },
-+    identities: [],
++    id: INVITATION_ID,
++    clubId: CLUB_ID,
++    email: "member@example.test",
++    name: "招待者",
++    role: "MEMBER",
++    status: "PREPARING",
++    authUserId: null,
++    existingUserId: null,
++    membershipId: null,
++    claimToken: "current-claim",
++    leaseExpiresAt: new Date(
++      NOW.getTime() + 5 * 60_000,
++    ),
++    expiresAt: new Date(
++      NOW.getTime() + 24 * 60 * 60_000,
++    ),
++    attemptCount: 1,
++    ...overrides,
 +  };
 +}
 +
-+// リンク・OTP・ハッシュを含むSDKレスポンスから、必要な値だけを返せるか検証する。
-+function linkResponse() {
-+  return {
-+    data: {
-+      user: authUser(),
-+      properties: {
-+        action_link: ACTION_LINK,
-+        redirect_to: REDIRECT_TO,
-+        verification_type: "invite",
-+        hashed_token: "test-hashed-token",
-+        email_otp: "test-otp",
-+      },
-+    },
-+    error: null,
-+  };
++// mock内の保存状態を取得する。実DBの制約・rollback自体は既存統合テストの責務。
++function row(): ClubInvitationProcessing {
++  if (!saved) {
++    throw new Error("Missing test invitation");
++  }
++
++  return saved;
 +}
 +
-+// 外部エラーの原文やcauseを保持せず、固定のDomainErrorだけを返すか確認する。
-+async function expectSafeExternal(
-+  operation: Promise<unknown>,
-+): Promise<void> {
-+  const error = await operation.catch(
-+    (value: unknown) => value,
++// 新規招待の公開入口を使い、email・氏名の正規化も確認する。
++function invite() {
++  return inviteClubMember(
++    {
++      ...owner,
++      email: " MEMBER@EXAMPLE.TEST ",
++      name: " 招待者 ",
++      role: "MEMBER",
++    },
++    buildLinks,
 +  );
++}
 +
-+  expect(error).toBeInstanceOf(DomainError);
-+  expect(error).toMatchObject({
-+    code: "EXTERNAL_SERVICE",
-+    cause: undefined,
-+  });
-+  expect(String(error)).not.toContain(
++// 既存Membershipを持つ招待で、同じInvitationの再送を開始する。
++function resend() {
++  return resendClubInvitation(
++    {
++      ...owner,
++      invitationId: INVITATION_ID,
++    },
++    buildLinks,
++  );
++}
++
++// publicな結果へ秘密値・氏名・メールを返していないことを確認する。
++function expectSafeResult(value: unknown): void {
++  const text = JSON.stringify(value);
++
++  for (const secret of [
++    RAW_TOKEN,
++    NEW_TOKEN,
++    AUTH_LINK,
 +    PRIVATE_ERROR,
-+  );
++    "member@example.test",
++    "招待者",
++    "current-claim",
++  ]) {
++    expect(text).not.toContain(secret);
++  }
 +}
 +
-+// 各テストでSDKを独立させ、実際のAuth・環境変数ファイルへ接続しない。
++// 外部サービスとDBの代わりに、commit済み段階だけを記録するmockを設定する。
 +beforeEach(() => {
 +  vi.resetAllMocks();
-+  mocks.createAdmin.mockReturnValue({
-+    auth: {
-+      admin: {
-+        generateLink: mocks.generateLink,
-+        getUserById: mocks.getUserById,
-+      },
-+    },
++  vi.useFakeTimers({
++    toFake: ["Date"],
 +  });
-+  mocks.generateLink.mockResolvedValue(
-+    linkResponse(),
++  vi.setSystemTime(NOW);
++  vi.stubEnv("NODE_ENV", "development");
++  vi.stubEnv("RESEND_API_KEY", "test-api-key");
++  vi.stubEnv("MAIL_FROM_ADDRESS", "from@example.test");
++  vi.stubEnv(
++    "NEXT_PUBLIC_SUPABASE_URL",
++    "https://auth.example.test",
 +  );
-+  mocks.getUserById.mockResolvedValue({
-+    data: {
-+      user: authUser(),
++  vi.stubEnv(
++    "SUPABASE_SERVICE_ROLE_KEY",
++    "test-service-role-key",
++  );
++  vi.stubEnv("APP_BASE_URL", "https://app.example.test");
++  saved = null;
++  userSaved = false;
++  membershipSaved = false;
++  claimReleased = false;
++  persistedHash = null;
++  mocks.createToken.mockReturnValue(RAW_TOKEN);
++  mocks.reserve.mockImplementation(async (input) => {
++    saved = processing({
++      email: input.email,
++      name: input.name,
++      role: input.role,
++    });
++    persistedHash = input.tokenHash;
++
++    return {
++      outcome: "RESERVED",
++      invitation: {
++        ...saved,
++      },
++    };
++  });
++  mocks.claim.mockImplementation(async (input) => {
++    saved = processing({
++      authUserId: USER_ID,
++      existingUserId: USER_ID,
++      membershipId: MEMBER_ID,
++      role: "COACH",
++      attemptCount: 2,
++    });
++    userSaved = true;
++    membershipSaved = true;
++    persistedHash = input.tokenHash;
++
++    return {
++      outcome: "CLAIMED",
++      invitation: {
++        ...saved,
++      },
++    };
++  });
++  mocks.recordAuth.mockImplementation(async (input) => {
++    row().authUserId = input.verifiedAuthUser.id;
++
++    return {
++      outcome: "UPDATED",
++    };
++  });
++  mocks.prepare.mockImplementation(async () => {
++    userSaved = true;
++    membershipSaved = true;
++    row().status = "READY_TO_SEND";
++    row().membershipId = MEMBER_ID;
++    row().existingUserId = USER_ID;
++
++    return {
++      outcome: "PREPARED",
++      invitation: {
++        ...row(),
++      },
++    };
++  });
++  mocks.release.mockImplementation(async () => {
++    claimReleased = true;
++
++    return {
++      outcome: "UPDATED",
++    };
++  });
++  mocks.markSent.mockImplementation(async () => {
++    row().status = "SENT";
++    claimReleased = true;
++
++    return {
++      outcome: "UPDATED",
++    };
++  });
++  mocks.markFailed.mockImplementation(async () => {
++    row().status = "EMAIL_FAILED";
++    claimReleased = true;
++
++    return {
++      outcome: "UPDATED",
++    };
++  });
++  mocks.getAuth.mockResolvedValue({
++    id: USER_ID,
++    email: "member@example.test",
++    isEmailConfirmed: true,
++  });
++  mocks.generateLink.mockResolvedValue({
++    user: {
++      id: USER_ID,
++      email: "member@example.test",
++      isEmailConfirmed: false,
 +    },
-+    error: null,
++    actionLink: AUTH_LINK,
++  });
++  mocks.sendEmail.mockResolvedValue({
++    outcome: "ACCEPTED",
++    emailId: "provider-email-id",
 +  });
 +  vi.spyOn(console, "error").mockImplementation(
 +    () => undefined,
@@ -394,1111 +868,613 @@ new file mode 100644
 +  );
 +});
 +
-+// ログも機密情報を出していないことを確認してからmockと環境変数を戻す。
++// ログ、時刻、環境変数のmockを戻す。秘密情報を含む実環境ファイルは読まない。
 +afterEach(() => {
 +  expect(console.error).not.toHaveBeenCalled();
 +  expect(console.warn).not.toHaveBeenCalled();
 +  vi.restoreAllMocks();
 +  vi.unstubAllEnvs();
++  vi.useRealTimers();
 +});
 +
-+describe("club invitation Auth adapter", () => {
-+  it("正規化emailでinviteリンクだけを生成し、返却値を絞る", async () => {
-+    const result =
-+      await generateClubInvitationAuthLink({
-+        email: " ＭＥＭＢＥＲ＠ＥＸＡＭＰＬＥ．ＴＥＳＴ ",
-+        redirectTo: REDIRECT_TO,
-+      });
++describe("inviteClubMember / resendClubInvitation", () => {
++  it("新規Authを記録してDB準備後にだけ配送し、hashだけをRepositoryへ渡す", async () => {
++    const result = await invite();
 +
-+    expect(mocks.generateLink).toHaveBeenCalledWith({
-+      type: "invite",
-+      email: EMAIL,
-+      options: {
-+        redirectTo: REDIRECT_TO,
-+      },
-+    });
-+    expect(mocks.getUserById).not.toHaveBeenCalled();
 +    expect(result).toEqual({
-+      user: {
-+        id: USER_ID,
-+        email: EMAIL,
-+        isEmailConfirmed: false,
-+      },
-+      actionLink: ACTION_LINK,
++      outcome: "SENT",
++      invitationId: INVITATION_ID,
 +    });
-+    expect(JSON.stringify(result)).not.toContain(
-+      PRIVATE_ERROR,
++    expect(persistedHash).toMatch(
++      /^[a-f0-9]{64}$/u,
 +    );
-+    expect(JSON.stringify(result)).not.toContain(
-+      "test-otp",
++    expect(persistedHash).not.toBe(RAW_TOKEN);
++    expect(mocks.reserve.mock.calls[0][0]).toMatchObject({
++      clubId: CLUB_ID,
++      actorMembershipId: owner.actorMembershipId,
++      email: "member@example.test",
++      name: "招待者",
++      role: "MEMBER",
++    });
++    expect(
++      JSON.stringify(mocks.reserve.mock.calls),
++    ).not.toContain(RAW_TOKEN);
++    expect(mocks.generateLink).toHaveBeenCalledWith({
++      email: "member@example.test",
++      redirectTo:
++        `https://club.example.test/test-auth-return?token=${RAW_TOKEN}`,
++    });
++    expect(mocks.getAuth).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).toHaveBeenCalledWith(
++      expect.objectContaining({
++        kind: "NEW_USER",
++        authLink: AUTH_LINK,
++        role: "MEMBER",
++        attemptCount: 1,
++      }),
 +    );
-+    expect(JSON.stringify(result)).not.toContain(
-+      "test-hashed-token",
++    const order = [
++      mocks.reserve,
++      mocks.generateLink,
++      mocks.recordAuth,
++      mocks.prepare,
++      mocks.sendEmail,
++      mocks.markSent,
++    ].map((mock) => mock.mock.invocationCallOrder[0]);
++
++    expect(order).toEqual(
++      [...order].sort((left, right) => left - right),
 +    );
++    expect(row().status).toBe("SENT");
++    expect(userSaved).toBe(true);
++    expect(membershipSaved).toBe(true);
++    expectSafeResult(result);
 +  });
 +
-+  it("復旧時は同じAuth IDを事前確認してリンクを再生成する", async () => {
-+    const result =
-+      await generateClubInvitationAuthLink({
-+        email: EMAIL,
-+        redirectTo: REDIRECT_TO,
-+        expectedAuthUserId: USER_ID,
++  it("既存AppUserでも確認済みAuthだけに通常の参加案内を送る", async () => {
++    mocks.reserve.mockImplementationOnce(async () => {
++      saved = processing({
++        existingUserId: USER_ID,
 +      });
 +
-+    expect(mocks.getUserById).toHaveBeenCalledWith(
-+      USER_ID,
-+    );
-+    expect(
-+      mocks.getUserById.mock.invocationCallOrder[0],
-+    ).toBeLessThan(
-+      mocks.generateLink.mock.invocationCallOrder[0],
-+    );
-+    expect(result.user.id).toBe(USER_ID);
-+  });
-+
-+  it("確認済みAuthを取得し、ID・正規化email・確認状態だけを返す", async () => {
-+    mocks.getUserById.mockResolvedValue({
-+      data: {
-+        user: {
-+          ...authUser(),
-+          email: " MEMBER@EXAMPLE.TEST ",
-+          email_confirmed_at:
-+            "2026-10-10T03:00:00Z",
++      return {
++        outcome: "RESERVED",
++        invitation: {
++          ...saved,
 +        },
-+      },
-+      error: null,
++      };
 +    });
 +
-+    expect(
-+      await getClubInvitationAuthUserById({
-+        authUserId: USER_ID,
-+        email: EMAIL,
++    expect((await invite()).outcome).toBe("SENT");
++    expect(mocks.getAuth).toHaveBeenCalledWith({
++      authUserId: USER_ID,
++      email: "member@example.test",
++    });
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).toHaveBeenCalledWith(
++      expect.objectContaining({
++        kind: "EXISTING_USER",
++        invitationUrl:
++          `https://club.example.test/test-accept?token=${RAW_TOKEN}`,
 +      }),
-+    ).toEqual({
++    );
++  });
++
++  it.each([
++    "known Auth only",
++    "AppUser unconfirmed",
++  ])("%sは同じAuth IDで認証リンクを再生成する", async (state) => {
++    mocks.reserve.mockImplementationOnce(async () => {
++      saved = processing({
++        authUserId: state === "known Auth only"
++          ? USER_ID
++          : null,
++        existingUserId: state === "AppUser unconfirmed"
++          ? USER_ID
++          : null,
++      });
++
++      return {
++        outcome: "RESERVED",
++        invitation: {
++          ...saved,
++        },
++      };
++    });
++    mocks.getAuth.mockResolvedValue({
 +      id: USER_ID,
-+      email: EMAIL,
-+      isEmailConfirmed: true,
-+    });
-+  });
-+
-+  it("確認済みの既知Authへinviteを再生成しない", async () => {
-+    mocks.getUserById.mockResolvedValue({
-+      data: {
-+        user: {
-+          ...authUser(),
-+          email_confirmed_at:
-+            "2026-10-10T03:00:00Z",
-+        },
-+      },
-+      error: null,
++      email: "member@example.test",
++      isEmailConfirmed: false,
 +    });
 +
-+    await expectSafeExternal(
-+      generateClubInvitationAuthLink({
-+        email: EMAIL,
-+        redirectTo: REDIRECT_TO,
++    expect((await invite()).outcome).toBe("SENT");
++    expect(mocks.generateLink).toHaveBeenCalledWith(
++      expect.objectContaining({
 +        expectedAuthUserId: USER_ID,
 +      }),
 +    );
-+    expect(mocks.generateLink).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    "email mismatch",
-+    "id mismatch",
-+    "missing email",
-+    "missing user",
-+  ])("Auth取得の%sを拒否する", async (failure) => {
-+    const user = {
-+      ...authUser(),
-+      id: failure === "id mismatch"
-+        ? OTHER_USER_ID
-+        : USER_ID,
-+      email: failure === "email mismatch"
-+        ? "other@example.test"
-+        : failure === "missing email"
-+          ? undefined
-+          : EMAIL,
-+    };
-+    mocks.getUserById.mockResolvedValue({
-+      data: {
-+        user: failure === "missing user"
-+          ? null
-+          : user,
-+      },
-+      error: null,
-+    });
-+
-+    await expectSafeExternal(
-+      getClubInvitationAuthUserById({
-+        authUserId: USER_ID,
-+        email: EMAIL,
-+      }),
++    expect(mocks.sendEmail.mock.calls[0][0].kind).toBe(
++      "NEW_USER",
 +    );
 +  });
 +
-+  it("明確なuser_not_foundだけをnullとして扱い、復旧で新規作成しない", async () => {
-+    mocks.getUserById.mockResolvedValue({
-+      data: {
-+        user: null,
-+      },
-+      error: new AuthApiError(
-+        PRIVATE_ERROR,
-+        404,
-+        "user_not_found",
-+      ),
++  it("再送は同じ招待ID・現在のroleを使い、tokenと試行番号を変える", async () => {
++    await invite();
++    const originalHash = persistedHash;
++    mocks.createToken.mockReturnValue(NEW_TOKEN);
++
++    expect(await resend()).toEqual({
++      outcome: "SENT",
++      invitationId: INVITATION_ID,
 +    });
++    expect(persistedHash).not.toBe(originalHash);
++    expect(mocks.claim).toHaveBeenCalledWith({
++      clubId: CLUB_ID,
++      actorMembershipId: owner.actorMembershipId,
++      invitationId: INVITATION_ID,
++      tokenHash: persistedHash,
++    });
++    expect(mocks.sendEmail.mock.calls[1][0]).toMatchObject({
++      kind: "EXISTING_USER",
++      role: "COACH",
++      attemptCount: 2,
++      invitationId: INVITATION_ID,
++    });
++    expect(mocks.reserve).toHaveBeenCalledTimes(1);
++    expect(mocks.generateLink).toHaveBeenCalledTimes(1);
++  });
++
++  it.each([
++    "RESEND_API_KEY",
++    "SUPABASE_SERVICE_ROLE_KEY",
++    "NEXT_PUBLIC_SUPABASE_URL",
++  ])("未設定%sでは予約・Auth・配送を開始しない", async (setting) => {
++    vi.stubEnv(setting, "");
++
++    expect(await invite()).toEqual({
++      outcome: "CONFIGURATION_ERROR",
++    });
++    expect(await resend()).toEqual({
++      outcome: "CONFIGURATION_ERROR",
++    });
++    expect(saved).toBeNull();
++    expect(mocks.reserve).not.toHaveBeenCalled();
++    expect(mocks.claim).not.toHaveBeenCalled();
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++  });
++
++  it("本番From未設定と不正なFromを予約前に拒否する", async () => {
++    vi.stubEnv("NODE_ENV", "production");
++    vi.stubEnv("MAIL_FROM_ADDRESS", "");
++
++    expect((await invite()).outcome).toBe(
++      "CONFIGURATION_ERROR",
++    );
++    vi.stubEnv("MAIL_FROM_ADDRESS", PRIVATE_ERROR);
++    expect((await invite()).outcome).toBe(
++      "CONFIGURATION_ERROR",
++    );
++    expect(mocks.reserve).not.toHaveBeenCalled();
++  });
++
++  it("URL未設定では予約せず、クラブURL未設定時だけAPP_BASE_URLへ戻す", async () => {
++    const input = {
++      ...owner,
++      club: {
++        ...owner.club,
++        appBaseUrl: null,
++      },
++      invitationId: INVITATION_ID,
++    };
++    vi.stubEnv("APP_BASE_URL", "");
 +
 +    expect(
-+      await getClubInvitationAuthUserById({
-+        authUserId: USER_ID,
-+        email: EMAIL,
-+      }),
-+    ).toBeNull();
-+    await expectSafeExternal(
-+      generateClubInvitationAuthLink({
-+        email: EMAIL,
-+        redirectTo: REDIRECT_TO,
-+        expectedAuthUserId: USER_ID,
-+      }),
-+    );
-+    expect(mocks.generateLink).not.toHaveBeenCalled();
-+  });
++      (await resendClubInvitation(input, buildLinks)).outcome,
++    ).toBe("CONFIGURATION_ERROR");
++    expect(mocks.claim).not.toHaveBeenCalled();
++    vi.stubEnv("APP_BASE_URL", "https://app.example.test");
++    await resendClubInvitation(input, buildLinks);
 +
-+  it.each([
-+    "generated email",
-+    "generated id",
-+    "verification type",
-+    "confirmed user",
-+    "redirect fallback",
-+    "link redirect",
-+    "unsafe link",
-+    "missing properties",
-+  ])("生成結果の%sを安全に拒否する", async (failure) => {
-+    const response = linkResponse();
-+
-+    if (failure === "generated email") {
-+      response.data.user.email = "other@example.test";
-+    }
-+    if (failure === "generated id") {
-+      response.data.user.id = OTHER_USER_ID;
-+    }
-+    if (failure === "verification type") {
-+      response.data.properties.verification_type = "magiclink";
-+    }
-+    if (failure === "confirmed user") {
-+      Object.assign(response.data.user, {
-+        email_confirmed_at:
-+          "2026-10-10T03:00:00Z",
-+      });
-+    }
-+    if (failure === "redirect fallback") {
-+      response.data.properties.redirect_to =
-+        "https://app.example.test/";
-+    }
-+    if (failure === "link redirect") {
-+      response.data.properties.action_link =
-+        "https://auth.example.test/auth/v1/verify?redirect_to=https://other.example.test/";
-+    }
-+    if (failure === "unsafe link") {
-+      response.data.properties.action_link =
-+        "javascript:alert(1)";
-+    }
-+    if (failure === "missing properties") {
-+      Object.assign(response.data, {
-+        properties: null,
-+      });
-+    }
-+
-+    mocks.generateLink.mockResolvedValue(response);
-+    await expectSafeExternal(
-+      generateClubInvitationAuthLink({
-+        email: EMAIL,
-+        redirectTo: REDIRECT_TO,
-+        expectedAuthUserId: USER_ID,
-+      }),
-+    );
-+  });
-+
-+  it.each([
-+    "resolved API error",
-+    "thrown API error",
-+    "client configuration",
-+  ])("%sの原文・causeを返さない", async (failure) => {
-+    if (failure === "resolved API error") {
-+      mocks.generateLink.mockResolvedValue({
-+        data: {
-+          user: null,
-+          properties: null,
-+        },
-+        error: new Error(PRIVATE_ERROR),
-+      });
-+      mocks.getUserById.mockResolvedValue({
-+        data: {
-+          user: null,
-+        },
-+        error: new AuthApiError(
-+          PRIVATE_ERROR,
-+          404,
-+          "unexpected_error",
-+        ),
-+      });
-+    } else if (failure === "thrown API error") {
-+      mocks.generateLink.mockRejectedValue(
-+        new Error(PRIVATE_ERROR),
-+      );
-+      mocks.getUserById.mockRejectedValue(
-+        new Error(PRIVATE_ERROR),
-+      );
-+    } else {
-+      mocks.createAdmin.mockImplementation(() => {
-+        throw new Error(PRIVATE_ERROR);
-+      });
-+    }
-+
-+    await expectSafeExternal(
-+      generateClubInvitationAuthLink({
-+        email: EMAIL,
-+        redirectTo: REDIRECT_TO,
-+      }),
-+    );
-+    await expectSafeExternal(
-+      getClubInvitationAuthUserById({
-+        authUserId: USER_ID,
-+        email: EMAIL,
-+      }),
++    expect(mocks.sendEmail.mock.calls[0][0].invitationUrl).toBe(
++      `https://app.example.test/test-accept?token=${RAW_TOKEN}`,
 +    );
 +  });
 +
 +  it.each([
 +    "javascript:alert(1)",
-+    "https://user:password@app.example.test/",
-+    "https://app.example.test/\r\n",
-+    "/auth/confirm",
-+  ])("不正なredirect URLをAPI呼び出し前に拒否する", async (redirectTo) => {
++    "https://user:password@club.example.test/",
++    "https://club.example.test/path",
++    "https://club.example.test/?secret=value",
++  ])("不正なクラブoriginを予約前に拒否する", async (appBaseUrl) => {
++    expect(
++      await resendClubInvitation(
++        {
++          ...owner,
++          club: {
++            ...owner.club,
++            appBaseUrl,
++          },
++          invitationId: INVITATION_ID,
++        },
++        buildLinks,
++      ),
++    ).toEqual({
++      outcome: "CONFIGURATION_ERROR",
++    });
++    expect(mocks.claim).not.toHaveBeenCalled();
++  });
++
++  it("別originのリンク・未提供のbuilder・不正なtimezoneを予約前に拒否する", async () => {
++    expect(
++      await resendClubInvitation(
++        {
++          ...owner,
++          invitationId: INVITATION_ID,
++        },
++        () => ({
++          invitationUrl:
++            "https://other.example.test/accept",
++          authRedirectTo:
++            "https://club.example.test/test-auth-return",
++        }),
++      ),
++    ).toEqual({
++      outcome: "CONFIGURATION_ERROR",
++    });
++    expect(
++      await resendClubInvitation(
++        {
++          ...owner,
++          invitationId: INVITATION_ID,
++        },
++        undefined as unknown as ClubInvitationLinkBuilder,
++      ),
++    ).toEqual({
++      outcome: "CONFIGURATION_ERROR",
++    });
++    expect(
++      await resendClubInvitation(
++        {
++          ...owner,
++          club: {
++            ...owner.club,
++            timezone: PRIVATE_ERROR,
++          },
++          invitationId: INVITATION_ID,
++        },
++        buildLinks,
++      ),
++    ).toEqual({
++      outcome: "CONFIGURATION_ERROR",
++    });
++    expect(mocks.claim).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    {
++      outcome: "ACTOR_NOT_ACTIVE_OWNER",
++    },
++    {
++      outcome: "MEMBERSHIP_EXISTS",
++      membershipStatus: "SUSPENDED",
++    },
++    {
++      outcome: "DUPLICATE",
++      reason: "ACTIVE_INVITATION",
++    },
++  ])("予約拒否$outcomeでは外部APIを呼ばない", async (failure) => {
++    mocks.reserve.mockResolvedValue(failure);
++
++    expect(await invite()).toEqual(failure);
++    expect(saved).toBeNull();
++    expect(mocks.getAuth).not.toHaveBeenCalled();
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    "ACTOR_NOT_ACTIVE_OWNER",
++    "NOT_FOUND",
++    "CLAIM_LOST",
++    "RULE_VIOLATION",
++  ])("再送拒否%sを尊重しAuth・配送を開始しない", async (outcome) => {
++    const failure = outcome === "RULE_VIOLATION"
++      ? {
++          outcome,
++          reason: "RESEND_COOLDOWN",
++        }
++      : {
++          outcome,
++        };
++    mocks.claim.mockResolvedValue(failure);
++
++    expect(await resend()).toEqual(failure);
++    expect(mocks.getAuth).not.toHaveBeenCalled();
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++  });
++
++  it("PREPARING保存前の障害では招待や外部副作用を残さない", async () => {
++    mocks.reserve.mockRejectedValue(
++      new Error(PRIVATE_ERROR),
++    );
++
++    const result = await invite();
++
++    expect(result).toEqual({
++      outcome: "RESERVATION_FAILED",
++    });
++    expect(saved).toBeNull();
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++    expect(mocks.release).not.toHaveBeenCalled();
++    expectSafeResult(result);
++  });
++
++  it("Auth生成失敗はPREPARINGを残し、ID不明の手動復旧境界を返す", async () => {
++    mocks.generateLink.mockRejectedValue(
++      new Error(PRIVATE_ERROR),
++    );
++
++    const result = await invite();
++
++    expect(result).toEqual({
++      outcome: "PREPARATION_FAILED",
++      invitationId: INVITATION_ID,
++      stage: "AUTH",
++      recovery: "MANUAL",
++    });
++    expect(row().status).toBe("PREPARING");
++    expect(row().authUserId).toBeNull();
++    expect(claimReleased).toBe(true);
++    expect(mocks.recordAuth).not.toHaveBeenCalled();
++    expect(mocks.prepare).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++    expectSafeResult(result);
++  });
++
++  it.each([
++    "exception",
++    "claim lost",
++  ])("Auth ID記録%sはDB準備へ進まず手動復旧対象を返す", async (failure) => {
++    if (failure === "exception") {
++      mocks.recordAuth.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++    } else {
++      mocks.recordAuth.mockResolvedValue({
++        outcome: "CLAIM_LOST",
++      });
++    }
++
++    const result = await invite();
++
++    expect(result).toMatchObject({
++      outcome: "PREPARATION_FAILED",
++      stage: "AUTH_RECORD",
++      recovery: "MANUAL",
++    });
++    expect(row().authUserId).toBeNull();
++    expect(userSaved).toBe(false);
++    expect(membershipSaved).toBe(false);
++    expect(mocks.prepare).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++    expectSafeResult(result);
++  });
++
++  it.each([
++    "transaction failure",
++    "claim lost",
++    "membership exists",
++  ])("DB準備%sは記録済みAuthを残し、復旧方法を区別する", async (failure) => {
++    if (failure === "transaction failure") {
++      mocks.prepare.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++    } else {
++      mocks.prepare.mockResolvedValue({
++        outcome: failure === "claim lost"
++          ? "CLAIM_LOST"
++          : "MEMBERSHIP_EXISTS",
++        membershipStatus: "WITHDRAWN",
++      });
++    }
++
++    const result = await invite();
++
++    expect(result).toMatchObject({
++      outcome: "PREPARATION_FAILED",
++      stage: "PREPARATION",
++      recovery: failure === "membership exists"
++        ? "MANUAL"
++        : "RESEND",
++    });
++    expect(row().authUserId).toBe(USER_ID);
++    expect(row().status).toBe("PREPARING");
++    expect(userSaved).toBe(false);
++    expect(membershipSaved).toBe(false);
++    expect(claimReleased).toBe(true);
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++    expectSafeResult(result);
++  });
++
++  it("既知Auth消失では新しいAuthを作らず、手動確認へ止める", async () => {
++    mocks.getAuth.mockResolvedValue(null);
++
++    const result = await resend();
++
++    expect(result).toMatchObject({
++      outcome: "PREPARATION_FAILED",
++      stage: "AUTH",
++      recovery: "MANUAL",
++    });
++    expect(mocks.generateLink).not.toHaveBeenCalled();
++    expect(mocks.recordAuth).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++  });
++
++  it("Auth確認中のlease切れでは配送しない", async () => {
++    mocks.getAuth.mockImplementation(async () => {
++      vi.setSystemTime(
++        new Date(NOW.getTime() + 5 * 60_000),
++      );
++
++      return {
++        id: USER_ID,
++        email: "member@example.test",
++        isEmailConfirmed: true,
++      };
++    });
++
++    expect((await resend()).outcome).toBe(
++      "PREPARATION_FAILED",
++    );
++    expect(mocks.sendEmail).not.toHaveBeenCalled();
++  });
++
++  it("明確な配送拒否だけEMAIL_FAILEDを記録しMembershipを残す", async () => {
++    mocks.sendEmail.mockResolvedValue({
++      outcome: "REJECTED",
++      errorCode: "EMAIL_SEND_FAILED",
++    });
++
++    const result = await invite();
++
++    expect(result).toEqual({
++      outcome: "EMAIL_FAILED",
++      invitationId: INVITATION_ID,
++    });
++    expect(row().status).toBe("EMAIL_FAILED");
++    expect(membershipSaved).toBe(true);
++    expect(mocks.markSent).not.toHaveBeenCalled();
++    expect(mocks.markFailed).toHaveBeenCalledWith({
++      clubId: CLUB_ID,
++      actorMembershipId: owner.actorMembershipId,
++      invitationId: INVITATION_ID,
++      claimToken: "current-claim",
++    });
++    expect(mocks.release).not.toHaveBeenCalled();
++    expectSafeResult(result);
++  });
++
++  it.each([
++    "UNKNOWN",
++    "thrown transport error",
++  ])("%sはREADY_TO_SENDとleaseを残し、自動再送や失敗記録をしない", async (failure) => {
++    if (failure === "UNKNOWN") {
++      mocks.sendEmail.mockResolvedValue({
++        outcome: "UNKNOWN",
++        errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
++      });
++    } else {
++      mocks.sendEmail.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++    }
++
++    const result = await invite();
++
++    expect(result).toEqual({
++      outcome: "DELIVERY_UNKNOWN",
++      invitationId: INVITATION_ID,
++    });
++    expect(row().status).toBe("READY_TO_SEND");
++    expect(membershipSaved).toBe(true);
++    expect(claimReleased).toBe(false);
++    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
++    expect(mocks.markSent).not.toHaveBeenCalled();
++    expect(mocks.markFailed).not.toHaveBeenCalled();
++    expect(mocks.release).not.toHaveBeenCalled();
++    expectSafeResult(result);
++  });
++
++  it.each([
++    "exception",
++    "claim lost",
++    "owner revoked",
++  ])("受付成功後の記録%sでも送信失敗へ巻き戻さない", async (failure) => {
++    if (failure === "exception") {
++      mocks.markSent.mockRejectedValue(
++        new Error(PRIVATE_ERROR),
++      );
++    } else {
++      mocks.markSent.mockResolvedValue({
++        outcome: failure === "claim lost"
++          ? "CLAIM_LOST"
++          : "ACTOR_NOT_ACTIVE_OWNER",
++      });
++    }
++
++    const result = await invite();
++
++    expect(result).toEqual({
++      outcome: "DELIVERY_RECORDING_FAILED",
++      invitationId: INVITATION_ID,
++      delivery: "ACCEPTED",
++    });
++    expect(row().status).toBe("READY_TO_SEND");
++    expect(claimReleased).toBe(false);
++    expect(mocks.markFailed).not.toHaveBeenCalled();
++    expect(mocks.release).not.toHaveBeenCalled();
++    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
++    expectSafeResult(result);
++  });
++
++  it("配送拒否のDB記録失敗も区別し、自動で新しいtokenを送らない", async () => {
++    mocks.sendEmail.mockResolvedValue({
++      outcome: "REJECTED",
++      errorCode: "EMAIL_SEND_FAILED",
++    });
++    mocks.markFailed.mockRejectedValue(
++      new Error(PRIVATE_ERROR),
++    );
++
++    expect(await invite()).toEqual({
++      outcome: "DELIVERY_RECORDING_FAILED",
++      invitationId: INVITATION_ID,
++      delivery: "REJECTED",
++    });
++    expect(row().status).toBe("READY_TO_SEND");
++    expect(claimReleased).toBe(false);
++    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
++  });
++
++  it("claim解除失敗でも記録済みAuthと元の復旧段階を保持する", async () => {
++    mocks.prepare.mockRejectedValue(
++      new Error(PRIVATE_ERROR),
++    );
++    mocks.release.mockRejectedValue(
++      new Error(PRIVATE_ERROR),
++    );
++
++    const result = await invite();
++
++    expect(result).toMatchObject({
++      outcome: "PREPARATION_FAILED",
++      stage: "PREPARATION",
++      recovery: "RESEND",
++    });
++    expect(row().authUserId).toBe(USER_ID);
++    expect(claimReleased).toBe(false);
++    expectSafeResult(result);
++  });
++
++  it("不正roleを予約・Auth処理前に拒否する", async () => {
 +    await expect(
-+      generateClubInvitationAuthLink({
-+        email: EMAIL,
-+        redirectTo,
-+      }),
++      inviteClubMember(
++        {
++          ...owner,
++          email: "member@example.test",
++          name: "招待者",
++          role: "OWNER" as "MEMBER",
++        },
++        buildLinks,
++      ),
 +    ).rejects.toMatchObject({
 +      code: "VALIDATION",
 +      cause: undefined,
 +    });
-+    expect(mocks.createAdmin).not.toHaveBeenCalled();
-+  });
-+
-+  it("不正なemail・Auth IDをAPI呼び出し前に拒否する", async () => {
-+    await expect(
-+      generateClubInvitationAuthLink({
-+        email: "invalid",
-+        redirectTo: REDIRECT_TO,
-+      }),
-+    ).rejects.toMatchObject({
-+      code: "VALIDATION",
-+    });
-+    await expect(
-+      getClubInvitationAuthUserById({
-+        authUserId: "invalid",
-+        email: EMAIL,
-+      }),
-+    ).rejects.toMatchObject({
-+      code: "VALIDATION",
-+    });
-+    expect(mocks.createAdmin).not.toHaveBeenCalled();
-+  });
-+
-+  it("管理クライアントはStorage・Auth共通のサーバー設定を維持する", async () => {
-+    vi.stubEnv(
-+      "NEXT_PUBLIC_SUPABASE_URL",
-+      "https://auth.example.test",
-+    );
-+    vi.stubEnv(
-+      "SUPABASE_SERVICE_ROLE_KEY",
-+      "test-service-role-key",
-+    );
-+    const actual = await vi.importActual<
-+      typeof import("@/src/infrastructure/supabase/admin")
-+    >("@/src/infrastructure/supabase/admin");
-+
-+    actual.createSupabaseAdminClient();
-+
-+    expect(mocks.createClient).toHaveBeenCalledWith(
-+      "https://auth.example.test",
-+      "test-service-role-key",
-+      {
-+        auth: {
-+          autoRefreshToken: false,
-+          persistSession: false,
-+        },
-+      },
-+    );
-+
-+    vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "");
-+    expect(
-+      actual.createSupabaseAdminClient,
-+    ).toThrow(
-+      "Supabase管理操作用の環境変数が設定されていません。",
-+    );
++    expect(mocks.reserve).not.toHaveBeenCalled();
++    expect(mocks.generateLink).not.toHaveBeenCalled();
 +  });
 +});
-diff --git a/lib/mail/club-invitation-mail.ts b/lib/mail/club-invitation-mail.ts
-new file mode 100644
---- /dev/null
-+++ b/lib/mail/club-invitation-mail.ts
-@@ -0,0 +1,270 @@
-+// lib/mail/club-invitation-mail.ts
-+// 招待メールの本文を生成し、送信試行の冪等キー付きでResendへ渡す。
-+
-+import "server-only";
-+
-+import { z } from "zod";
-+
-+import {
-+  getClubMemberRoleLabel,
-+} from "@/domain/club/club-member-role";
-+import {
-+  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
-+} from "@/domain/club/invitation/invitation-form";
-+import {
-+  formatClubDateTime,
-+} from "@/domain/shared/date-time/club-date-time";
-+import { DomainError } from "@/domain/shared/domain-error";
-+import { normalizeEmail } from "@/domain/shared/email";
-+import type { ClubMemberRole } from "@/types/prisma";
-+
-+import {
-+  buildMailFrom,
-+  resend,
-+} from "./resend";
-+
-+export type ClubInvitationEmailInput = {
-+  email: string;
-+  name: string | null;
-+  clubName: string;
-+  role: ClubMemberRole;
-+  expiresAt: Date;
-+  timeZone?: string;
-+} & (
-+  | {
-+      kind: "NEW_USER";
-+      authLink: string;
-+    }
-+  | {
-+      kind: "EXISTING_USER";
-+      invitationUrl: string;
-+    }
-+);
-+
-+export type ClubInvitationEmail = {
-+  to: string;
-+  subject: string;
-+  text: string;
-+  html: string;
-+};
-+
-+export type ClubInvitationEmailSendResult =
-+  | {
-+      outcome: "ACCEPTED";
-+      emailId: string;
-+    }
-+  | {
-+      outcome: "REJECTED";
-+      errorCode: "EMAIL_SEND_FAILED";
-+    }
-+  | {
-+      outcome: "UNKNOWN";
-+      errorCode: "EMAIL_SEND_RESULT_UNKNOWN";
-+    };
-+
-+const emailSchema = z.email().max(
-+  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
-+);
-+const invitationIdSchema = z.uuid();
-+
-+// 氏名・クラブ名を本文用の一行へ揃え、件名への改行混入も防ぐ。
-+function singleLine(value: string): string {
-+  return value.replace(/\s+/gu, " ").trim();
-+}
-+
-+// 本文・hrefへ埋め込む値をエスケープし、HTMLや属性の注入を防ぐ。
-+function escapeHtml(value: string): string {
-+  return value
-+    .replaceAll("&", "&amp;")
-+    .replaceAll("<", "&lt;")
-+    .replaceAll(">", "&gt;")
-+    .replaceAll('"', "&quot;")
-+    .replaceAll("'", "&#39;");
-+}
-+
-+// サーバーが構築した招待URLを検証し、危険なschemeや資格情報を拒否する。
-+function invitationUrl(value: string): string {
-+  let url: URL;
-+
-+  try {
-+    url = new URL(value);
-+  } catch {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待メールのリンクを確認してください。",
-+    );
-+  }
-+
-+  if (
-+    /[\r\n]/u.test(value) ||
-+    (
-+      url.protocol !== "https:" &&
-+      url.protocol !== "http:"
-+    ) ||
-+    url.username ||
-+    url.password
-+  ) {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待メールのリンクを確認してください。",
-+    );
-+  }
-+
-+  return url.toString();
-+}
-+
-+// 新規ユーザー向けの初回設定案内と、既存ユーザー向けのクラブ参加案内を作る。
-+export function buildClubInvitationEmail(
-+  input: ClubInvitationEmailInput,
-+): ClubInvitationEmail {
-+  const email = normalizeEmail(input.email);
-+  const name =
-+    singleLine(input.name ?? "") ||
-+    "ご招待者";
-+  const clubName = singleLine(input.clubName);
-+  const roleLabel = getClubMemberRoleLabel(
-+    input.role,
-+  );
-+
-+  if (
-+    !emailSchema.safeParse(email).success ||
-+    !clubName ||
-+    !roleLabel ||
-+    !Number.isFinite(input.expiresAt.getTime())
-+  ) {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待メールの内容を確認してください。",
-+    );
-+  }
-+
-+  const url = invitationUrl(
-+    input.kind === "NEW_USER"
-+      ? input.authLink
-+      : input.invitationUrl,
-+  );
-+  let expiresAt: string;
-+
-+  try {
-+    expiresAt = formatClubDateTime(
-+      input.expiresAt,
-+      input.timeZone ?? "Asia/Tokyo",
-+    );
-+  } catch {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待メールの有効期限を確認してください。",
-+    );
-+  }
-+
-+  const instructions =
-+    input.kind === "NEW_USER"
-+      ? "認証リンクからメールアドレスを確認し、初回設定とクラブ参加を進めてください。"
-+      : "既存のアカウントでログインし、参加案内からクラブへの参加を進めてください。";
-+  const linkLabel =
-+    input.kind === "NEW_USER"
-+      ? "初回設定とクラブ参加へ進む"
-+      : "クラブ参加案内を開く";
-+  const deadline =
-+    `招待の有効期限：${expiresAt}（${input.timeZone ?? "Asia/Tokyo"}）`;
-+
-+  return {
-+    to: email,
-+    subject: `【${clubName}】クラブ参加のご案内`,
-+    text: [
-+      `${name} 様`,
-+      "",
-+      `${clubName}から、${roleLabel}として招待されています。`,
-+      instructions,
-+      "",
-+      linkLabel,
-+      url,
-+      "",
-+      deadline,
-+      "この招待に心当たりがない場合は、このメールを破棄してください。",
-+    ].join("\n"),
-+    html: [
-+      `<p>${escapeHtml(name)} 様</p>`,
-+      `<p>${escapeHtml(clubName)}から、${escapeHtml(roleLabel)}として招待されています。</p>`,
-+      `<p>${escapeHtml(instructions)}</p>`,
-+      `<p><a href="${escapeHtml(url)}">${escapeHtml(linkLabel)}</a></p>`,
-+      `<p>${escapeHtml(deadline)}</p>`,
-+      "<p>この招待に心当たりがない場合は、このメールを破棄してください。</p>",
-+    ].join("\n"),
-+  };
-+}
-+
-+// 同じInvitation・attemptCountは同じキー、新tokenの再送は新しいattemptCountで送る。
-+export async function sendClubInvitationEmail(
-+  input: ClubInvitationEmailInput & {
-+    invitationId: string;
-+    attemptCount: number;
-+  },
-+): Promise<ClubInvitationEmailSendResult> {
-+  if (
-+    !invitationIdSchema.safeParse(
-+      input.invitationId,
-+    ).success ||
-+    !Number.isSafeInteger(input.attemptCount) ||
-+    input.attemptCount < 1
-+  ) {
-+    throw new DomainError(
-+      "VALIDATION",
-+      "招待メールの送信試行を確認してください。",
-+    );
-+  }
-+
-+  const email = buildClubInvitationEmail(input);
-+  const idempotencyKey =
-+    `club-invitation/${input.invitationId}/${input.attemptCount}`;
-+
-+  try {
-+    const response = await resend.emails.send(
-+      {
-+        from: buildMailFrom(input.clubName),
-+        to: email.to,
-+        subject: email.subject,
-+        text: email.text,
-+        html: email.html,
-+      },
-+      {
-+        idempotencyKey,
-+      },
-+    );
-+
-+    if (
-+      !response.error &&
-+      response.data?.id
-+    ) {
-+      return {
-+        outcome: "ACCEPTED",
-+        emailId: response.data.id,
-+      };
-+    }
-+
-+    // 4xxの明確な拒否だけを失敗扱いにし、timeout・競合・5xxは送信結果不明とする。
-+    const statusCode =
-+      response.error?.statusCode;
-+
-+    if (
-+      typeof statusCode === "number" &&
-+      statusCode >= 400 &&
-+      statusCode < 500 &&
-+      statusCode !== 408 &&
-+      statusCode !== 409 &&
-+      response.error?.name !== "application_error"
-+    ) {
-+      return {
-+        outcome: "REJECTED",
-+        errorCode: "EMAIL_SEND_FAILED",
-+      };
-+    }
-+  } catch {
-+    // 通信切断でも配送済みの可能性があるため、原文やcauseを返さず結果不明にする。
-+  }
-+
-+  return {
-+    outcome: "UNKNOWN",
-+    errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
-+  };
-+}
-diff --git a/lib/mail/club-invitation-mail.test.ts b/lib/mail/club-invitation-mail.test.ts
-new file mode 100644
---- /dev/null
-+++ b/lib/mail/club-invitation-mail.test.ts
-@@ -0,0 +1,449 @@
-+// lib/mail/club-invitation-mail.test.ts
-+// 招待本文の安全性、宛先・From、冪等キー、配送結果の分類を検証する。
-+
-+import {
-+  afterEach,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+import {
-+  buildClubInvitationEmail,
-+  sendClubInvitationEmail,
-+  type ClubInvitationEmailInput,
-+} from "@/lib/mail/club-invitation-mail";
-+
-+const mocks = vi.hoisted(() => ({
-+  send: vi.fn(),
-+  buildMailFrom: vi.fn(),
-+}));
-+
-+vi.mock("server-only", () => ({}));
-+vi.mock("@/lib/mail/resend", () => ({
-+  resend: {
-+    emails: {
-+      send: mocks.send,
-+    },
-+  },
-+  buildMailFrom: mocks.buildMailFrom,
-+}));
-+
-+const INVITATION_ID =
-+  "11111111-1111-4111-8111-111111111111";
-+const AUTH_LINK =
-+  "https://auth.example.test/verify?token=test-token&redirect_to=https%3A%2F%2Fapp.example.test";
-+const INVITATION_URL =
-+  "https://app.example.test/club/test/invitation?token=test-invitation-token";
-+const PRIVATE_ERROR =
-+  "private@example.test test-token test-api-key";
-+
-+// 新規ユーザー向けの固定入力を用意し、実メールや環境変数ファイルを使わない。
-+function newUserInput(): ClubInvitationEmailInput {
-+  return {
-+    kind: "NEW_USER",
-+    email: " MEMBER@EXAMPLE.TEST ",
-+    name: " 招待者 ",
-+    clubName: "テストクラブ",
-+    role: "MEMBER",
-+    expiresAt: new Date(
-+      "2026-10-11T03:00:00Z",
-+    ),
-+    authLink: AUTH_LINK,
-+  };
-+}
-+
-+// 既存ユーザー向けにはAuthリンクではなく、クラブ参加案内URLだけを渡す。
-+function existingUserInput(): ClubInvitationEmailInput {
-+  return {
-+    kind: "EXISTING_USER",
-+    email: "member@example.test",
-+    name: null,
-+    clubName: "テストクラブ",
-+    role: "COACH",
-+    expiresAt: new Date(
-+      "2026-10-11T03:00:00Z",
-+    ),
-+    invitationUrl: INVITATION_URL,
-+  };
-+}
-+
-+// SDKだけをmockし、本文生成と結果分類は実装を通して検証する。
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  mocks.buildMailFrom.mockReturnValue(
-+    "テストクラブ <from@example.test>",
-+  );
-+  mocks.send.mockResolvedValue({
-+    data: {
-+      id: "test-email-id",
-+    },
-+    error: null,
-+    headers: {
-+      privateValue: PRIVATE_ERROR,
-+    },
-+  });
-+  vi.spyOn(console, "error").mockImplementation(
-+    () => undefined,
-+  );
-+  vi.spyOn(console, "warn").mockImplementation(
-+    () => undefined,
-+  );
-+});
-+
-+// 接続部から本文・宛先・外部エラーをログへ出していないことを確認する。
-+afterEach(() => {
-+  expect(console.error).not.toHaveBeenCalled();
-+  expect(console.warn).not.toHaveBeenCalled();
-+  vi.restoreAllMocks();
-+});
-+
-+describe("buildClubInvitationEmail", () => {
-+  it("新規ユーザーへ初回設定案内と認証リンクを生成する", () => {
-+    const email = buildClubInvitationEmail(
-+      newUserInput(),
-+    );
-+
-+    expect(email.to).toBe(
-+      "member@example.test",
-+    );
-+    expect(email.subject).toBe(
-+      "【テストクラブ】クラブ参加のご案内",
-+    );
-+    expect(email.text).toContain(
-+      "招待者 様",
-+    );
-+    expect(email.text).toContain(
-+      "初回設定とクラブ参加",
-+    );
-+    expect(email.text).toContain(AUTH_LINK);
-+    expect(email.html).toContain(
-+      "&amp;redirect_to=",
-+    );
-+    expect(email.text).toContain(
-+      "2026年10月11日",
-+    );
-+    expect(email.text).toContain(
-+      "12:00（Asia/Tokyo）",
-+    );
-+  });
-+
-+  it("既存ユーザーへログインとクラブ参加を案内し、現在のroleを使う", () => {
-+    const email = buildClubInvitationEmail(
-+      existingUserInput(),
-+    );
-+
-+    expect(email.text).toContain(
-+      "ご招待者 様",
-+    );
-+    expect(email.text).toContain(
-+      "指導者として招待",
-+    );
-+    expect(email.text).toContain(
-+      "既存のアカウントでログイン",
-+    );
-+    expect(email.text).toContain(
-+      INVITATION_URL,
-+    );
-+    expect(email.text).not.toContain(
-+      AUTH_LINK,
-+    );
-+    expect(email.text).not.toContain(
-+      "初回設定",
-+    );
-+  });
-+
-+  it("氏名・クラブ名・hrefのHTML注入と件名の改行混入を防ぐ", () => {
-+    const email = buildClubInvitationEmail({
-+      ...newUserInput(),
-+      name: `<script>"&'</script>`,
-+      clubName:
-+        "<img src=x onerror=alert(1)>\r\nInjected",
-+    });
-+
-+    expect(email.html).not.toContain(
-+      "<script>",
-+    );
-+    expect(email.html).not.toContain(
-+      "<img",
-+    );
-+    expect(email.html).toContain(
-+      "&lt;script&gt;&quot;&amp;&#39;&lt;/script&gt;",
-+    );
-+    expect(email.html).toContain(
-+      "&lt;img src=x onerror=alert(1)&gt; Injected",
-+    );
-+    expect(email.subject).not.toMatch(
-+      /[\r\n]/u,
-+    );
-+    expect(email.html).toContain(
-+      'href="https://auth.example.test/verify?token=test-token&amp;redirect_to=',
-+    );
-+  });
-+
-+  it("指定したクラブのタイムゾーンで期限を表示する", () => {
-+    const email = buildClubInvitationEmail({
-+      ...existingUserInput(),
-+      timeZone: "UTC",
-+    });
-+
-+    expect(email.text).toContain(
-+      "03:00（UTC）",
-+    );
-+  });
-+
-+  it.each([
-+    "javascript:alert(1)",
-+    "data:text/html,unsafe",
-+    "https://user:password@app.example.test/",
-+    "https://app.example.test/\r\n",
-+    "/club/test/invitation",
-+  ])("危険な招待URLを拒否する", (authLink) => {
-+    expect(() => buildClubInvitationEmail({
-+      ...newUserInput(),
-+      kind: "NEW_USER",
-+      authLink,
-+    })).toThrow(
-+      "招待メールのリンクを確認してください。",
-+    );
-+  });
-+
-+  it.each([
-+    "email",
-+    "club name",
-+    "expiration",
-+    "time zone",
-+  ])("不正な%sを固定エラーで拒否する", (failure) => {
-+    const input = newUserInput();
-+
-+    if (failure === "email") {
-+      input.email = "invalid";
-+    }
-+    if (failure === "club name") {
-+      input.clubName = " ";
-+    }
-+    if (failure === "expiration") {
-+      input.expiresAt = new Date(Number.NaN);
-+    }
-+    if (failure === "time zone") {
-+      input.timeZone = PRIVATE_ERROR;
-+    }
-+
-+    try {
-+      buildClubInvitationEmail(input);
-+      expect.fail("Validation must reject the input");
-+    } catch (error) {
-+      expect(error).toMatchObject({
-+        code: "VALIDATION",
-+        cause: undefined,
-+      });
-+      expect(String(error)).not.toContain(
-+        PRIVATE_ERROR,
-+      );
-+    }
-+  });
-+});
-+
-+describe("sendClubInvitationEmail", () => {
-+  it("招待対象だけへ設定済みFromで送り、受付IDだけを返す", async () => {
-+    const result =
-+      await sendClubInvitationEmail({
-+        ...newUserInput(),
-+        invitationId: INVITATION_ID,
-+        attemptCount: 1,
-+      });
-+
-+    expect(mocks.buildMailFrom).toHaveBeenCalledWith(
-+      "テストクラブ",
-+    );
-+    const payload =
-+      mocks.send.mock.calls[0][0];
-+
-+    expect(payload.from).toBe(
-+      "テストクラブ <from@example.test>",
-+    );
-+    expect(payload.to).toBe(
-+      "member@example.test",
-+    );
-+    expect(payload).not.toHaveProperty("cc");
-+    expect(payload).not.toHaveProperty("bcc");
-+    expect(payload.text).toContain(
-+      AUTH_LINK,
-+    );
-+    expect(result).toEqual({
-+      outcome: "ACCEPTED",
-+      emailId: "test-email-id",
-+    });
-+  });
-+
-+  it("同じ試行は同じpayload・キー、新tokenの再送は別キーを使う", async () => {
-+    const input = {
-+      ...existingUserInput(),
-+      invitationId: INVITATION_ID,
-+      attemptCount: 1,
-+    };
-+
-+    await sendClubInvitationEmail(input);
-+    await sendClubInvitationEmail(input);
-+    await sendClubInvitationEmail({
-+      ...input,
-+      kind: "EXISTING_USER",
-+      invitationUrl:
-+        "https://app.example.test/club/test/invitation?token=new-test-token",
-+      attemptCount: 2,
-+    });
-+
-+    expect(
-+      mocks.send.mock.calls[0],
-+    ).toEqual(
-+      mocks.send.mock.calls[1],
-+    );
-+    expect(
-+      mocks.send.mock.calls[0][1],
-+    ).toEqual({
-+      idempotencyKey:
-+        `club-invitation/${INVITATION_ID}/1`,
-+    });
-+    expect(
-+      mocks.send.mock.calls[2][1],
-+    ).toEqual({
-+      idempotencyKey:
-+        `club-invitation/${INVITATION_ID}/2`,
-+    });
-+    expect(
-+      JSON.stringify(mocks.send.mock.calls[2][1]),
-+    ).not.toContain("new-test-token");
-+  });
-+
-+  it.each([
-+    400,
-+    401,
-+    403,
-+    422,
-+    429,
-+  ])("明確なHTTP %s拒否は固定エラー識別子だけを返す", async (statusCode) => {
-+    mocks.send.mockResolvedValue({
-+      data: null,
-+      error: {
-+        name: "validation_error",
-+        statusCode,
-+        message: PRIVATE_ERROR,
-+      },
-+      headers: {
-+        privateValue: PRIVATE_ERROR,
-+      },
-+    });
-+
-+    expect(
-+      await sendClubInvitationEmail({
-+        ...existingUserInput(),
-+        invitationId: INVITATION_ID,
-+        attemptCount: 1,
-+      }),
-+    ).toEqual({
-+      outcome: "REJECTED",
-+      errorCode: "EMAIL_SEND_FAILED",
-+    });
-+  });
-+
-+  it.each([
-+    null,
-+    408,
-+    409,
-+    500,
-+    503,
-+  ])("HTTP %sや通信障害は確実な未送信と扱わない", async (statusCode) => {
-+    mocks.send.mockResolvedValue({
-+      data: null,
-+      error: {
-+        name: "internal_server_error",
-+        statusCode,
-+        message: PRIVATE_ERROR,
-+      },
-+      headers: null,
-+    });
-+
-+    expect(
-+      await sendClubInvitationEmail({
-+        ...newUserInput(),
-+        invitationId: INVITATION_ID,
-+        attemptCount: 1,
-+      }),
-+    ).toEqual({
-+      outcome: "UNKNOWN",
-+      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
-+    });
-+  });
-+
-+  it.each([
-+    "application_error",
-+    "missing result",
-+    "thrown error",
-+  ])("%sは原文を残さず結果不明を返す", async (failure) => {
-+    if (failure === "application_error") {
-+      mocks.send.mockResolvedValue({
-+        data: null,
-+        error: {
-+          name: "application_error",
-+          statusCode: 400,
-+          message: PRIVATE_ERROR,
-+        },
-+      });
-+    } else if (failure === "missing result") {
-+      mocks.send.mockResolvedValue({
-+        data: {},
-+        error: null,
-+      });
-+    } else {
-+      mocks.send.mockRejectedValue(
-+        new Error(PRIVATE_ERROR),
-+      );
-+    }
-+
-+    expect(
-+      await sendClubInvitationEmail({
-+        ...newUserInput(),
-+        invitationId: INVITATION_ID,
-+        attemptCount: 1,
-+      }),
-+    ).toEqual({
-+      outcome: "UNKNOWN",
-+      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
-+    });
-+  });
-+
-+  it.each([
-+    0,
-+    -1,
-+    1.5,
-+    Number.NaN,
-+    Number.POSITIVE_INFINITY,
-+    Number.MAX_SAFE_INTEGER + 1,
-+  ])("不正なattemptCountを送信前に拒否する", async (attemptCount) => {
-+    await expect(
-+      sendClubInvitationEmail({
-+        ...newUserInput(),
-+        invitationId: INVITATION_ID,
-+        attemptCount,
-+      }),
-+    ).rejects.toMatchObject({
-+      code: "VALIDATION",
-+    });
-+    expect(mocks.send).not.toHaveBeenCalled();
-+  });
-+
-+  it("不正なInvitation IDを送信前に拒否する", async () => {
-+    await expect(
-+      sendClubInvitationEmail({
-+        ...newUserInput(),
-+        invitationId: "invalid",
-+        attemptCount: 1,
-+      }),
-+    ).rejects.toMatchObject({
-+      code: "VALIDATION",
-+    });
-+    expect(mocks.send).not.toHaveBeenCalled();
-+  });
-+});
-diff --git a/src/infrastructure/supabase/admin.ts b/src/infrastructure/supabase/admin.ts
---- a/src/infrastructure/supabase/admin.ts
-+++ b/src/infrastructure/supabase/admin.ts
-@@ -1,5 +1,5 @@
- // src/infrastructure/supabase/admin.ts
--// Storage操作専用のService Roleクライアント(アプリのPDFに使う)
-+// Storage・Auth管理操作用のサーバー専用Service Roleクライアント
- 
- import "server-only";
- 
-@@ -23,7 +23,7 @@
-     !serviceRoleKey
-   ) {
-     throw new Error(
--      "Supabase Storage用の環境変数が設定されていません。",
-+      "Supabase管理操作用の環境変数が設定されていません。",
-     );
-   }
- 
-diff --git a/src/infrastructure/prisma/client.ts b/src/infrastructure/prisma/client.ts
---- a/src/infrastructure/prisma/client.ts
-+++ b/src/infrastructure/prisma/client.ts
-@@ -29,7 +29,7 @@
-   globalForPrisma.prisma ??
-   new PrismaClient({
-   adapter, // ★ ここでアダプターを渡すのが新ルール！
--    log: ["error", "warn"],//エラーと警告だけターミナルにメッセージを表示する
-+    log: [],//入力値を含み得るPrismaエラー原文を自動出力しない
-   });
- 
- if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;//本番環境（production）ではない時（＝開発中）だけ、倉庫に回線を保存しておく(本番環境では Next.js の挙動が異なるため、この使い回しテクニックは主に開発中のエラーを防ぐために使われる)
