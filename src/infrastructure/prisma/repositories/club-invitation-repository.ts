@@ -80,7 +80,7 @@ type RuleViolation =
   | "AUTH_USER_MISMATCH"//認証ユーザーが一致しない
   | "TOKEN_NOT_ROTATED";//トークンが回転してない（古いトークンが使いまわされている）
 
-  //クラブ招待の失敗の理由
+// 招待処理の権限・存在・処理権・業務ルールに関する失敗
 export type ClubInvitationFailure =
   | {
       outcome:
@@ -164,7 +164,7 @@ type StoredInvitation =
 class TransactionAbort extends Error {
   constructor(
     readonly result:
-      ClubInvitationFailure, //クラブ招待の失敗の理由
+      ClubInvitationFailure, //招待処理の権限・存在・処理権・業務ルールに関する失敗
   ) {
     super(
       "Invitation transaction aborted",//招待処理の中止
@@ -348,7 +348,7 @@ async function ownerTransaction<T>(
     now: Date,
   ) => Promise<T>,
 ): Promise<
-  T | ClubInvitationFailure//クラブ招待の失敗の理由
+  T | ClubInvitationFailure//招待処理の権限・存在・処理権・業務ルールに関する失敗
 > {
   for (
     let attempt = 0;
@@ -1480,8 +1480,7 @@ export async function markClubInvitationEmailFailed(
 }
 
 
-//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態で、招待メール送信の完了または失敗後に、
-// クラブ招待テーブルのクレームトークンと有効期限をnullにすることで、招待の処理権(クレーム)をなくす関数
+//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態で、RESENDへの招待メールの依頼準備完了時とRESENDへの依頼完了時にクレームトークンと有効期限をnullにする関数
 export async function releaseClubInvitationClaim(
   input: ClaimInput,//招待の引数（招待の引数＋claimToken）
 ) {
@@ -1544,8 +1543,7 @@ export async function releaseClubInvitationClaim(
   );
 }
 
-//オーナーが、クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態のクラブ招待テーブルのステータスをCANCELLED（キャンセル済み）にし、
-//招待中のメンバーシップを削除する関数
+//オーナーが、クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態のクラブ招待テーブルのステータスをCANCELLED（キャンセル済み）にし、招待中のメンバーシップを削除する関数
 export async function cancelClubInvitation(
   input: InvitationInput,
 ) {

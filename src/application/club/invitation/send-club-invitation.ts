@@ -1,6 +1,6 @@
 // src/application/club/invitation/send-club-invitation.ts
 //OWNER認可結果を受け取り、招待の準備・DB保存・外部配送を順に進めるファイル
-//RESENDへクラブ招待メール送信に必要情報を依頼とともに送り、送信結果を取得し、DBに保存する関数
+//RESENDへクラブ招待メール送信に必要情報を依頼とともに送り、RESENDへの送信結果を取得しDBに保存する関数
 //すでにDBに存在する招待データ（過去に送ったもの）を再利用して、RESENDへの依頼を再度実行する関数
 
 import "server-only";
@@ -23,9 +23,9 @@ import {
   markClubInvitationEmailFailed,//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、サーバーからRESENDへのメール送信依頼の失敗をDBに記録する関数
   markClubInvitationEmailSent,//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、サーバーからRESENDへのメール送信依頼の完了をDBに記録する関数
   recordClubInvitationAuthUser,//DBのクラブ招待テーブルの認証済みユーザーIDを更新する関数
-  releaseClubInvitationClaim,//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態で、招待メール送信の完了または失敗後に、クラブ招待テーブルのクレームトークンと有効期限をnullにすることで、招待の処理権(クレーム)をなくす関数
+  releaseClubInvitationClaim,//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態で、RESENDへの招待メールの依頼準備完了時とRESENDへの依頼完了時にクレームトークンと有効期限をnullにする関数
   reserveClubInvitation,//クラブのオーナーが新しいメンバーをメールで招待した際に、そのリクエスト（入力値や重複）を厳格にチェックし、問題がなければデータベース内に5分間のロック（予約）をかけた状態で『招待状データ』を新規作成する、招待プロセスの出発点となる関数
-  type ClubInvitationFailure,//クラブ招待の失敗の理由
+  type ClubInvitationFailure,//招待処理の権限・存在・処理権・業務ルールに関する失敗
   type ClubInvitationProcessing,//クラブ招待の処理中の型
 } from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
 import {
@@ -66,9 +66,9 @@ export type ClubInvitationLinkBuilder = (
   },
 ) => ClubInvitationLinks;//クラブ招待メールに関するリンク型
 
-//招待メール送信結果の型（準備段階からRESENDが配送した結果も含む）
+//RESENDへの招待メール依頼送信結果の型
 export type SendClubInvitationResult =
-  | ClubInvitationFailure//クラブ招待の失敗の理由
+  | ClubInvitationFailure//招待処理の権限・存在・処理権・業務ルールに関する失敗
   | {
       outcome: "CONFIGURATION_ERROR";//設定エラー
     }
@@ -252,7 +252,7 @@ async function releasePreparationClaim(
   invitation: ClubInvitationProcessing,//クラブ招待の処理中の型
 ): Promise<void> {
   try {
-    await releaseClubInvitationClaim({//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態で、招待メール送信の完了または失敗後に、クラブ招待テーブルのクレームトークンと有効期限をnullにすることで、招待の処理権(クレーム)をなくす関数
+    await releaseClubInvitationClaim({//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態で、RESENDへの招待メールの依頼準備完了時とRESENDへの依頼完了時にクレームトークンと有効期限をnullにする関数
       ...attempt.owner,
       invitationId: invitation.id,
       claimToken: invitation.claimToken,
@@ -266,7 +266,7 @@ async function releasePreparationClaim(
 async function prepareAndSend(
   attempt: Attempt,//招待メールを送信(試行)するために必要なデータ（RESENDに依頼する用）と関数を詰め込んだパッケージの型
   invitation: ClubInvitationProcessing,//クラブ招待の処理中の型
-): Promise<SendClubInvitationResult> {//招待メール送信結果の型（準備段階からRESENDが配送した結果も含む）
+): Promise<SendClubInvitationResult> {//RESENDへの招待メール依頼送信結果の型
   const claim = {//クレームという箱に以下を詰める
     ...attempt.owner,
     invitationId: invitation.id,
@@ -470,7 +470,7 @@ async function prepareAndSend(
 export async function inviteClubMember(
   input: OwnerContext & ValidClubMemberInviteInput,//オーナー権限を持った操作者がどのクラブに対して処理をするかの背景情報（コンテキスト）型とバリデーション成功時のデータの値
   buildLinks: ClubInvitationLinkBuilder,//招待リンクを作成するための関数の型
-): Promise<SendClubInvitationResult> {//招待メール送信結果の型（準備段階からRESENDが配送した結果も含む）
+): Promise<SendClubInvitationResult> {//RESENDへの招待メール依頼送信結果の型
   const validation =
     validateClubMemberInviteFormValues(input);//招待メール送信フォームの値のバリデーション関数
 
@@ -522,7 +522,7 @@ export async function resendClubInvitation(
     invitationId: string;
   },
   buildLinks: ClubInvitationLinkBuilder,//招待リンクを作成するための関数の型
-): Promise<SendClubInvitationResult> {//招待メール送信結果の型（準備段階からRESENDが配送した結果も含む）
+): Promise<SendClubInvitationResult> {//RESENDへの招待メール依頼送信結果の型
   let attempt: Attempt;//招待メールを送信(試行)するために必要なデータ（RESENDに依頼する用）と関数を詰め込んだパッケージの型
 
   try {
