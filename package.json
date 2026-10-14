@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts",
+    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts tests/club-invitation-recovery.integration.test.ts",
     "prisma:validate": "prisma validate",
     "env:validate": "node scripts/validate-env.mjs",
     "predev": "npm run env:validate",
@@ -21,7 +21,10 @@
     "db:seed:local": "dotenv -e .env.local -- prisma db seed",
     "db:seed:prod": "dotenv -e .env.prod -- tsx prisma/seed.ts",
     "db:seed:app:local": "dotenv -e .env.local -- tsx prisma/seed-app-local.ts",
-    "club:line:init": "node --conditions=react-server --import tsx scripts/initialize-club-line-setting.ts"
+    "club:line:init": "node --conditions=react-server --import tsx scripts/initialize-club-line-setting.ts",
+    "club:invitation:recover": "node --conditions=react-server --import tsx scripts/recover-club-invitation.ts",
+    "test:club-invitation:recovery": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-invitation-recovery.integration.test.ts",
+    "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts"
   },
   "dependencies": {
     "@axiomhq/js": "^1.8.0",

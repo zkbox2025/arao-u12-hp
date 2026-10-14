@@ -29,7 +29,7 @@ export type RecoverClubInvitationPreparationResult =
       outcome: "RECOVERY_FAILED";//復旧失敗
     };
 
-//障害からの復旧処理(途中でクラッシュするなどして「準備中（PREPARING）」のままロックされてしまった招待データを、安全に元の正常なステータスへ戻す関数
+//障害からの復旧処理(途中でクラッシュするなどして「準備中（PREPARING）」のままロックされてしまった招待データを、安全に元の正常なステータス（準備完了）へ戻す関数
 export async function recoverClubInvitationPreparation(
   input: {
     clubId: string;
