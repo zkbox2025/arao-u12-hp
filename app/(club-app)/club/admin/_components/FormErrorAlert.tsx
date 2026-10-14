@@ -1,6 +1,5 @@
 //app/(club-app)/club/admin/_components/FormErrorAlert.tsx
-//フォーム全体で発生したエラー（サーバーエラー、ログイン失敗、通信タイムアウトなど）を受け取り、
-// アラートとして表示する関数
+//フォーム全体で発生したエラー（サーバーエラー、ログイン失敗、通信タイムアウトなど）を受け取りアラートとして表示する関数
 
 type FormErrorAlertProps = {
   message: string | null;

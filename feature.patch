@@ -1,1287 +1,795 @@
-diff --git a/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts b/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts
+diff --git a/app/(club-app)/club/[clubSlug]/admin/members/ClubInvitationOperations.tsx b/app/(club-app)/club/[clubSlug]/admin/members/ClubInvitationOperations.tsx
 new file mode 100644
-index 0000000..acad153
+index 0000000..da4ba76
 --- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts
-@@ -0,0 +1,448 @@
-+// app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts
++++ b/app/(club-app)/club/[clubSlug]/admin/members/ClubInvitationOperations.tsx
+@@ -0,0 +1,296 @@
++// app/(club-app)/club/[clubSlug]/admin/members/ClubInvitationOperations.tsx
 +
-+"use server";
-+
-+import {
-+  notFound,
-+  redirect,
-+  unstable_rethrow,
-+} from "next/navigation";
-+import { z } from "zod";
++"use client";
 +
 +import {
-+  requireClubAppOwnerAccess,
-+} from "@/app/(club-app)/club/club-app-authorization";
++  useActionState,
++  useCallback,
++  useEffect,
++  useId,
++  useRef,
++  useState,
++  type RefObject,
++} from "react";
++import { createPortal } from "react-dom";
++
 +import {
-+  revalidateClubMemberPaths,
-+} from "@/app/(club-app)/club/revalidate-club-paths";
++  FormErrorAlert,
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  useScrollToFormError,
++} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
 +import type {
-+  ClubMembersToastCode,
-+} from "@/domain/club/member/member-toast";
-+import {
-+  buildClubMemberInviteFormValues,
-+  validateClubMemberInviteFormValues,
-+  type ClubMemberInviteActionState,
-+  type ClubMemberInviteFormValues,
-+} from "@/domain/club/invitation/invitation-form";
-+import type { ActionState } from "@/domain/shared/action-state";
-+import {
-+  createRequestId,
-+  isRequestId,
-+} from "@/domain/shared/request-id";
-+import {
-+  cancelClubMemberInvitation,
-+  type CancelClubMemberInvitationResult,
-+} from "@/src/application/club/invitation/cancel-club-invitation";
-+import {
-+  inviteClubMember,
-+  resendClubInvitation,
-+  type ClubInvitationLinkBuilder,
-+  type SendClubInvitationResult,
-+} from "@/src/application/club/invitation/send-club-invitation";
-+import {
-+  prisma,
-+} from "@/src/infrastructure/prisma/client";
-+import {
-+  convertPrismaError,
-+} from "@/src/infrastructure/prisma/prisma-error";
++  ClubInvitationOperationActionState,
++} from "./invitation-actions";
 +
-+export type ClubInvitationOperationActionState = ActionState<
-+  Record<string, never>
-+>;
-+
-+type InvitationResult =
-+  | SendClubInvitationResult
-+  | CancelClubMemberInvitationResult;
-+
-+type ResultPresentation =
-+  | {
-+      toast: ClubMembersToastCode;
-+    }
-+  | {
-+      message: string;
-+      revalidate: boolean;
-+    };
-+
-+const EXPIRED_FORM_MESSAGE =
-+  "フォームの有効期限が切れました。もう一度お試しください。";
-+const FAILURE_MESSAGE =
-+  "招待処理を完了できませんでした。招待状況を確認してからもう一度お試しください。";
-+const invitationIdSchema = z.uuid();
-+
-+// 前回stateからは検証済みrequestIdだけを引き継ぎ、不正な値を反射しない。
-+function safeRequestId(requestId: unknown): string {
-+  return isRequestId(requestId) ? requestId : createRequestId();
-+}
-+
-+// requestIdは形式とstateとの一致だけを検証し、認可や永続的な重複排除に使わない。
-+function matchesRequestId(
-+  previousRequestId: unknown,
++type OperationAction = (
++  previousState: ClubInvitationOperationActionState,
 +  formData: FormData,
-+): boolean {
-+  const requestId = formData.get("requestId");
++) => Promise<ClubInvitationOperationActionState>;
 +
-+  return (
-+    isRequestId(previousRequestId) &&
-+    isRequestId(requestId) &&
-+    requestId === previousRequestId
-+  );
-+}
++type Props = {
++  name: string;
++  email: string;
++  canResend: boolean;
++  canCancel: boolean;
++  needsPreparationRetry: boolean;
++  resendInitialState: ClubInvitationOperationActionState;
++  cancelInitialState: ClubInvitationOperationActionState;
++  resendAction: OperationAction;
++  cancelAction: OperationAction;
++};
 +
-+// 送信結果の原文や内部IDを返さず、既存toastと固定メッセージへ変換する。
-+function presentResult(
-+  result: InvitationResult,
-+  resent: boolean,
-+): ResultPresentation {
-+  switch (result.outcome) {
-+    case "NOT_FOUND":
-+    case "ACTOR_NOT_ACTIVE_OWNER":
-+      notFound();
-+    case "SENT":
-+      return {
-+        toast: resent ? "member-invitation-resent" : "member-invited",
-+      };
-+    case "CANCELLED":
-+      return {
-+        toast: "member-invitation-cancelled",
-+      };
-+    case "EMAIL_FAILED":
-+      return {
-+        toast: "member-invitation-email-failed",
-+      };
-+    case "PREPARATION_FAILED":
-+      return {
-+        toast: "member-invitation-recovery-required",
-+      };
-+    case "DELIVERY_UNKNOWN":
-+      return {
-+        message:
-+          "招待情報は保存されていますが、メールの送信結果を確認できません。" +
-+          "重複送信を避けるため、招待状況を確認してください。",
-+        revalidate: true,
-+      };
-+    case "DELIVERY_RECORDING_FAILED":
-+      return {
-+        message: result.delivery === "ACCEPTED"
-+          ? "招待情報は保存されています。メール送信は受け付けられましたが、" +
-+            "結果を記録できませんでした。招待状況を確認してください。"
-+          : "招待情報は保存されていますが、メール送信に失敗し、" +
-+            "結果を記録できませんでした。招待状況を確認してください。",
-+        revalidate: true,
-+      };
-+    case "CONFIGURATION_ERROR":
-+      return {
-+        message: "招待メールの送信設定を確認できません。運営者へお問い合わせください。",
-+        revalidate: false,
-+      };
-+    case "RESERVATION_FAILED":
-+    case "CANCELLATION_FAILED":
-+      return {
-+        message: FAILURE_MESSAGE,
-+        revalidate: true,
-+      };
-+    case "CLAIM_LOST":
-+      return {
-+        message: "招待状況が変更されました。最新の招待状況を確認してください。",
-+        revalidate: true,
-+      };
-+    case "MEMBERSHIP_EXISTS":
-+      return {
-+        message: "対象のメンバーは既に所属しています。在籍状態を確認してください。",
-+        revalidate: false,
-+      };
-+    case "DUPLICATE":
-+      return {
-+        message: "招待または所属情報が既に存在します。最新の招待状況を確認してください。",
-+        revalidate: true,
-+      };
-+    case "RULE_VIOLATION": {
-+      const reason = result.reason;
++type CancelDialogProps = {
++  name: string;
++  email: string;
++  state: ClubInvitationOperationActionState;
++  formAction: (formData: FormData) => void;
++  formRef: RefObject<HTMLFormElement | null>;
++  isPending: boolean;
++  canCancel: boolean;
++  onClose: () => void;
++};
 +
-+      switch (reason) {
-+        case "INVITATION_ALREADY_ACCEPTED":
-+          return {
-+            message: "承諾済みの招待は操作できません。",
-+            revalidate: true,
-+          };
-+        case "INVITATION_CANCELLED":
-+          return {
-+            message: "取消済みの招待は操作できません。",
-+            revalidate: true,
-+          };
-+        case "INVITATION_PROCESSING":
-+        case "RESEND_COOLDOWN":
-+          return {
-+            message: "招待を処理中、または再送待機中です。時間をおいてお試しください。",
-+            revalidate: true,
-+          };
-+        case "MEMBERSHIP_NOT_FOUND":
-+        case "MEMBERSHIP_NOT_INVITED":
-+        case "INVALID_INVITATION_STATE":
-+        case "AUTH_USER_MISMATCH":
-+        case "TOKEN_NOT_ROTATED":
-+          return {
-+            message: "現在の招待状況では操作できません。招待状況を確認してください。",
-+            revalidate: true,
-+          };
-+        default: {
-+          const exhaustiveReason: never = reason;
-+          return exhaustiveReason;
++// Portal上の取消確認にフォーカスを閉じ込め、閉じたら元のボタンへ戻す。
++function CancelDialog({
++  name,
++  email,
++  state,
++  formAction,
++  formRef,
++  isPending,
++  canCancel,
++  onClose,
++}: CancelDialogProps) {
++  const panelRef = useRef<HTMLDivElement>(null);
++  const headingId = useId();
++  const descriptionId = useId();
++
++  useEffect(() => {
++    // 開いた時点のフォーカスとスクロール状態を保存する。
++    const previousFocus = document.activeElement;
++    const previousOverflow = document.body.style.overflow;
++    document.body.style.overflow = "hidden";
++    panelRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
++
++    return () => {
++      document.body.style.overflow = previousOverflow;
++
++      if (
++        previousFocus instanceof HTMLElement &&
++        previousFocus.isConnected
++      ) {
++        previousFocus.focus();
++      }
++    };
++  }, []);
++
++  useEffect(() => {
++    // 送信中はEscapeで閉じず、Tabはダイアログ内で循環させる。
++    function handleKeyDown(event: KeyboardEvent) {
++      if (event.key === "Escape") {
++        event.preventDefault();
++
++        if (!isPending) {
++          onClose();
 +        }
++
++        return;
++      }
++
++      if (event.key !== "Tab") {
++        return;
++      }
++
++      const focusable = panelRef.current?.querySelectorAll<HTMLElement>(
++        'button:not([disabled]), [tabindex]:not([tabindex="-1"])',
++      );
++
++      if (!focusable?.length) {
++        event.preventDefault();
++        panelRef.current?.focus();
++        return;
++      }
++
++      const first = focusable[0];
++      const last = focusable[focusable.length - 1];
++      const active = document.activeElement;
++      const isOutside = !Array.from(focusable).some((element) => element === active);
++
++      if (event.shiftKey && (active === first || isOutside)) {
++        event.preventDefault();
++        last.focus();
++      } else if (!event.shiftKey && (active === last || isOutside)) {
++        event.preventDefault();
++        first.focus();
 +      }
 +    }
-+    default: {
-+      const exhaustiveResult: never = result;
-+      return exhaustiveResult;
-+    }
-+  }
-+}
 +
-+// DB保存後の結果は再検証し、認可された正規slugと固定toastだけで遷移する。
-+function redirectToMembers(
-+  clubSlug: string,
-+  requestId: string,
-+  toast: ClubMembersToastCode,
-+): never {
-+  revalidateClubMemberPaths(clubSlug);
++    document.addEventListener("keydown", handleKeyDown);
 +
-+  const query = new URLSearchParams({
-+    toast,
-+    toastId: requestId,
-+  });
++    return () => document.removeEventListener("keydown", handleKeyDown);
++  }, [isPending, onClose]);
 +
-+  redirect(
-+    `/club/${encodeURIComponent(clubSlug)}/admin/members?${query.toString()}`,
++  return (
++    <div
++      className="fixed inset-0 z-10000 flex items-center justify-center
++        overflow-y-auto bg-black/50 p-4"
++      onMouseDown={(event) => {
++        // 背景を押した場合だけ閉じ、処理中の取消確認は保持する。
++        if (event.target === event.currentTarget && !isPending) {
++          onClose();
++        }
++      }}
++    >
++      <div
++        ref={panelRef}
++        role="dialog"
++        aria-modal="true"
++        aria-labelledby={headingId}
++        aria-describedby={descriptionId}
++        tabIndex={-1}
++        className="box-border max-h-[calc(100dvh-2rem)] w-full max-w-lg
++          overflow-y-auto rounded-xl border border-slate-200 bg-white p-5 shadow-xl sm:p-6"
++      >
++        <h2
++          id={headingId}
++          className="text-xl font-bold text-slate-900"
++        >
++          招待を取り消しますか？
++        </h2>
++        <p className="mt-3 wrap-break-word font-bold text-slate-900">{name}</p>
++        <p className="mt-1 break-all text-sm text-slate-700">{email}</p>
++        <p
++          id={descriptionId}
++          className="mt-3 text-sm leading-6 text-slate-700"
++        >
++          招待中のメンバーは一覧から削除されます。招待履歴は残ります。
++        </p>
++
++        <form
++          ref={formRef}
++          action={formAction}
++          aria-busy={isPending}
++          className="mt-5 space-y-5"
++        >
++          <input
++            type="hidden"
++            name="requestId"
++            value={state.requestId}
++          />
++          <FormErrorAlert message={state.formError} />
++          <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
++            <button
++              type="button"
++              disabled={isPending}
++              onClick={onClose}
++              className="rounded-md border border-slate-300 px-4 py-3 text-sm font-bold
++                text-slate-700 hover:bg-slate-50 focus-visible:outline-2
++                focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
++            >
++              戻る
++            </button>
++            <button
++              type="submit"
++              disabled={isPending || !canCancel}
++              className="rounded-md bg-red-600 px-4 py-3 text-sm font-bold text-white
++                hover:bg-red-700 focus-visible:outline-2 focus-visible:outline-offset-2
++                focus-visible:outline-red-600 disabled:cursor-wait disabled:opacity-60"
++            >
++              {isPending ? "取消中..." : "招待を取り消す"}
++            </button>
++          </div>
++        </form>
++      </div>
++    </div>
 +  );
 +}
 +
-+// 再送・取消ではフォームの個人情報や前回stateのdataを返さない。
-+function operationError(
-+  requestId: unknown,
-+  message: string,
-+): ClubInvitationOperationActionState {
-+  return {
-+    status: "error",
-+    values: {},
-+    fieldErrors: {},
-+    formError: message,
-+    requestId: safeRequestId(requestId),
-+  };
++// 再送と取消のstateを分け、同じ招待に対する処理中は両方の操作を無効化する。
++export function ClubInvitationOperations({
++  name,
++  email,
++  canResend,
++  canCancel,
++  needsPreparationRetry,
++  resendInitialState,
++  cancelInitialState,
++  resendAction,
++  cancelAction,
++}: Props) {
++  const [resendState, resendFormAction, isResending] = useActionState(
++    resendAction,
++    resendInitialState,
++  );
++  const [cancelState, cancelFormAction, isCancelling] = useActionState(
++    cancelAction,
++    cancelInitialState,
++  );
++  const resendFormRef = useScrollToFormError(resendState);
++  const cancelFormRef = useScrollToFormError(cancelState);
++  const [isOpen, setIsOpen] = useState(false);
++  const isPending = isResending || isCancelling;
++
++  // ダイアログを閉じても取消Actionのエラーstateは親に保持する。
++  const close = useCallback(() => {
++    setIsOpen(false);
++  }, []);
++
++  return (
++    <div className="mt-4 space-y-3">
++      <form
++        ref={resendFormRef}
++        action={resendFormAction}
++        aria-busy={isResending}
++        className="space-y-3"
++      >
++        <input
++          type="hidden"
++          name="requestId"
++          value={resendState.requestId}
++        />
++        <FormErrorAlert message={resendState.formError} />
++        <button
++          type="submit"
++          disabled={isPending || !canResend}
++          className="rounded-md border border-blue-300 bg-white px-4 py-3
++            text-sm font-bold text-blue-700 hover:bg-blue-50 focus-visible:outline-2
++            focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-60"
++        >
++          {isResending
++            ? "処理中..."
++            : needsPreparationRetry
++              ? "準備を再試行する"
++              : "招待メールを再送する"}
++        </button>
++      </form>
++      {!isOpen ? <FormErrorAlert message={cancelState.formError} /> : null}
++      <button
++        type="button"
++        disabled={isPending || !canCancel}
++        onClick={() => setIsOpen(true)}
++        className="rounded-md border border-red-300 bg-white px-4 py-3
++          text-sm font-bold text-red-700 hover:bg-red-50 focus-visible:outline-2
++          focus-visible:outline-offset-2 focus-visible:outline-red-600 disabled:opacity-60"
++      >
++        招待を取り消す
++      </button>
++
++      {isOpen
++        ? createPortal(
++            <CancelDialog
++              name={name}
++              email={email}
++              state={cancelState}
++              formAction={cancelFormAction}
++              formRef={cancelFormRef}
++              isPending={isPending}
++              canCancel={canCancel}
++              onClose={close}
++            />,
++            document.body,
++          )
++        : null}
++    </div>
++  );
 +}
-+
-+// DomainErrorでもpublicMessageを直接返さず、許可したcodeから固定文言を選ぶ。
-+function serviceFailureMessage(error: unknown): string {
-+  const safe = convertPrismaError(error);
-+
-+  return safe.code === "VALIDATION"
-+    ? "招待する入力値を確認してください。"
-+    : FAILURE_MESSAGE;
-+}
-+
-+// 招待フォームの許可された入力値だけをエラーstateへ戻す。
-+function inviteError(
-+  values: ClubMemberInviteFormValues,
-+  requestId: unknown,
-+  message: string,
-+): ClubMemberInviteActionState {
-+  return {
-+    status: "error",
-+    values,
-+    fieldErrors: {},
-+    formError: message,
-+    requestId: safeRequestId(requestId),
-+  };
-+}
-+
-+// 招待に必要なクラブ情報だけを、認可したクラブIDでDBから取得する。
-+async function invitationOwner(
-+  access: Awaited<ReturnType<typeof requireClubAppOwnerAccess>>,
-+) {
-+  const configuration = await prisma.club.findUnique({
-+    where: {
-+      id: access.club.id,
-+    },
-+    select: {
-+      id: true,
-+      name: true,
-+      slug: true,
-+      timezone: true,
-+      appBaseUrl: true,
-+    },
-+  });
-+
-+  if (!configuration) {
-+    throw new Error("Invitation club configuration is unavailable");
-+  }
-+
-+  return {
-+    club: configuration,
-+    actorMembershipId: access.membership.id,
-+  };
-+}
-+
-+// Serviceが検証したorigin・DBのslug・生成したrawTokenで確定契約のURLを作る。
-+function buildClubInvitationLinks(
-+  input: Parameters<ClubInvitationLinkBuilder>[0],
-+): ReturnType<ClubInvitationLinkBuilder> {
-+  const query = new URLSearchParams({
-+    clubSlug: input.clubSlug,
-+    token: input.rawToken,
-+  });
-+  const invitationUrl = new URL("/club-invitations/accept", input.origin);
-+  const authRedirectTo = new URL("/welcome", input.origin);
-+
-+  invitationUrl.search = query.toString();
-+  authRedirectTo.search = query.toString();
-+
-+  return {
-+    invitationUrl: invitationUrl.toString(),
-+    authRedirectTo: authRedirectTo.toString(),
-+  };
-+}
-+
-+// 新規招待もAction自身でOWNER認可し、検証済みの氏名・email・roleだけを渡す。
-+export async function inviteClubMemberAction(
-+  clubSlug: string,
-+  previousState: ClubMemberInviteActionState,
-+  formData: FormData,
-+): Promise<ClubMemberInviteActionState> {
-+  const access = await requireClubAppOwnerAccess(clubSlug);
-+  const values = buildClubMemberInviteFormValues(formData);
-+
-+  if (!matchesRequestId(previousState.requestId, formData)) {
-+    return inviteError(values, previousState.requestId, EXPIRED_FORM_MESSAGE);
-+  }
-+
-+  const validation = validateClubMemberInviteFormValues(values);
-+
-+  if (!validation.success) {
-+    return {
-+      status: "error",
-+      values,
-+      fieldErrors: validation.fieldErrors,
-+      formError: null,
-+      requestId: safeRequestId(previousState.requestId),
-+    };
-+  }
-+
-+  let result: SendClubInvitationResult;
-+
-+  try {
-+    const owner = await invitationOwner(access);
-+    result = await inviteClubMember(
-+      {
-+        ...owner,
-+        ...validation.data,
-+      },
-+      buildClubInvitationLinks,
-+    );
-+  } catch (error) {
-+    unstable_rethrow(error);
-+    revalidateClubMemberPaths(access.club.slug);
-+    return inviteError(values, previousState.requestId, serviceFailureMessage(error));
-+  }
-+
-+  const presentation = presentResult(result, false);
-+
-+  if ("toast" in presentation) {
-+    redirectToMembers(access.club.slug, previousState.requestId, presentation.toast);
-+  }
-+
-+  if (presentation.revalidate) {
-+    revalidateClubMemberPaths(access.club.slug);
-+  }
-+
-+  return inviteError(values, previousState.requestId, presentation.message);
-+}
-+
-+// 再送対象IDも信用せず、認可クラブに属するかをService経由で再検証する。
-+export async function resendClubInvitationAction(
-+  clubSlug: string,
-+  invitationId: string,
-+  previousState: ClubInvitationOperationActionState,
-+  formData: FormData,
-+): Promise<ClubInvitationOperationActionState> {
-+  const access = await requireClubAppOwnerAccess(clubSlug);
-+
-+  if (!matchesRequestId(previousState.requestId, formData)) {
-+    return operationError(previousState.requestId, EXPIRED_FORM_MESSAGE);
-+  }
-+
-+  if (!invitationIdSchema.safeParse(invitationId).success) {
-+    return operationError(previousState.requestId, "招待対象を確認してください。");
-+  }
-+
-+  let result: SendClubInvitationResult;
-+
-+  try {
-+    const owner = await invitationOwner(access);
-+    result = await resendClubInvitation(
-+      {
-+        ...owner,
-+        invitationId,
-+      },
-+      buildClubInvitationLinks,
-+    );
-+  } catch (error) {
-+    unstable_rethrow(error);
-+    revalidateClubMemberPaths(access.club.slug);
-+    return operationError(previousState.requestId, serviceFailureMessage(error));
-+  }
-+
-+  const presentation = presentResult(result, true);
-+
-+  if ("toast" in presentation) {
-+    redirectToMembers(access.club.slug, previousState.requestId, presentation.toast);
-+  }
-+
-+  if (presentation.revalidate) {
-+    revalidateClubMemberPaths(access.club.slug);
-+  }
-+
-+  return operationError(previousState.requestId, presentation.message);
-+}
-+
-+// 取消も最初に現在のOWNERを認可し、対象IDの形式とrequestIdを検証する。
-+export async function cancelClubInvitationAction(
-+  clubSlug: string,
-+  invitationId: string,
-+  previousState: ClubInvitationOperationActionState,
-+  formData: FormData,
-+): Promise<ClubInvitationOperationActionState> {
-+  const access = await requireClubAppOwnerAccess(clubSlug);
-+
-+  if (!matchesRequestId(previousState.requestId, formData)) {
-+    return operationError(previousState.requestId, EXPIRED_FORM_MESSAGE);
-+  }
-+
-+  if (!invitationIdSchema.safeParse(invitationId).success) {
-+    return operationError(previousState.requestId, "招待対象を確認してください。");
-+  }
-+
-+  let result: CancelClubMemberInvitationResult;
-+
-+  try {
-+    result = await cancelClubMemberInvitation({
-+      clubId: access.club.id,
-+      actorMembershipId: access.membership.id,
-+      invitationId,
-+    });
-+  } catch (error) {
-+    unstable_rethrow(error);
-+    revalidateClubMemberPaths(access.club.slug);
-+    return operationError(previousState.requestId, serviceFailureMessage(error));
-+  }
-+
-+  // notFound・redirectはService例外を扱うtry/catchの外で実行する。
-+  const presentation = presentResult(result, false);
-+
-+  if ("toast" in presentation) {
-+    redirectToMembers(access.club.slug, previousState.requestId, presentation.toast);
-+  }
-+
-+  if (presentation.revalidate) {
-+    revalidateClubMemberPaths(access.club.slug);
-+  }
-+
-+  return operationError(previousState.requestId, presentation.message);
-+}
-diff --git a/tests/club-invitation-actions.test.ts b/tests/club-invitation-actions.test.ts
+diff --git a/app/(club-app)/club/[clubSlug]/admin/members/ClubMemberInviteForm.tsx b/app/(club-app)/club/[clubSlug]/admin/members/ClubMemberInviteForm.tsx
 new file mode 100644
-index 0000000..e381591
+index 0000000..3b95760
 --- /dev/null
-+++ b/tests/club-invitation-actions.test.ts
-@@ -0,0 +1,827 @@
-+// tests/club-invitation-actions.test.ts
++++ b/app/(club-app)/club/[clubSlug]/admin/members/ClubMemberInviteForm.tsx
+@@ -0,0 +1,180 @@
++// app/(club-app)/club/[clubSlug]/admin/members/ClubMemberInviteForm.tsx
++
++"use client";
 +
 +import {
-+  afterEach,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
++  useActionState,
++  useId,
++} from "react";
 +
++import {
++  FieldErrorList,
++} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
++import {
++  FormErrorAlert,
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  useScrollToFormError,
++} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
++import {
++  useUnsavedChangesGuard,
++} from "@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard";
++import {
++  getClubMemberRoleLabel,
++} from "@/domain/club/club-member-role";
++import {
++  CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH,
++  CLUB_MEMBER_INVITE_NAME_MAX_LENGTH,
++  CLUB_MEMBER_INVITE_ROLES,
++  type ClubMemberInviteActionState,
++} from "@/domain/club/invitation/invitation-form";
++
++type Props = {
++  initialState: ClubMemberInviteActionState;
++  action: (
++    previousState: ClubMemberInviteActionState,
++    formData: FormData,
++  ) => Promise<ClubMemberInviteActionState>;
++};
++
++// 招待Actionへ許可された入力だけを送り、エラー後の値と未保存変更を保持する。
++export function ClubMemberInviteForm({
++  initialState,
++  action,
++}: Props) {
++  const [state, formAction, isPending] = useActionState(action, initialState);
++  const formRef = useScrollToFormError(state);
++  const {
++    markDirty,
++    markSubmitting,
++  } = useUnsavedChangesGuard(isPending);
++  const emailId = useId();
++  const nameId = useId();
++  const roleId = useId();
++  const emailErrorId = `${emailId}-error`;
++  const nameErrorId = `${nameId}-error`;
++  const roleErrorId = `${roleId}-error`;
++
++  return (
++    <form
++      ref={formRef}
++      action={formAction}
++      aria-busy={isPending}
++      onChange={markDirty}
++      onSubmit={markSubmitting}
++      className="space-y-5"
++    >
++      <input
++        type="hidden"
++        name="requestId"
++        value={state.requestId}
++      />
++      <FormErrorAlert message={state.formError} />
++
++      <fieldset
++        disabled={isPending}
++        className="grid gap-5 sm:grid-cols-2"
++      >
++        <legend className="sr-only">招待するメンバーの情報</legend>
++        <div>
++          <label
++            htmlFor={emailId}
++            className="block text-sm font-bold text-slate-900"
++          >
++            メールアドレス
++          </label>
++          <input
++            key={`email-${state.status}-${state.values.email}`}
++            id={emailId}
++            type="email"
++            name="email"
++            autoComplete="email"
++            required
++            maxLength={CLUB_MEMBER_INVITE_EMAIL_MAX_LENGTH}
++            defaultValue={state.values.email}
++            aria-invalid={!!state.fieldErrors.email?.length}
++            aria-describedby={state.fieldErrors.email?.length ? emailErrorId : undefined}
++            className="mt-2 w-full rounded-md border border-slate-300 px-3 py-3"
++          />
++          <FieldErrorList
++            id={emailErrorId}
++            errors={state.fieldErrors.email}
++          />
++        </div>
++        <div>
++          <label
++            htmlFor={nameId}
++            className="block text-sm font-bold text-slate-900"
++          >
++            氏名
++          </label>
++          <input
++            key={`name-${state.status}-${state.values.name}`}
++            id={nameId}
++            type="text"
++            name="name"
++            autoComplete="name"
++            required
++            maxLength={CLUB_MEMBER_INVITE_NAME_MAX_LENGTH}
++            defaultValue={state.values.name}
++            aria-invalid={!!state.fieldErrors.name?.length}
++            aria-describedby={state.fieldErrors.name?.length ? nameErrorId : undefined}
++            className="mt-2 w-full rounded-md border border-slate-300 px-3 py-3"
++          />
++          <FieldErrorList
++            id={nameErrorId}
++            errors={state.fieldErrors.name}
++          />
++        </div>
++        <div>
++          <label
++            htmlFor={roleId}
++            className="block text-sm font-bold text-slate-900"
++          >
++            権限
++          </label>
++          <select
++            key={`role-${state.status}-${state.values.role}`}
++            id={roleId}
++            name="role"
++            defaultValue={state.values.role}
++            aria-invalid={!!state.fieldErrors.role?.length}
++            aria-describedby={state.fieldErrors.role?.length ? roleErrorId : undefined}
++            className="mt-2 w-full rounded-md border border-slate-300 bg-white px-3 py-3"
++          >
++            {!CLUB_MEMBER_INVITE_ROLES.some((role) => role === state.values.role) ? (
++              <option
++                value={state.values.role}
++                disabled
++              >
++                権限を選択してください
++              </option>
++            ) : null}
++            {CLUB_MEMBER_INVITE_ROLES.map((role) => (
++              <option
++                key={role}
++                value={role}
++              >
++                {getClubMemberRoleLabel(role)}
++              </option>
++            ))}
++          </select>
++          <FieldErrorList
++            id={roleErrorId}
++            errors={state.fieldErrors.role}
++          />
++        </div>
++      </fieldset>
++
++      <button
++        type="submit"
++        disabled={isPending}
++        className="rounded-md bg-blue-600 px-4 py-3 text-sm font-bold text-white
++          hover:bg-blue-700 focus-visible:outline-2 focus-visible:outline-offset-2
++          focus-visible:outline-blue-600 disabled:cursor-wait disabled:opacity-60"
++      >
++        {isPending ? "招待メールを送信中..." : "招待メールを送信する"}
++      </button>
++    </form>
++  );
++}
+diff --git a/app/(club-app)/club/[clubSlug]/admin/members/loading.tsx b/app/(club-app)/club/[clubSlug]/admin/members/loading.tsx
+index 6b36507..90e6b6b 100644
+--- a/app/(club-app)/club/[clubSlug]/admin/members/loading.tsx
++++ b/app/(club-app)/club/[clubSlug]/admin/members/loading.tsx
+@@ -18,6 +18,25 @@ export default function ClubMembersLoading() {
+         <div className="h-5 w-36 animate-pulse rounded bg-slate-100" />
+       </header>
+ 
++      <div
++        aria-hidden="true"
++        className="space-y-5 rounded-xl border border-slate-200 bg-white p-5"
++      >
++        <div className="h-7 w-48 animate-pulse rounded bg-slate-200" />
++        <div className="grid gap-5 sm:grid-cols-2">
++          {Array.from({ length: 3 }).map((_, index) => (
++            <div
++              key={index}
++              className="space-y-2"
++            >
++              <div className="h-4 w-24 animate-pulse rounded bg-slate-100" />
++              <div className="h-12 animate-pulse rounded bg-slate-100" />
++            </div>
++          ))}
++        </div>
++        <div className="h-12 w-48 animate-pulse rounded bg-blue-100" />
++      </div>
++
+       <ul className="grid gap-4">
+         {Array.from({ length: 3 }).map(
+           (_, index) => (
+@@ -28,6 +47,19 @@ export default function ClubMembersLoading() {
+           ),
+         )}
+       </ul>
++
++      <div
++        aria-hidden="true"
++        className="space-y-4"
++      >
++        <div className="h-7 w-32 animate-pulse rounded bg-slate-200" />
++        {Array.from({ length: 2 }).map((_, index) => (
++          <div
++            key={index}
++            className="h-64 animate-pulse rounded-xl border border-slate-200 bg-white"
++          />
++        ))}
++      </div>
+     </section>
+   );
+ }
+diff --git a/app/(club-app)/club/[clubSlug]/admin/members/page.tsx b/app/(club-app)/club/[clubSlug]/admin/members/page.tsx
+index bf1fc76..07efe97 100644
+--- a/app/(club-app)/club/[clubSlug]/admin/members/page.tsx
++++ b/app/(club-app)/club/[clubSlug]/admin/members/page.tsx
+@@ -2,6 +2,11 @@
+ // OWNER用メンバー管理一覧
+ 
+ import Link from "next/link";
++import { notFound } from "next/navigation";
++
++import {
++  FormErrorAlert,
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
+ 
+ import {
+   requireClubAppOwnerAccess,//オーナーでありアプリを使用できることを確認する関数
+@@ -23,12 +28,15 @@ import {
+ import {
+   createInitialActionState,//新規登録画面はまっさらで編集画面はDBから取得した既存のデータ（value）が入る
+ } from "@/domain/shared/action-state";
++import type {
++  ClubMemberInviteActionState,
++} from "@/domain/club/invitation/invitation-form";
+ import {
+   formatClubDateTime,//DBから取得したUTCをタイムゾーン（日本）に合わせて2026年8月19日（水） 18:30のように変換する関数
+ } from "@/domain/shared/date-time/club-date-time";
+ import {
+-  findClubMembershipsForOwner,//OWNER用メンバーシップ一覧へ表示する最小限のデータだけをDBから取得する。
+-} from "@/src/infrastructure/prisma/repositories/club-membership-repository";
++  getClubMemberManagement,
++} from "@/src/application/club/invitation/get-club-member-management";
+ 
+ import {
+   updateClubMembershipAction,//OWNERが同じクラブのMembershipのrole・statusを更新する。
+@@ -36,6 +44,14 @@ import {
+ import {
+   ClubMemberEditDialog,//メンバーシップ変更のモーダル関数
+ } from "./ClubMemberEditDialog";
++import { ClubMemberInviteForm } from "./ClubMemberInviteForm";
++import { ClubInvitationOperations } from "./ClubInvitationOperations";
 +import {
 +  cancelClubInvitationAction,
 +  inviteClubMemberAction,
 +  resendClubInvitationAction,
 +  type ClubInvitationOperationActionState,
-+} from "@/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions";
-+import { DomainError } from "@/domain/shared/domain-error";
-+import type {
-+  ClubMemberInviteActionState,
-+} from "@/domain/club/invitation/invitation-form";
-+import type {
-+  ClubInvitationLinkBuilder,
-+} from "@/src/application/club/invitation/send-club-invitation";
-+
-+// 認可は実装を使い、セッション・DB・Service・画面遷移の境界だけを差し替える。
-+const mocks = vi.hoisted(() => ({
-+  getUser: vi.fn(),
-+  membership: vi.fn(),
-+  club: vi.fn(),
-+  invite: vi.fn(),
-+  resend: vi.fn(),
-+  cancel: vi.fn(),
-+  revalidate: vi.fn(),
-+  redirect: vi.fn(),
-+  notFound: vi.fn(),
-+}));
-+
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: async () => ({
-+    auth: {
-+      getUser: mocks.getUser,
-+    },
-+  }),
-+}));
-+vi.mock("@/src/infrastructure/prisma/client", () => ({
-+  prisma: {
-+    clubMembership: {
-+      findFirst: mocks.membership,
-+    },
-+    club: {
-+      findUnique: mocks.club,
-+    },
-+  },
-+}));
-+vi.mock("@/src/application/club/invitation/send-club-invitation", () => ({
-+  inviteClubMember: mocks.invite,
-+  resendClubInvitation: mocks.resend,
-+}));
-+vi.mock("@/src/application/club/invitation/cancel-club-invitation", () => ({
-+  cancelClubMemberInvitation: mocks.cancel,
-+}));
-+vi.mock("@/app/(club-app)/club/revalidate-club-paths", () => ({
-+  revalidateClubMemberPaths: mocks.revalidate,
-+}));
-+vi.mock("next/navigation", async (importOriginal) => {
-+  // catch内のNext.js制御例外は実APIで再送出する。
-+  const original = await importOriginal<typeof import("next/navigation")>();
-+
-+  return {
-+    redirect: mocks.redirect,
-+    notFound: mocks.notFound,
-+    unstable_rethrow: original.unstable_rethrow,
-+  };
-+});
-+
-+const clubId = "11111111-1111-4111-8111-111111111111";
-+const actorMembershipId = "22222222-2222-4222-8222-222222222222";
-+const invitationId = "33333333-3333-4333-8333-333333333333";
-+const requestId = "44444444-4444-4444-8444-444444444444";
-+const clubSlug = "canonical-club";
-+const privateDetail = "private@example.test raw-token auth-link service-role-secret";
-+const club = {
-+  id: clubId,
-+  slug: clubSlug,
-+  name: "テストクラブ",
-+  timezone: "Asia/Tokyo",
-+  planType: "STANDARD",
-+};
-+
-+// Next.jsが実際に判定するdigestを付け、制御例外の伝播を検証する。
-+function navigationError(digest: string): Error & { digest: string } {
-+  return Object.assign(new Error("NEXT_NAVIGATION"), {
-+    digest,
-+  });
-+}
-+
-+// 再送・取消にはrequestId以外のフォーム値を必要としない。
-+function operationState(): ClubInvitationOperationActionState {
-+  return {
-+    status: "idle",
-+    values: {},
-+    fieldErrors: {},
-+    formError: null,
-+    requestId,
-+  };
-+}
-+
-+// 正常な送信IDを持つフォームを作成する。
-+function form(): FormData {
-+  const data = new FormData();
-+  data.set("requestId", requestId);
-+  return data;
-+}
-+
-+// 新規招待で画面へ返せる入力値だけを初期stateへ設定する。
-+function inviteState(): ClubMemberInviteActionState {
-+  return {
-+    ...operationState(),
-+    values: {
-+      email: "",
-+      name: "",
-+      role: "MEMBER",
-+    },
-+  };
-+}
-+
-+// 新規招待の正常な入力を作り、正規化も検証できるよう空白を含める。
-+function inviteForm(): FormData {
-+  const data = form();
-+  data.set("email", " MEMBER@EXAMPLE.TEST ");
-+  data.set("name", " 会員名 ");
-+  data.set("role", "MEMBER");
-+  return data;
-+}
-+
-+type ActionKind = "invite" | "resend" | "cancel";
-+
-+// 共通の安全性検証でも各Actionの実際の引数契約を使う。
-+function invoke(kind: ActionKind, data = inviteForm()) {
-+  if (kind === "invite") {
-+    return inviteClubMemberAction(clubSlug, inviteState(), data);
++} from "./invitation-actions";
+ 
+ // Cookieと現在のMembershipを毎回確認するために、毎回ページを読み込む
+ export const dynamic =
+@@ -65,11 +81,41 @@ export default async function ClubMembersPage({
+       clubSlug,
+     );
+ 
+-  const members =
+-    await findClubMembershipsForOwner({//OWNER用メンバーシップ一覧へ表示する最小限のデータだけをDBから取得する。
++  const management =
++    await getClubMemberManagement({
+       clubId: access.club.id,
++      actorMembershipId: access.membership.id,
+     });
+ 
++  // 取得中にOWNER資格を失った場合も個人情報を表示しない。
++  if (
++    management.outcome === "ACTOR_NOT_ACTIVE_OWNER" ||
++    management.outcome === "NOT_FOUND"
++  ) {
++    notFound();
 +  }
 +
-+  const action = kind === "resend"
-+    ? resendClubInvitationAction
-+    : cancelClubInvitationAction;
-+
-+  return action(clubSlug, invitationId, operationState(), data);
-+}
-+
-+// OWNERの実認可を通過する最小限の境界データを初期化する。
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  mocks.getUser.mockResolvedValue({
-+    data: {
-+      user: {
-+        id: "authenticated-user",
-+      },
-+    },
-+    error: null,
-+  });
-+  mocks.membership.mockResolvedValue({
-+    id: actorMembershipId,
-+    role: "OWNER",
-+    club,
-+  });
-+  mocks.club.mockResolvedValue({
-+    id: clubId,
-+    name: club.name,
-+    slug: clubSlug,
-+    timezone: club.timezone,
-+    appBaseUrl: "https://club.example.test",
-+  });
-+  mocks.invite.mockResolvedValue({
-+    outcome: "SENT",
-+    invitationId,
-+  });
-+  mocks.resend.mockResolvedValue({
-+    outcome: "SENT",
-+    invitationId,
-+  });
-+  mocks.cancel.mockResolvedValue({
-+    outcome: "CANCELLED",
-+  });
-+  mocks.notFound.mockImplementation(() => {
-+    throw navigationError("NEXT_HTTP_ERROR_FALLBACK;404");
-+  });
-+  mocks.redirect.mockImplementation((path: string) => {
-+    throw navigationError(`NEXT_REDIRECT;push;${path};303;`);
-+  });
-+});
-+
-+// console等へのspyを次のテストへ持ち越さない。
-+afterEach(() => {
-+  vi.restoreAllMocks();
-+});
-+
-+// 取消入口の実認可、入力検証、固定結果、例外境界を検証する。
-+describe("cancelClubInvitationAction", () => {
-+  it.each(["MEMBER", "COACH", "OFFICER"])(
-+    "%sの直接呼び出しを入力検証前に拒否する",
-+    async (role) => {
-+      mocks.membership.mockResolvedValue({
-+        id: actorMembershipId,
-+        role,
-+        club,
-+      });
-+      const data = new FormData();
-+      const get = vi.spyOn(data, "get");
-+
-+      await expect(cancelClubInvitationAction(
-+        clubSlug,
-+        invitationId,
-+        operationState(),
-+        data,
-+      )).rejects.toMatchObject({
-+        digest: "NEXT_HTTP_ERROR_FALLBACK;404",
-+      });
-+      expect(get).not.toHaveBeenCalled();
-+      expect(mocks.cancel).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it.each([null, "invalid", "55555555-5555-4555-8555-555555555555"])(
-+    "欠損・不正・不一致requestIdを拒否する: %s",
-+    async (value) => {
-+      const data = form();
-+
-+      if (value === null) {
-+        data.delete("requestId");
-+      } else {
-+        data.set("requestId", value);
-+      }
-+
-+      const result = await cancelClubInvitationAction(
-+        clubSlug,
-+        invitationId,
-+        operationState(),
-+        data,
-+      );
-+
-+      expect(result.status).toBe("error");
-+      expect(result.formError).toContain("フォームの有効期限");
-+      expect(mocks.cancel).not.toHaveBeenCalled();
-+      expect(mocks.revalidate).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it("不正な対象IDをServiceへ渡さない", async () => {
-+    const result = await cancelClubInvitationAction(
-+      clubSlug,
-+      "invalid",
-+      operationState(),
-+      form(),
++  if (management.outcome !== "FOUND") {
++    return (
++      <section className="space-y-6">
++        <h1 className="text-2xl font-bold text-slate-900">メンバー管理</h1>
++        <FormErrorAlert
++          message="メンバーと招待状況を取得できませんでした。
++            時間をおいてページを再読み込みしてください。"
++        />
++      </section>
 +    );
++  }
 +
-+    expect(result.formError).toBe("招待対象を確認してください。");
-+    expect(mocks.cancel).not.toHaveBeenCalled();
++  const members = management.memberships;
++  const invitations = management.invitations;
++  const inviteInitialState: ClubMemberInviteActionState = createInitialActionState({
++    email: "",
++    name: "",
++    role: "MEMBER",
 +  });
-+
-+  it("認可済みIDだけをServiceへ渡し、正規slugの固定toastへ遷移する", async () => {
-+    const data = form();
-+    data.set("clubId", "other-club");
-+    data.set("actorMembershipId", "other-owner");
-+    data.set("authUserId", privateDetail);
-+    data.set("tokenHash", privateDetail);
-+    data.set("redirectTo", "https://attacker.example.test");
-+
-+    await expect(cancelClubInvitationAction(
-+      " requested-slug ",
-+      invitationId,
-+      operationState(),
-+      data,
-+    )).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    expect(mocks.cancel).toHaveBeenCalledExactlyOnceWith({
-+      clubId,
-+      actorMembershipId,
-+      invitationId,
-+    });
-+    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith(clubSlug);
-+    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith(
-+      `/club/${clubSlug}/admin/members?toast=member-invitation-cancelled&toastId=${requestId}`,
-+    );
-+    expect(mocks.revalidate.mock.invocationCallOrder[0]).toBeLessThan(
-+      mocks.redirect.mock.invocationCallOrder[0],
-+    );
-+  });
-+
-+  it.each(["NOT_FOUND", "ACTOR_NOT_ACTIVE_OWNER"])(
-+    "%sは他クラブ対象・失効したOWNERの情報を404に統一する",
-+    async (outcome) => {
-+      mocks.cancel.mockResolvedValue({
-+        outcome,
-+      });
-+
-+      await expect(cancelClubInvitationAction(
-+        clubSlug,
-+        invitationId,
-+        operationState(),
-+        form(),
-+      )).rejects.toMatchObject({
-+        digest: "NEXT_HTTP_ERROR_FALLBACK;404",
-+      });
-+      expect(mocks.revalidate).not.toHaveBeenCalled();
-+      expect(mocks.redirect).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it.each([
-+    "INVITATION_ALREADY_ACCEPTED",
-+    "INVITATION_CANCELLED",
-+    "MEMBERSHIP_NOT_INVITED",
-+  ])("%sの拒否を成功に変換しない", async (reason) => {
-+    mocks.cancel.mockResolvedValue({
-+      outcome: "RULE_VIOLATION",
-+      reason,
-+    });
-+
-+    const result = await cancelClubInvitationAction(
-+      clubSlug,
-+      invitationId,
-+      operationState(),
-+      form(),
-+    );
-+
-+    expect(result.status).toBe("error");
-+    expect(result.formError).toBeTruthy();
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+  });
-+
-+  it("例外と前回stateの秘密をログ・ActionStateへ残さない", async () => {
-+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-+    mocks.cancel.mockRejectedValue(new DomainError("INTERNAL", privateDetail));
-+
-+    const result = await cancelClubInvitationAction(
-+      clubSlug,
-+      invitationId,
-+      {
-+        ...operationState(),
-+        values: {
-+          secret: privateDetail,
-+        } as never,
-+        formError: privateDetail,
-+      },
-+      form(),
-+    );
-+
-+    expect(result.status).toBe("error");
-+    expect(result.values).toEqual({});
-+    expect(JSON.stringify(result)).not.toContain(privateDetail);
-+    expect(log).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    "NEXT_HTTP_ERROR_FALLBACK;404",
-+    "NEXT_REDIRECT;push;/club-login;303;",
-+  ])("Serviceが投げたNext.js制御例外も吸収しない: %s", async (digest) => {
-+    const error = navigationError(digest);
-+    mocks.cancel.mockRejectedValue(error);
-+
-+    await expect(cancelClubInvitationAction(
-+      clubSlug,
-+      invitationId,
-+      operationState(),
-+      form(),
-+    )).rejects.toBe(error);
-+    expect(mocks.revalidate).not.toHaveBeenCalled();
-+  });
-+
-+  it("不正な前回requestIdをそのまま反射しない", async () => {
-+    const result = await cancelClubInvitationAction(
-+      clubSlug,
-+      invitationId,
-+      {
-+        ...operationState(),
-+        requestId: privateDetail,
-+      },
-+      form(),
-+    );
-+
-+    expect(JSON.stringify(result)).not.toContain(privateDetail);
-+    expect(result.requestId).toMatch(/^[a-f0-9-]{36}$/);
-+    expect(mocks.cancel).not.toHaveBeenCalled();
-+  });
-+});
-+
-+// 新規・再送・取消のいずれも実認可を通るまで入力や副作用を扱わない。
-+describe.each(["invite", "resend", "cancel"] as const)("%s共通の認可", (kind) => {
-+  it.each(["MEMBER", "COACH", "OFFICER"])("%sにはServiceを呼ばない", async (role) => {
-+    mocks.membership.mockResolvedValue({
-+      id: actorMembershipId,
-+      role,
-+      club,
-+    });
-+    const data = inviteForm();
-+    const get = vi.spyOn(data, "get");
-+
-+    await expect(invoke(kind, data)).rejects.toMatchObject({
-+      digest: "NEXT_HTTP_ERROR_FALLBACK;404",
-+    });
-+    expect(get).not.toHaveBeenCalled();
-+    expect(mocks.invite).not.toHaveBeenCalled();
-+    expect(mocks.resend).not.toHaveBeenCalled();
-+    expect(mocks.cancel).not.toHaveBeenCalled();
-+    expect(mocks.club).not.toHaveBeenCalled();
-+  });
-+
-+  it.each(["SUSPENDED", "WITHDRAWN"])("最新DB状態が%sなら拒否する", async (status) => {
-+    // 実認可がACTIVE条件を付けている場合だけ、失効した所属を検索結果から除外する。
-+    mocks.membership.mockImplementation(async (query) => {
-+      expect(query.where.status).toBe("ACTIVE");
-+      expect(query.where.userId).toBe("authenticated-user");
-+      expect(query.where.club.is.slug).toBe(clubSlug);
-+
-+      return query.where.status === status
-+        ? {
-+            id: actorMembershipId,
-+            role: "OWNER",
-+            club,
-+          }
-+        : null;
-+    });
-+
-+    await expect(invoke(kind)).rejects.toMatchObject({
-+      digest: "NEXT_HTTP_ERROR_FALLBACK;404",
-+    });
-+    expect(mocks[kind]).not.toHaveBeenCalled();
-+  });
-+
-+  it("未ログイン時のredirectを吸収しない", async () => {
-+    mocks.getUser.mockResolvedValue({
-+      data: {
-+        user: null,
-+      },
-+      error: null,
-+    });
-+
-+    await expect(invoke(kind)).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club-login;303;",
-+    });
-+    expect(mocks[kind]).not.toHaveBeenCalled();
-+  });
-+
-+  it("requestIdをFileで渡しても処理しない", async () => {
-+    const data = inviteForm();
-+    data.set("requestId", new Blob([privateDetail]), "request.txt");
-+
-+    const result = await invoke(kind, data);
-+
-+    expect(result.status).toBe("error");
-+    expect(result.formError).toContain("フォームの有効期限");
-+    expect(mocks[kind]).not.toHaveBeenCalled();
-+    expect(mocks.club).not.toHaveBeenCalled();
-+  });
-+});
-+
-+// 送信入力の改ざん拒否と、認可結果・DB設定だけによるService入力を確認する。
-+describe("inviteClubMemberActionの入力", () => {
-+  it.each(["OWNER", "SUPER_ADMIN", ""])("不正role=%sを拒否する", async (role) => {
-+    const data = inviteForm();
-+    data.set("role", role);
-+
-+    const result = await invoke("invite", data);
-+
-+    expect(result.status).toBe("error");
-+    expect(result.fieldErrors).toHaveProperty("role");
-+    expect(mocks.invite).not.toHaveBeenCalled();
-+    expect(mocks.club).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([null, "invalid", "55555555-5555-4555-8555-555555555555"])(
-+    "requestId=%sを入力検証・DB設定取得より前に拒否する",
-+    async (value) => {
-+      const data = inviteForm();
-+
-+      if (value === null) {
-+        data.delete("requestId");
-+      } else {
-+        data.set("requestId", value);
-+      }
-+
-+      const result = await invoke("invite", data);
-+
-+      expect(result.formError).toContain("フォームの有効期限");
-+      expect(mocks.invite).not.toHaveBeenCalled();
-+      expect(mocks.club).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it("氏名とemailの入力エラーを返す", async () => {
-+    const data = inviteForm();
-+    data.set("email", "invalid");
-+    data.set("name", " ");
-+
-+    const result = await invoke("invite", data);
-+
-+    expect(result.fieldErrors).toHaveProperty("email");
-+    expect(result.fieldErrors).toHaveProperty("name");
-+    expect(mocks.invite).not.toHaveBeenCalled();
-+  });
-+
-+  it("正規化入力・認可ID・DB設定だけをServiceへ渡す", async () => {
-+    const data = inviteForm();
-+
-+    for (const field of [
-+      "clubId",
-+      "actorMembershipId",
-+      "authUserId",
-+      "tokenHash",
-+      "status",
-+      "appBaseUrl",
-+      "redirectTo",
-+    ]) {
-+      data.set(field, privateDetail);
-+    }
-+
-+    await expect(invoke("invite", data)).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    expect(mocks.club).toHaveBeenCalledExactlyOnceWith({
-+      where: {
-+        id: clubId,
-+      },
-+      select: {
-+        id: true,
-+        name: true,
-+        slug: true,
-+        timezone: true,
-+        appBaseUrl: true,
-+      },
-+    });
-+    expect(mocks.invite).toHaveBeenCalledExactlyOnceWith({
-+      club: {
-+        id: clubId,
-+        name: club.name,
-+        slug: clubSlug,
-+        timezone: club.timezone,
-+        appBaseUrl: "https://club.example.test",
-+      },
-+      actorMembershipId,
-+      email: "member@example.test",
-+      name: "会員名",
-+      role: "MEMBER",
-+    }, expect.any(Function));
-+  });
-+});
-+
-+// DB保存済みの失敗・不明な配送と、保存前の失敗を区別して表示する。
-+describe.each(["invite", "resend"] as const)("%sの結果表示", (kind) => {
-+  it.each([
-+    {
-+      result: {
-+        outcome: "SENT",
-+        invitationId,
-+      },
-+      toast: kind === "invite" ? "member-invited" : "member-invitation-resent",
-+    },
-+    {
-+      result: {
-+        outcome: "EMAIL_FAILED",
-+        invitationId,
-+      },
-+      toast: "member-invitation-email-failed",
-+    },
-+    {
-+      result: {
-+        outcome: "PREPARATION_FAILED",
-+        invitationId,
-+        stage: "PREPARATION",
-+        recovery: "RESEND",
-+      },
-+      toast: "member-invitation-recovery-required",
-+    },
-+  ])("$result.outcomeは一覧更新後に固定toastへ遷移する", async ({ result, toast }) => {
-+    mocks[kind].mockResolvedValue(result);
-+
-+    await expect(invoke(kind)).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith(clubSlug);
-+    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith(
-+      `/club/${clubSlug}/admin/members?toast=${toast}&toastId=${requestId}`,
-+    );
-+  });
-+
-+  it.each([
-+    {
-+      outcome: "DELIVERY_UNKNOWN",
-+      invitationId,
-+    },
-+    {
-+      outcome: "DELIVERY_RECORDING_FAILED",
-+      invitationId,
-+      delivery: "ACCEPTED",
-+    },
-+    {
-+      outcome: "DELIVERY_RECORDING_FAILED",
-+      invitationId,
-+      delivery: "REJECTED",
-+    },
-+  ])("$outcome/$deliveryは保存済みの固定メッセージで再検証する", async (result) => {
-+    mocks[kind].mockResolvedValue(result);
-+
-+    const state = await invoke(kind);
-+
-+    expect(state.status).toBe("error");
-+    expect(state.formError).toContain("招待情報は保存されています");
-+    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith(clubSlug);
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+
-+    if (result.delivery === "ACCEPTED") {
-+      expect(state.formError).toContain("メール送信は受け付けられました");
-+      expect(state.formError).not.toContain("メール送信に失敗");
-+    }
-+  });
-+
-+  it.each(["NOT_FOUND", "ACTOR_NOT_ACTIVE_OWNER"])(
-+    "%sでは対象の有無を404に統一する",
-+    async (outcome) => {
-+      mocks[kind].mockResolvedValue({
-+        outcome,
-+      });
-+
-+      await expect(invoke(kind)).rejects.toMatchObject({
-+        digest: "NEXT_HTTP_ERROR_FALLBACK;404",
-+      });
-+      expect(mocks.revalidate).not.toHaveBeenCalled();
-+      expect(mocks.redirect).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it.each([
-+    "INVITATION_ALREADY_ACCEPTED",
-+    "INVITATION_CANCELLED",
-+    "INVITATION_PROCESSING",
-+    "RESEND_COOLDOWN",
-+    "AUTH_USER_MISMATCH",
-+  ])("%sの再送拒否を成功扱いしない", async (reason) => {
-+    mocks[kind].mockResolvedValue({
-+      outcome: "RULE_VIOLATION",
-+      reason,
-+    });
-+
-+    const result = await invoke(kind);
-+
-+    expect(result.status).toBe("error");
-+    expect(result.formError).toBeTruthy();
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+  });
-+
-+  it("設定不備は保存済みとして表示せずService結果の秘密も返さない", async () => {
-+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-+    mocks[kind].mockResolvedValue({
-+      outcome: "CONFIGURATION_ERROR",
-+      tokenHash: privateDetail,
-+      authLink: privateDetail,
-+    });
-+
-+    const result = await invoke(kind);
-+
-+    expect(result.status).toBe("error");
-+    expect(result.formError).not.toContain("保存");
-+    expect(JSON.stringify(result)).not.toContain(privateDetail);
-+    expect(mocks.revalidate).not.toHaveBeenCalled();
-+    expect(log).not.toHaveBeenCalled();
-+  });
-+
-+  it("DB設定取得失敗はServiceに進めず原文を返さない", async () => {
-+    mocks.club.mockRejectedValue(new Error(privateDetail));
-+
-+    const result = await invoke(kind);
-+
-+    expect(result.status).toBe("error");
-+    expect(JSON.stringify(result)).not.toContain(privateDetail);
-+    expect(mocks[kind]).not.toHaveBeenCalled();
-+  });
-+});
-+
-+// 再送入口では対象ID以外のフォーム値をService入力に使用しない。
-+describe("resendClubInvitationActionの対象", () => {
-+  it("改ざんされた対象IDの形式を拒否する", async () => {
-+    const result = await resendClubInvitationAction(
-+      clubSlug,
-+      "invalid",
-+      operationState(),
-+      form(),
-+    );
-+
-+    expect(result.formError).toBe("招待対象を確認してください。");
-+    expect(mocks.resend).not.toHaveBeenCalled();
-+    expect(mocks.club).not.toHaveBeenCalled();
-+  });
-+
-+  it("他クラブID等が追加されても認可結果と対象IDだけを渡す", async () => {
-+    const data = inviteForm();
-+    data.set("clubId", "attacker-club");
-+    data.set("actorMembershipId", "attacker-owner");
-+    data.set("role", "OWNER");
-+    data.set("email", "attacker@example.test");
-+
-+    await expect(invoke("resend", data)).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    expect(mocks.resend).toHaveBeenCalledExactlyOnceWith({
-+      club: {
-+        id: clubId,
-+        name: club.name,
-+        slug: clubSlug,
-+        timezone: club.timezone,
-+        appBaseUrl: "https://club.example.test",
-+      },
-+      actorMembershipId,
-+      invitationId,
-+    }, expect.any(Function));
-+  });
-+});
-+
-+// URL生成関数は非公開のまま、Serviceへ渡された実関数で確定契約を検証する。
-+describe.each(["invite", "resend"] as const)("%sのURL契約", (kind) => {
-+  it("DBから取得したクラブ情報をServiceへ渡す", async () => {
-+    mocks.club.mockResolvedValue({
-+      id: clubId,
-+      name: "DBのクラブ名",
-+      slug: "db-club-slug",
-+      timezone: "UTC",
-+      appBaseUrl: "https://db.example.test",
-+    });
-+
-+    await expect(invoke(kind)).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    expect(mocks[kind].mock.calls[0][0].club).toEqual({
-+      id: clubId,
-+      name: "DBのクラブ名",
-+      slug: "db-club-slug",
-+      timezone: "UTC",
-+      appBaseUrl: "https://db.example.test",
-+    });
-+  });
-+
-+  it.each([
-+    {
-+      origin: "https://club.example.test",
-+      slug: "club-a",
-+      token: "raw_token-123",
-+    },
-+    {
-+      origin: "http://localhost:3000",
-+      slug: "クラブ & / ? #",
-+      token: "token+/=?&:#",
-+    },
-+  ])("Service指定origin=$originから2つの安全なURLを作る", async (value) => {
-+    const data = inviteForm();
-+    data.set("origin", "https://attacker.example.test");
-+    data.set("Host", "attacker.example.test");
-+    data.set("invitationUrl", privateDetail);
-+    data.set("authRedirectTo", privateDetail);
-+    data.set("token", privateDetail);
-+
-+    await expect(invoke(kind, data)).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    const builder: ClubInvitationLinkBuilder = mocks[kind].mock.calls[0][1];
-+    const links = builder({
-+      origin: value.origin,
-+      clubId,
-+      clubSlug: value.slug,
-+      rawToken: value.token,
-+    });
-+    const acceptance = new URL(links.invitationUrl);
-+    const welcome = new URL(links.authRedirectTo);
-+
-+    expect(acceptance.pathname).toBe("/club-invitations/accept");
-+    expect(welcome.pathname).toBe("/welcome");
-+
-+    for (const url of [acceptance, welcome]) {
-+      expect(url.origin).toBe(value.origin);
-+      expect(Array.from(url.searchParams.keys())).toEqual(["clubSlug", "token"]);
-+      expect(url.searchParams.get("clubSlug")).toBe(value.slug);
-+      expect(url.searchParams.get("token")).toBe(value.token);
-+      expect(url.hash).toBe("");
-+      expect(url.href).not.toContain(clubId);
-+      expect(url.href).not.toContain("attacker.example.test");
-+      expect(url.href).not.toContain(privateDetail);
-+    }
-+  });
-+
-+  it("appBaseUrl未設定はServiceのAPP_BASE_URLフォールバックに委ねる", async () => {
-+    mocks.club.mockResolvedValue({
-+      id: clubId,
-+      name: club.name,
-+      slug: clubSlug,
-+      timezone: club.timezone,
-+      appBaseUrl: null,
-+    });
-+
-+    await expect(invoke(kind)).rejects.toMatchObject({
-+      digest: expect.stringContaining("NEXT_REDIRECT"),
-+    });
-+    expect(mocks[kind].mock.calls[0][0].club.appBaseUrl).toBeNull();
-+  });
-+
-+  it("クラブ設定が取得できなければServiceを呼ばない", async () => {
-+    mocks.club.mockResolvedValue(null);
-+
-+    const result = await invoke(kind);
-+
-+    expect(result.status).toBe("error");
-+    expect(mocks[kind]).not.toHaveBeenCalled();
-+  });
-+});
-+
-+// use serverの実行可能なexportを3つのasync Actionに限定する。
-+it("同期URL生成関数や復旧Actionを公開しない", async () => {
-+  const actions = await import(
-+    "@/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions"
-+  );
-+
-+  expect(Object.keys(actions).sort()).toEqual([
-+    "cancelClubInvitationAction",
-+    "inviteClubMemberAction",
-+    "resendClubInvitationAction",
-+  ]);
-+});
++  const inviteAction = inviteClubMemberAction.bind(null, access.club.slug);
++
+   const resolvedSearchParams =
+     await searchParams;
+   const toastMessage =
+@@ -77,6 +123,14 @@ export default async function ClubMembersPage({
+       resolvedSearchParams.toast,
+     );
+ 
++  // 保存済みの送信失敗・復旧待ちを成功色で表示しない。
++  const toastClassName =
++    resolvedSearchParams.toast === "member-invitation-email-failed"
++      ? "border-red-300 bg-red-50 text-red-800"
++      : resolvedSearchParams.toast === "member-invitation-recovery-required"
++        ? "border-amber-300 bg-amber-50 text-amber-900"
++        : "border-green-300 bg-green-50 text-green-800";
++
+   //オーナーの数をカウントする
+   const activeOwnerCount =
+     members.filter(
+@@ -116,12 +170,28 @@ export default async function ClubMembersPage({
+         <p
+           role="status"
+           aria-live="polite"
+-          className="rounded-lg border border-green-300 bg-green-50 p-4 text-sm font-bold text-green-800"
++          className={`rounded-lg border p-4 text-sm font-bold ${toastClassName}`}
+         >
+           {toastMessage}
+         </p>
+       ) : null}
+ 
++      <section
++        aria-labelledby="member-invite-heading"
++        className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
++      >
++        <h2
++          id="member-invite-heading"
++          className="mb-5 text-xl font-bold text-slate-900"
++        >
++          新規メンバー招待
++        </h2>
++        <ClubMemberInviteForm
++          initialState={inviteInitialState}
++          action={inviteAction}
++        />
++      </section>
++
+       {members.length === 0 ? (
+         <p className="rounded-lg border border-dashed border-slate-300 bg-white p-6 text-slate-700">
+           登録済みメンバーはいません。
+@@ -219,6 +289,118 @@ export default async function ClubMembersPage({
+           })}
+         </ul>
+       )}
++
++      <section
++        aria-labelledby="invitation-list-heading"
++        className="space-y-4"
++      >
++        <h2
++          id="invitation-list-heading"
++          className="text-xl font-bold text-slate-900"
++        >
++          招待状況
++        </h2>
++        <p className="text-sm leading-6 text-slate-600">
++          処理中や再送待機中の場合は操作できません。
++          時間をおいてページを再読み込みしてください。
++        </p>
++        {invitations.length === 0 ? (
++          <p className="rounded-lg border border-dashed border-slate-300 bg-white p-6">
++            招待情報はありません。
++          </p>
++        ) : (
++          <ul className="grid gap-4">
++            {invitations.map((invitation) => {
++              // Membership未作成の招待も独立した一覧行として表示する。
++              const displayName = invitation.name?.trim() || "氏名未登録";
++              const resendInitialState: ClubInvitationOperationActionState =
++                createInitialActionState({});
++              const cancelInitialState: ClubInvitationOperationActionState =
++                createInitialActionState({});
++              const resendAction = resendClubInvitationAction.bind(
++                null,
++                access.club.slug,
++                invitation.id,
++              );
++              const cancelAction = cancelClubInvitationAction.bind(
++                null,
++                access.club.slug,
++                invitation.id,
++              );
++
++              return (
++                <li
++                  key={invitation.id}
++                  className="min-w-0 rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
++                >
++                  <h3 className="wrap-break-word text-lg font-bold text-slate-900">
++                    {displayName}
++                  </h3>
++                  <p className="mt-1 break-all text-sm text-slate-700">{invitation.email}</p>
++                  <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
++                    <div>
++                      <dt className="font-bold text-slate-700">権限</dt>
++                      <dd className="mt-1">{getClubMemberRoleLabel(invitation.role)}</dd>
++                    </div>
++                    <div>
++                      <dt className="font-bold text-slate-700">招待状態</dt>
++                      <dd className="mt-1">{getClubInvitationStatusLabel(invitation.status)}</dd>
++                    </div>
++                    <div>
++                      <dt className="font-bold text-slate-700">在籍状態</dt>
++                      <dd className="mt-1">
++                        {invitation.membershipStatus
++                          ? getClubMembershipStatusLabel(invitation.membershipStatus)
++                          : "所属情報なし"}
++                      </dd>
++                    </div>
++                    <div>
++                      <dt className="font-bold text-slate-700">有効期限</dt>
++                      <dd className="mt-1">
++                        {formatClubDateTime(invitation.expiresAt, access.club.timezone)}
++                      </dd>
++                    </div>
++                    <div>
++                      <dt className="font-bold text-slate-700">最終送信日時</dt>
++                      <dd className="mt-1">
++                        {invitation.emailSentAt
++                          ? formatClubDateTime(invitation.emailSentAt, access.club.timezone)
++                          : "送信記録なし"}
++                      </dd>
++                    </div>
++                  </dl>
++
++                  {(
++                    invitation.status === "PREPARING" ||
++                    (
++                      invitation.status === "EXPIRED" &&
++                      !invitation.hasMembership
++                    )
++                  ) ? (
++                    <p className="mt-4 rounded-lg border border-amber-300 bg-amber-50
++                      p-3 text-sm leading-6 text-amber-900">
++                      準備の再試行で解消しない場合、または再試行できない場合は、
++                      運営者による復旧が必要です。運営者へお問い合わせください。
++                    </p>
++                  ) : null}
++
++                  <ClubInvitationOperations
++                    name={displayName}
++                    email={invitation.email}
++                    canResend={invitation.canResend}
++                    canCancel={invitation.canCancel}
++                    needsPreparationRetry={invitation.needsPreparationRetry}
++                    resendInitialState={resendInitialState}
++                    cancelInitialState={cancelInitialState}
++                    resendAction={resendAction}
++                    cancelAction={cancelAction}
++                  />
++                </li>
++              );
++            })}
++          </ul>
++        )}
++      </section>
+     </section>
+   );
+ }

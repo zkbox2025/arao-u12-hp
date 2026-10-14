@@ -18,6 +18,25 @@ export default function ClubMembersLoading() {
         <div className="h-5 w-36 animate-pulse rounded bg-slate-100" />
       </header>
 
+      <div
+        aria-hidden="true"
+        className="space-y-5 rounded-xl border border-slate-200 bg-white p-5"
+      >
+        <div className="h-7 w-48 animate-pulse rounded bg-slate-200" />
+        <div className="grid gap-5 sm:grid-cols-2">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div
+              key={index}
+              className="space-y-2"
+            >
+              <div className="h-4 w-24 animate-pulse rounded bg-slate-100" />
+              <div className="h-12 animate-pulse rounded bg-slate-100" />
+            </div>
+          ))}
+        </div>
+        <div className="h-12 w-48 animate-pulse rounded bg-blue-100" />
+      </div>
+
       <ul className="grid gap-4">
         {Array.from({ length: 3 }).map(
           (_, index) => (
@@ -28,6 +47,19 @@ export default function ClubMembersLoading() {
           ),
         )}
       </ul>
+
+      <div
+        aria-hidden="true"
+        className="space-y-4"
+      >
+        <div className="h-7 w-32 animate-pulse rounded bg-slate-200" />
+        {Array.from({ length: 2 }).map((_, index) => (
+          <div
+            key={index}
+            className="h-64 animate-pulse rounded-xl border border-slate-200 bg-white"
+          />
+        ))}
+      </div>
     </section>
   );
 }
