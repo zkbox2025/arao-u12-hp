@@ -1,446 +1,464 @@
-diff --git a/src/application/club/invitation/cancel-club-invitation.test.ts b/src/application/club/invitation/cancel-club-invitation.test.ts
+diff --git a/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts b/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts
 new file mode 100644
-index 0000000..ebd424f
+index 0000000..acad153
 --- /dev/null
-+++ b/src/application/club/invitation/cancel-club-invitation.test.ts
-@@ -0,0 +1,142 @@
-+// src/application/club/invitation/cancel-club-invitation.test.ts
++++ b/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts
+@@ -0,0 +1,448 @@
++// app/(club-app)/club/[clubSlug]/admin/members/invitation-actions.ts
++
++"use server";
 +
 +import {
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
++  notFound,
++  redirect,
++  unstable_rethrow,
++} from "next/navigation";
++import { z } from "zod";
 +
++import {
++  requireClubAppOwnerAccess,
++} from "@/app/(club-app)/club/club-app-authorization";
++import {
++  revalidateClubMemberPaths,
++} from "@/app/(club-app)/club/revalidate-club-paths";
++import type {
++  ClubMembersToastCode,
++} from "@/domain/club/member/member-toast";
++import {
++  buildClubMemberInviteFormValues,
++  validateClubMemberInviteFormValues,
++  type ClubMemberInviteActionState,
++  type ClubMemberInviteFormValues,
++} from "@/domain/club/invitation/invitation-form";
++import type { ActionState } from "@/domain/shared/action-state";
++import {
++  createRequestId,
++  isRequestId,
++} from "@/domain/shared/request-id";
 +import {
 +  cancelClubMemberInvitation,
++  type CancelClubMemberInvitationResult,
 +} from "@/src/application/club/invitation/cancel-club-invitation";
-+
-+// 取消の結果を制御し、Serviceが拒否や競合を成功に変換しないことを確認する。
-+const mocks = vi.hoisted(() => ({
-+  cancel: vi.fn(),
-+  transaction: vi.fn(),
-+}));
-+
-+vi.mock("@/src/infrastructure/prisma/client", () => ({
-+  prisma: {
-+    $transaction: mocks.transaction,
-+  },
-+}));
-+
-+vi.mock(
-+  "@/src/infrastructure/prisma/repositories/club-invitation-repository",
-+  () => ({
-+    cancelClubInvitation: mocks.cancel,
-+  }),
-+);
-+
-+const input = {
-+  clubId: "club-a",
-+  actorMembershipId: "owner-a",
-+  invitationId: "invitation-a",
-+};
-+
-+// 各ケースで呼び出し履歴と結果を初期化する。
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+});
-+
-+// Repositoryによる再認可・在籍状態判定と安全な障害結果を検証する。
-+describe("cancelClubMemberInvitation", () => {
-+  it.each([
-+    { outcome: "CANCELLED" },
-+    { outcome: "ACTOR_NOT_ACTIVE_OWNER" },
-+    { outcome: "NOT_FOUND" },
-+    { outcome: "CLAIM_LOST" },
-+    {
-+      outcome: "RULE_VIOLATION",
-+      reason: "MEMBERSHIP_NOT_FOUND",
-+    },
-+    {
-+      outcome: "RULE_VIOLATION",
-+      reason: "MEMBERSHIP_NOT_INVITED",
-+    },
-+    {
-+      outcome: "RULE_VIOLATION",
-+      reason: "INVITATION_ALREADY_ACCEPTED",
-+    },
-+    {
-+      outcome: "RULE_VIOLATION",
-+      reason: "INVITATION_CANCELLED",
-+    },
-+  ])("取消・拒否・競合の結果を保持する: $outcome / $reason", async (result) => {
-+    mocks.cancel.mockResolvedValue(result);
-+
-+    expect(await cancelClubMemberInvitation(input)).toEqual(result);
-+    expect(mocks.cancel).toHaveBeenCalledExactlyOnceWith(input);
-+  });
-+
-+  // rollback等のDB障害の詳細は外へ出さない。
-+  it("DB例外を固定結果に変換する", async () => {
-+    mocks.cancel.mockRejectedValue(new Error("private database detail"));
-+
-+    expect(await cancelClubMemberInvitation(input)).toEqual({
-+      outcome: "CANCELLATION_FAILED",
-+    });
-+  });
-+
-+  // 実Repositoryの状態・claim判定を使い、古い送信処理のSENT復帰を検証する。
-+  it.each([
-+    {
-+      status: "CANCELLED",
-+      claimToken: null,
-+      leaseExpiresAt: null,
-+    },
-+    {
-+      status: "EXPIRED",
-+      claimToken: null,
-+      leaseExpiresAt: null,
-+    },
-+    {
-+      status: "PREPARING",
-+      claimToken: "new-claim",
-+      leaseExpiresAt: new Date("2026-10-13T00:05:00Z"),
-+    },
-+  ])("$statusへの変更後、旧送信処理はSENTに戻せない", async (state) => {
-+    const repository = await vi.importActual<
-+      typeof import("@/src/infrastructure/prisma/repositories/club-invitation-repository")
-+    >("@/src/infrastructure/prisma/repositories/club-invitation-repository");
-+    const update = vi.fn();
-+    const tx = {
-+      clubMembership: {
-+        findFirst: vi.fn().mockResolvedValue({
-+          id: input.actorMembershipId,
-+        }),
-+      },
-+      clubInvitation: {
-+        findFirst: vi.fn().mockResolvedValue({
-+          id: input.invitationId,
-+          clubId: input.clubId,
-+          acceptedAt: null,
-+          expiresAt: new Date("2026-10-14T00:00:00Z"),
-+          membership: {
-+            clubId: input.clubId,
-+            status: "INVITED",
-+          },
-+          ...state,
-+        }),
-+        updateMany: update,
-+      },
-+    };
-+
-+    // transactionのDB境界だけを差し替え、実DBへ接続しない。
-+    mocks.transaction.mockImplementation(
-+      (operation: (transaction: typeof tx) => Promise<unknown>) => operation(tx),
-+    );
-+
-+    expect(await repository.markClubInvitationEmailSent({
-+      ...input,
-+      claimToken: "old-claim",
-+      now: new Date("2026-10-13T00:00:00Z"),
-+    })).toEqual({
-+      outcome: "CLAIM_LOST",
-+    });
-+    expect(update).not.toHaveBeenCalled();
-+  });
-+});
-diff --git a/src/application/club/invitation/cancel-club-invitation.ts b/src/application/club/invitation/cancel-club-invitation.ts
-new file mode 100644
-index 0000000..359a72a
---- /dev/null
-+++ b/src/application/club/invitation/cancel-club-invitation.ts
-@@ -0,0 +1,39 @@
-+// src/application/club/invitation/cancel-club-invitation.ts
-+
-+import "server-only";
-+
 +import {
-+  cancelClubInvitation,
-+  type ClubInvitationFailure,
-+} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++  inviteClubMember,
++  resendClubInvitation,
++  type ClubInvitationLinkBuilder,
++  type SendClubInvitationResult,
++} from "@/src/application/club/invitation/send-club-invitation";
++import {
++  prisma,
++} from "@/src/infrastructure/prisma/client";
++import {
++  convertPrismaError,
++} from "@/src/infrastructure/prisma/prisma-error";
 +
-+export type CancelClubMemberInvitationResult =
-+  | ClubInvitationFailure
++export type ClubInvitationOperationActionState = ActionState<
++  Record<string, never>
++>;
++
++type InvitationResult =
++  | SendClubInvitationResult
++  | CancelClubMemberInvitationResult;
++
++type ResultPresentation =
 +  | {
-+      outcome: "CANCELLED";
++      toast: ClubMembersToastCode;
 +    }
 +  | {
-+      outcome: "CANCELLATION_FAILED";
++      message: string;
++      revalidate: boolean;
 +    };
 +
-+// サーバーで認可したクラブ・操作者を渡し、Repositoryで再認可して取消する。
-+export async function cancelClubMemberInvitation(
-+  input: {
-+    clubId: string;
-+    actorMembershipId: string;
-+    invitationId: string;
-+  },
-+): Promise<CancelClubMemberInvitationResult> {
-+  try {
-+    return await cancelClubInvitation({
-+      clubId: input.clubId,
-+      actorMembershipId: input.actorMembershipId,
-+      invitationId: input.invitationId,
-+    });
-+  } catch {
-+    // DB原文や個人情報を結果・ログへ残さない。
-+    return {
-+      outcome: "CANCELLATION_FAILED",
-+    };
++const EXPIRED_FORM_MESSAGE =
++  "フォームの有効期限が切れました。もう一度お試しください。";
++const FAILURE_MESSAGE =
++  "招待処理を完了できませんでした。招待状況を確認してからもう一度お試しください。";
++const invitationIdSchema = z.uuid();
++
++// 前回stateからは検証済みrequestIdだけを引き継ぎ、不正な値を反射しない。
++function safeRequestId(requestId: unknown): string {
++  return isRequestId(requestId) ? requestId : createRequestId();
++}
++
++// requestIdは形式とstateとの一致だけを検証し、認可や永続的な重複排除に使わない。
++function matchesRequestId(
++  previousRequestId: unknown,
++  formData: FormData,
++): boolean {
++  const requestId = formData.get("requestId");
++
++  return (
++    isRequestId(previousRequestId) &&
++    isRequestId(requestId) &&
++    requestId === previousRequestId
++  );
++}
++
++// 送信結果の原文や内部IDを返さず、既存toastと固定メッセージへ変換する。
++function presentResult(
++  result: InvitationResult,
++  resent: boolean,
++): ResultPresentation {
++  switch (result.outcome) {
++    case "NOT_FOUND":
++    case "ACTOR_NOT_ACTIVE_OWNER":
++      notFound();
++    case "SENT":
++      return {
++        toast: resent ? "member-invitation-resent" : "member-invited",
++      };
++    case "CANCELLED":
++      return {
++        toast: "member-invitation-cancelled",
++      };
++    case "EMAIL_FAILED":
++      return {
++        toast: "member-invitation-email-failed",
++      };
++    case "PREPARATION_FAILED":
++      return {
++        toast: "member-invitation-recovery-required",
++      };
++    case "DELIVERY_UNKNOWN":
++      return {
++        message:
++          "招待情報は保存されていますが、メールの送信結果を確認できません。" +
++          "重複送信を避けるため、招待状況を確認してください。",
++        revalidate: true,
++      };
++    case "DELIVERY_RECORDING_FAILED":
++      return {
++        message: result.delivery === "ACCEPTED"
++          ? "招待情報は保存されています。メール送信は受け付けられましたが、" +
++            "結果を記録できませんでした。招待状況を確認してください。"
++          : "招待情報は保存されていますが、メール送信に失敗し、" +
++            "結果を記録できませんでした。招待状況を確認してください。",
++        revalidate: true,
++      };
++    case "CONFIGURATION_ERROR":
++      return {
++        message: "招待メールの送信設定を確認できません。運営者へお問い合わせください。",
++        revalidate: false,
++      };
++    case "RESERVATION_FAILED":
++    case "CANCELLATION_FAILED":
++      return {
++        message: FAILURE_MESSAGE,
++        revalidate: true,
++      };
++    case "CLAIM_LOST":
++      return {
++        message: "招待状況が変更されました。最新の招待状況を確認してください。",
++        revalidate: true,
++      };
++    case "MEMBERSHIP_EXISTS":
++      return {
++        message: "対象のメンバーは既に所属しています。在籍状態を確認してください。",
++        revalidate: false,
++      };
++    case "DUPLICATE":
++      return {
++        message: "招待または所属情報が既に存在します。最新の招待状況を確認してください。",
++        revalidate: true,
++      };
++    case "RULE_VIOLATION": {
++      const reason = result.reason;
++
++      switch (reason) {
++        case "INVITATION_ALREADY_ACCEPTED":
++          return {
++            message: "承諾済みの招待は操作できません。",
++            revalidate: true,
++          };
++        case "INVITATION_CANCELLED":
++          return {
++            message: "取消済みの招待は操作できません。",
++            revalidate: true,
++          };
++        case "INVITATION_PROCESSING":
++        case "RESEND_COOLDOWN":
++          return {
++            message: "招待を処理中、または再送待機中です。時間をおいてお試しください。",
++            revalidate: true,
++          };
++        case "MEMBERSHIP_NOT_FOUND":
++        case "MEMBERSHIP_NOT_INVITED":
++        case "INVALID_INVITATION_STATE":
++        case "AUTH_USER_MISMATCH":
++        case "TOKEN_NOT_ROTATED":
++          return {
++            message: "現在の招待状況では操作できません。招待状況を確認してください。",
++            revalidate: true,
++          };
++        default: {
++          const exhaustiveReason: never = reason;
++          return exhaustiveReason;
++        }
++      }
++    }
++    default: {
++      const exhaustiveResult: never = result;
++      return exhaustiveResult;
++    }
 +  }
 +}
-diff --git a/src/application/club/invitation/get-club-member-management.test.ts b/src/application/club/invitation/get-club-member-management.test.ts
-new file mode 100644
-index 0000000..6748c73
---- /dev/null
-+++ b/src/application/club/invitation/get-club-member-management.test.ts
-@@ -0,0 +1,165 @@
-+// src/application/club/invitation/get-club-member-management.test.ts
 +
-+import {
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
++// DB保存後の結果は再検証し、認可された正規slugと固定toastだけで遷移する。
++function redirectToMembers(
++  clubSlug: string,
++  requestId: string,
++  toast: ClubMembersToastCode,
++): never {
++  revalidateClubMemberPaths(clubSlug);
 +
-+import {
-+  getClubMemberManagement,
-+} from "@/src/application/club/invitation/get-club-member-management";
-+import type {
-+  ClubInvitationForOwner,
-+} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
-+import type {
-+  ClubMembershipForOwner,
-+} from "@/src/infrastructure/prisma/repositories/club-membership-repository";
-+
-+// 一覧のDB取得順と失敗時の打ち切りを制御する。
-+const mocks = vi.hoisted(() => ({
-+  expire: vi.fn(),
-+  memberships: vi.fn(),
-+  invitations: vi.fn(),
-+}));
-+
-+vi.mock(
-+  "@/src/infrastructure/prisma/repositories/club-invitation-repository",
-+  () => ({
-+    expireClubInvitations: mocks.expire,
-+    findClubInvitationsForOwner: mocks.invitations,
-+  }),
-+);
-+vi.mock(
-+  "@/src/infrastructure/prisma/repositories/club-membership-repository",
-+  () => ({
-+    findClubMembershipsForOwner: mocks.memberships,
-+  }),
-+);
-+
-+const owner = {
-+  clubId: "club-a",
-+  actorMembershipId: "owner-a",
-+};
-+const now = new Date("2026-10-13T00:00:00Z");
-+const membership: ClubMembershipForOwner = {
-+  id: "member-a",
-+  role: "MEMBER",
-+  status: "INVITED",
-+  createdAt: now,
-+  updatedAt: now,
-+  displayName: "表示名",
-+  displayEmail: "member@example.test",
-+  invitationStatus: "EXPIRED",
-+};
-+const invitation: ClubInvitationForOwner = {
-+  id: "invitation-a",
-+  name: null,
-+  email: "new@example.test",
-+  role: "MEMBER",
-+  status: "PREPARING",
-+  hasMembership: false,
-+  membershipStatus: null,
-+  createdAt: now,
-+  expiresAt: new Date(now.getTime() + 86_400_000),
-+  emailSentAt: null,
-+  lastAttemptAt: now,
-+  leaseExpiresAt: null,
-+  canResend: true,
-+  canCancel: false,
-+  needsPreparationRetry: true,
-+};
-+
-+// 各テストを正常な一覧取得状態から開始する。
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  mocks.expire.mockResolvedValue({
-+    outcome: "EXPIRED",
-+    count: 1,
-+  });
-+  mocks.memberships.mockResolvedValue([membership]);
-+  mocks.invitations.mockResolvedValue({
-+    outcome: "FOUND",
-+    invitations: [invitation],
-+  });
-+});
-+
-+// Authへの個別問い合わせを使わず、未紐付け招待も保持する契約を検証する。
-+describe("getClubMemberManagement", () => {
-+  it("期限切れ更新後にDB一覧を順に取得し、PREPARING未紐付けも返す", async () => {
-+    expect(await getClubMemberManagement(owner)).toEqual({
-+      outcome: "FOUND",
-+      memberships: [membership],
-+      invitations: [invitation],
-+    });
-+    expect(mocks.expire).toHaveBeenCalledExactlyOnceWith(owner);
-+    expect(mocks.memberships).toHaveBeenCalledExactlyOnceWith({
-+      clubId: owner.clubId,
-+    });
-+    expect(mocks.invitations).toHaveBeenCalledExactlyOnceWith(owner);
-+    expect(mocks.expire.mock.invocationCallOrder[0]).toBeLessThan(
-+      mocks.memberships.mock.invocationCallOrder[0],
-+    );
-+    expect(mocks.memberships.mock.invocationCallOrder[0]).toBeLessThan(
-+      mocks.invitations.mock.invocationCallOrder[0],
-+    );
++  const query = new URLSearchParams({
++    toast,
++    toastId: requestId,
 +  });
 +
-+  it("期限切れ更新時の認可拒否では一覧を取得しない", async () => {
-+    mocks.expire.mockResolvedValue({
-+      outcome: "ACTOR_NOT_ACTIVE_OWNER",
-+    });
++  redirect(
++    `/club/${encodeURIComponent(clubSlug)}/admin/members?${query.toString()}`,
++  );
++}
 +
-+    expect(await getClubMemberManagement(owner)).toEqual({
-+      outcome: "ACTOR_NOT_ACTIVE_OWNER",
-+    });
-+    expect(mocks.memberships).not.toHaveBeenCalled();
-+    expect(mocks.invitations).not.toHaveBeenCalled();
-+  });
-+
-+  it("取得中のOWNER資格失効ではメンバー一覧も返さない", async () => {
-+    mocks.invitations.mockResolvedValue({
-+      outcome: "ACTOR_NOT_ACTIVE_OWNER",
-+    });
-+
-+    expect(await getClubMemberManagement(owner)).toEqual({
-+      outcome: "ACTOR_NOT_ACTIVE_OWNER",
-+    });
-+  });
-+
-+  it.each([
-+    "expire",
-+    "memberships",
-+    "invitations",
-+  ] as const)("%sの障害では部分結果や原文を返さない", async (stage) => {
-+    mocks[stage].mockRejectedValue(new Error("private database detail"));
-+
-+    expect(await getClubMemberManagement(owner)).toEqual({
-+      outcome: "FETCH_FAILED",
-+    });
-+
-+    if (stage === "expire") {
-+      expect(mocks.memberships).not.toHaveBeenCalled();
-+    }
-+
-+    if (stage !== "invitations") {
-+      expect(mocks.invitations).not.toHaveBeenCalled();
-+    }
-+  });
-+
-+  it("メンバーも招待も存在しない一覧を返す", async () => {
-+    mocks.memberships.mockResolvedValue([]);
-+    mocks.invitations.mockResolvedValue({
-+      outcome: "FOUND",
-+      invitations: [],
-+    });
-+
-+    expect(await getClubMemberManagement(owner)).toEqual({
-+      outcome: "FOUND",
-+      memberships: [],
-+      invitations: [],
-+    });
-+  });
-+});
-diff --git a/src/application/club/invitation/get-club-member-management.ts b/src/application/club/invitation/get-club-member-management.ts
-new file mode 100644
-index 0000000..084fe62
---- /dev/null
-+++ b/src/application/club/invitation/get-club-member-management.ts
-@@ -0,0 +1,66 @@
-+// src/application/club/invitation/get-club-member-management.ts
-+
-+import "server-only";
-+
-+import {
-+  expireClubInvitations,
-+  findClubInvitationsForOwner,
-+  type ClubInvitationFailure,
-+  type ClubInvitationForOwner,
-+} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
-+import {
-+  findClubMembershipsForOwner,
-+  type ClubMembershipForOwner,
-+} from "@/src/infrastructure/prisma/repositories/club-membership-repository";
-+
-+export type GetClubMemberManagementResult =
-+  | ClubInvitationFailure
-+  | {
-+      outcome: "FOUND";
-+      memberships: ClubMembershipForOwner[];
-+      invitations: ClubInvitationForOwner[];
-+    }
-+  | {
-+      outcome: "FETCH_FAILED";
-+    };
-+
-+// 期限切れ更新の再認可後にDBの一覧を順に取得し、安全なDTOだけを返す。
-+export async function getClubMemberManagement(
-+  input: {
-+    clubId: string;
-+    actorMembershipId: string;
-+  },
-+): Promise<GetClubMemberManagementResult> {
-+  const owner = {
-+    clubId: input.clubId,
-+    actorMembershipId: input.actorMembershipId,
++// 再送・取消ではフォームの個人情報や前回stateのdataを返さない。
++function operationError(
++  requestId: unknown,
++  message: string,
++): ClubInvitationOperationActionState {
++  return {
++    status: "error",
++    values: {},
++    fieldErrors: {},
++    formError: message,
++    requestId: safeRequestId(requestId),
 +  };
++}
 +
-+  try {
-+    const expired = await expireClubInvitations(owner);
++// DomainErrorでもpublicMessageを直接返さず、許可したcodeから固定文言を選ぶ。
++function serviceFailureMessage(error: unknown): string {
++  const safe = convertPrismaError(error);
 +
-+    if (expired.outcome !== "EXPIRED") {
-+      return expired;
-+    }
++  return safe.code === "VALIDATION"
++    ? "招待する入力値を確認してください。"
++    : FAILURE_MESSAGE;
++}
 +
-+    const memberships = await findClubMembershipsForOwner({
-+      clubId: owner.clubId,
-+    });
-+    const result = await findClubInvitationsForOwner(owner);
++// 招待フォームの許可された入力値だけをエラーstateへ戻す。
++function inviteError(
++  values: ClubMemberInviteFormValues,
++  requestId: unknown,
++  message: string,
++): ClubMemberInviteActionState {
++  return {
++    status: "error",
++    values,
++    fieldErrors: {},
++    formError: message,
++    requestId: safeRequestId(requestId),
++  };
++}
 +
-+    if (result.outcome !== "FOUND") {
-+      // 取得中にOWNER資格を失った場合も部分的な一覧を返さない。
-+      return result;
-+    }
++// 招待に必要なクラブ情報だけを、認可したクラブIDでDBから取得する。
++async function invitationOwner(
++  access: Awaited<ReturnType<typeof requireClubAppOwnerAccess>>,
++) {
++  const configuration = await prisma.club.findUnique({
++    where: {
++      id: access.club.id,
++    },
++    select: {
++      id: true,
++      name: true,
++      slug: true,
++      timezone: true,
++      appBaseUrl: true,
++    },
++  });
 +
++  if (!configuration) {
++    throw new Error("Invitation club configuration is unavailable");
++  }
++
++  return {
++    club: configuration,
++    actorMembershipId: access.membership.id,
++  };
++}
++
++// Serviceが検証したorigin・DBのslug・生成したrawTokenで確定契約のURLを作る。
++function buildClubInvitationLinks(
++  input: Parameters<ClubInvitationLinkBuilder>[0],
++): ReturnType<ClubInvitationLinkBuilder> {
++  const query = new URLSearchParams({
++    clubSlug: input.clubSlug,
++    token: input.rawToken,
++  });
++  const invitationUrl = new URL("/club-invitations/accept", input.origin);
++  const authRedirectTo = new URL("/welcome", input.origin);
++
++  invitationUrl.search = query.toString();
++  authRedirectTo.search = query.toString();
++
++  return {
++    invitationUrl: invitationUrl.toString(),
++    authRedirectTo: authRedirectTo.toString(),
++  };
++}
++
++// 新規招待もAction自身でOWNER認可し、検証済みの氏名・email・roleだけを渡す。
++export async function inviteClubMemberAction(
++  clubSlug: string,
++  previousState: ClubMemberInviteActionState,
++  formData: FormData,
++): Promise<ClubMemberInviteActionState> {
++  const access = await requireClubAppOwnerAccess(clubSlug);
++  const values = buildClubMemberInviteFormValues(formData);
++
++  if (!matchesRequestId(previousState.requestId, formData)) {
++    return inviteError(values, previousState.requestId, EXPIRED_FORM_MESSAGE);
++  }
++
++  const validation = validateClubMemberInviteFormValues(values);
++
++  if (!validation.success) {
 +    return {
-+      outcome: "FOUND",
-+      memberships,
-+      invitations: result.invitations,
-+    };
-+  } catch {
-+    return {
-+      outcome: "FETCH_FAILED",
++      status: "error",
++      values,
++      fieldErrors: validation.fieldErrors,
++      formError: null,
++      requestId: safeRequestId(previousState.requestId),
 +    };
 +  }
++
++  let result: SendClubInvitationResult;
++
++  try {
++    const owner = await invitationOwner(access);
++    result = await inviteClubMember(
++      {
++        ...owner,
++        ...validation.data,
++      },
++      buildClubInvitationLinks,
++    );
++  } catch (error) {
++    unstable_rethrow(error);
++    revalidateClubMemberPaths(access.club.slug);
++    return inviteError(values, previousState.requestId, serviceFailureMessage(error));
++  }
++
++  const presentation = presentResult(result, false);
++
++  if ("toast" in presentation) {
++    redirectToMembers(access.club.slug, previousState.requestId, presentation.toast);
++  }
++
++  if (presentation.revalidate) {
++    revalidateClubMemberPaths(access.club.slug);
++  }
++
++  return inviteError(values, previousState.requestId, presentation.message);
 +}
-diff --git a/src/application/club/invitation/recover-club-invitation.test.ts b/src/application/club/invitation/recover-club-invitation.test.ts
++
++// 再送対象IDも信用せず、認可クラブに属するかをService経由で再検証する。
++export async function resendClubInvitationAction(
++  clubSlug: string,
++  invitationId: string,
++  previousState: ClubInvitationOperationActionState,
++  formData: FormData,
++): Promise<ClubInvitationOperationActionState> {
++  const access = await requireClubAppOwnerAccess(clubSlug);
++
++  if (!matchesRequestId(previousState.requestId, formData)) {
++    return operationError(previousState.requestId, EXPIRED_FORM_MESSAGE);
++  }
++
++  if (!invitationIdSchema.safeParse(invitationId).success) {
++    return operationError(previousState.requestId, "招待対象を確認してください。");
++  }
++
++  let result: SendClubInvitationResult;
++
++  try {
++    const owner = await invitationOwner(access);
++    result = await resendClubInvitation(
++      {
++        ...owner,
++        invitationId,
++      },
++      buildClubInvitationLinks,
++    );
++  } catch (error) {
++    unstable_rethrow(error);
++    revalidateClubMemberPaths(access.club.slug);
++    return operationError(previousState.requestId, serviceFailureMessage(error));
++  }
++
++  const presentation = presentResult(result, true);
++
++  if ("toast" in presentation) {
++    redirectToMembers(access.club.slug, previousState.requestId, presentation.toast);
++  }
++
++  if (presentation.revalidate) {
++    revalidateClubMemberPaths(access.club.slug);
++  }
++
++  return operationError(previousState.requestId, presentation.message);
++}
++
++// 取消も最初に現在のOWNERを認可し、対象IDの形式とrequestIdを検証する。
++export async function cancelClubInvitationAction(
++  clubSlug: string,
++  invitationId: string,
++  previousState: ClubInvitationOperationActionState,
++  formData: FormData,
++): Promise<ClubInvitationOperationActionState> {
++  const access = await requireClubAppOwnerAccess(clubSlug);
++
++  if (!matchesRequestId(previousState.requestId, formData)) {
++    return operationError(previousState.requestId, EXPIRED_FORM_MESSAGE);
++  }
++
++  if (!invitationIdSchema.safeParse(invitationId).success) {
++    return operationError(previousState.requestId, "招待対象を確認してください。");
++  }
++
++  let result: CancelClubMemberInvitationResult;
++
++  try {
++    result = await cancelClubMemberInvitation({
++      clubId: access.club.id,
++      actorMembershipId: access.membership.id,
++      invitationId,
++    });
++  } catch (error) {
++    unstable_rethrow(error);
++    revalidateClubMemberPaths(access.club.slug);
++    return operationError(previousState.requestId, serviceFailureMessage(error));
++  }
++
++  // notFound・redirectはService例外を扱うtry/catchの外で実行する。
++  const presentation = presentResult(result, false);
++
++  if ("toast" in presentation) {
++    redirectToMembers(access.club.slug, previousState.requestId, presentation.toast);
++  }
++
++  if (presentation.revalidate) {
++    revalidateClubMemberPaths(access.club.slug);
++  }
++
++  return operationError(previousState.requestId, presentation.message);
++}
+diff --git a/tests/club-invitation-actions.test.ts b/tests/club-invitation-actions.test.ts
 new file mode 100644
-index 0000000..788c094
+index 0000000..e381591
 --- /dev/null
-+++ b/src/application/club/invitation/recover-club-invitation.test.ts
-@@ -0,0 +1,374 @@
-+// src/application/club/invitation/recover-club-invitation.test.ts
++++ b/tests/club-invitation-actions.test.ts
+@@ -0,0 +1,827 @@
++// tests/club-invitation-actions.test.ts
 +
 +import {
 +  afterEach,
@@ -452,523 +470,818 @@ index 0000000..788c094
 +} from "vitest";
 +
 +import {
-+  recoverClubInvitationPreparation,
-+} from "@/src/application/club/invitation/recover-club-invitation";
++  cancelClubInvitationAction,
++  inviteClubMemberAction,
++  resendClubInvitationAction,
++  type ClubInvitationOperationActionState,
++} from "@/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions";
++import { DomainError } from "@/domain/shared/domain-error";
 +import type {
-+  ClubInvitationForOwner,
-+  ClubInvitationProcessing,
-+} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++  ClubMemberInviteActionState,
++} from "@/domain/club/invitation/invitation-form";
++import type {
++  ClubInvitationLinkBuilder,
++} from "@/src/application/club/invitation/send-club-invitation";
 +
-+// Authの照合・DB準備・claim解除を独立して制御する。
++// 認可は実装を使い、セッション・DB・Service・画面遷移の境界だけを差し替える。
 +const mocks = vi.hoisted(() => ({
-+  find: vi.fn(),
-+  getAuth: vi.fn(),
-+  prepare: vi.fn(),
-+  release: vi.fn(),
++  getUser: vi.fn(),
++  membership: vi.fn(),
++  club: vi.fn(),
++  invite: vi.fn(),
++  resend: vi.fn(),
++  cancel: vi.fn(),
++  revalidate: vi.fn(),
++  redirect: vi.fn(),
++  notFound: vi.fn(),
 +}));
 +
-+vi.mock(
-+  "@/src/infrastructure/prisma/repositories/club-invitation-repository",
-+  () => ({
-+    findClubInvitationsForOwner: mocks.find,
-+    completeClubInvitationPreparation: mocks.prepare,
-+    releaseClubInvitationClaim: mocks.release,
++vi.mock("@/src/infrastructure/supabase/server", () => ({
++  createClient: async () => ({
++    auth: {
++      getUser: mocks.getUser,
++    },
 +  }),
-+);
-+vi.mock(
-+  "@/src/infrastructure/supabase/club-invitation-auth",
-+  () => ({
-+    getClubInvitationAuthUserById: mocks.getAuth,
-+  }),
-+);
++}));
++vi.mock("@/src/infrastructure/prisma/client", () => ({
++  prisma: {
++    clubMembership: {
++      findFirst: mocks.membership,
++    },
++    club: {
++      findUnique: mocks.club,
++    },
++  },
++}));
++vi.mock("@/src/application/club/invitation/send-club-invitation", () => ({
++  inviteClubMember: mocks.invite,
++  resendClubInvitation: mocks.resend,
++}));
++vi.mock("@/src/application/club/invitation/cancel-club-invitation", () => ({
++  cancelClubMemberInvitation: mocks.cancel,
++}));
++vi.mock("@/app/(club-app)/club/revalidate-club-paths", () => ({
++  revalidateClubMemberPaths: mocks.revalidate,
++}));
++vi.mock("next/navigation", async (importOriginal) => {
++  // catch内のNext.js制御例外は実APIで再送出する。
++  const original = await importOriginal<typeof import("next/navigation")>();
 +
-+const now = new Date("2026-10-13T00:00:00Z");
-+const owner = {
-+  clubId: "club-a",
-+  actorMembershipId: "owner-a",
-+};
-+const authUserId = "11111111-1111-4111-8111-111111111111";
-+const invitation: ClubInvitationProcessing = {
-+  id: "invitation-a",
-+  clubId: owner.clubId,
-+  email: "member@example.test",
-+  name: null,
-+  role: "MEMBER",
-+  status: "PREPARING",
-+  authUserId,
-+  existingUserId: null,
-+  membershipId: null,
-+  claimToken: "claim-a",
-+  leaseExpiresAt: new Date(now.getTime() + 300_000),
-+  expiresAt: new Date(now.getTime() + 86_400_000),
-+  attemptCount: 2,
-+};
-+const stored: ClubInvitationForOwner = {
-+  id: invitation.id,
-+  name: null,
-+  email: invitation.email,
-+  role: invitation.role,
-+  status: "PREPARING",
-+  hasMembership: false,
-+  membershipStatus: null,
-+  createdAt: now,
-+  expiresAt: invitation.expiresAt,
-+  emailSentAt: null,
-+  lastAttemptAt: now,
-+  leaseExpiresAt: invitation.leaseExpiresAt,
-+  canResend: false,
-+  canCancel: false,
-+  needsPreparationRetry: false,
-+};
-+const user = {
-+  id: authUserId,
-+  email: invitation.email,
-+  isEmailConfirmed: false,
-+};
-+const claim = {
-+  ...owner,
-+  invitationId: invitation.id,
-+  claimToken: invitation.claimToken,
++  return {
++    redirect: mocks.redirect,
++    notFound: mocks.notFound,
++    unstable_rethrow: original.unstable_rethrow,
++  };
++});
++
++const clubId = "11111111-1111-4111-8111-111111111111";
++const actorMembershipId = "22222222-2222-4222-8222-222222222222";
++const invitationId = "33333333-3333-4333-8333-333333333333";
++const requestId = "44444444-4444-4444-8444-444444444444";
++const clubSlug = "canonical-club";
++const privateDetail = "private@example.test raw-token auth-link service-role-secret";
++const club = {
++  id: clubId,
++  slug: clubSlug,
++  name: "テストクラブ",
++  timezone: "Asia/Tokyo",
++  planType: "STANDARD",
 +};
 +
-+// 時刻を固定し、記録済みAuthを正常に復旧できる状態を設定する。
++// Next.jsが実際に判定するdigestを付け、制御例外の伝播を検証する。
++function navigationError(digest: string): Error & { digest: string } {
++  return Object.assign(new Error("NEXT_NAVIGATION"), {
++    digest,
++  });
++}
++
++// 再送・取消にはrequestId以外のフォーム値を必要としない。
++function operationState(): ClubInvitationOperationActionState {
++  return {
++    status: "idle",
++    values: {},
++    fieldErrors: {},
++    formError: null,
++    requestId,
++  };
++}
++
++// 正常な送信IDを持つフォームを作成する。
++function form(): FormData {
++  const data = new FormData();
++  data.set("requestId", requestId);
++  return data;
++}
++
++// 新規招待で画面へ返せる入力値だけを初期stateへ設定する。
++function inviteState(): ClubMemberInviteActionState {
++  return {
++    ...operationState(),
++    values: {
++      email: "",
++      name: "",
++      role: "MEMBER",
++    },
++  };
++}
++
++// 新規招待の正常な入力を作り、正規化も検証できるよう空白を含める。
++function inviteForm(): FormData {
++  const data = form();
++  data.set("email", " MEMBER@EXAMPLE.TEST ");
++  data.set("name", " 会員名 ");
++  data.set("role", "MEMBER");
++  return data;
++}
++
++type ActionKind = "invite" | "resend" | "cancel";
++
++// 共通の安全性検証でも各Actionの実際の引数契約を使う。
++function invoke(kind: ActionKind, data = inviteForm()) {
++  if (kind === "invite") {
++    return inviteClubMemberAction(clubSlug, inviteState(), data);
++  }
++
++  const action = kind === "resend"
++    ? resendClubInvitationAction
++    : cancelClubInvitationAction;
++
++  return action(clubSlug, invitationId, operationState(), data);
++}
++
++// OWNERの実認可を通過する最小限の境界データを初期化する。
 +beforeEach(() => {
 +  vi.resetAllMocks();
-+  vi.useFakeTimers();
-+  vi.setSystemTime(now);
-+  mocks.find.mockResolvedValue({
-+    outcome: "FOUND",
-+    invitations: [stored],
-+  });
-+  mocks.getAuth.mockResolvedValue(user);
-+  mocks.prepare.mockResolvedValue({
-+    outcome: "PREPARED",
-+    invitation: {
-+      ...invitation,
-+      status: "READY_TO_SEND",
-+      membershipId: "membership-a",
++  mocks.getUser.mockResolvedValue({
++    data: {
++      user: {
++        id: "authenticated-user",
++      },
 +    },
++    error: null,
 +  });
-+  mocks.release.mockResolvedValue({
-+    outcome: "UPDATED",
++  mocks.membership.mockResolvedValue({
++    id: actorMembershipId,
++    role: "OWNER",
++    club,
++  });
++  mocks.club.mockResolvedValue({
++    id: clubId,
++    name: club.name,
++    slug: clubSlug,
++    timezone: club.timezone,
++    appBaseUrl: "https://club.example.test",
++  });
++  mocks.invite.mockResolvedValue({
++    outcome: "SENT",
++    invitationId,
++  });
++  mocks.resend.mockResolvedValue({
++    outcome: "SENT",
++    invitationId,
++  });
++  mocks.cancel.mockResolvedValue({
++    outcome: "CANCELLED",
++  });
++  mocks.notFound.mockImplementation(() => {
++    throw navigationError("NEXT_HTTP_ERROR_FALLBACK;404");
++  });
++  mocks.redirect.mockImplementation((path: string) => {
++    throw navigationError(`NEXT_REDIRECT;push;${path};303;`);
 +  });
 +});
 +
-+// 固定時計を他のテストへ持ち越さない。
++// console等へのspyを次のテストへ持ち越さない。
 +afterEach(() => {
-+  vi.useRealTimers();
++  vi.restoreAllMocks();
 +});
 +
-+// 記録済みIDだけの復旧と、古いclaim・不一致・障害時の停止を検証する。
-+describe("recoverClubInvitationPreparation", () => {
-+  it.each([false, true])("Auth確認済み=%sでも同じIDでDB準備だけを復旧する", async (confirmed) => {
-+    mocks.getAuth.mockResolvedValue({
-+      ...user,
-+      isEmailConfirmed: confirmed,
-+    });
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "RECOVERED",
-+      invitationId: invitation.id,
-+    });
-+    expect(mocks.find).toHaveBeenCalledExactlyOnceWith(owner);
-+    expect(mocks.getAuth).toHaveBeenCalledExactlyOnceWith({
-+      authUserId,
-+      email: stored.email,
-+    });
-+    expect(mocks.prepare).toHaveBeenCalledExactlyOnceWith({
-+      ...claim,
-+      verifiedAuthUser: {
-+        ...user,
-+        isEmailConfirmed: confirmed,
-+      },
-+    });
-+    expect(mocks.release).toHaveBeenCalledExactlyOnceWith(claim);
-+    expect(mocks.find.mock.invocationCallOrder[0]).toBeLessThan(
-+      mocks.getAuth.mock.invocationCallOrder[0],
-+    );
-+    expect(mocks.getAuth.mock.invocationCallOrder[0]).toBeLessThan(
-+      mocks.prepare.mock.invocationCallOrder[0],
-+    );
-+  });
-+
-+  it("OWNER再認可の拒否後はAuthもDB準備も呼ばない", async () => {
-+    mocks.find.mockResolvedValue({
-+      outcome: "ACTOR_NOT_ACTIVE_OWNER",
-+    });
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "ACTOR_NOT_ACTIVE_OWNER",
-+    });
-+    expect(mocks.getAuth).not.toHaveBeenCalled();
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+    expect(mocks.release).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    { clubId: "other-club" },
-+    { status: "READY_TO_SEND" },
-+    { email: "other@example.test" },
-+    { claimToken: "" },
-+    { leaseExpiresAt: now },
-+    { expiresAt: now },
-+    { leaseExpiresAt: new Date("invalid") },
-+  ] satisfies Partial<ClubInvitationProcessing>[])(
-+    "不正なクラブ・状態・email・leaseをAuth照合前に拒否する: %j",
-+    async (change) => {
-+      expect(await recoverClubInvitationPreparation({
-+        ...owner,
-+        invitation: {
-+          ...invitation,
-+          ...change,
-+        },
-+      })).toEqual({
-+        outcome: "CLAIM_LOST",
++// 取消入口の実認可、入力検証、固定結果、例外境界を検証する。
++describe("cancelClubInvitationAction", () => {
++  it.each(["MEMBER", "COACH", "OFFICER"])(
++    "%sの直接呼び出しを入力検証前に拒否する",
++    async (role) => {
++      mocks.membership.mockResolvedValue({
++        id: actorMembershipId,
++        role,
++        club,
 +      });
-+      expect(mocks.getAuth).not.toHaveBeenCalled();
-+      expect(mocks.prepare).not.toHaveBeenCalled();
-+      expect(mocks.release).not.toHaveBeenCalled();
++      const data = new FormData();
++      const get = vi.spyOn(data, "get");
++
++      await expect(cancelClubInvitationAction(
++        clubSlug,
++        invitationId,
++        operationState(),
++        data,
++      )).rejects.toMatchObject({
++        digest: "NEXT_HTTP_ERROR_FALLBACK;404",
++      });
++      expect(get).not.toHaveBeenCalled();
++      expect(mocks.cancel).not.toHaveBeenCalled();
 +    },
 +  );
 +
-+  it.each([
-+    { status: "CANCELLED" },
-+    { status: "EXPIRED" },
-+    { status: "SENT" },
-+    { status: "ACCEPTED" },
-+    { membershipStatus: "ACTIVE" },
-+    { membershipStatus: "SUSPENDED" },
-+    { membershipStatus: "WITHDRAWN" },
-+    { leaseExpiresAt: new Date(now.getTime() + 600_000) },
-+  ] satisfies Partial<ClubInvitationForOwner>[])(
-+    "現在の取消・期限切れ・再送・在籍状態変更を拒否する: %j",
-+    async (change) => {
-+      mocks.find.mockResolvedValue({
-+        outcome: "FOUND",
-+        invitations: [{
-+          ...stored,
-+          ...change,
-+        }],
-+      });
++  it.each([null, "invalid", "55555555-5555-4555-8555-555555555555"])(
++    "欠損・不正・不一致requestIdを拒否する: %s",
++    async (value) => {
++      const data = form();
 +
-+      expect(await recoverClubInvitationPreparation({
-+        ...owner,
-+        invitation,
-+      })).toEqual({
-+        outcome: "CLAIM_LOST",
-+      });
-+      expect(mocks.getAuth).not.toHaveBeenCalled();
-+      expect(mocks.prepare).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it("招待が見つからなければ復旧しない", async () => {
-+    mocks.find.mockResolvedValue({
-+      outcome: "FOUND",
-+      invitations: [],
-+    });
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "CLAIM_LOST",
-+    });
-+    expect(mocks.getAuth).not.toHaveBeenCalled();
-+  });
-+
-+  it("ID未記録では既存AppUserがあってもAuthを照会・作成しない", async () => {
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation: {
-+        ...invitation,
-+        authUserId: null,
-+        existingUserId: authUserId,
-+      },
-+    })).toEqual({
-+      outcome: "MANUAL_RECOVERY_REQUIRED",
-+    });
-+    expect(mocks.getAuth).not.toHaveBeenCalled();
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+    expect(mocks.release).toHaveBeenCalledExactlyOnceWith(claim);
-+  });
-+
-+  it("記録済みIDと既存AppUserの不一致を拒否する", async () => {
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation: {
-+        ...invitation,
-+        existingUserId: "other-user",
-+      },
-+    })).toEqual({
-+      outcome: "RULE_VIOLATION",
-+      reason: "AUTH_USER_MISMATCH",
-+    });
-+    expect(mocks.getAuth).not.toHaveBeenCalled();
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+  });
-+
-+  it("Auth欠損は新規作成せず運営者確認へ止める", async () => {
-+    mocks.getAuth.mockResolvedValue(null);
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "MANUAL_RECOVERY_REQUIRED",
-+    });
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    { id: "other-user" },
-+    { email: "other@example.test" },
-+  ])("AuthのID・email不一致ではDB準備しない: %j", async (change) => {
-+    mocks.getAuth.mockResolvedValue({
-+      ...user,
-+      ...change,
-+    });
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "RULE_VIOLATION",
-+      reason: "AUTH_USER_MISMATCH",
-+    });
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    "取消",
-+    "期限切れ",
-+    "再送",
-+  ])("Auth照合中の%sによるclaim喪失を成功に変換しない", async () => {
-+    mocks.prepare.mockResolvedValue({
-+      outcome: "CLAIM_LOST",
-+    });
-+    mocks.release.mockResolvedValue({
-+      outcome: "CLAIM_LOST",
-+    });
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "CLAIM_LOST",
-+    });
-+  });
-+
-+  it("DB側で検知したAuth不一致を保持する", async () => {
-+    mocks.prepare.mockResolvedValue({
-+      outcome: "RULE_VIOLATION",
-+      reason: "AUTH_USER_MISMATCH",
-+    });
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "RULE_VIOLATION",
-+      reason: "AUTH_USER_MISMATCH",
-+    });
-+  });
-+
-+  it.each([
-+    "find",
-+    "getAuth",
-+    "prepare",
-+  ] as const)("%sの例外から秘密情報を結果へ残さない", async (stage) => {
-+    mocks[stage].mockRejectedValue(new Error("private Auth or database detail"));
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "RECOVERY_FAILED",
-+    });
-+
-+    if (stage === "find") {
-+      expect(mocks.getAuth).not.toHaveBeenCalled();
-+      expect(mocks.release).not.toHaveBeenCalled();
-+    } else {
-+      expect(mocks.release).toHaveBeenCalledExactlyOnceWith(claim);
-+    }
-+  });
-+
-+  it("claim解除障害でも保存済み復旧結果を保持する", async () => {
-+    mocks.release.mockRejectedValue(new Error("private database detail"));
-+
-+    expect(await recoverClubInvitationPreparation({
-+      ...owner,
-+      invitation,
-+    })).toEqual({
-+      outcome: "RECOVERED",
-+      invitationId: invitation.id,
-+    });
-+  });
-+});
-diff --git a/src/application/club/invitation/recover-club-invitation.ts b/src/application/club/invitation/recover-club-invitation.ts
-new file mode 100644
-index 0000000..7aa9181
---- /dev/null
-+++ b/src/application/club/invitation/recover-club-invitation.ts
-@@ -0,0 +1,152 @@
-+// src/application/club/invitation/recover-club-invitation.ts
-+
-+import "server-only";
-+
-+import { normalizeEmail } from "@/domain/shared/email";
-+import {
-+  completeClubInvitationPreparation,
-+  findClubInvitationsForOwner,
-+  releaseClubInvitationClaim,
-+  type ClubInvitationFailure,
-+  type ClubInvitationProcessing,
-+} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
-+import {
-+  getClubInvitationAuthUserById,
-+} from "@/src/infrastructure/supabase/club-invitation-auth";
-+
-+export type RecoverClubInvitationPreparationResult =
-+  | ClubInvitationFailure
-+  | {
-+      outcome: "RECOVERED";
-+      invitationId: string;
-+    }
-+  | {
-+      outcome: "MANUAL_RECOVERY_REQUIRED";
-+    }
-+  | {
-+      outcome: "RECOVERY_FAILED";
-+    };
-+
-+// 入力はサーバー内部でRepositoryから得たclaim付き招待に限定する。
-+// lease切れ時のclaim再取得は既存claimClubInvitationResendを呼び出し元で使用する。
-+// ブラウザからAuth IDやclaimを受け取る入口には接続しない。
-+export async function recoverClubInvitationPreparation(
-+  input: {
-+    clubId: string;
-+    actorMembershipId: string;
-+    invitation: ClubInvitationProcessing;
-+  },
-+): Promise<RecoverClubInvitationPreparationResult> {
-+  const owner = {
-+    clubId: input.clubId,
-+    actorMembershipId: input.actorMembershipId,
-+  };
-+  const invitation = input.invitation;
-+  const claim = {
-+    ...owner,
-+    invitationId: invitation.id,
-+    claimToken: invitation.claimToken,
-+  };
-+  let ownsPreparation = false;
-+
-+  try {
-+    // Auth管理APIより前に現在のOWNER資格と招待状態を確認する。
-+    const result = await findClubInvitationsForOwner(owner);
-+
-+    if (result.outcome !== "FOUND") {
-+      return result;
-+    }
-+
-+    const stored = result.invitations.find((row) => row.id === invitation.id);
-+    const now = Date.now();
-+
-+    if (
-+      !stored ||
-+      invitation.clubId !== owner.clubId ||
-+      invitation.status !== "PREPARING" ||
-+      stored.status !== "PREPARING" ||
-+      normalizeEmail(stored.email) !== normalizeEmail(invitation.email) ||
-+      !invitation.claimToken ||
-+      !(invitation.leaseExpiresAt.getTime() > now) ||
-+      !(invitation.expiresAt.getTime() > now) ||
-+      stored.leaseExpiresAt?.getTime() !== invitation.leaseExpiresAt.getTime() ||
-+      stored.expiresAt.getTime() !== invitation.expiresAt.getTime() ||
-+      (
-+        stored.membershipStatus !== null &&
-+        stored.membershipStatus !== "INVITED"
-+      )
-+    ) {
-+      return {
-+        outcome: "CLAIM_LOST",
-+      };
-+    }
-+
-+    ownsPreparation = true;
-+
-+    if (!invitation.authUserId) {
-+      // Auth ID未記録は粒度9の運営者手順へ委ね、新規Authで穴埋めしない。
-+      return {
-+        outcome: "MANUAL_RECOVERY_REQUIRED",
-+      };
-+    }
-+
-+    if (
-+      invitation.existingUserId &&
-+      invitation.existingUserId !== invitation.authUserId
-+    ) {
-+      return {
-+        outcome: "RULE_VIOLATION",
-+        reason: "AUTH_USER_MISMATCH",
-+      };
-+    }
-+
-+    const user = await getClubInvitationAuthUserById({
-+      authUserId: invitation.authUserId,
-+      email: stored.email,
-+    });
-+
-+    if (!user) {
-+      return {
-+        outcome: "MANUAL_RECOVERY_REQUIRED",
-+      };
-+    }
-+
-+    if (
-+      user.id !== invitation.authUserId ||
-+      normalizeEmail(user.email) !== normalizeEmail(stored.email)
-+    ) {
-+      return {
-+        outcome: "RULE_VIOLATION",
-+        reason: "AUTH_USER_MISMATCH",
-+      };
-+    }
-+
-+    // transaction内で記録済みID・email・clubId・状態・claimを再照合する。
-+    const prepared = await completeClubInvitationPreparation({
-+      ...claim,
-+      verifiedAuthUser: user,
-+    });
-+
-+    if (prepared.outcome !== "PREPARED") {
-+      return prepared;
-+    }
-+
-+    return {
-+      outcome: "RECOVERED",
-+      invitationId: invitation.id,
-+    };
-+  } catch {
-+    return {
-+      outcome: "RECOVERY_FAILED",
-+    };
-+  } finally {
-+    if (ownsPreparation) {
-+      try {
-+        // 配送は行わないためclaimを解除する。失敗時はlease期限後に再試行する。
-+        await releaseClubInvitationClaim(claim);
-+      } catch {
-+        // 保存済みAuth IDと復旧地点を保持し、解除障害の原文を残さない。
++      if (value === null) {
++        data.delete("requestId");
++      } else {
++        data.set("requestId", value);
 +      }
++
++      const result = await cancelClubInvitationAction(
++        clubSlug,
++        invitationId,
++        operationState(),
++        data,
++      );
++
++      expect(result.status).toBe("error");
++      expect(result.formError).toContain("フォームの有効期限");
++      expect(mocks.cancel).not.toHaveBeenCalled();
++      expect(mocks.revalidate).not.toHaveBeenCalled();
++    },
++  );
++
++  it("不正な対象IDをServiceへ渡さない", async () => {
++    const result = await cancelClubInvitationAction(
++      clubSlug,
++      "invalid",
++      operationState(),
++      form(),
++    );
++
++    expect(result.formError).toBe("招待対象を確認してください。");
++    expect(mocks.cancel).not.toHaveBeenCalled();
++  });
++
++  it("認可済みIDだけをServiceへ渡し、正規slugの固定toastへ遷移する", async () => {
++    const data = form();
++    data.set("clubId", "other-club");
++    data.set("actorMembershipId", "other-owner");
++    data.set("authUserId", privateDetail);
++    data.set("tokenHash", privateDetail);
++    data.set("redirectTo", "https://attacker.example.test");
++
++    await expect(cancelClubInvitationAction(
++      " requested-slug ",
++      invitationId,
++      operationState(),
++      data,
++    )).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    expect(mocks.cancel).toHaveBeenCalledExactlyOnceWith({
++      clubId,
++      actorMembershipId,
++      invitationId,
++    });
++    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith(clubSlug);
++    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith(
++      `/club/${clubSlug}/admin/members?toast=member-invitation-cancelled&toastId=${requestId}`,
++    );
++    expect(mocks.revalidate.mock.invocationCallOrder[0]).toBeLessThan(
++      mocks.redirect.mock.invocationCallOrder[0],
++    );
++  });
++
++  it.each(["NOT_FOUND", "ACTOR_NOT_ACTIVE_OWNER"])(
++    "%sは他クラブ対象・失効したOWNERの情報を404に統一する",
++    async (outcome) => {
++      mocks.cancel.mockResolvedValue({
++        outcome,
++      });
++
++      await expect(cancelClubInvitationAction(
++        clubSlug,
++        invitationId,
++        operationState(),
++        form(),
++      )).rejects.toMatchObject({
++        digest: "NEXT_HTTP_ERROR_FALLBACK;404",
++      });
++      expect(mocks.revalidate).not.toHaveBeenCalled();
++      expect(mocks.redirect).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each([
++    "INVITATION_ALREADY_ACCEPTED",
++    "INVITATION_CANCELLED",
++    "MEMBERSHIP_NOT_INVITED",
++  ])("%sの拒否を成功に変換しない", async (reason) => {
++    mocks.cancel.mockResolvedValue({
++      outcome: "RULE_VIOLATION",
++      reason,
++    });
++
++    const result = await cancelClubInvitationAction(
++      clubSlug,
++      invitationId,
++      operationState(),
++      form(),
++    );
++
++    expect(result.status).toBe("error");
++    expect(result.formError).toBeTruthy();
++    expect(mocks.redirect).not.toHaveBeenCalled();
++  });
++
++  it("例外と前回stateの秘密をログ・ActionStateへ残さない", async () => {
++    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
++    mocks.cancel.mockRejectedValue(new DomainError("INTERNAL", privateDetail));
++
++    const result = await cancelClubInvitationAction(
++      clubSlug,
++      invitationId,
++      {
++        ...operationState(),
++        values: {
++          secret: privateDetail,
++        } as never,
++        formError: privateDetail,
++      },
++      form(),
++    );
++
++    expect(result.status).toBe("error");
++    expect(result.values).toEqual({});
++    expect(JSON.stringify(result)).not.toContain(privateDetail);
++    expect(log).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    "NEXT_HTTP_ERROR_FALLBACK;404",
++    "NEXT_REDIRECT;push;/club-login;303;",
++  ])("Serviceが投げたNext.js制御例外も吸収しない: %s", async (digest) => {
++    const error = navigationError(digest);
++    mocks.cancel.mockRejectedValue(error);
++
++    await expect(cancelClubInvitationAction(
++      clubSlug,
++      invitationId,
++      operationState(),
++      form(),
++    )).rejects.toBe(error);
++    expect(mocks.revalidate).not.toHaveBeenCalled();
++  });
++
++  it("不正な前回requestIdをそのまま反射しない", async () => {
++    const result = await cancelClubInvitationAction(
++      clubSlug,
++      invitationId,
++      {
++        ...operationState(),
++        requestId: privateDetail,
++      },
++      form(),
++    );
++
++    expect(JSON.stringify(result)).not.toContain(privateDetail);
++    expect(result.requestId).toMatch(/^[a-f0-9-]{36}$/);
++    expect(mocks.cancel).not.toHaveBeenCalled();
++  });
++});
++
++// 新規・再送・取消のいずれも実認可を通るまで入力や副作用を扱わない。
++describe.each(["invite", "resend", "cancel"] as const)("%s共通の認可", (kind) => {
++  it.each(["MEMBER", "COACH", "OFFICER"])("%sにはServiceを呼ばない", async (role) => {
++    mocks.membership.mockResolvedValue({
++      id: actorMembershipId,
++      role,
++      club,
++    });
++    const data = inviteForm();
++    const get = vi.spyOn(data, "get");
++
++    await expect(invoke(kind, data)).rejects.toMatchObject({
++      digest: "NEXT_HTTP_ERROR_FALLBACK;404",
++    });
++    expect(get).not.toHaveBeenCalled();
++    expect(mocks.invite).not.toHaveBeenCalled();
++    expect(mocks.resend).not.toHaveBeenCalled();
++    expect(mocks.cancel).not.toHaveBeenCalled();
++    expect(mocks.club).not.toHaveBeenCalled();
++  });
++
++  it.each(["SUSPENDED", "WITHDRAWN"])("最新DB状態が%sなら拒否する", async (status) => {
++    // 実認可がACTIVE条件を付けている場合だけ、失効した所属を検索結果から除外する。
++    mocks.membership.mockImplementation(async (query) => {
++      expect(query.where.status).toBe("ACTIVE");
++      expect(query.where.userId).toBe("authenticated-user");
++      expect(query.where.club.is.slug).toBe(clubSlug);
++
++      return query.where.status === status
++        ? {
++            id: actorMembershipId,
++            role: "OWNER",
++            club,
++          }
++        : null;
++    });
++
++    await expect(invoke(kind)).rejects.toMatchObject({
++      digest: "NEXT_HTTP_ERROR_FALLBACK;404",
++    });
++    expect(mocks[kind]).not.toHaveBeenCalled();
++  });
++
++  it("未ログイン時のredirectを吸収しない", async () => {
++    mocks.getUser.mockResolvedValue({
++      data: {
++        user: null,
++      },
++      error: null,
++    });
++
++    await expect(invoke(kind)).rejects.toMatchObject({
++      digest: "NEXT_REDIRECT;push;/club-login;303;",
++    });
++    expect(mocks[kind]).not.toHaveBeenCalled();
++  });
++
++  it("requestIdをFileで渡しても処理しない", async () => {
++    const data = inviteForm();
++    data.set("requestId", new Blob([privateDetail]), "request.txt");
++
++    const result = await invoke(kind, data);
++
++    expect(result.status).toBe("error");
++    expect(result.formError).toContain("フォームの有効期限");
++    expect(mocks[kind]).not.toHaveBeenCalled();
++    expect(mocks.club).not.toHaveBeenCalled();
++  });
++});
++
++// 送信入力の改ざん拒否と、認可結果・DB設定だけによるService入力を確認する。
++describe("inviteClubMemberActionの入力", () => {
++  it.each(["OWNER", "SUPER_ADMIN", ""])("不正role=%sを拒否する", async (role) => {
++    const data = inviteForm();
++    data.set("role", role);
++
++    const result = await invoke("invite", data);
++
++    expect(result.status).toBe("error");
++    expect(result.fieldErrors).toHaveProperty("role");
++    expect(mocks.invite).not.toHaveBeenCalled();
++    expect(mocks.club).not.toHaveBeenCalled();
++  });
++
++  it.each([null, "invalid", "55555555-5555-4555-8555-555555555555"])(
++    "requestId=%sを入力検証・DB設定取得より前に拒否する",
++    async (value) => {
++      const data = inviteForm();
++
++      if (value === null) {
++        data.delete("requestId");
++      } else {
++        data.set("requestId", value);
++      }
++
++      const result = await invoke("invite", data);
++
++      expect(result.formError).toContain("フォームの有効期限");
++      expect(mocks.invite).not.toHaveBeenCalled();
++      expect(mocks.club).not.toHaveBeenCalled();
++    },
++  );
++
++  it("氏名とemailの入力エラーを返す", async () => {
++    const data = inviteForm();
++    data.set("email", "invalid");
++    data.set("name", " ");
++
++    const result = await invoke("invite", data);
++
++    expect(result.fieldErrors).toHaveProperty("email");
++    expect(result.fieldErrors).toHaveProperty("name");
++    expect(mocks.invite).not.toHaveBeenCalled();
++  });
++
++  it("正規化入力・認可ID・DB設定だけをServiceへ渡す", async () => {
++    const data = inviteForm();
++
++    for (const field of [
++      "clubId",
++      "actorMembershipId",
++      "authUserId",
++      "tokenHash",
++      "status",
++      "appBaseUrl",
++      "redirectTo",
++    ]) {
++      data.set(field, privateDetail);
 +    }
-+  }
-+}
++
++    await expect(invoke("invite", data)).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    expect(mocks.club).toHaveBeenCalledExactlyOnceWith({
++      where: {
++        id: clubId,
++      },
++      select: {
++        id: true,
++        name: true,
++        slug: true,
++        timezone: true,
++        appBaseUrl: true,
++      },
++    });
++    expect(mocks.invite).toHaveBeenCalledExactlyOnceWith({
++      club: {
++        id: clubId,
++        name: club.name,
++        slug: clubSlug,
++        timezone: club.timezone,
++        appBaseUrl: "https://club.example.test",
++      },
++      actorMembershipId,
++      email: "member@example.test",
++      name: "会員名",
++      role: "MEMBER",
++    }, expect.any(Function));
++  });
++});
++
++// DB保存済みの失敗・不明な配送と、保存前の失敗を区別して表示する。
++describe.each(["invite", "resend"] as const)("%sの結果表示", (kind) => {
++  it.each([
++    {
++      result: {
++        outcome: "SENT",
++        invitationId,
++      },
++      toast: kind === "invite" ? "member-invited" : "member-invitation-resent",
++    },
++    {
++      result: {
++        outcome: "EMAIL_FAILED",
++        invitationId,
++      },
++      toast: "member-invitation-email-failed",
++    },
++    {
++      result: {
++        outcome: "PREPARATION_FAILED",
++        invitationId,
++        stage: "PREPARATION",
++        recovery: "RESEND",
++      },
++      toast: "member-invitation-recovery-required",
++    },
++  ])("$result.outcomeは一覧更新後に固定toastへ遷移する", async ({ result, toast }) => {
++    mocks[kind].mockResolvedValue(result);
++
++    await expect(invoke(kind)).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith(clubSlug);
++    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith(
++      `/club/${clubSlug}/admin/members?toast=${toast}&toastId=${requestId}`,
++    );
++  });
++
++  it.each([
++    {
++      outcome: "DELIVERY_UNKNOWN",
++      invitationId,
++    },
++    {
++      outcome: "DELIVERY_RECORDING_FAILED",
++      invitationId,
++      delivery: "ACCEPTED",
++    },
++    {
++      outcome: "DELIVERY_RECORDING_FAILED",
++      invitationId,
++      delivery: "REJECTED",
++    },
++  ])("$outcome/$deliveryは保存済みの固定メッセージで再検証する", async (result) => {
++    mocks[kind].mockResolvedValue(result);
++
++    const state = await invoke(kind);
++
++    expect(state.status).toBe("error");
++    expect(state.formError).toContain("招待情報は保存されています");
++    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith(clubSlug);
++    expect(mocks.redirect).not.toHaveBeenCalled();
++
++    if (result.delivery === "ACCEPTED") {
++      expect(state.formError).toContain("メール送信は受け付けられました");
++      expect(state.formError).not.toContain("メール送信に失敗");
++    }
++  });
++
++  it.each(["NOT_FOUND", "ACTOR_NOT_ACTIVE_OWNER"])(
++    "%sでは対象の有無を404に統一する",
++    async (outcome) => {
++      mocks[kind].mockResolvedValue({
++        outcome,
++      });
++
++      await expect(invoke(kind)).rejects.toMatchObject({
++        digest: "NEXT_HTTP_ERROR_FALLBACK;404",
++      });
++      expect(mocks.revalidate).not.toHaveBeenCalled();
++      expect(mocks.redirect).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each([
++    "INVITATION_ALREADY_ACCEPTED",
++    "INVITATION_CANCELLED",
++    "INVITATION_PROCESSING",
++    "RESEND_COOLDOWN",
++    "AUTH_USER_MISMATCH",
++  ])("%sの再送拒否を成功扱いしない", async (reason) => {
++    mocks[kind].mockResolvedValue({
++      outcome: "RULE_VIOLATION",
++      reason,
++    });
++
++    const result = await invoke(kind);
++
++    expect(result.status).toBe("error");
++    expect(result.formError).toBeTruthy();
++    expect(mocks.redirect).not.toHaveBeenCalled();
++  });
++
++  it("設定不備は保存済みとして表示せずService結果の秘密も返さない", async () => {
++    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
++    mocks[kind].mockResolvedValue({
++      outcome: "CONFIGURATION_ERROR",
++      tokenHash: privateDetail,
++      authLink: privateDetail,
++    });
++
++    const result = await invoke(kind);
++
++    expect(result.status).toBe("error");
++    expect(result.formError).not.toContain("保存");
++    expect(JSON.stringify(result)).not.toContain(privateDetail);
++    expect(mocks.revalidate).not.toHaveBeenCalled();
++    expect(log).not.toHaveBeenCalled();
++  });
++
++  it("DB設定取得失敗はServiceに進めず原文を返さない", async () => {
++    mocks.club.mockRejectedValue(new Error(privateDetail));
++
++    const result = await invoke(kind);
++
++    expect(result.status).toBe("error");
++    expect(JSON.stringify(result)).not.toContain(privateDetail);
++    expect(mocks[kind]).not.toHaveBeenCalled();
++  });
++});
++
++// 再送入口では対象ID以外のフォーム値をService入力に使用しない。
++describe("resendClubInvitationActionの対象", () => {
++  it("改ざんされた対象IDの形式を拒否する", async () => {
++    const result = await resendClubInvitationAction(
++      clubSlug,
++      "invalid",
++      operationState(),
++      form(),
++    );
++
++    expect(result.formError).toBe("招待対象を確認してください。");
++    expect(mocks.resend).not.toHaveBeenCalled();
++    expect(mocks.club).not.toHaveBeenCalled();
++  });
++
++  it("他クラブID等が追加されても認可結果と対象IDだけを渡す", async () => {
++    const data = inviteForm();
++    data.set("clubId", "attacker-club");
++    data.set("actorMembershipId", "attacker-owner");
++    data.set("role", "OWNER");
++    data.set("email", "attacker@example.test");
++
++    await expect(invoke("resend", data)).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    expect(mocks.resend).toHaveBeenCalledExactlyOnceWith({
++      club: {
++        id: clubId,
++        name: club.name,
++        slug: clubSlug,
++        timezone: club.timezone,
++        appBaseUrl: "https://club.example.test",
++      },
++      actorMembershipId,
++      invitationId,
++    }, expect.any(Function));
++  });
++});
++
++// URL生成関数は非公開のまま、Serviceへ渡された実関数で確定契約を検証する。
++describe.each(["invite", "resend"] as const)("%sのURL契約", (kind) => {
++  it("DBから取得したクラブ情報をServiceへ渡す", async () => {
++    mocks.club.mockResolvedValue({
++      id: clubId,
++      name: "DBのクラブ名",
++      slug: "db-club-slug",
++      timezone: "UTC",
++      appBaseUrl: "https://db.example.test",
++    });
++
++    await expect(invoke(kind)).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    expect(mocks[kind].mock.calls[0][0].club).toEqual({
++      id: clubId,
++      name: "DBのクラブ名",
++      slug: "db-club-slug",
++      timezone: "UTC",
++      appBaseUrl: "https://db.example.test",
++    });
++  });
++
++  it.each([
++    {
++      origin: "https://club.example.test",
++      slug: "club-a",
++      token: "raw_token-123",
++    },
++    {
++      origin: "http://localhost:3000",
++      slug: "クラブ & / ? #",
++      token: "token+/=?&:#",
++    },
++  ])("Service指定origin=$originから2つの安全なURLを作る", async (value) => {
++    const data = inviteForm();
++    data.set("origin", "https://attacker.example.test");
++    data.set("Host", "attacker.example.test");
++    data.set("invitationUrl", privateDetail);
++    data.set("authRedirectTo", privateDetail);
++    data.set("token", privateDetail);
++
++    await expect(invoke(kind, data)).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    const builder: ClubInvitationLinkBuilder = mocks[kind].mock.calls[0][1];
++    const links = builder({
++      origin: value.origin,
++      clubId,
++      clubSlug: value.slug,
++      rawToken: value.token,
++    });
++    const acceptance = new URL(links.invitationUrl);
++    const welcome = new URL(links.authRedirectTo);
++
++    expect(acceptance.pathname).toBe("/club-invitations/accept");
++    expect(welcome.pathname).toBe("/welcome");
++
++    for (const url of [acceptance, welcome]) {
++      expect(url.origin).toBe(value.origin);
++      expect(Array.from(url.searchParams.keys())).toEqual(["clubSlug", "token"]);
++      expect(url.searchParams.get("clubSlug")).toBe(value.slug);
++      expect(url.searchParams.get("token")).toBe(value.token);
++      expect(url.hash).toBe("");
++      expect(url.href).not.toContain(clubId);
++      expect(url.href).not.toContain("attacker.example.test");
++      expect(url.href).not.toContain(privateDetail);
++    }
++  });
++
++  it("appBaseUrl未設定はServiceのAPP_BASE_URLフォールバックに委ねる", async () => {
++    mocks.club.mockResolvedValue({
++      id: clubId,
++      name: club.name,
++      slug: clubSlug,
++      timezone: club.timezone,
++      appBaseUrl: null,
++    });
++
++    await expect(invoke(kind)).rejects.toMatchObject({
++      digest: expect.stringContaining("NEXT_REDIRECT"),
++    });
++    expect(mocks[kind].mock.calls[0][0].club.appBaseUrl).toBeNull();
++  });
++
++  it("クラブ設定が取得できなければServiceを呼ばない", async () => {
++    mocks.club.mockResolvedValue(null);
++
++    const result = await invoke(kind);
++
++    expect(result.status).toBe("error");
++    expect(mocks[kind]).not.toHaveBeenCalled();
++  });
++});
++
++// use serverの実行可能なexportを3つのasync Actionに限定する。
++it("同期URL生成関数や復旧Actionを公開しない", async () => {
++  const actions = await import(
++    "@/app/(club-app)/club/[clubSlug]/admin/members/invitation-actions"
++  );
++
++  expect(Object.keys(actions).sort()).toEqual([
++    "cancelClubInvitationAction",
++    "inviteClubMemberAction",
++    "resendClubInvitationAction",
++  ]);
++});
