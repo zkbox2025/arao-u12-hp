@@ -445,6 +445,344 @@ describe("招待受取人の読取Repository（DBなし）", () => {
   });
 });
 
+// 【追加：F06粒度3】実DBへ接続せず、transactionの境界と再試行を確認する。
+describe("招待受取人の承諾Repository（DBなし）", () => {
+  const tx = {
+    clubInvitation: {
+      findFirst: vi.fn(),
+      updateMany: vi.fn(),
+    },
+    clubMembership: {
+      updateMany: vi.fn(),
+    },
+  };
+  const transaction = vi.fn();
+  let repository: Repository;
+
+  // 受取人処理がOWNER認可用の別clientを使わないことも確認する。
+  beforeAll(async () => {
+    repository = await loadRepository({
+      $transaction: transaction,
+    });
+  });
+
+  // 書込は毎回独立したmockに戻す。実DBのrollbackは後続suiteで確認する。
+  beforeEach(() => {
+    tx.clubInvitation.findFirst.mockReset();
+    tx.clubInvitation.findFirst.mockResolvedValue(buildRow());
+    tx.clubInvitation.updateMany.mockReset();
+    tx.clubInvitation.updateMany.mockResolvedValue({
+      count: 1,
+    });
+    tx.clubMembership.updateMany.mockReset();
+    tx.clubMembership.updateMany.mockResolvedValue({
+      count: 1,
+    });
+    transaction.mockReset();
+    transaction.mockImplementation(async (
+      operation: (client: typeof tx) => Promise<unknown>,
+    ) => operation(tx));
+  });
+
+  // fake clockを実DBのsuiteや他の試験へ持ち越さない。
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // 共有clientの評価を防ぐmockを解除する。
+  afterAll(() => {
+    vi.doUnmock("@/src/infrastructure/prisma/client");
+    vi.resetModules();
+  });
+
+  // 許可済み状態だけを条件付き更新し、claimとleaseを同時に解除する。
+  it.each([
+    "READY_TO_SEND",
+    "SENT",
+    "EMAIL_FAILED",
+  ] as const)("%sの本人向け承諾をSerializableで行う", async (status) => {
+    const row = buildRow();
+    row.status = status;
+    tx.clubInvitation.findFirst.mockResolvedValueOnce(row);
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup())).toEqual({
+      outcome: "ACCEPTED",
+      clubSlug: "club-a",
+    });
+    expect(transaction).toHaveBeenCalledExactlyOnceWith(
+      expect.any(Function),
+      {
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      },
+    );
+    expect(tx.clubInvitation.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          tokenHash: "a".repeat(64),
+          authUserId: "user-a",
+          club: {
+            is: {
+              slug: "club-a",
+            },
+          },
+        },
+      }),
+    );
+    expect(tx.clubInvitation.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: expect.objectContaining({
+        id: "invitation-a",
+        clubId: "club-a",
+        tokenHash: "a".repeat(64),
+        authUserId: "user-a",
+        email: "member@example.test",
+        membershipId: "membership-a",
+        status,
+        acceptedAt: null,
+        expiresAt: {
+          gt: NOW,
+        },
+        membership: {
+          is: {
+            id: "membership-a",
+            clubId: "club-a",
+            userId: "user-a",
+            status: "INVITED",
+            user: {
+              is: {
+                email: "member@example.test",
+              },
+            },
+          },
+        },
+      }),
+      data: {
+        status: "ACCEPTED",
+        acceptedAt: NOW,
+        claimToken: null,
+        leaseExpiresAt: null,
+      },
+    });
+    expect(tx.clubMembership.updateMany).toHaveBeenCalledExactlyOnceWith({
+      where: {
+        id: "membership-a",
+        clubId: "club-a",
+        userId: "user-a",
+        status: "INVITED",
+        user: {
+          is: {
+            email: "member@example.test",
+          },
+        },
+      },
+      data: {
+        status: "ACTIVE",
+      },
+    });
+  });
+
+  // 一致しない検索結果を期限切れや取消と推測せず、書込もしない。
+  it("検索結果なしでは更新しない", async () => {
+    tx.clubInvitation.findFirst.mockResolvedValueOnce(null);
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup())).toEqual({
+      outcome: "UNAVAILABLE",
+      reason: "INVALID_INVITATION",
+    });
+    expect(tx.clubInvitation.updateMany).not.toHaveBeenCalled();
+    expect(tx.clubMembership.updateMany).not.toHaveBeenCalled();
+  });
+
+  // 終端状態や準備中の招待を更新対象にしない。
+  it.each([
+    "PREPARING",
+    "CANCELLED",
+    "ACCEPTED",
+    "EXPIRED",
+  ] as const)("%sでは書込しない", async (status) => {
+    const row = buildRow();
+    row.status = status;
+    tx.clubInvitation.findFirst.mockResolvedValueOnce(row);
+
+    expect((await repository.acceptClubInvitationForUser(
+      buildLookup(),
+    )).outcome).toBe("UNAVAILABLE");
+    expect(tx.clubInvitation.updateMany).not.toHaveBeenCalled();
+    expect(tx.clubMembership.updateMany).not.toHaveBeenCalled();
+  });
+
+  // hashが正しくても本人のIDや現在emailが一致しなければ承諾させない。
+  it.each([
+    {
+      id: "other-user",
+      email: "member@example.test",
+    },
+    {
+      id: "user-a",
+      email: "changed@example.test",
+    },
+  ])("本人不一致では更新しない: %j", async (authenticatedUser) => {
+    expect((await repository.acceptClubInvitationForUser(buildLookup({
+      authenticatedUser,
+    }))).outcome).toBe("UNAVAILABLE");
+    expect(tx.clubInvitation.updateMany).not.toHaveBeenCalled();
+    expect(tx.clubMembership.updateMany).not.toHaveBeenCalled();
+  });
+
+  // AppUserの欠損emailや他クラブ所属を黙って修復しない。
+  it.each([
+    "app-email",
+    "membership-club",
+    "membership-status",
+  ])("不整合な%sでは更新しない", async (target) => {
+    const row = buildRow();
+
+    if (target === "app-email") {
+      row.membership!.user.email = null;
+    } else if (target === "membership-club") {
+      row.membership!.clubId = "other-club";
+    } else {
+      row.membership!.status = "ACTIVE";
+    }
+
+    tx.clubInvitation.findFirst.mockResolvedValueOnce(row);
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup())).toEqual({
+      outcome: "UNAVAILABLE",
+      reason: "MEMBERSHIP_MISMATCH",
+    });
+    expect(tx.clubInvitation.updateMany).not.toHaveBeenCalled();
+    expect(tx.clubMembership.updateMany).not.toHaveBeenCalled();
+  });
+
+  // 取得中に期限を迎えた招待では、取得前の時刻で更新しない。
+  it("DB取得後に現在時刻を確認する", async () => {
+    vi.useFakeTimers({
+      toFake: ["Date"],
+    });
+    vi.setSystemTime(NOW);
+    tx.clubInvitation.findFirst.mockImplementationOnce(async () => {
+      const row = buildRow();
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+      return row;
+    });
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup({
+      now: undefined,
+    }))).toEqual({
+      outcome: "UNAVAILABLE",
+      reason: "INVITATION_EXPIRED",
+    });
+    expect(tx.clubInvitation.updateMany).not.toHaveBeenCalled();
+    expect(tx.clubMembership.updateMany).not.toHaveBeenCalled();
+  });
+
+  // 件数不成立はcallbackからthrowし、正常commitとして返さない。
+  it.each([
+    "invitation",
+    "membership",
+  ])("%sの更新件数0はtransactionを中止する", async (target) => {
+    const update = target === "invitation"
+      ? tx.clubInvitation.updateMany
+      : tx.clubMembership.updateMany;
+    update.mockResolvedValueOnce({
+      count: 0,
+    });
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup())).toEqual({
+      outcome: "CONFLICT",
+    });
+    await expect(transaction.mock.results[0].value).rejects.toThrow(
+      "Invitation acceptance conflict",
+    );
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+
+  // commit時のP2034後も、前の取得結果と時刻で承諾を続行しない。
+  it("P2034では招待と時刻を取得し直す", async () => {
+    vi.useFakeTimers({
+      toFake: ["Date"],
+    });
+    vi.setSystemTime(NOW);
+    transaction.mockImplementationOnce(async (
+      operation: (client: typeof tx) => Promise<unknown>,
+    ) => {
+      await operation(tx);
+      vi.setSystemTime(new Date(NOW.getTime() + 60_000));
+      throw new Prisma.PrismaClientKnownRequestError("Synthetic conflict", {
+        code: "P2034",
+        clientVersion: Prisma.prismaVersion.client,
+      });
+    });
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup({
+      now: undefined,
+    }))).toEqual({
+      outcome: "UNAVAILABLE",
+      reason: "INVITATION_EXPIRED",
+    });
+    expect(transaction).toHaveBeenCalledTimes(2);
+    expect(tx.clubInvitation.findFirst).toHaveBeenCalledTimes(2);
+    expect(tx.clubInvitation.updateMany).toHaveBeenCalledTimes(1);
+  });
+
+  // 競合の自動再試行には既存と同じ上限を設ける。
+  it("P2034が継続しても初回と再試行3回で止める", async () => {
+    transaction.mockRejectedValue(new Prisma.PrismaClientKnownRequestError(
+      "Synthetic conflict",
+      {
+        code: "P2034",
+        clientVersion: Prisma.prismaVersion.client,
+      },
+    ));
+
+    expect(await repository.acceptClubInvitationForUser(buildLookup())).toEqual({
+      outcome: "CONFLICT",
+    });
+    expect(transaction).toHaveBeenCalledTimes(4);
+  });
+
+  // DB原文やcauseを公開せず、競合以外のエラーは再試行しない。
+  it.each([
+    "known",
+    "unknown",
+  ])("%sのDBエラーを固定例外へ変換する", async (kind) => {
+    const error = kind === "known"
+      ? new Prisma.PrismaClientKnownRequestError("private-db-detail", {
+          code: "P2003",
+          clientVersion: Prisma.prismaVersion.client,
+        })
+      : new Error("private-db-detail");
+    tx.clubMembership.updateMany.mockRejectedValueOnce(error);
+
+    await expect(repository.acceptClubInvitationForUser(
+      buildLookup(),
+    )).rejects.toMatchObject({
+      code: kind === "known" ? "INVALID_REFERENCE" : "INTERNAL",
+      message: "招待を承諾できませんでした。",
+      cause: undefined,
+    });
+    expect(transaction).toHaveBeenCalledTimes(1);
+  });
+
+  // 不正な入力をtransactionへ持ち込まない。
+  it("不正なhash・時刻・本人欠損ではtransactionを開始しない", async () => {
+    await expect(repository.acceptClubInvitationForUser(buildLookup({
+      tokenHash: "private-raw-token",
+    }))).rejects.toMatchObject({
+      code: "VALIDATION",
+    });
+    await expect(repository.acceptClubInvitationForUser(buildLookup({
+      now: new Date(Number.NaN),
+    }))).rejects.toMatchObject({
+      code: "VALIDATION",
+    });
+    expect((await repository.acceptClubInvitationForUser(buildLookup({
+      authenticatedUser: null,
+    }))).outcome).toBe("UNAVAILABLE");
+    expect(transaction).not.toHaveBeenCalled();
+  });
+});
+
 // このsuiteは明示flagとloopbackの専用DBがある場合だけ実行する。
 describeDatabase("招待受取人の読取Repository（ローカルDB）", () => {
   let db: PrismaClient | undefined;
@@ -918,6 +1256,334 @@ describeDatabase("招待受取人の読取Repository（ローカルDB）", () =>
       },
     });
     expect(await snapshot(value)).toEqual(before);
+  });
+
+  // 【追加：F06粒度3】実transactionの一部だけに失敗を注入してrollbackを確認する。
+  function interceptAcceptance(
+    change: (tx: Prisma.TransactionClient) => void,
+  ): void {
+    const client = database();
+    const original = client.$transaction.bind(client);
+    const replacement = async (
+      operation: (tx: Prisma.TransactionClient) => Promise<unknown>,
+      options?: {
+        isolationLevel?: Prisma.TransactionIsolationLevel;
+        maxWait?: number;
+        timeout?: number;
+      },
+    ) => original(
+      async (tx) => {
+        change(tx);
+        return operation(tx);
+      },
+      options,
+    );
+
+    vi.spyOn(client, "$transaction").mockImplementationOnce(
+      replacement as typeof client.$transaction,
+    );
+  }
+
+  // 【追加：F06粒度3】既存F05操作との競合に使う同一クラブOWNER入力を作る。
+  function ownerInput(
+    value: Awaited<ReturnType<typeof fixture>>,
+  ) {
+    return {
+      clubId: value.clubId,
+      actorMembershipId: value.ownerMembershipId,
+      invitationId: value.invitationId,
+      now: NOW,
+    };
+  }
+
+  // 【追加：F06粒度3】承諾は既存3状態を対象にし、role・AppUser・他の情報を変えない。
+  it.each([
+    "READY_TO_SEND",
+    "SENT",
+    "EMAIL_FAILED",
+  ] as const)("%sを一回だけ承諾し、claimとleaseを同時解除する", async (status) => {
+    const value = await fixture();
+    await database().clubInvitation.update({
+      where: {
+        id: value.invitationId,
+      },
+      data: {
+        status,
+        claimToken: randomUUID(),
+        leaseExpiresAt: new Date(NOW.getTime() + 300_000),
+      },
+    });
+    const before = await snapshot(value);
+
+    expect(await repository.acceptClubInvitationForUser(value.lookup)).toEqual({
+      outcome: "ACCEPTED",
+      clubSlug: value.lookup.clubSlug,
+    });
+
+    const after = await snapshot(value);
+    expect(after[0]).toEqual({
+      ...before[0],
+      status: "ACCEPTED",
+      acceptedAt: NOW,
+      claimToken: null,
+      leaseExpiresAt: null,
+      updatedAt: expect.any(Date),
+    });
+    expect(after[1]).toEqual({
+      ...before[1],
+      status: "ACTIVE",
+      updatedAt: expect.any(Date),
+    });
+    expect(after[2]).toEqual(before[2]);
+    expect(await repository.acceptClubInvitationForUser(value.lookup)).toEqual({
+      outcome: "UNAVAILABLE",
+      reason: "INVITATION_ALREADY_ACCEPTED",
+    });
+    expect(await snapshot(value)).toEqual(after);
+  });
+
+  // 【追加：F06粒度3】同じtokenの2並行でも、成功結果とDBの確定は1件だけ。
+  it("同一招待を2並行で承諾しても成功は1回だけ", async () => {
+    const value = await fixture();
+    const results = await Promise.all([
+      repository.acceptClubInvitationForUser(value.lookup),
+      repository.acceptClubInvitationForUser(value.lookup),
+    ]);
+    const accepted = results.filter((result) => result.outcome === "ACCEPTED");
+
+    expect(accepted).toHaveLength(1);
+    const [invitation, membership] = await snapshot(value);
+    expect(invitation.status).toBe("ACCEPTED");
+    expect(invitation.acceptedAt).toEqual(NOW);
+    expect(membership?.status).toBe("ACTIVE");
+  });
+
+  // 【追加：F06粒度3】片方の件数不成立や例外で、先行した更新もrollbackする。
+  it.each([
+    "invitation-zero",
+    "membership-zero",
+    "membership-error",
+  ])("%sでも承諾更新を部分保存しない", async (failure) => {
+    const value = await fixture();
+    const before = await snapshot(value);
+
+    interceptAcceptance((tx) => {
+      if (failure === "invitation-zero") {
+        vi.spyOn(tx.clubInvitation, "updateMany").mockResolvedValueOnce({
+          count: 0,
+        });
+      } else if (failure === "membership-zero") {
+        vi.spyOn(tx.clubMembership, "updateMany").mockResolvedValueOnce({
+          count: 0,
+        });
+      } else {
+        vi.spyOn(tx.clubMembership, "updateMany").mockRejectedValueOnce(
+          new Error("private-transaction-detail"),
+        );
+      }
+    });
+
+    if (failure === "membership-error") {
+      await expect(repository.acceptClubInvitationForUser(
+        value.lookup,
+      )).rejects.toMatchObject({
+        message: "招待を承諾できませんでした。",
+        cause: undefined,
+      });
+    } else {
+      expect(await repository.acceptClubInvitationForUser(value.lookup)).toEqual({
+        outcome: "CONFLICT",
+      });
+    }
+
+    expect(await snapshot(value)).toEqual(before);
+  });
+
+  // 【追加：F06粒度3】別クラブ・別Auth・現在email違いではDBを更新しない。
+  it("本人・クラブ・hashの不一致を拒否して状態を保持する", async () => {
+    const value = await fixture();
+    const other = await fixture();
+    const before = await snapshot(value);
+
+    for (const overrides of [
+      {
+        clubSlug: other.lookup.clubSlug,
+      },
+      {
+        tokenHash: randomBytes(32).toString("hex"),
+      },
+      {
+        authenticatedUser: {
+          id: other.userId,
+          email: value.lookup.authenticatedUser.email,
+        },
+      },
+      {
+        authenticatedUser: {
+          id: value.userId,
+          email: "changed@example.test",
+        },
+      },
+    ]) {
+      expect((await repository.acceptClubInvitationForUser({
+        ...value.lookup,
+        ...overrides,
+      })).outcome).toBe("UNAVAILABLE");
+    }
+
+    expect(await snapshot(value)).toEqual(before);
+  });
+
+  // 【追加：F06粒度3】有効期限ちょうどではINVITEDをACTIVEにしない。
+  it("期限ちょうどの承諾を拒否する", async () => {
+    const value = await fixture();
+    const before = await snapshot(value);
+
+    expect(await repository.acceptClubInvitationForUser({
+      ...value.lookup,
+      now: new Date(NOW.getTime() + 60_000),
+    })).toEqual({
+      outcome: "UNAVAILABLE",
+      reason: "INVITATION_EXPIRED",
+    });
+    expect(await snapshot(value)).toEqual(before);
+  });
+
+  // 【追加：F06粒度3】取消と承諾のいずれが先でも、ACTIVEとCANCELLEDを混在させない。
+  it("取消との競合で一貫した終端状態だけを残す", async () => {
+    const value = await fixture();
+    const [acceptance] = await Promise.all([
+      repository.acceptClubInvitationForUser(value.lookup),
+      repository.cancelClubInvitation(ownerInput(value)),
+    ]);
+    const [invitation, membership] = await snapshot(value);
+
+    if (invitation.status === "ACCEPTED") {
+      expect(acceptance.outcome).toBe("ACCEPTED");
+      expect(membership?.status).toBe("ACTIVE");
+    } else {
+      expect(invitation.status).toBe("CANCELLED");
+      expect(acceptance.outcome).not.toBe("ACCEPTED");
+      expect(membership).toBeNull();
+    }
+  });
+
+  // 【追加：F06粒度3】再送が先なら旧hashを拒否し、承諾が先なら再送で巻き戻さない。
+  it("再送との競合で旧tokenを再利用できない", async () => {
+    const value = await fixture();
+    const tokenHash = randomBytes(32).toString("hex");
+    const [acceptance] = await Promise.all([
+      repository.acceptClubInvitationForUser(value.lookup),
+      repository.claimClubInvitationResend({
+        ...ownerInput(value),
+        tokenHash,
+      }),
+    ]);
+    const [invitation, membership] = await snapshot(value);
+
+    if (invitation.status === "ACCEPTED") {
+      expect(acceptance.outcome).toBe("ACCEPTED");
+      expect(invitation.tokenHash).toBe(value.lookup.tokenHash);
+      expect(membership?.status).toBe("ACTIVE");
+    } else {
+      expect(invitation.status).toBe("PREPARING");
+      expect(invitation.tokenHash).toBe(tokenHash);
+      expect(acceptance.outcome).not.toBe("ACCEPTED");
+      expect(membership?.status).toBe("INVITED");
+    }
+
+    expect((await repository.acceptClubInvitationForUser(
+      value.lookup,
+    )).outcome).toBe("UNAVAILABLE");
+  });
+
+  // 【追加：F06粒度3】期限処理と競合しても、期限切れのままACTIVEにはならない。
+  it("期限処理との競合で招待と所属の対応を維持する", async () => {
+    const value = await fixture();
+    const [acceptance] = await Promise.all([
+      repository.acceptClubInvitationForUser(value.lookup),
+      repository.expireClubInvitations({
+        ...ownerInput(value),
+        now: new Date(NOW.getTime() + 60_000),
+      }),
+    ]);
+    const [invitation, membership] = await snapshot(value);
+
+    if (invitation.status === "ACCEPTED") {
+      expect(acceptance.outcome).toBe("ACCEPTED");
+      expect(membership?.status).toBe("ACTIVE");
+    } else {
+      expect(invitation.status).toBe("EXPIRED");
+      expect(acceptance.outcome).not.toBe("ACCEPTED");
+      expect(membership?.status).toBe("INVITED");
+    }
+  });
+
+  // 【追加：F06粒度3】送信完了の遅延報告でACCEPTEDをSENTへ戻さない。
+  it("送信結果記録との競合後も承諾状態とclaim解除を維持する", async () => {
+    const value = await fixture();
+    const claimToken = randomUUID();
+    await database().clubInvitation.update({
+      where: {
+        id: value.invitationId,
+      },
+      data: {
+        status: "READY_TO_SEND",
+        claimToken,
+        leaseExpiresAt: new Date(NOW.getTime() + 300_000),
+      },
+    });
+    const claim = {
+      ...ownerInput(value),
+      claimToken,
+    };
+    const [acceptance] = await Promise.all([
+      repository.acceptClubInvitationForUser(value.lookup),
+      repository.markClubInvitationEmailSent(claim),
+    ]);
+
+    expect(acceptance.outcome).toBe("ACCEPTED");
+    expect(await repository.markClubInvitationEmailSent(claim)).toEqual({
+      outcome: "CLAIM_LOST",
+    });
+    const [invitation, membership] = await snapshot(value);
+    expect(invitation.status).toBe("ACCEPTED");
+    expect(invitation.claimToken).toBeNull();
+    expect(invitation.leaseExpiresAt).toBeNull();
+    expect(membership?.status).toBe("ACTIVE");
+  });
+
+  // 【追加：F06粒度3】対象クラブのINVITEDだけを更新し、既存の別所属を維持する。
+  it("承諾しても他クラブのstatus・roleとAppUserを保持する", async () => {
+    const value = await fixture();
+    const other = await fixture();
+    const membership = await database().clubMembership.create({
+      data: {
+        clubId: other.clubId,
+        userId: value.userId,
+        role: "COACH",
+        status: "ACTIVE",
+      },
+    });
+    const user = await database().appUser.findUniqueOrThrow({
+      where: {
+        id: value.userId,
+      },
+    });
+
+    expect((await repository.acceptClubInvitationForUser(
+      value.lookup,
+    )).outcome).toBe("ACCEPTED");
+    expect(await database().clubMembership.findUniqueOrThrow({
+      where: {
+        id: membership.id,
+      },
+    })).toEqual(membership);
+    expect(await database().appUser.findUniqueOrThrow({
+      where: {
+        id: value.userId,
+      },
+    })).toEqual(user);
   });
 
   // 既存の他クラブ所属には一切の更新を行わない。

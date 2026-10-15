@@ -176,6 +176,27 @@ export type ClubInvitationAcceptanceForUser =
       >;
     };
 
+// クラブ招待の最終結果
+export type ClubInvitationAcceptanceResult =
+  | {
+      outcome: "ACCEPTED";//入会成功
+      clubSlug: string;
+    }
+  | {
+      outcome: "UNAVAILABLE";//ルール違反で失敗
+      reason: ClubInvitationAcceptanceViolation;
+    }
+  | {
+      outcome: "CONFLICT";//データの衝突(他の誰かが同じ処理を同時にしたか裏でデータが変わったか)
+    };
+
+//データの衝突（タッチの差での取り合い）が起きたときに、プログラムを安全にストップさせてエラーを発生させるための型を作成する
+class ClubInvitationAcceptanceConflict extends Error {
+  constructor() {
+    super("Invitation acceptance conflict");
+  }
+}
+
 //DBから取得したクラブ招待データの型
 type StoredInvitation =
   Prisma.ClubInvitationGetPayload<{
@@ -391,7 +412,7 @@ async function ownerTransaction<T>(
       return await prisma.$transaction(
         async (tx) => {
           const now =
-            time(input);
+            time(input);//現在の日時が正しいか検証する関数
 
           const actor =//操作者のメンバーシップを取得する
             await tx.clubMembership.findFirst(
@@ -1684,6 +1705,227 @@ export async function expireClubInvitations(
   );
 }
 
+
+
+//クラブ招待を承諾できるかを評価し、DBのクラブ招待テーブルのデータを招待済みを承諾済みへメンバーシップテーブルのデータを招待済みからアクティブへ変更する関数
+export async function acceptClubInvitationForUser(
+  input: {
+    clubSlug: string;
+    tokenHash: string;
+    authenticatedUser: ClubInvitationAcceptanceUser | null;// Authで検証した現在の本人情報の型
+    now?: Date;
+  },
+): Promise<ClubInvitationAcceptanceResult> {// クラブ招待の最終結果
+  assertTokenHash(input.tokenHash);//トークンハッシュの形式が正しいかを判定する関数
+
+  if (input.now !== undefined) {
+    time(input);//現在の日時が正しいか検証する関数
+  }
+
+  if (!input.clubSlug) {
+    return {
+      outcome: "UNAVAILABLE",//ルール違反
+      reason: "INVALID_INVITATION",//招待が不正
+    };
+  }
+
+  const authenticatedUser = input.authenticatedUser;// Authで検証した現在の本人情報の型
+
+  if (!authenticatedUser?.id) {
+    return {
+      outcome: "UNAVAILABLE",//ルール違反
+      reason: "RECIPIENT_MISMATCH",//招待された人が不一致
+    };
+  }
+
+  for (
+    let attempt = 0;
+    ;
+    attempt += 1
+  ) {
+    try {
+      return await prisma.$transaction(
+        async (tx): Promise<ClubInvitationAcceptanceResult> => {// クラブ招待の最終結果
+          const row = await tx.clubInvitation.findFirst({//クラブ招待テーブルから一件データを取得する
+            where: {
+              tokenHash: input.tokenHash,
+              authUserId: authenticatedUser.id,// Authで検証した現在の本人情報の型
+              club: {
+                is: {
+                  slug: input.clubSlug,
+                },
+              },
+            },
+            select: {
+              id: true,
+              clubId: true,
+              tokenHash: true,
+              authUserId: true,
+              email: true,
+              membershipId: true,
+              status: true,
+              acceptedAt: true,
+              expiresAt: true,
+              club: {
+                select: {
+                  slug: true,
+                },
+              },
+              membership: {
+                select: {
+                  id: true,
+                  clubId: true,
+                  userId: true,
+                  status: true,
+                  user: {
+                    select: {
+                      email: true,
+                    },
+                  },
+                },
+              },
+            },
+          });
+
+          if (!row) {
+            return {
+              outcome: "UNAVAILABLE",//ルール違反
+              reason: "INVALID_INVITATION",//不正
+            };
+          }
+
+          const now = time(input);//現在の日時が正しいか検証する関数
+          const evaluation = evaluateClubInvitationAcceptance({//クラブ招待を承諾できるかを評価する関数
+            invitation: row,
+            membership: row.membership,
+            authenticatedUser,
+            clubId: row.clubId,
+            tokenHash: input.tokenHash,
+            now,
+          });
+
+          if (!evaluation.allowed) {
+            return {
+              outcome: "UNAVAILABLE",
+              reason: evaluation.violation,
+            };
+          }
+
+          if (
+            !row.membership ||
+            normalizeEmail(row.membership.user.email ?? "") !==//メアドを正規化する
+              normalizeEmail(row.email)
+          ) {
+            return {
+              outcome: "UNAVAILABLE",//ルール違反
+              reason: "MEMBERSHIP_MISMATCH",
+            };
+          }
+
+          const invitation = await tx.clubInvitation.updateMany({//DBのクラブ招待テーブルを更新する（招待ずみを承諾済みへ更新）
+            where: {
+              id: row.id,
+              clubId: row.clubId,
+              tokenHash: input.tokenHash,
+              authUserId: authenticatedUser.id,
+              email: row.email,
+              membershipId: row.membership.id,
+              status: row.status,
+              acceptedAt: null,
+              expiresAt: {
+                gt: now,
+              },
+              club: {
+                is: {
+                  slug: input.clubSlug,
+                },
+              },
+              membership: {
+                is: {
+                  id: row.membership.id,
+                  clubId: row.clubId,
+                  userId: authenticatedUser.id,
+                  status: "INVITED",
+                  user: {
+                    is: {
+                      email: row.membership.user.email,
+                    },
+                  },
+                },
+              },
+            },
+            data: {
+              status: "ACCEPTED",
+              acceptedAt: now,
+              claimToken: null,
+              leaseExpiresAt: null,
+            },
+          });
+
+          if (invitation.count !== 1) {
+            throw new ClubInvitationAcceptanceConflict();//データの衝突（タッチの差での取り合い）が起きたときに、プログラムを安全にストップさせてエラーを発生させるための型を作成する
+          }
+
+          const membership = await tx.clubMembership.updateMany({//DBのクラブメンバーシップテーブルを更新する（招待ずみからアクティブへ更新）
+            where: {
+              id: row.membership.id,
+              clubId: row.clubId,
+              userId: authenticatedUser.id,
+              status: "INVITED",
+              user: {
+                is: {
+                  email: row.membership.user.email,
+                },
+              },
+            },
+            data: {
+              status: "ACTIVE",
+            },
+          });
+
+          if (membership.count !== 1) {
+            throw new ClubInvitationAcceptanceConflict();//データの衝突（タッチの差での取り合い）が起きたときに、プログラムを安全にストップさせてエラーを発生させるための型を作成する
+          }
+
+          return {
+            outcome: "ACCEPTED",
+            clubSlug: row.club.slug,
+          };
+        },
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,//安全にデータを更新する
+        },
+      );
+    } catch (error) {
+      if (error instanceof ClubInvitationAcceptanceConflict) {//データの衝突（タッチの差での取り合い）が起きたときに、プログラムを安全にストップさせてエラーを発生させるための型を作成する
+        return {
+          outcome: "CONFLICT",//データの衝突
+        };
+      }
+
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2034"
+      ) {
+        if (attempt < MAX_TRANSACTION_RETRIES) {//試行が3回以下の場合続ける
+          continue;
+        }
+
+        return {
+          outcome: "CONFLICT",//データの衝突
+        };
+      }
+
+      const safe = convertPrismaError(error);//PrismaエラーをDomainErrorへ変換する。
+
+      throw new DomainError(
+        safe.code,
+        "招待を承諾できませんでした。",
+      );
+    }
+  }
+}
+
 //クラブ招待の承諾が不可である場合のデータを整理する関数
 function unavailableClubInvitationAcceptance(
   reason: ClubInvitationAcceptanceViolation,//クラブ招待承諾処理のルール違反一覧
@@ -1707,7 +1949,7 @@ export async function findClubInvitationAcceptanceForUser(
   },
 ): Promise<ClubInvitationAcceptanceForUser> {//ユーザーのためのクラブ招待の承諾結果の型
   assertTokenHash(input.tokenHash);//トークンハッシュの形式が正しいかを判定する関数
-  const now = time(input);
+  const now = time(input);//現在の日時が正しいか検証する関数
   const authenticatedUser = input.authenticatedUser;
 
   if (!input.clubSlug) {
@@ -1828,7 +2070,7 @@ export async function findUsableClubInvitationByTokenHash(
   );
 
   const now =
-    time(input);
+    time(input);//現在の日時が正しいか検証する関数
 
   if (!input.authenticatedUserId)//認証済みのユーザーIDがない
     return null;
