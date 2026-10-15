@@ -10,6 +10,12 @@ import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
 
 import {
+  evaluateClubInvitationAcceptance,//クラブ招待を承諾できるかを評価する関数
+  type ClubInvitationAcceptanceUser,// Authで検証した現在の本人情報の型
+  type ClubInvitationAcceptanceView,//招待リンクを開いたときに何を表示させるかを定義した型
+  type ClubInvitationAcceptanceViolation,//クラブ招待承諾処理のルール違反一覧
+} from "@/domain/club/invitation/acceptance-policy";
+import {
   validateClubMemberInviteFormValues,//招待メール送信フォームの値のバリデーション関数
   type ValidClubMemberInviteInput,  //バリデーション成功時のデータの値
 } from "@/domain/club/invitation/invitation-form";
@@ -143,6 +149,32 @@ export type ClubInvitationForOwner = {
   canCancel: boolean;
   needsPreparationRetry: boolean;
 };
+
+//ユーザーのためのクラブ招待の承諾結果の型
+export type ClubInvitationAcceptanceForUser =
+  | {
+      outcome: "AVAILABLE";
+      invitation: {
+        id: string;
+        clubId: string;
+        membershipId: string;
+      };
+      view: Extract<
+        ClubInvitationAcceptanceView,//招待リンクを開いたときに何を表示させるかを定義した型
+        {
+          status: "available";
+        }
+      >;
+    }
+  | {
+      outcome: "UNAVAILABLE";
+      view: Extract<
+        ClubInvitationAcceptanceView,//招待リンクを開いたときに何を表示させるかを定義した型
+        {
+          status: "unavailable";
+        }
+      >;
+    };
 
 //DBから取得したクラブ招待データの型
 type StoredInvitation =
@@ -1650,6 +1682,134 @@ export async function expireClubInvitations(
       ),
     }),
   );
+}
+
+//クラブ招待の承諾が不可である場合のデータを整理する関数
+function unavailableClubInvitationAcceptance(
+  reason: ClubInvitationAcceptanceViolation,//クラブ招待承諾処理のルール違反一覧
+): ClubInvitationAcceptanceForUser {//ユーザーのためのクラブ招待の承諾結果の型
+  return {
+    outcome: "UNAVAILABLE",
+    view: {
+      status: "unavailable",
+      reason,
+    },
+  };
+}
+
+//招待を承諾可能かをチェックして、必要なデータをDB取得し、承諾結果を返す関数
+export async function findClubInvitationAcceptanceForUser(
+  input: {
+    clubSlug: string;
+    tokenHash: string;
+    authenticatedUser: ClubInvitationAcceptanceUser | null;// Authで検証した現在の本人情報の型
+    now?: Date;
+  },
+): Promise<ClubInvitationAcceptanceForUser> {//ユーザーのためのクラブ招待の承諾結果の型
+  assertTokenHash(input.tokenHash);//トークンハッシュの形式が正しいかを判定する関数
+  const now = time(input);
+  const authenticatedUser = input.authenticatedUser;
+
+  if (!input.clubSlug) {
+    return unavailableClubInvitationAcceptance("INVALID_INVITATION");//クラブ招待の承諾が不可である場合のデータを整理する関数
+  }
+
+  if (!authenticatedUser?.id) {
+    return unavailableClubInvitationAcceptance("RECIPIENT_MISMATCH");//クラブ招待の承諾が不可である場合のデータを整理する関数（招待された人が不一致）
+  }
+
+  try {
+    //クラブ招待テーブルから必要なデータを取得する
+    const row = await prisma.clubInvitation.findFirst({
+      where: {
+        tokenHash: input.tokenHash,
+        authUserId: authenticatedUser.id,
+        club: {
+          is: {
+            slug: input.clubSlug,
+          },
+        },
+      },
+      select: {
+        id: true,
+        clubId: true,
+        tokenHash: true,
+        authUserId: true,
+        email: true,
+        membershipId: true,
+        status: true,
+        acceptedAt: true,
+        expiresAt: true,
+        club: {
+          select: {
+            name: true,
+            slug: true,
+          },
+        },
+        membership: {
+          select: {
+            id: true,
+            clubId: true,
+            userId: true,
+            status: true,
+            user: {
+              select: {
+                email: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    if (!row) {
+      return unavailableClubInvitationAcceptance("INVALID_INVITATION");//クラブ招待の承諾が不可である場合のデータを整理する関数
+    }
+
+    const evaluation = evaluateClubInvitationAcceptance({//クラブ招待を承諾できるかを評価する関数
+      invitation: row,
+      membership: row.membership,
+      authenticatedUser,
+      clubId: row.clubId,
+      tokenHash: input.tokenHash,
+      now,
+    });
+
+    if (!evaluation.allowed) {
+      return unavailableClubInvitationAcceptance(evaluation.violation);//クラブ招待の承諾が不可である場合のデータを整理する関数
+    }
+
+
+    if (
+      !row.membership ||
+      normalizeEmail(row.membership.user.email ?? "") !==//メアドを正規化する
+        normalizeEmail(row.email)
+    ) {
+      return unavailableClubInvitationAcceptance("MEMBERSHIP_MISMATCH");//クラブ招待の承諾が不可である場合のデータを整理する関数
+    }
+
+    return {
+      outcome: "AVAILABLE",
+      invitation: {
+        id: row.id,
+        clubId: row.clubId,
+        membershipId: row.membership.id,
+      },
+      view: {
+        status: "available",
+        clubName: row.club.name,
+        clubSlug: row.club.slug,
+        expiresAt: row.expiresAt.toISOString(),
+      },
+    };
+  } catch (error) {
+    const safe = convertPrismaError(error);//PrismaエラーをDomainErrorへ変換する。
+
+    throw new DomainError(
+      safe.code,
+      "招待情報を確認できませんでした。",
+    );
+  }
 }
 
 //クラブ招待のトークンハッシュを使って、招待メールの使用が可能かどうかを判定し、使用可能な場合は招待メールの情報を返す関数

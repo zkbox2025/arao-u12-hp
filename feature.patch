@@ -1,572 +1,499 @@
-diff --git a/docs/implementation/phases/F06.md b/docs/implementation/phases/F06.md
-index a50306e..5986db2 100644
---- a/docs/implementation/phases/F06.md
-+++ b/docs/implementation/phases/F06.md
-@@ -2,7 +2,8 @@
+diff --git a/package.json b/package.json
+index 0100235..655bdaf 100644
+--- a/package.json
++++ b/package.json
+@@ -10,7 +10,7 @@
+     "typecheck": "tsc --noEmit",
+     "test": "vitest run",
+     "test:watch": "vitest",
+-    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts tests/club-invitation-recovery.integration.test.ts",
++    "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts tests/club-invitation-acceptance-repository.integration.test.ts tests/club-invitation-recovery.integration.test.ts",
+     "prisma:validate": "prisma validate",
+     "env:validate": "node scripts/validate-env.mjs",
+     "predev": "npm run env:validate",
+diff --git a/src/infrastructure/prisma/repositories/club-invitation-repository.ts b/src/infrastructure/prisma/repositories/club-invitation-repository.ts
+index 246e0b3..9523256 100644
+--- a/src/infrastructure/prisma/repositories/club-invitation-repository.ts
++++ b/src/infrastructure/prisma/repositories/club-invitation-repository.ts
+@@ -9,6 +9,13 @@ import { randomUUID } from "node:crypto";
  
- F06. /welcome・招待承諾
- 目的
--招待された利用者が本人確認後にパスワードを設定し、招待を一回だけ承諾できるようにします。
-+招待された利用者が本人確認後に、招待を一回だけ承諾できるようにします。
-+新規アカウントは初回パスワードを設定し、既存アカウントは再設定せずログインして承諾します。
- 実装範囲
- 1. Auth confirm Routeでinviteを扱い、Supabaseセッション確立後に/welcomeへ安全に遷移する。
- 2. URLのraw tokenを検証後に除去し、必要なら短時間・HttpOnly・SameSite cookieへ交換する。
-@@ -13,8 +14,10 @@ F06. /welcome・招待承諾
-    - Invitationが承諾可能状態
-    - MembershipがINVITED
-    - ログイン中Auth userと招待emailが一致
--4. パスワード8文字以上・英数字・確認一致を検証する。
--5. Supabase Authのパスワード更新後、DB承諾処理を一回限りで実行する。
-+4. 新規アカウントはパスワード8文字以上・英字と数字を各1文字以上含むこと・確認一致を検証する。
-+   記号は禁止せず、パスワードのtrim・全角変換などは行わない。
-+5. 新規アカウントはSupabase Authのパスワード更新後、DB承諾処理を一回限りで実行する。
-+   既存アカウントは本人のログインを確認し、パスワードを更新せずDB承諾処理を実行する。
- 6. InvitationをACCEPTED、acceptedAt=nowへ更新する。
- 7. MembershipをINVITED -> ACTIVEへ更新する。
- 8. 二重送信・二重承諾は条件付き更新で拒否する。
-@@ -26,7 +29,22 @@ F06. /welcome・招待承諾
- - 同時に2回送信しても一度しかACTIVEにならない。
- - 承諾後のtokenは再利用できない。
- - 複数クラブ所属になる場合も既存所属を壊さない。
-+- 既存アカウントの承諾では、パスワードを変更しない。
-+- フォームのActionStateにパスワード・確認値を保持せず、入力エラーにも値を含めない。
- 理解する重要箇所
- - Supabaseの認証確認とアプリDBの招待承諾が別処理であること
- - token、Auth email、Invitation emailの三者を照合する理由
--- 条件付き更新による一回限り保証
-\ No newline at end of file
-+- 条件付き更新による一回限り保証
-+
-+粒度1の契約と後続への引き渡し
-+- Domainの受取人判定は、クラブ・token hash・Auth ID・正規化email・所属の対応を検査する。
-+  承諾可能状態・期限・INVITEDの基本判定には既存のisUsableClubInvitationを使う。
-+- 失効理由は本人のAuth IDと現在emailを照合した後に判定する。
-+  別人には招待の取消・期限切れ・承諾済みなどの詳細を返さない。
-+- 表示用のClubInvitationAcceptanceViewには、利用可能時のクラブ名・正規slug・期限、
-+  利用不可時の理由、処理失敗の区別だけを持たせる。hash・Auth ID・emailは含めない。
-+- 新規・既存の区別をAppUserの存在、email_confirmed_at、URLやcookieの自己申告で判断しない。
-+  既存ルートは検証済みのパスワード認証sessionを根拠にする。
-+  SDKのgetClaimsとAMRによる確認は粒度5で実証し、不明な場合はパスワードログインへ案内する。
-+- 粒度1の純粋関数はセッションの正当性やDB更新の成功を保証しない。
-+  Repositoryでの最新状態の再照合・条件付き更新、Auth・Action・画面への接続は後続粒度で行う。
-diff --git a/domain/club/invitation/acceptance-form.test.ts b/domain/club/invitation/acceptance-form.test.ts
-new file mode 100644
-index 0000000..de93d22
---- /dev/null
-+++ b/domain/club/invitation/acceptance-form.test.ts
-@@ -0,0 +1,152 @@
-+// domain/club/invitation/acceptance-form.test.ts
-+// 初回パスワードの検証、非文字列拒否、失敗時の秘密の非返却を確認する。
-+
+ import { Prisma } from "@prisma/client";
+ 
++// 【追加：F06粒度2】受取人向けの照合と表示用DTOを使用する。
 +import {
-+  describe,
-+  expect,
-+  expectTypeOf,
-+  it,
-+} from "vitest";
-+
-+import type {
-+  WelcomeActionState,
-+  WelcomeFormValues,
-+} from "./acceptance-form";
-+import {
-+  validateWelcomeInput,
-+} from "./acceptance-form";
-+
-+// 初回設定の公開stateは空で、入力値は検証結果の成功側にだけ保持する。
-+describe("validateWelcomeInput", () => {
-+  // stateの型がパスワードを保持できる形へ広がらないことを確認する。
-+  it("フォームstateのvaluesは空のオブジェクトに限定する", () => {
-+    expectTypeOf<WelcomeActionState["values"]>()
-+      .toEqualTypeOf<WelcomeFormValues>();
-+    expectTypeOf<WelcomeFormValues>()
-+      .toEqualTypeOf<Record<string, never>>();
-+    expectTypeOf<WelcomeActionState["data"]>()
-+      .toEqualTypeOf<undefined>();
-+  });
-+
-+  // 最小文字数ちょうどの英字数字を受理する。
-+  it("英字と数字を含む8文字を受理する", () => {
-+    expect(validateWelcomeInput({
-+      password: "Abcdefg1",
-+      confirmation: "Abcdefg1",
-+    })).toEqual({
-+      success: true,
-+      data: {
-+        password: "Abcdefg1",
-+      },
-+    });
-+  });
-+
-+  // 記号や前後の空白を勝手に取り除かない。
-+  it("記号と空白を含むパスワードを変更せず返す", () => {
-+    const password = "  Abc123!  ";
-+
-+    expect(validateWelcomeInput({
-+      password,
-+      confirmation: password,
-+    })).toEqual({
-+      success: true,
-+      data: {
-+        password,
-+      },
-+    });
-+  });
-+
-+  // 文字数だけ満たしても英字と数字の両方が必要。
-+  it.each([
-+    "Abcdef1",
-+    "abcdefgh",
-+    "12345678",
-+    "!!!!!!!!",
-+    "ＡＢＣＤ１２３４",
-+  ])("不十分なパスワードを拒否する: %s", (password) => {
-+    const result = validateWelcomeInput({
-+      password,
-+      confirmation: password,
-+    });
-+
-+    expect(result.success).toBe(false);
-+
-+    if (!result.success) {
-+      expect(result.fieldErrors.password).toBeDefined();
-+      expect(JSON.stringify(result)).not.toContain(password);
-+    }
-+  });
-+
-+  // 同じ見た目でも大小文字や前後空白の違いを一致扱いにしない。
-+  it.each([
-+    "Abcdefg2",
-+    "abcdefg1",
-+    " Abcdefg1 ",
-+  ])("確認値の違いを拒否する: %s", (confirmation) => {
-+    expect(validateWelcomeInput({
-+      password: "Abcdefg1",
-+      confirmation,
-+    })).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        confirmation: [
-+          "パスワードが一致しません。",
-+        ],
-+      },
-+    });
-+  });
-+
-+  // 未入力・非文字列は暗黙に文字列化せず拒否する。
-+  it.each([
-+    undefined,
-+    null,
-+    "",
-+    12345678,
-+    ["Abcdefg1"],
-+    {
-+      password: "Abcdefg1",
-+    },
-+    new Blob(["Abcdefg1"]),
-+  ])("文字列以外や空の入力を拒否する: %j", (value) => {
-+    const invalidPassword = validateWelcomeInput({
-+      password: value,
-+      confirmation: "Abcdefg1",
-+    });
-+    const invalidConfirmation = validateWelcomeInput({
-+      password: "Abcdefg1",
-+      confirmation: value,
-+    });
-+
-+    expect(invalidPassword.success).toBe(false);
-+    expect(invalidConfirmation.success).toBe(false);
-+
-+    if (!invalidPassword.success) {
-+      expect(invalidPassword.fieldErrors.password).toBeDefined();
-+    }
-+
-+    if (!invalidConfirmation.success) {
-+      expect(invalidConfirmation.fieldErrors.confirmation).toBeDefined();
-+    }
-+  });
-+
-+  // FormDataのFileを受け取る場合も成功や値の反射をさせない。
-+  it("File入力を拒否して秘密の内容を返さない", () => {
-+    const formData = new FormData();
-+    formData.set(
-+      "password",
-+      new Blob(["private-password1"]),
-+      "password.txt",
-+    );
-+
-+    const result = validateWelcomeInput({
-+      password: formData.get("password"),
-+      confirmation: "private-confirmation2",
-+    });
-+
-+    expect(result.success).toBe(false);
-+    expect(JSON.stringify(result)).not.toContain("private-password1");
-+    expect(JSON.stringify(result)).not.toContain("private-confirmation2");
-+    expect(result).not.toHaveProperty("data");
-+    expect(result).not.toHaveProperty("values");
-+  });
-+});
-diff --git a/domain/club/invitation/acceptance-form.ts b/domain/club/invitation/acceptance-form.ts
-new file mode 100644
-index 0000000..16b5500
---- /dev/null
-+++ b/domain/club/invitation/acceptance-form.ts
-@@ -0,0 +1,97 @@
-+// domain/club/invitation/acceptance-form.ts
-+// 初回パスワードの入力検証と、秘密の値を保持しないフォームの型。
-+
-+import type {
-+  ActionState,
-+  FieldErrors,
-+} from "@/domain/shared/action-state";
-+
-+export const WELCOME_PASSWORD_MIN_LENGTH = 8;
-+
-+export type WelcomeFormValues = Record<string, never>;
-+
-+export type WelcomeFormField =
-+  | "password"
-+  | "confirmation";
-+
-+export type WelcomeActionState = ActionState<
-+  WelcomeFormValues,
-+  WelcomeFormField
-+>;
-+
-+export type WelcomeValidationResult =
++  evaluateClubInvitationAcceptance,
++  type ClubInvitationAcceptanceUser,
++  type ClubInvitationAcceptanceView,
++  type ClubInvitationAcceptanceViolation,
++} from "@/domain/club/invitation/acceptance-policy";
+ import {
+   validateClubMemberInviteFormValues,//招待メール送信フォームの値のバリデーション関数
+   type ValidClubMemberInviteInput,  //バリデーション成功時のデータの値
+@@ -144,6 +151,32 @@ export type ClubInvitationForOwner = {
+   needsPreparationRetry: boolean;
+ };
+ 
++// 【追加：F06粒度2】内部IDはサーバー内だけで使い、Clientへはviewだけを渡す。
++export type ClubInvitationAcceptanceForUser =
 +  | {
-+      success: true;
-+      data: {
-+        password: string;
++      outcome: "AVAILABLE";
++      invitation: {
++        id: string;
++        clubId: string;
++        membershipId: string;
 +      };
++      view: Extract<
++        ClubInvitationAcceptanceView,
++        {
++          status: "available";
++        }
++      >;
 +    }
 +  | {
-+      success: false;
-+      fieldErrors: FieldErrors<WelcomeFormField>;
++      outcome: "UNAVAILABLE";
++      view: Extract<
++        ClubInvitationAcceptanceView,
++        {
++          status: "unavailable";
++        }
++      >;
 +    };
 +
-+// パスワードを変換せず検証し、失敗時には入力値を返さない。
-+// 成功時のpasswordもAuth更新専用であり、ActionStateやログへ渡さない。
-+export function validateWelcomeInput(
-+  input: {
-+    password: unknown;
-+    confirmation: unknown;
-+  },
-+): WelcomeValidationResult {
-+  const {
-+    password,
-+    confirmation,
-+  } = input;
-+  const fieldErrors: FieldErrors<WelcomeFormField> = {};
-+
-+  if (
-+    typeof password !== "string" ||
-+    password.length === 0
-+  ) {
-+    fieldErrors.password = [
-+      "パスワードを入力してください。",
-+    ];
-+  } else if (password.length < WELCOME_PASSWORD_MIN_LENGTH) {
-+    fieldErrors.password = [
-+      `パスワードは${WELCOME_PASSWORD_MIN_LENGTH}文字以上で入力してください。`,
-+    ];
-+  } else if (
-+    !/[A-Za-z]/u.test(password) ||
-+    !/[0-9]/u.test(password)
-+  ) {
-+    fieldErrors.password = [
-+      "パスワードは英字と数字を含めて入力してください。",
-+    ];
-+  }
-+
-+  if (
-+    typeof confirmation !== "string" ||
-+    confirmation.length === 0
-+  ) {
-+    fieldErrors.confirmation = [
-+      "確認用パスワードを入力してください。",
-+    ];
-+  } else if (confirmation !== password) {
-+    fieldErrors.confirmation = [
-+      "パスワードが一致しません。",
-+    ];
-+  }
-+
-+  if (
-+    Object.keys(fieldErrors).length > 0 ||
-+    typeof password !== "string"
-+  ) {
-+    return {
-+      success: false,
-+      fieldErrors,
-+    };
-+  }
-+
+ //DBから取得したクラブ招待データの型
+ type StoredInvitation =
+   Prisma.ClubInvitationGetPayload<{
+@@ -1652,6 +1685,136 @@ export async function expireClubInvitations(
+   );
+ }
+ 
++// 【追加：F06粒度2】内部IDや本人情報を含めずに受取人向けの拒否理由を返す。
++function unavailableClubInvitationAcceptance(
++  reason: ClubInvitationAcceptanceViolation,
++): ClubInvitationAcceptanceForUser {
 +  return {
-+    success: true,
-+    data: {
-+      password,
++    outcome: "UNAVAILABLE",
++    view: {
++      status: "unavailable",
++      reason,
 +    },
 +  };
 +}
-diff --git a/domain/club/invitation/acceptance-policy.test.ts b/domain/club/invitation/acceptance-policy.test.ts
++
++// 【追加：F06粒度2】本人に限定した読取を行い、終端状態を含めて理由を区別する。
++// authenticatedUserは呼出し元でAuth検証した現在の本人情報。承諾更新は行わない。
++export async function findClubInvitationAcceptanceForUser(
++  input: {
++    clubSlug: string;
++    tokenHash: string;
++    authenticatedUser: ClubInvitationAcceptanceUser | null;
++    now?: Date;
++  },
++): Promise<ClubInvitationAcceptanceForUser> {
++  assertTokenHash(input.tokenHash);
++  const now = time(input);
++  const authenticatedUser = input.authenticatedUser;
++
++  if (!input.clubSlug) {
++    return unavailableClubInvitationAcceptance("INVALID_INVITATION");
++  }
++
++  if (!authenticatedUser?.id) {
++    return unavailableClubInvitationAcceptance("RECIPIENT_MISMATCH");
++  }
++
++  try {
++    // 他クラブ・別人の招待を検索対象にせず、状態や期限の理由は取得後に判定する。
++    const row = await prisma.clubInvitation.findFirst({
++      where: {
++        tokenHash: input.tokenHash,
++        authUserId: authenticatedUser.id,
++        club: {
++          is: {
++            slug: input.clubSlug,
++          },
++        },
++      },
++      select: {
++        id: true,
++        clubId: true,
++        tokenHash: true,
++        authUserId: true,
++        email: true,
++        membershipId: true,
++        status: true,
++        acceptedAt: true,
++        expiresAt: true,
++        club: {
++          select: {
++            name: true,
++            slug: true,
++          },
++        },
++        membership: {
++          select: {
++            id: true,
++            clubId: true,
++            userId: true,
++            status: true,
++            user: {
++              select: {
++                email: true,
++              },
++            },
++          },
++        },
++      },
++    });
++
++    if (!row) {
++      return unavailableClubInvitationAcceptance("INVALID_INVITATION");
++    }
++
++    const evaluation = evaluateClubInvitationAcceptance({
++      invitation: row,
++      membership: row.membership,
++      authenticatedUser,
++      clubId: row.clubId,
++      tokenHash: input.tokenHash,
++      now,
++    });
++
++    if (!evaluation.allowed) {
++      return unavailableClubInvitationAcceptance(evaluation.violation);
++    }
++
++    // AppUserのemail不整合を読取時に修復したり、本人確認の根拠にしたりしない。
++    if (
++      !row.membership ||
++      normalizeEmail(row.membership.user.email ?? "") !==
++        normalizeEmail(row.email)
++    ) {
++      return unavailableClubInvitationAcceptance("MEMBERSHIP_MISMATCH");
++    }
++
++    return {
++      outcome: "AVAILABLE",
++      invitation: {
++        id: row.id,
++        clubId: row.clubId,
++        membershipId: row.membership.id,
++      },
++      view: {
++        status: "available",
++        clubName: row.club.name,
++        clubSlug: row.club.slug,
++        expiresAt: row.expiresAt.toISOString(),
++      },
++    };
++  } catch (error) {
++    const safe = convertPrismaError(error);
++
++    // Prisma原文・cause・既存DomainErrorの任意メッセージを外へ引き継がない。
++    throw new DomainError(
++      safe.code,
++      "招待情報を確認できませんでした。",
++    );
++  }
++}
++
+ //クラブ招待のトークンハッシュを使って、招待メールの使用が可能かどうかを判定し、使用可能な場合は招待メールの情報を返す関数
+ //招待リンクを踏んでやってきたユーザーのために、「あなたが今から使える有効な招待メールの情報はこれですよ」 と、
+ // 次に進むためのデータを渡してあげる
+diff --git a/tests/club-invitation-acceptance-repository.integration.test.ts b/tests/club-invitation-acceptance-repository.integration.test.ts
 new file mode 100644
-index 0000000..c4c3190
+index 0000000..a6e7756
 --- /dev/null
-+++ b/domain/club/invitation/acceptance-policy.test.ts
-@@ -0,0 +1,330 @@
-+// domain/club/invitation/acceptance-policy.test.ts
-+// 招待・本人・所属の照合と、本人以外への失効理由の非開示を確認する。
++++ b/tests/club-invitation-acceptance-repository.integration.test.ts
+@@ -0,0 +1,947 @@
++// tests/club-invitation-acceptance-repository.integration.test.ts
++// 通常はDBなしで読取境界を確認し、明示flag時だけローカルDBの統合試験を行う。
 +
 +import {
++  randomBytes,
++  randomUUID,
++} from "node:crypto";
++
++import {
++  Prisma,
++  PrismaClient,
++} from "@prisma/client";
++import { PrismaPg } from "@prisma/adapter-pg";
++import {
++  afterAll,
++  afterEach,
++  beforeAll,
++  beforeEach,
 +  describe,
 +  expect,
-+  expectTypeOf,
 +  it,
++  vi,
 +} from "vitest";
 +
-+import {
-+  evaluateClubInvitationAcceptance,
-+  type ClubInvitationAcceptanceInput,
-+  type ClubInvitationAcceptanceView,
-+} from "./acceptance-policy";
++import type {
++  ClubInvitationAcceptanceInvitation,
++  ClubInvitationAcceptanceMembership,
++} from "@/domain/club/invitation/acceptance-policy";
++
++type Repository = typeof import(
++  "@/src/infrastructure/prisma/repositories/club-invitation-repository"
++);
++type LookupInput = Parameters<
++  Repository["findClubInvitationAcceptanceForUser"]
++>[0];
++type LookupRow = ClubInvitationAcceptanceInvitation & {
++  id: string;
++  club: {
++    name: string;
++    slug: string;
++  };
++  membership: (
++    ClubInvitationAcceptanceMembership & {
++      user: {
++        email: string | null;
++      };
++    }
++  ) | null;
++};
 +
 +const NOW = new Date("2026-10-15T00:00:00.000Z");
++const describeDatabase = process.env.RUN_DB_INTEGRATION_TESTS === "1"
++  ? describe
++  : describe.skip;
 +
-+// 呼出し元が取得したDB情報と認証済み本人の組合せを作る。
-+function buildInput(
-+  overrides: Partial<ClubInvitationAcceptanceInput> = {},
-+): ClubInvitationAcceptanceInput {
++// dotenvを使う共有clientを評価せず、試験専用のclientだけをRepositoryへ渡す。
++async function loadRepository(
++  client: unknown,
++): Promise<Repository> {
++  vi.resetModules();
++  vi.doMock("@/src/infrastructure/prisma/client", () => ({
++    prisma: client,
++  }));
++
++  return import(
++    "@/src/infrastructure/prisma/repositories/club-invitation-repository"
++  );
++}
++
++// 正しいクラブ・本人・所属に対応する読取結果を作る。
++function buildRow(): LookupRow {
 +  return {
-+    invitation: {
-+      clubId: "club-a",
-+      tokenHash: "a".repeat(64),
-+      authUserId: "user-a",
-+      email: "member@example.test",
-+      membershipId: "membership-a",
-+      status: "SENT",
-+      acceptedAt: null,
-+      expiresAt: new Date(NOW.getTime() + 1_000),
++    id: "invitation-a",
++    clubId: "club-a",
++    tokenHash: "a".repeat(64),
++    authUserId: "user-a",
++    email: "member@example.test",
++    membershipId: "membership-a",
++    status: "SENT",
++    acceptedAt: null,
++    expiresAt: new Date(NOW.getTime() + 60_000),
++    club: {
++      name: "招待先クラブ",
++      slug: "club-a",
 +    },
 +    membership: {
 +      id: "membership-a",
 +      clubId: "club-a",
 +      userId: "user-a",
 +      status: "INVITED",
++      user: {
++        email: "member@example.test",
++      },
 +    },
++  };
++}
++
++// クライアントの自己申告ではなく、検証済み本人を想定した入力を作る。
++function buildLookup(
++  overrides: Partial<LookupInput> = {},
++): LookupInput {
++  return {
++    clubSlug: "club-a",
++    tokenHash: "a".repeat(64),
 +    authenticatedUser: {
 +      id: "user-a",
 +      email: "member@example.test",
 +    },
-+    clubId: "club-a",
-+    tokenHash: "a".repeat(64),
 +    now: NOW,
 +    ...overrides,
 +  };
 +}
 +
-+// Domain判定にはDB更新やsession検証の副作用を含めない。
-+describe("evaluateClubInvitationAcceptance", () => {
-+  // F05で利用可能な各状態を本人照合後も受理する。
++// このsuiteは実DB・dotenv・Auth・メールを使わずに実行する。
++describe("招待受取人の読取Repository（DBなし）", () => {
++  const findFirst = vi.fn();
++  let repository: Repository;
++
++  // 共有clientのimportより前に、読取だけを持つmockへ差し替える。
++  beforeAll(async () => {
++    repository = await loadRepository({
++      clubInvitation: {
++        findFirst,
++      },
++    });
++  });
++
++  // 他の試験の返却値を引き継がない。
++  beforeEach(() => {
++    findFirst.mockReset();
++    findFirst.mockResolvedValue(buildRow());
++  });
++
++  // 次のsuiteへmockやmodule cacheを持ち越さない。
++  afterAll(() => {
++    vi.doUnmock("@/src/infrastructure/prisma/client");
++    vi.resetModules();
++  });
++
++  // 内部IDと画面用DTOを分け、有効な既存3状態を扱う。
 +  it.each([
 +    "READY_TO_SEND",
 +    "SENT",
 +    "EMAIL_FAILED",
-+  ] as const)("本人に紐付く%sの招待を許可する", (status) => {
-+    const input = buildInput();
-+    input.invitation!.status = status;
++  ] as const)("%sの本人向けDTOに秘密を含めない", async (status) => {
++    const row = buildRow();
++    row.status = status;
++    findFirst.mockResolvedValueOnce(row);
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: true,
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).toEqual({
++      outcome: "AVAILABLE",
++      invitation: {
++        id: "invitation-a",
++        clubId: "club-a",
++        membershipId: "membership-a",
++      },
++      view: {
++        status: "available",
++        clubName: "招待先クラブ",
++        clubSlug: "club-a",
++        expiresAt: "2026-10-15T00:01:00.000Z",
++      },
 +    });
 +  });
 +
-+  // 両方のメールを既存の正規化規則で照合する。
-+  it("Authと招待のemailを正規化して照合する", () => {
-+    const input = buildInput();
-+    input.invitation!.email = "  MEMBER@EXAMPLE.TEST ";
-+    input.authenticatedUser!.email = "ｍｅｍｂｅｒ＠ｅｘａｍｐｌｅ．ｔｅｓｔ";
++  // 検索条件自体でクラブ・hash・本人を限定する。
++  it("slug・hash・Auth IDを同じ検索条件へ入れる", async () => {
++    await repository.findClubInvitationAcceptanceForUser(buildLookup());
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: true,
++    expect(findFirst).toHaveBeenCalledExactlyOnceWith(
++      expect.objectContaining({
++        where: {
++          tokenHash: "a".repeat(64),
++          authUserId: "user-a",
++          club: {
++            is: {
++              slug: "club-a",
++            },
++          },
++        },
++      }),
++    );
++  });
++
++  // 条件に一致しない相手には存在や終端状態を知らせない。
++  it("検索結果がない場合は理由を推測しない", async () => {
++    findFirst.mockResolvedValueOnce(null);
++
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "INVALID_INVITATION",
++      },
 +    });
 +  });
 +
-+  // tokenを持つ別人には終端状態を開示しない。
-+  it.each([
-+    "SENT",
-+    "CANCELLED",
-+    "ACCEPTED",
-+    "EXPIRED",
-+  ] as const)("別Authユーザーに%sの詳細を返さない", (status) => {
-+    const input = buildInput();
-+    input.invitation!.status = status;
-+    input.authenticatedUser!.id = "other-user";
++  // DB結果の本人が異なる場合もDomainの再照合で詳細を隠す。
++  it("別人の取消状態を返さない", async () => {
++    const row = buildRow();
++    row.status = "CANCELLED";
++    row.authUserId = "other-user";
++    row.membership = null;
++    findFirst.mockResolvedValueOnce(row);
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "RECIPIENT_MISMATCH",
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "RECIPIENT_MISMATCH",
++      },
 +    });
 +  });
 +
-+  // emailだけが一致してもAuth IDが対応しなければ拒否する。
-+  it("Auth IDが記録されていない招待を拒否する", () => {
-+    const input = buildInput();
-+    input.invitation!.authUserId = null;
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "RECIPIENT_MISMATCH",
-+    });
-+  });
-+
-+  // session未確認の入力を本人扱いにしない。
-+  it("認証済み本人の入力がない場合は詳細を返さない", () => {
-+    expect(evaluateClubInvitationAcceptance(buildInput({
-+      authenticatedUser: null,
-+    }))).toEqual({
-+      allowed: false,
-+      violation: "RECIPIENT_MISMATCH",
-+    });
-+  });
-+
-+  // 現在emailの欠損・変更を見逃さない。
++  // 現在emailの欠損・変更では状態の詳細まで開示しない。
 +  it.each([
 +    null,
 +    "",
 +    "   ",
++    "changed@example.test",
++  ])("Auth email不一致を区別する: %s", async (email) => {
++    const row = buildRow();
++    row.status = "ACCEPTED";
++    findFirst.mockResolvedValueOnce(row);
++
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup({
++        authenticatedUser: {
++          id: "user-a",
++          email,
++        },
++      }),
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "INVITATION_EMAIL_MISMATCH",
++      },
++    });
++  });
++
++  // 既存のメール正規化規則をAuth・Invitation・AppUserに適用する。
++  it("正規化で一致するemailを受理する", async () => {
++    const row = buildRow();
++    row.email = " MEMBER@EXAMPLE.TEST ";
++    row.membership!.user.email = "Member@Example.Test";
++    findFirst.mockResolvedValueOnce(row);
++
++    const result = await repository.findClubInvitationAcceptanceForUser(
++      buildLookup({
++        authenticatedUser: {
++          id: "user-a",
++          email: "ｍｅｍｂｅｒ＠ｅｘａｍｐｌｅ．ｔｅｓｔ",
++        },
++      }),
++    );
++
++    expect(result.outcome).toBe("AVAILABLE");
++  });
++
++  // AppUser不整合を隠して成功にしたり修復したりしない。
++  it.each([
++    null,
++    "",
 +    "other@example.test",
-+    "member+other@example.test",
-+  ])("現在のAuth emailが一致しなければ拒否する: %s", (email) => {
-+    const input = buildInput();
-+    input.authenticatedUser!.email = email;
-+    input.invitation!.status = "CANCELLED";
++  ])("AppUser email不整合を拒否する: %s", async (email) => {
++    const row = buildRow();
++    row.membership!.user.email = email;
++    findFirst.mockResolvedValueOnce(row);
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_EMAIL_MISMATCH",
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "MEMBERSHIP_MISMATCH",
++      },
 +    });
++    expect(row.membership!.user.email).toBe(email);
 +  });
 +
-+  // 両方空のemailが等しい場合も本人確認成功にしない。
-+  it("空の招待emailとAuth emailを拒否する", () => {
-+    const input = buildInput();
-+    input.invitation!.email = " ";
-+    input.authenticatedUser!.email = "";
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_EMAIL_MISMATCH",
-+    });
-+  });
-+
-+  // queryに由来するクラブとhashが行の内容に対応する必要がある。
-+  it.each([
-+    {
-+      clubId: "other-club",
-+    },
-+    {
-+      clubId: "",
-+    },
-+    {
-+      tokenHash: "b".repeat(64),
-+    },
-+    {
-+      tokenHash: "",
-+    },
-+    {
-+      invitation: null,
-+    },
-+  ])("クラブ・hash・招待の不一致を拒否する: %j", (overrides) => {
-+    expect(evaluateClubInvitationAcceptance(buildInput(overrides))).toEqual({
-+      allowed: false,
-+      violation: "INVALID_INVITATION",
-+    });
-+  });
-+
-+  // 取消による所属削除を所属不整合として扱わない。
-+  it("本人には所属削除後も取消済みと返す", () => {
-+    const input = buildInput({
-+      membership: null,
-+    });
-+    input.invitation!.status = "CANCELLED";
-+    input.invitation!.membershipId = null;
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_CANCELLED",
-+    });
-+  });
-+
-+  // ACTIVE化済みでも本人の再操作を承諾済みとして区別する。
-+  it("本人にはACTIVE化後も承諾済みと返す", () => {
-+    const input = buildInput();
-+    input.invitation!.status = "ACCEPTED";
-+    input.membership!.status = "ACTIVE";
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_ALREADY_ACCEPTED",
-+    });
-+  });
-+
-+  // statusの記録が不整合でも使用済み日時があれば再利用させない。
-+  it("acceptedAtがある招待を再利用させない", () => {
-+    const input = buildInput();
-+    input.invitation!.acceptedAt = new Date(NOW);
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_ALREADY_ACCEPTED",
-+    });
-+  });
-+
-+  // 期限到達は所属検査より前に本人向けの失効理由へ変換する。
-+  it("期限ちょうどの本人向け結果を期限切れとする", () => {
-+    const input = buildInput({
-+      membership: null,
-+    });
-+    input.invitation!.expiresAt = new Date(NOW);
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_EXPIRED",
-+    });
-+  });
-+
-+  // 明示的に失効済みの招待を日時だけで復活させない。
-+  it("EXPIREDは未来の期限が残っていても拒否する", () => {
-+    const input = buildInput();
-+    input.invitation!.status = "EXPIRED";
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVITATION_EXPIRED",
-+    });
-+  });
-+
-+  // 不正な日時を期限内として扱わない。
-+  it.each([
-+    "now",
-+    "expiresAt",
-+  ] as const)("不正な%sでは許可しない", (field) => {
-+    const input = buildInput();
-+
-+    if (field === "now") {
-+      input.now = new Date(Number.NaN);
-+    } else {
-+      input.invitation!.expiresAt = new Date(Number.NaN);
-+    }
-+
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVALID_INVITATION_STATE",
-+    });
-+  });
-+
-+  // 同じクラブに別の所属があるだけでは招待の所属として採用しない。
++  // 同一クラブ制約に加え、読取側も所属の対応を検査する。
 +  it.each([
 +    {
 +      id: "other-membership",
@@ -586,257 +513,642 @@ index 0000000..c4c3190
 +    {
 +      status: "WITHDRAWN",
 +    },
-+  ] as const)("不整合な所属を拒否する: %j", (overrides) => {
-+    const input = buildInput();
-+    Object.assign(input.membership!, overrides);
++  ] as const)("不整合な所属をDTOへ採用しない: %j", async (overrides) => {
++    const row = buildRow();
++    Object.assign(row.membership!, overrides);
++    findFirst.mockResolvedValueOnce(row);
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "MEMBERSHIP_MISMATCH",
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "MEMBERSHIP_MISMATCH",
++      },
 +    });
 +  });
 +
-+  // DBの所属行や招待側の参照が欠損していれば承諾できない。
-+  it("招待のmembershipId欠損と所属欠損を拒否する", () => {
-+    const input = buildInput();
-+    input.invitation!.membershipId = null;
++  // 取消による所属削除と通常の所属欠損を区別する。
++  it.each([
++    {
++      status: "CANCELLED",
++      reason: "INVITATION_CANCELLED",
++    },
++    {
++      status: "ACCEPTED",
++      reason: "INVITATION_ALREADY_ACCEPTED",
++    },
++    {
++      status: "EXPIRED",
++      reason: "INVITATION_EXPIRED",
++    },
++    {
++      status: "SENT",
++      reason: "MEMBERSHIP_MISMATCH",
++    },
++  ] as const)("所属欠損でも本人の$statusを区別する", async ({
++    status,
++    reason,
++  }) => {
++    const row = buildRow();
++    row.status = status;
++    row.membershipId = null;
++    row.membership = null;
++    findFirst.mockResolvedValueOnce(row);
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "MEMBERSHIP_MISMATCH",
-+    });
-+    expect(evaluateClubInvitationAcceptance(buildInput({
-+      membership: null,
-+    }))).toEqual({
-+      allowed: false,
-+      violation: "MEMBERSHIP_MISMATCH",
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason,
++      },
 +    });
 +  });
 +
-+  // 基本の利用可否はF05の既存関数に委ね、準備中を受理しない。
-+  it("PREPARINGを本人・所属一致でも許可しない", () => {
-+    const input = buildInput();
-+    input.invitation!.status = "PREPARING";
++  // 不正なhashや時刻は検索する前に固定メッセージで拒否する。
++  it("不正なhash・時刻でDB検索しない", async () => {
++    await expect(repository.findClubInvitationAcceptanceForUser(
++      buildLookup({
++        tokenHash: "private-raw-token",
++      }),
++    )).rejects.toMatchObject({
++      code: "VALIDATION",
++      message: "招待トークンの形式が正しくありません。",
++    });
++    await expect(repository.findClubInvitationAcceptanceForUser(
++      buildLookup({
++        now: new Date(Number.NaN),
++      }),
++    )).rejects.toMatchObject({
++      code: "VALIDATION",
++      message: "処理日時が正しくありません。",
++    });
++    expect(findFirst).not.toHaveBeenCalled();
++  });
 +
-+    expect(evaluateClubInvitationAcceptance(input)).toEqual({
-+      allowed: false,
-+      violation: "INVALID_INVITATION_STATE",
++  // 未認証や空のslugで招待情報を読まない。
++  it("本人情報なし・空slugではDB検索しない", async () => {
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup({
++        authenticatedUser: null,
++      }),
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++    });
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      buildLookup({
++        clubSlug: "",
++      }),
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++    });
++    expect(findFirst).not.toHaveBeenCalled();
++  });
++
++  // DBの生エラーから固定文言と安全なコードだけを引き継ぐ。
++  it("DBエラーの原文・meta・causeを返さない", async () => {
++    const privateDetail = "private@example.test raw-token connection-secret";
++    findFirst.mockRejectedValueOnce(
++      new Prisma.PrismaClientKnownRequestError(privateDetail, {
++        code: "P2003",
++        clientVersion: Prisma.prismaVersion.client,
++        meta: {
++          privateDetail,
++        },
++      }),
++    );
++
++    await expect(repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).rejects.toMatchObject({
++      code: "INVALID_REFERENCE",
++      message: "招待情報を確認できませんでした。",
++      publicMessage: "招待情報を確認できませんでした。",
++      cause: undefined,
 +    });
 +  });
 +
-+  // 表示用DTOへ内部識別子や本人情報を追加しない契約を確認する。
-+  it("表示用DTOは安全な値と処理失敗の区別を持つ", () => {
-+    type AvailableView = Extract<
-+      ClubInvitationAcceptanceView,
++  // 任意のDomainErrorメッセージも、そのまま公開文言にしない。
++  it("既存DomainErrorの任意メッセージも反射しない", async () => {
++    const { DomainError } = await import("@/domain/shared/domain-error");
++    findFirst.mockRejectedValueOnce(new DomainError(
++      "INTERNAL",
++      "private-domain-detail",
 +      {
-+        status: "available";
-+      }
-+    >;
++        cause: new Error("private-cause"),
++      },
++    ));
 +
-+    expectTypeOf<keyof AvailableView>().toEqualTypeOf<
-+      | "status"
-+      | "clubName"
-+      | "clubSlug"
-+      | "expiresAt"
-+    >();
-+    expectTypeOf<Extract<
-+      ClubInvitationAcceptanceView,
-+      {
-+        status: "error";
-+      }
-+    >["reason"]>().toEqualTypeOf<"PROCESSING_FAILED">();
++    await expect(repository.findClubInvitationAcceptanceForUser(
++      buildLookup(),
++    )).rejects.toMatchObject({
++      code: "INTERNAL",
++      message: "招待情報を確認できませんでした。",
++      cause: undefined,
++    });
 +  });
 +});
-diff --git a/domain/club/invitation/acceptance-policy.ts b/domain/club/invitation/acceptance-policy.ts
-new file mode 100644
-index 0000000..2444580
---- /dev/null
-+++ b/domain/club/invitation/acceptance-policy.ts
-@@ -0,0 +1,187 @@
-+// domain/club/invitation/acceptance-policy.ts
-+// 招待受取人の照合・理由別判定と、秘密を含まない表示用DTO。
 +
-+import { normalizeEmail } from "@/domain/shared/email";
-+import type {
-+  ClubInvitation,
-+  ClubMembership,
-+} from "@/types/prisma";
++// このsuiteは明示flagとloopbackの専用DBがある場合だけ実行する。
++describeDatabase("招待受取人の読取Repository（ローカルDB）", () => {
++  let db: PrismaClient | undefined;
++  let repository: Repository;
++  const clubs = new Set<string>();
++  const users = new Set<string>();
 +
-+import {
-+  isUsableClubInvitation,
-+} from "./invitation-policy";
++  // 本番接続・外部接続を拒否し、環境ファイルは読み込まない。
++  beforeAll(async () => {
++    const databaseUrl = process.env.DATABASE_URL;
++    let url: URL;
 +
-+export type ClubInvitationAcceptanceInvitation = Pick<
-+  ClubInvitation,
-+  | "clubId"
-+  | "tokenHash"
-+  | "authUserId"
-+  | "email"
-+  | "membershipId"
-+  | "status"
-+  | "acceptedAt"
-+  | "expiresAt"
-+>;
-+
-+export type ClubInvitationAcceptanceMembership = Pick<
-+  ClubMembership,
-+  | "id"
-+  | "clubId"
-+  | "userId"
-+  | "status"
-+>;
-+
-+// Authで検証した現在の本人情報を受け取る。クライアントの自己申告は渡さない。
-+export type ClubInvitationAcceptanceUser = {
-+  id: string;
-+  email: string | null;
-+};
-+
-+export type ClubInvitationAcceptanceViolation =
-+  | "INVALID_INVITATION"
-+  | "RECIPIENT_MISMATCH"
-+  | "INVITATION_EMAIL_MISMATCH"
-+  | "INVITATION_ALREADY_ACCEPTED"
-+  | "INVITATION_CANCELLED"
-+  | "INVITATION_EXPIRED"
-+  | "MEMBERSHIP_MISMATCH"
-+  | "INVALID_INVITATION_STATE";
-+
-+export type ClubInvitationAcceptanceEvaluation =
-+  | {
-+      allowed: true;
++    try {
++      url = new URL(databaseUrl ?? "invalid");
++    } catch {
++      throw new Error("ローカル専用DBの接続設定が必要です。");
 +    }
-+  | {
-+      allowed: false;
-+      violation: ClubInvitationAcceptanceViolation;
++
++    if (
++      process.env.NODE_ENV === "production" ||
++      !["postgres:", "postgresql:"].includes(url.protocol) ||
++      !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)
++    ) {
++      throw new Error("DB試験はloopbackの専用環境だけで実行できます。");
++    }
++
++    db = new PrismaClient({
++      adapter: new PrismaPg({
++        connectionString: databaseUrl,
++        max: 3,
++      }),
++      log: [],
++    });
++    repository = await loadRepository(db);
++  });
++
++  // 実DB試験でも、試験間のspyを保持しない。
++  afterEach(() => {
++    vi.restoreAllMocks();
++  });
++
++  // 作成したUUIDのfixtureだけを削除し、既存データへ触れない。
++  afterAll(async () => {
++    if (!db) {
++      return;
++    }
++
++    try {
++      await db.club.deleteMany({
++        where: {
++          id: {
++            in: [...clubs],
++          },
++        },
++      });
++      await db.appUser.deleteMany({
++        where: {
++          id: {
++            in: [...users],
++          },
++        },
++      });
++    } finally {
++      vi.doUnmock("@/src/infrastructure/prisma/client");
++      vi.resetModules();
++      await db.$disconnect();
++    }
++  });
++
++  // flagなしでは呼ばれず、共有clientのdotenvも読み込まない。
++  function database(): PrismaClient {
++    if (!db) {
++      throw new Error("DB試験の接続が準備されていません。");
++    }
++
++    return db;
++  }
++
++  // 実際の制約を維持したまま、OWNERと招待受取人を別ユーザーとして作る。
++  async function fixture() {
++    const clubId = randomUUID();
++    const ownerId = randomUUID();
++    const userId = randomUUID();
++    const ownerMembershipId = randomUUID();
++    const membershipId = randomUUID();
++    const invitationId = randomUUID();
++    const clubSlug = `f06-reader-${clubId}`;
++    const email = `${userId}@example.test`;
++    const tokenHash = randomBytes(32).toString("hex");
++    clubs.add(clubId);
++    users.add(ownerId);
++    users.add(userId);
++
++    await database().$transaction(async (tx) => {
++      await tx.appUser.createMany({
++        data: [
++          {
++            id: ownerId,
++            email: `${ownerId}@example.test`,
++          },
++          {
++            id: userId,
++            email,
++          },
++        ],
++      });
++      await tx.club.create({
++        data: {
++          id: clubId,
++          name: "F06読取テストクラブ",
++          slug: clubSlug,
++        },
++      });
++      await tx.clubMembership.createMany({
++        data: [
++          {
++            id: ownerMembershipId,
++            clubId,
++            userId: ownerId,
++            role: "OWNER",
++            status: "ACTIVE",
++          },
++          {
++            id: membershipId,
++            clubId,
++            userId,
++            role: "MEMBER",
++            status: "INVITED",
++          },
++        ],
++      });
++      await tx.clubInvitation.create({
++        data: {
++          id: invitationId,
++          clubId,
++          email,
++          role: "MEMBER",
++          status: "SENT",
++          tokenHash,
++          authUserId: userId,
++          membershipId,
++          invitedByMembershipId: ownerMembershipId,
++          expiresAt: new Date(NOW.getTime() + 60_000),
++        },
++      });
++    });
++
++    return {
++      clubId,
++      invitationId,
++      membershipId,
++      ownerMembershipId,
++      userId,
++      lookup: {
++        clubSlug,
++        tokenHash,
++        authenticatedUser: {
++          id: userId,
++          email,
++        },
++        now: NOW,
++      },
 +    };
++  }
 +
-+// 利用可能時のexpiresAtはISO文字列に変換して表示層へ渡す。
-+// DB内部ID・hash・本人emailを含めず、外部処理の失敗も区別する。
-+export type ClubInvitationAcceptanceView =
-+  | {
-+      status: "available";
-+      clubName: string;
-+      clubSlug: string;
-+      expiresAt: string;
++  // 更新時刻を含む対象行を比較し、読取による期限処理や修復がないことを確認する。
++  async function snapshot(
++    value: Awaited<ReturnType<typeof fixture>>,
++  ) {
++    return Promise.all([
++      database().clubInvitation.findUniqueOrThrow({
++        where: {
++          id: value.invitationId,
++        },
++      }),
++      database().clubMembership.findUnique({
++        where: {
++          id: value.membershipId,
++        },
++      }),
++      database().appUser.findUniqueOrThrow({
++        where: {
++          id: value.userId,
++        },
++      }),
++    ]);
++  }
++
++  // MEMBER受取人が各有効状態を取得でき、いずれも行を書き換えない。
++  it.each([
++    "READY_TO_SEND",
++    "SENT",
++    "EMAIL_FAILED",
++  ] as const)("%sのDTOを実DBから読取り、更新しない", async (status) => {
++    const value = await fixture();
++    await database().clubInvitation.update({
++      where: {
++        id: value.invitationId,
++      },
++      data: {
++        status,
++      },
++    });
++    const before = await snapshot(value);
++
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toEqual({
++      outcome: "AVAILABLE",
++      invitation: {
++        id: value.invitationId,
++        clubId: value.clubId,
++        membershipId: value.membershipId,
++      },
++      view: {
++        status: "available",
++        clubName: "F06読取テストクラブ",
++        clubSlug: value.lookup.clubSlug,
++        expiresAt: "2026-10-15T00:01:00.000Z",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
++
++  // 終端状態の診断のために、利用可能状態だけへ検索を絞らない。
++  it.each([
++    "CANCELLED",
++    "ACCEPTED",
++  ] as const)("本人の%sを区別し、再更新しない", async (status) => {
++    const value = await fixture();
++    await database().clubInvitation.update({
++      where: {
++        id: value.invitationId,
++      },
++      data: {
++        status,
++        acceptedAt: status === "ACCEPTED" ? NOW : null,
++      },
++    });
++
++    if (status === "CANCELLED") {
++      await database().clubMembership.delete({
++        where: {
++          id: value.membershipId,
++        },
++      });
++    } else {
++      await database().clubMembership.update({
++        where: {
++          id: value.membershipId,
++        },
++        data: {
++          status: "ACTIVE",
++        },
++      });
 +    }
-+  | {
-+      status: "unavailable";
-+      reason: ClubInvitationAcceptanceViolation;
++
++    const before = await snapshot(value);
++
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: status === "CANCELLED"
++          ? "INVITATION_CANCELLED"
++          : "INVITATION_ALREADY_ACCEPTED",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
++
++  // 読取はPREPARINGを承諾可能にせず、期限到達をEXPIREDへ書き換えもしない。
++  it("PREPARINGと期限ちょうどを拒否して状態を保存し直さない", async () => {
++    const value = await fixture();
++    await database().clubInvitation.update({
++      where: {
++        id: value.invitationId,
++      },
++      data: {
++        status: "PREPARING",
++      },
++    });
++
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "INVALID_INVITATION_STATE",
++      },
++    });
++
++    await database().clubInvitation.update({
++      where: {
++        id: value.invitationId,
++      },
++      data: {
++        status: "SENT",
++        expiresAt: NOW,
++      },
++    });
++    const before = await snapshot(value);
++
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "INVITATION_EXPIRED",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
++
++  // 正しいtokenでも、別クラブや別Authのデータを取得できない。
++  it("slug・hash・Auth IDの不一致で詳細を返さない", async () => {
++    const value = await fixture();
++    const other = await fixture();
++    const before = await snapshot(value);
++
++    for (const overrides of [
++      {
++        clubSlug: other.lookup.clubSlug,
++      },
++      {
++        tokenHash: randomBytes(32).toString("hex"),
++      },
++      {
++        authenticatedUser: {
++          id: other.userId,
++          email: value.lookup.authenticatedUser.email,
++        },
++      },
++    ]) {
++      expect(await repository.findClubInvitationAcceptanceForUser({
++        ...value.lookup,
++        ...overrides,
++      })).toEqual({
++        outcome: "UNAVAILABLE",
++        view: {
++          status: "unavailable",
++          reason: "INVALID_INVITATION",
++        },
++      });
 +    }
-+  | {
-+      status: "error";
-+      reason: "PROCESSING_FAILED";
-+    };
 +
-+export type ClubInvitationAcceptanceInput = {
-+  invitation: ClubInvitationAcceptanceInvitation | null;
-+  membership: ClubInvitationAcceptanceMembership | null;
-+  authenticatedUser: ClubInvitationAcceptanceUser | null;
-+  clubId: string;
-+  tokenHash: string;
-+  now: Date;
-+};
++    expect(await snapshot(value)).toEqual(before);
++  });
 +
-+// 秘密の値やDB情報を付けずに拒否理由だけを返す。
-+function reject(
-+  violation: ClubInvitationAcceptanceViolation,
-+): ClubInvitationAcceptanceEvaluation {
-+  return {
-+    allowed: false,
-+    violation,
-+  };
-+}
++  // 同じAuth IDでも、現在emailが変わっていれば承諾可能にしない。
++  it.each([
++    null,
++    "",
++    "changed@example.test",
++  ])("現在Auth emailの欠損・不一致を拒否する: %s", async (email) => {
++    const value = await fixture();
 +
-+// 本人照合より前に終端状態を開示せず、所属削除後の取消理由も判定する。
-+// session検証・hash生成・DBの最新状態取得と書込時の再検査は呼び出し側の責務。
-+export function evaluateClubInvitationAcceptance({
-+  invitation,
-+  membership,
-+  authenticatedUser,
-+  clubId,
-+  tokenHash,
-+  now,
-+}: ClubInvitationAcceptanceInput): ClubInvitationAcceptanceEvaluation {
-+  if (
-+    !invitation ||
-+    !clubId ||
-+    !tokenHash ||
-+    invitation.clubId !== clubId ||
-+    invitation.tokenHash !== tokenHash
-+  ) {
-+    return reject("INVALID_INVITATION");
-+  }
++    expect(await repository.findClubInvitationAcceptanceForUser({
++      ...value.lookup,
++      authenticatedUser: {
++        id: value.userId,
++        email,
++      },
++    })).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "INVITATION_EMAIL_MISMATCH",
++      },
++    });
++  });
 +
-+  if (
-+    !authenticatedUser?.id ||
-+    !invitation.authUserId ||
-+    invitation.authUserId !== authenticatedUser.id
-+  ) {
-+    return reject("RECIPIENT_MISMATCH");
-+  }
++  // AppUserのemailを勝手に補完・同期しない。
++  it.each([
++    "missing",
++    "different",
++  ] as const)("AppUser emailの%sを修復せず拒否する", async (mode) => {
++    const value = await fixture();
++    await database().appUser.update({
++      where: {
++        id: value.userId,
++      },
++      data: {
++        email: mode === "missing"
++          ? null
++          : `changed-${value.userId}@example.test`,
++      },
++    });
++    const before = await snapshot(value);
 +
-+  const email = normalizeEmail(authenticatedUser.email ?? "");
-+  const invitationEmail = normalizeEmail(invitation.email);
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "MEMBERSHIP_MISMATCH",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
 +
-+  if (
-+    !email ||
-+    !invitationEmail ||
-+    email !== invitationEmail
-+  ) {
-+    return reject("INVITATION_EMAIL_MISMATCH");
-+  }
++  // INVITED以外へ変更された所属を読取時に復帰させない。
++  it.each([
++    "ACTIVE",
++    "SUSPENDED",
++    "WITHDRAWN",
++  ] as const)("所属%sを拒否して状態を変更しない", async (status) => {
++    const value = await fixture();
++    await database().clubMembership.update({
++      where: {
++        id: value.membershipId,
++      },
++      data: {
++        status,
++      },
++    });
++    const before = await snapshot(value);
 +
-+  if (
-+    invitation.acceptedAt !== null ||
-+    invitation.status === "ACCEPTED"
-+  ) {
-+    return reject("INVITATION_ALREADY_ACCEPTED");
-+  }
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "MEMBERSHIP_MISMATCH",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
 +
-+  if (invitation.status === "CANCELLED") {
-+    return reject("INVITATION_CANCELLED");
-+  }
++  // 同一クラブの所属でも、別userへ紐付いた場合は拒否する。
++  it("別userへの所属参照を拒否する", async () => {
++    const value = await fixture();
++    await database().clubInvitation.update({
++      where: {
++        id: value.invitationId,
++      },
++      data: {
++        membershipId: value.ownerMembershipId,
++      },
++    });
++    const before = await snapshot(value);
 +
-+  if (
-+    !Number.isFinite(now.getTime()) ||
-+    !Number.isFinite(invitation.expiresAt.getTime())
-+  ) {
-+    return reject("INVALID_INVITATION_STATE");
-+  }
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "MEMBERSHIP_MISMATCH",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
 +
-+  if (
-+    invitation.status === "EXPIRED" ||
-+    invitation.expiresAt.getTime() <= now.getTime()
-+  ) {
-+    return reject("INVITATION_EXPIRED");
-+  }
++  // 所属の削除後も、SENTを自動修復せず不整合として返す。
++  it("所属欠損を補完しない", async () => {
++    const value = await fixture();
++    await database().clubMembership.delete({
++      where: {
++        id: value.membershipId,
++      },
++    });
++    const before = await snapshot(value);
 +
-+  if (
-+    !membership ||
-+    !invitation.membershipId ||
-+    membership.id !== invitation.membershipId ||
-+    membership.clubId !== clubId ||
-+    membership.userId !== authenticatedUser.id
-+  ) {
-+    return reject("MEMBERSHIP_MISMATCH");
-+  }
++    expect(await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).toMatchObject({
++      outcome: "UNAVAILABLE",
++      view: {
++        reason: "MEMBERSHIP_MISMATCH",
++      },
++    });
++    expect(await snapshot(value)).toEqual(before);
++  });
 +
-+  if (
-+    !isUsableClubInvitation({
-+      invitation,
-+      membership,
-+      now,
-+    })
-+  ) {
-+    return reject(
-+      membership.status === "INVITED"
-+        ? "INVALID_INVITATION_STATE"
-+        : "MEMBERSHIP_MISMATCH",
-+    );
-+  }
++  // 既存の他クラブ所属には一切の更新を行わない。
++  it("別クラブの既存ACTIVE所属を保持する", async () => {
++    const value = await fixture();
++    const other = await fixture();
++    const membership = await database().clubMembership.create({
++      data: {
++        clubId: other.clubId,
++        userId: value.userId,
++        role: "COACH",
++        status: "ACTIVE",
++      },
++    });
++    const before = await snapshot(value);
 +
-+  return {
-+    allowed: true,
-+  };
-+}
++    expect((await repository.findClubInvitationAcceptanceForUser(
++      value.lookup,
++    )).outcome).toBe("AVAILABLE");
++    expect(await database().clubMembership.findUniqueOrThrow({
++      where: {
++        id: membership.id,
++      },
++    })).toEqual(membership);
++    expect(await snapshot(value)).toEqual(before);
++  });
++});
