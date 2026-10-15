@@ -64,6 +64,7 @@ AGENTS.md
 - 既存のPrettier・ESLint設定を優先する
 - ファイルのトップにファイルパスをつける（例：//src/infrastructure/prisma/repositories/club-invitation-repository.ts）
 - インラインコメントは日本語にし、関数ごとにインラインコメントを書くこと
+- 既存のファイル内のコードを変更する際は、変更したところに印をつけること
 
 ## Next.js関連の確認
 
