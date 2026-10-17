@@ -39,6 +39,7 @@ function getSupabasePublicConfig(): {
   };
 }
 
+//ユーザーがページを移動するたびに、ログイン状態（セッション）を自動で最新に更新し、クッキー（Cookie）の有効期限をのばすための関数
 export async function updateSession(
   request: NextRequest,
 ): Promise<NextResponse> {
