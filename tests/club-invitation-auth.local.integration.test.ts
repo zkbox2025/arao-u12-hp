@@ -21,6 +21,12 @@ import {
   createSupabaseAdminClient,
 } from "@/src/infrastructure/supabase/admin";
 
+// 【追加：F06粒度5】実Authの戻り形式・AMRとSSR Cookieの確立を確認する。
+import {
+  getVerifiedClubInvitationSession,
+  prepareClubInvitationSession,
+} from "@/src/infrastructure/supabase/club-invitation-session";
+
 const describeLocalAuth = process.env.RUN_CLUB_INVITATION_AUTH_TESTS === "1"
   ? describe
   : describe.skip;
@@ -75,7 +81,8 @@ describeLocalAuth("ローカルSupabaseの招待Auth契約", () => {
       const destination = new URL("/welcome", origin.origin);
       destination.search = new URLSearchParams({
         clubSlug: "local-auth-test",
-        token: "local-test-app-token",
+        // 【変更：F06粒度5】現行入口の43文字token契約に合わせる。
+        token: "a".repeat(43),
       }).toString();
       redirectTo = destination.toString();
       admin = createSupabaseAdminClient();
@@ -211,6 +218,98 @@ describeLocalAuth("ローカルSupabaseの招待Auth契約", () => {
         type: "invite",
       });
       expect(Boolean(reused.error)).toBe(true);
+    });
+  });
+
+  // 【追加：F06粒度5】メールを送らずverifyを一度だけ開き、実際のLocationを検査する。
+  it("実inviteリンクのimplicit fragmentから同一本人のSSR sessionを確立できる", async () => {
+    await safeCheck(async () => {
+      const invitation = await generateClubInvitationAuthLink({
+        email: email(),
+        redirectTo,
+      });
+      const verificationUrl = new URL(invitation.actionLink);
+
+      if (
+        verificationUrl.origin !== authUrl ||
+        verificationUrl.pathname !== "/auth/v1/verify" ||
+        verificationUrl.username ||
+        verificationUrl.password
+      ) {
+        throw new Error("Local invite endpoint required");
+      }
+
+      const response = await fetch(verificationUrl, {
+        redirect: "manual",
+        referrerPolicy: "no-referrer",
+      });
+      const location = response.headers.get("location");
+
+      if (![302, 303].includes(response.status) || !location) {
+        throw new Error("Invite redirect unavailable");
+      }
+
+      const destination = new URL(location);
+      const fragment = new URLSearchParams(destination.hash.slice(1));
+      const accessToken = fragment.get("access_token");
+      const refreshToken = fragment.get("refresh_token");
+
+      expect(destination.origin === new URL(redirectTo).origin).toBe(true);
+      expect(destination.pathname === "/welcome").toBe(true);
+      expect(destination.search === new URL(redirectTo).search).toBe(true);
+      expect(destination.searchParams.has("code")).toBe(false);
+      expect(fragment.get("type") === "invite").toBe(true);
+      expect(fragment.get("token_type") === "bearer").toBe(true);
+
+      if (!accessToken || !refreshToken) {
+        throw new Error("Implicit invitation tokens unavailable");
+      }
+
+      const prepared = await prepareClubInvitationSession({
+        accessToken,
+        refreshToken,
+        currentCookies: [],
+      });
+
+      if (prepared.outcome !== "VERIFIED") {
+        throw new Error("Verified invitation session unavailable");
+      }
+
+      // 実AMRが異なる環境では公開せず、認証方式の計画を再確認する。
+      expect(prepared.session.user.id === invitation.user.id).toBe(true);
+      expect(prepared.session.authenticationMethod === "otp").toBe(true);
+      expect(prepared.cookies.length > 0).toBe(true);
+    });
+  });
+
+  // 【追加：F06粒度5】inviteと異なり、パスワードログインはpassword AMRを証明する。
+  it("実パスワードログインの検証済みAMRで既存アカウントを識別できる", async () => {
+    await safeCheck(async () => {
+      const target = email();
+      const password = `Test-Aa1-${randomUUID()}`;
+      const created = await admin.auth.admin.createUser({
+        email: target,
+        password,
+        email_confirm: true,
+      });
+
+      if (created.error || !created.data.user) {
+        throw new Error("Password fixture unavailable");
+      }
+
+      const client = verificationClient();
+      const login = await client.auth.signInWithPassword({
+        email: target,
+        password,
+      });
+
+      if (login.error) {
+        throw new Error("Password login unavailable");
+      }
+
+      const verified = await getVerifiedClubInvitationSession(client);
+      expect(verified?.user.id === created.data.user.id).toBe(true);
+      expect(verified?.authenticationMethod === "password").toBe(true);
     });
   });
 });
