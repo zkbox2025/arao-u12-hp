@@ -1,4 +1,13 @@
-satori 運用メモ
+クラブHP 運用メモ
+・VSCode内の特定のプロジェクトのコードを全てコピペする方法
+機能：ChatGPT & Claude Code Exporter（拡張機能にてインストール済み）
+方法：全てファイルを閉じた状態でCmd + Option + Xをする。
+注意：以下はファイルを右クリックしてExclude from Exportを選択すること（コピペ不可にするため）（.vscode/project-export.jsonに保存される）
+.env.local
+.env.prod
+.DS_Store
+tsconfig.tsbuildinfo
+
 ・DBテーブルのマイグレーションのやり方
 ⭐️ローカル環境へのマイグレーション
 （更新したschema.prismaをローカルDB（DockerのPostgres）上に書き換えをお願いするとき）（npx dotenv-cli -e .env.local -- npx prisma migrate dev --name ・・・）
@@ -35,6 +44,13 @@ enum SubmissionResult {
   ALLOWED
   BLOCKED
 }
+
+◯HPのアクセス構成
+HP・アプリのDB	：　Prisma
+ログイン	：　Supabase Auth
+画像・PDF	：　Supabase Storage
+Supabase Data ：　API	使用していない
+Supabase RPC	：　使用していない
 
 ◯管理者ページのログインアカウントの作成方法
 Supabase Dashboard
@@ -253,3 +269,5 @@ function validateImageUrl(value?: string | null) {
 ◯supabaseの本番のSQLについて：ローカルからマイグレーション済みなのでSQlエディタに載っていないけど反映はされてるので大丈夫
 
 ◯本番用のFAQや文章画像を納品者に添削してもらい、全てで揃ったら、シードしてDBに直接保存する
+
+

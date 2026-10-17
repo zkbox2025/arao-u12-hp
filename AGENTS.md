@@ -1,5 +1,92 @@
-<!-- BEGIN:nextjs-agent-rules -->
-# This is NOT the Next.js you know
+AGENTS.md
 
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
-<!-- END:nextjs-agent-rules -->
+# クラブ運営アプリ開発ルール
+
+## 調査
+
+- 必ず現在のワークツリーを確認する。
+- ファイル検索はrgまたはrg --filesを優先する。
+- コードを推測せず、型、呼び出し元、Repository、テストを確認する。
+- node_modules、.next、coverage、dist、環境変数ファイルは必要がなければ読まない。
+- 最初にgit status --shortを確認してください。
+- 既存の未コミット変更がある場合は上書きせず、変更内容を報告してください。
+
+## 実装範囲
+
+- 指定されたフェーズと粒度だけを対象にする。
+- 別フェーズや次の粒度を先回りして実装しない。
+- 無関係なリファクタリングを含めない。
+- 既存の未コミット変更を上書きしない。
+
+## 設計確認
+
+次の観点を確認する。
+
+- 責務分離
+- 現在の規模に対する必要十分性
+- 保守性
+- 命名
+- 型安全性
+- 例外処理
+- セキュリティ
+- 不要コード
+- 将来拡張時の弱点
+- データ取得方法
+- キャッシュと再検証
+- 認証と認可
+- ログへ機密情報を出していないか
+
+将来のためだけの抽象化や過剰設計は追加しない。
+
+## Server ActionとRepository
+
+- Server Action内でも認証・認可を再確認する。
+- クライアントから送られたclubIdを信用しない。
+- 他クラブのデータを操作できない条件をRepositoryへ入れる。
+- ログへ本文、個人情報、トークン、秘密情報を出さない。
+
+## patch作成
+
+- 指定された粒度だけを含むGit互換のunified diffを作成する。
+- 元のワークツリーのソース・Git index・依存関係を変更しない。
+- 実装・検証用の一時ディレクトリへの書き込みは許可する。
+- 一時環境で変更し、Gitのdiff機能からpatchを生成する。
+- 新規ファイルも必ずpatchへ含める。
+- 元のワークツリーへpatchを適用しない。
+- 最後に元のワークツリーでgit apply --checkを実行する。
+- パッケージ追加・更新、実DB変更、実メール送信は行わない。
+
+
+## コードルール：
+- 1行へ複数の型プロパティや処理を詰め込まない
+- import、型定義、オブジェクト、関数引数、複合条件を適切に改行する
+- 1行100文字以内を目安にする
+- 既存のPrettier・ESLint設定を優先する
+- ファイルのトップにファイルパスをつける（例：//src/infrastructure/prisma/repositories/club-invitation-repository.ts）
+- インラインコメントは日本語にし、関数ごとにインラインコメントを書くこと
+- 既存のファイル内のコードを変更する際は、変更したところに印をつけること
+
+## Next.js関連の確認
+
+Next.jsのAPI・ルート・Componentを変更する場合だけ、
+インストール済みバージョンと対応するドキュメントの必要箇所を確認する。
+node_modules/next/dist/docs/が存在する場合は関係する箇所を検索する。
+存在しない場合は、その事実を報告して対応バージョンの公式資料を確認する。
+
+## 完了報告
+
+- 変更対象ファイルと役割
+- ユーザー操作からDBまでの処理フロー（各段階について、
+   ファイルパス・関数名・受け取る値・返す値・DB変更を説明する。
+   今回未接続の部分は「後続粒度」と明記する。）
+- 重要な確認コード
+- バグとセキュリティ上の注意点
+- 実行した確認コマンドと結果
+
+を簡潔に報告する。
+
+
+## 注意点
+
+このプロジェクトのNext.jsは独自の新仕様が適用されているため、必ず `node_modules/next/dist/docs/` のガイドや非推奨（deprecation）の通知を参照し、最新の規約に完全に準拠した形でコードを作成・修正してください。従来の古いNext.jsの書き方は使用しないでください。
+
