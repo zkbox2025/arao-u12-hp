@@ -7,9 +7,15 @@ import {
   createServerClient,
   type CookieOptions,//クッキーの取り扱いルール
 } from "@supabase/ssr";
-import type { SupabaseClient } from "@supabase/supabase-js";
+// 【追加：F06粒度6】SDKの拒否結果を固定の理由へ変換する。
+import {
+  isAuthApiError,//エラーが「Supabaseの認証（Auth）システムが原因で起きた通信エラーやルール違反かどうか」を判定する関数
+  isAuthWeakPasswordError,//エラーの原因が「設定しようとしたパスワードが簡単すぎる（脆弱である）ため、Supabaseに拒否されたかどうか」をピンポイントで判定する関数
+  type SupabaseClient,
+} from "@supabase/supabase-js";
 import { z } from "zod";
 
+import { validateWelcomeInput } from "@/domain/club/invitation/acceptance-form";//初回PW設定ページの入力値のバリデーション関数
 import { normalizeEmail } from "@/domain/shared/email";//メアド正規化関数
 import { createClient } from "@/src/infrastructure/supabase/server";
 
@@ -254,5 +260,145 @@ export async function prepareClubInvitationSession(input: {
     };
   } catch {
     return { outcome: "INVALID_SESSION" };
+  }
+}
+
+//クラブ招待でパスワード更新した際の結果
+export type ClubInvitationPasswordUpdateResult =
+  | {
+      outcome: "UPDATED";//更新済み
+      user: VerifiedClubInvitationSession["user"];//検証済みのログイン状態情報の型の中のuser
+    }
+  | {
+      outcome:
+        | "AUTHENTICATION_REQUIRED"//認証が必要
+        | "SESSION_CHANGED"//セッション情報が変わってる
+        | "PASSWORD_LOGIN_REQUIRED";//パスワードでログインが必要
+    }
+  | {
+      outcome: "REJECTED";//拒否された
+      reason: "PASSWORD_REJECTED" | "REAUTHENTICATION_REQUIRED";//パスワードが拒否された、もしくは再認証が必要
+    }
+  | {
+      outcome: "UNKNOWN";//不明
+    };
+
+//クラブ招待でパスワード更新した際のエラーをエラー結果に割り当てる関数
+function passwordUpdateRejection(error: unknown): ClubInvitationPasswordUpdateResult {//クラブ招待でパスワード更新した際の結果
+  if (
+    (isAuthApiError(error) || isAuthWeakPasswordError(error)) &&//エラーが「Supabaseの認証（Auth）システムが原因で起きた通信エラーやルール違反であるか、もしくはエラーの原因が「設定しようとしたパスワードが簡単すぎる（脆弱である）ため、Supabaseに拒否されたものである、かつ
+    error.status !== undefined &&//ステータスが定義されてあり、かつ
+    error.status >= 400 &&//400以上で
+    error.status < 500//500以下の場合は以下
+  ) {
+    if (error.code === "weak_password" || error.code === "same_password") {//エラーコードがパスワードが弱いもしくは同じである場合は、
+      return {
+        outcome: "REJECTED",//拒否
+        reason: "PASSWORD_REJECTED",//パスワードで拒否
+      };
+    }
+
+    if (//もしエラーコードが以下であるなら、
+      error.code === "reauthentication_needed" ||
+      error.code === "reauthentication_not_valid" ||
+      error.code === "reauth_nonce_missing" ||
+      error.code === "session_not_found" ||
+      error.code === "session_expired"
+    ) {
+      return {
+        outcome: "REJECTED",//拒否
+        reason: "REAUTHENTICATION_REQUIRED",//再認証が必要
+      };
+    }
+  }
+
+  //それ以外は不明
+  return {
+    outcome: "UNKNOWN",
+  };
+}
+
+//ログインに必要な新しいパスワードをSupabaseの認証システム（Auth）に設定（登録・変更）するための関数
+export async function updateClubInvitationPassword(input: {
+  password: string;
+  expectedSession: VerifiedClubInvitationSession;//検証済みのログインセッション情報の型
+}): Promise<ClubInvitationPasswordUpdateResult> {//クラブ招待でパスワード更新した際の結果
+  const validation = validateWelcomeInput({//初回PW設定ページの入力値のバリデーション関数
+    password: input.password,
+    confirmation: input.password,//確認用PW
+  });
+
+  if (!validation.success) {
+    return {
+      outcome: "REJECTED",
+      reason: "PASSWORD_REJECTED",
+    };
+  }
+
+  let updateStarted = false;
+
+  try {
+    const client = await createClient();
+    const current = await getVerifiedClubInvitationSession(client);//ブラウザから最新のクッキーに入ってるログインセッション情報を取得して検証し、検証済みのログインセッション情報を返す関数
+
+    if (!current) {
+      return {
+        outcome: "AUTHENTICATION_REQUIRED",//認証が必要
+      };
+    }
+
+    if (
+      current.user.id !== input.expectedSession.user.id ||
+      current.user.email !== input.expectedSession.user.email ||
+      current.sessionId !== input.expectedSession.sessionId
+    ) {
+      return {
+        outcome: "SESSION_CHANGED",//セッションが変わった
+      };
+    }
+
+    if (
+      current.authenticationMethod !== "otp" ||//最新のクッキーに入ってるログインセッションの中の認証された方法が招待リンクを押したものではない、もしくは
+      input.expectedSession.authenticationMethod !== "otp"//検証済みのログインセッション情報の中の認証された方法が招待リンクを押したものではない
+    ) {
+      return {
+        outcome: "PASSWORD_LOGIN_REQUIRED",//パスワードでログインする必要がある
+      };
+    }
+
+    updateStarted = true;
+    const {
+      data,
+      error,
+    } = await client.auth.updateUser({//バリデーション済みの新しいパスワードを、Supabaseの認証システム（Auth）に登録・更新する処理
+      password: validation.data.password,
+    });
+
+    if (error) {
+      return passwordUpdateRejection(error);//クラブ招待でパスワード更新した際のエラーをエラー結果に割り当てる関数
+    }
+
+    if (
+      !data.user ||
+      data.user.id !== current.user.id ||
+      normalizeEmail(data.user.email ?? "") !== current.user.email
+    ) {
+      return {
+        outcome: "UNKNOWN",
+      };
+    }
+
+    //それ以外は以下
+    return {
+      outcome: "UPDATED",//更新
+      user: {
+        id: current.user.id,
+        email: current.user.email,
+      },
+    };
+  } catch {
+    return {//更新スタート済みなら不明で更新スタートしてないなら認証が必要
+      outcome: updateStarted ? "UNKNOWN" : "AUTHENTICATION_REQUIRED",
+    };
   }
 }

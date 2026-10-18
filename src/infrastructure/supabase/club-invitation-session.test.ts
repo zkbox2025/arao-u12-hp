@@ -14,7 +14,15 @@ import {
 import {
   getVerifiedClubInvitationSession,
   prepareClubInvitationSession,
+  // 【追加：F06粒度6】初回password更新の本人照合と障害境界を検証する。
+  updateClubInvitationPassword,
 } from "./club-invitation-session";
+
+// 【追加：F06粒度6】SDKの固定拒否コードと不明な失敗を区別する。
+import {
+  AuthApiError,
+  AuthWeakPasswordError,
+} from "@supabase/supabase-js";
 
 const mocks = vi.hoisted(() => ({
   createServerClient: vi.fn(),
@@ -487,6 +495,262 @@ describe("実SSR SDKとの境界", () => {
       expect(result.cookies.length).toBeGreaterThan(0);
       expect(result.session.authenticationMethod).toBe("otp");
       expect(result.cookies.every((cookie) => cookie.options.path === "/")).toBe(true);
+    }
+  });
+});
+
+// 【追加：F06粒度6】admin APIを使用せず、本人のsessionだけでpasswordを更新する。
+describe("updateClubInvitationPassword", () => {
+  const password = "  Private-password1!  ";
+  const expectedSession = {
+    user: {
+      id: USER_ID,
+      email: "member@example.test",
+    },
+    authenticationMethod: "otp" as const,
+    sessionId: SESSION_ID,
+  };
+  let sdk: ReturnType<typeof client> & {
+    auth: {
+      updateUser: ReturnType<typeof vi.fn>;
+    };
+  };
+
+  beforeEach(() => {
+    sdk = {
+      auth: {
+        ...client().auth,
+        updateUser: vi.fn().mockResolvedValue({
+          data: {
+            user: {
+              ...user(),
+              user_metadata: { private: PRIVATE_ERROR },
+            },
+          },
+          error: null,
+        }),
+      },
+    };
+    mocks.createClient.mockResolvedValue(sdk);
+  });
+
+  // 入力passwordを加工せず、本人のID・email・sessionを照合した後にだけ実行する。
+  it("再検証後にupdateUserを一度呼び、必要な本人情報だけを返す", async () => {
+    const result = await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    });
+    expect(result).toEqual({
+      outcome: "UPDATED",
+      user: expectedSession.user,
+    });
+    expect(sdk.auth.updateUser).toHaveBeenCalledExactlyOnceWith({ password });
+    expect(sdk.auth.getUser).toHaveBeenCalledWith("current-access");
+    expect(sdk.auth.getClaims).toHaveBeenCalledWith("current-access");
+    expect(sdk.auth.getClaims.mock.invocationCallOrder[0])
+      .toBeLessThan(sdk.auth.updateUser.mock.invocationCallOrder[0]);
+    expect(JSON.stringify(result)).not.toContain(password);
+    expect(JSON.stringify(result)).not.toContain(PRIVATE_ERROR);
+  });
+
+  it.each(["short1", "abcdefgh", "12345678"])(
+    "Domain入力不正ならclientを生成しない: %s",
+    async (invalidPassword) => {
+      expect(await updateClubInvitationPassword({
+        password: invalidPassword,
+        expectedSession,
+      })).toEqual({
+        outcome: "REJECTED",
+        reason: "PASSWORD_REJECTED",
+      });
+      expect(mocks.createClient).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    {
+      user: {
+        ...expectedSession.user,
+        id: OTHER_ID,
+      },
+    },
+    {
+      user: {
+        ...expectedSession.user,
+        email: "other@example.test",
+      },
+    },
+    { sessionId: OTHER_ID },
+  ])("本人やsessionが変われば更新しない %#", async (change) => {
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession: {
+        ...expectedSession,
+        ...change,
+      },
+    })).toEqual({
+      outcome: "SESSION_CHANGED",
+    });
+    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it.each(["password", "unknown"])("現在の認証方法が%sなら更新しない", async (method) => {
+    sdk.auth.getClaims.mockResolvedValue({
+      data: { claims: claims(method === "password" ? ["password"] : undefined) },
+      error: null,
+    });
+    // claims()の既定値を使わず、欠損AMRを明示する。
+    if (method === "unknown") {
+      sdk.auth.getClaims.mockResolvedValue({
+        data: {
+          claims: {
+            ...claims(),
+            amr: undefined,
+          },
+        },
+        error: null,
+      });
+    }
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "PASSWORD_LOGIN_REQUIRED",
+    });
+    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("未認証の場合は更新しない", async () => {
+    sdk.auth.getSession.mockResolvedValue({
+      data: { session: null },
+      error: null,
+    });
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "AUTHENTICATION_REQUIRED",
+    });
+    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("受け取った予定sessionがpassword認証なら初回更新しない", async () => {
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession: {
+        ...expectedSession,
+        authenticationMethod: "password",
+      },
+    })).toEqual({
+      outcome: "PASSWORD_LOGIN_REQUIRED",
+    });
+    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("client準備で失敗した場合は更新未実行として扱う", async () => {
+    mocks.createClient.mockRejectedValue(new Error(PRIVATE_ERROR));
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "AUTHENTICATION_REQUIRED",
+    });
+    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["same_password", "PASSWORD_REJECTED"],
+    ["weak_password", "PASSWORD_REJECTED"],
+    ["reauthentication_needed", "REAUTHENTICATION_REQUIRED"],
+    ["reauthentication_not_valid", "REAUTHENTICATION_REQUIRED"],
+    ["reauth_nonce_missing", "REAUTHENTICATION_REQUIRED"],
+    ["session_not_found", "REAUTHENTICATION_REQUIRED"],
+    ["session_expired", "REAUTHENTICATION_REQUIRED"],
+  ])("SDKの明示拒否%sを固定の理由へ変換する", async (code, reason) => {
+    sdk.auth.updateUser.mockResolvedValue({
+      data: { user: null },
+      error: new AuthApiError(PRIVATE_ERROR, 422, code),
+    });
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "REJECTED",
+      reason,
+    });
+    expect(sdk.auth.updateUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("SDK固有の弱いpasswordエラーも原文を返さない", async () => {
+    sdk.auth.updateUser.mockResolvedValue({
+      data: { user: null },
+      error: new AuthWeakPasswordError(PRIVATE_ERROR, 422, ["length"]),
+    });
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "REJECTED",
+      reason: "PASSWORD_REJECTED",
+    });
+  });
+
+  it.each([
+    new AuthApiError(PRIVATE_ERROR, 500, "unexpected_failure"),
+    new AuthApiError(PRIVATE_ERROR, 504, "request_timeout"),
+    new AuthApiError(PRIVATE_ERROR, 400, "unknown_code"),
+    new Error(PRIVATE_ERROR),
+  ])("不明なSDK結果は失敗と断定せず自動再試行しない %#", async (error) => {
+    sdk.auth.updateUser.mockResolvedValue({
+      data: { user: null },
+      error,
+    });
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "UNKNOWN",
+    });
+    expect(sdk.auth.updateUser).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    null,
+    {
+      ...user(),
+      id: OTHER_ID,
+    },
+    {
+      ...user(),
+      email: "changed@example.test",
+    },
+  ])("更新応答の本人を確認できなければUNKNOWNにする %#", async (updatedUser) => {
+    sdk.auth.updateUser.mockResolvedValue({
+      data: { user: updatedUser },
+      error: null,
+    });
+    expect(await updateClubInvitationPassword({
+      password,
+      expectedSession,
+    })).toEqual({
+      outcome: "UNKNOWN",
+    });
+  });
+
+  it("更新開始後の例外をUNKNOWNにし、秘密をログへ渡さない", async () => {
+    sdk.auth.updateUser.mockRejectedValue(new Error(PRIVATE_ERROR));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      expect(await updateClubInvitationPassword({
+        password,
+        expectedSession,
+      })).toEqual({
+        outcome: "UNKNOWN",
+      });
+      expect(log).not.toHaveBeenCalled();
+      expect(sdk.auth.updateUser).toHaveBeenCalledTimes(1);
+    } finally {
+      log.mockRestore();
     }
   });
 });

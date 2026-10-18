@@ -1,349 +1,11 @@
-diff --git a/app/(club-app)/auth/confirm/route.ts b/app/(club-app)/auth/confirm/route.ts
-index 24ee281..815ab95 100644
---- a/app/(club-app)/auth/confirm/route.ts
-+++ b/app/(club-app)/auth/confirm/route.ts
-@@ -7,12 +7,26 @@ import "server-only";
- 
- import {
-   NextResponse,
-+  // 【追加：F06粒度5】invite POSTのCookieをリクエストから読む。
-+  type NextRequest,
- } from "next/server";
- 
- import {
-   createClient,
- } from "@/src/infrastructure/supabase/server";
- 
-+// 【追加：F06粒度5】invite専用POSTの検証先。recovery GETには使用しない。
-+import {
-+  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
-+  parseClubInvitationContext,
-+} from "@/src/infrastructure/security/club-invitation-context";
-+import {
-+  prepareClubInvitationSession,
-+} from "@/src/infrastructure/supabase/club-invitation-session";
-+import {
-+  findClubInvitationAcceptanceForUser,
-+} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
-+
- //エラーの場合のパス
- const INVALID_LINK_PATH =
-   "/club-login/forgot-password?error=invalid-link";
-@@ -107,4 +121,165 @@ export async function GET(
-     RESET_PASSWORD_PATH,
-     requestUrl,
-   );
--}
-\ No newline at end of file
-+}
-+
-+// 【追加：F06粒度5】tokenをURLへ戻さず、固定の結果だけを返す。
-+function invitationResult(
-+  result:
-+    | "confirmed"
-+    | "invalid-invitation"
-+    | "switch-account"
-+    | "login-required",
-+  status: number,
-+): NextResponse {
-+  const response = NextResponse.json(
-+    result === "confirmed"
-+      ? {
-+          status: result,
-+          redirectTo: "/welcome",
-+        }
-+      : { status: result },
-+    { status },
-+  );
-+
-+  response.headers.set("Cache-Control", "no-store");
-+  response.headers.set("Referrer-Policy", "no-referrer");
-+
-+  return response;
-+}
-+
-+// 【追加：F06粒度5】Content-Lengthを信用せず、読み込むbody自体を制限する。
-+async function readInvitationBody(request: Request): Promise<unknown> {
-+  const maximumBytes = 16_384;
-+  const contentLength = request.headers.get("content-length");
-+
-+  if (
-+    !request.body ||
-+    (contentLength !== null && (
-+      !/^[0-9]+$/u.test(contentLength) ||
-+      Number(contentLength) > maximumBytes
-+    ))
-+  ) {
-+    throw new Error("Invalid invitation body");
-+  }
-+
-+  const reader = request.body.getReader();
-+  const chunks: Uint8Array[] = [];
-+  let total = 0;
-+
-+  try {
-+    while (true) {
-+      const {
-+        done,
-+        value,
-+      } = await reader.read();
-+
-+      if (done) {
-+        break;
-+      }
-+
-+      total += value.byteLength;
-+
-+      if (total > maximumBytes) {
-+        await reader.cancel();
-+        throw new Error("Invitation body limit exceeded");
-+      }
-+
-+      chunks.push(value);
-+    }
-+  } finally {
-+    reader.releaseLock();
-+  }
-+
-+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-+}
-+
-+// 【追加：F06粒度5】fragmentの認証結果を同一originのJSON POSTだけで受け付ける。
-+export async function POST(request: NextRequest): Promise<NextResponse> {
-+  try {
-+    const requestUrl = new URL(request.url);
-+    const contentType = request.headers.get("content-type") ?? "";
-+    const fetchSite = request.headers.get("sec-fetch-site");
-+
-+    if (
-+      request.headers.get("origin") !== requestUrl.origin ||
-+      (fetchSite !== null && fetchSite !== "same-origin") ||
-+      !/^application\/json(?:;\s*charset=utf-8)?$/iu.test(contentType) ||
-+      requestUrl.search !== "" ||
-+      request.headers.has("content-encoding")
-+    ) {
-+      return invitationResult("invalid-invitation", 403);
-+    }
-+
-+    const context = parseClubInvitationContext(
-+      request.cookies.get(CLUB_INVITATION_CONTEXT_COOKIE_NAME)?.value,
-+    );
-+
-+    if (!context) {
-+      return invitationResult("invalid-invitation", 400);
-+    }
-+
-+    const body = await readInvitationBody(request);
-+
-+    if (
-+      typeof body !== "object" ||
-+      body === null ||
-+      Array.isArray(body) ||
-+      Object.keys(body).length !== 3 ||
-+      !("contextId" in body) ||
-+      body.contextId !== context.contextId ||
-+      !("accessToken" in body) ||
-+      typeof body.accessToken !== "string" ||
-+      body.accessToken.length > 8_192 ||
-+      !/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(body.accessToken) ||
-+      !("refreshToken" in body) ||
-+      typeof body.refreshToken !== "string" ||
-+      body.refreshToken.length === 0 ||
-+      body.refreshToken.length > 2_048 ||
-+      !/^[A-Za-z0-9._~-]+$/u.test(body.refreshToken)
-+    ) {
-+      return invitationResult("invalid-invitation", 400);
-+    }
-+
-+    const prepared = await prepareClubInvitationSession({
-+      accessToken: body.accessToken,
-+      refreshToken: body.refreshToken,
-+      currentCookies: request.cookies.getAll(),
-+    });
-+
-+    if (prepared.outcome === "SWITCH_ACCOUNT") {
-+      return invitationResult("switch-account", 409);
-+    }
-+
-+    if (prepared.outcome === "PASSWORD_LOGIN_REQUIRED") {
-+      return invitationResult("login-required", 409);
-+    }
-+
-+    if (prepared.outcome !== "VERIFIED") {
-+      return invitationResult("invalid-invitation", 409);
-+    }
-+
-+    // Cookie内のslug・hashも未信頼入力として、Auth本人とDBの最新状態を照合する。
-+    const invitation = await findClubInvitationAcceptanceForUser({
-+      clubSlug: context.clubSlug,
-+      tokenHash: context.tokenHash,
-+      authenticatedUser: prepared.session.user,
-+    });
-+
-+    if (invitation.outcome !== "AVAILABLE" || context.expiresAt <= Date.now()) {
-+      return invitationResult("invalid-invitation", 400);
-+    }
-+
-+    const response = invitationResult("confirmed", 200);
-+
-+    // 途中で書込が失敗した場合は、この応答全体を捨てて認証Cookieなしの失敗を返す。
-+    for (const cookie of prepared.cookies) {
-+      response.cookies.set(cookie.name, cookie.value, cookie.options);
-+    }
-+
-+    return response;
-+  } catch {
-+    // SDK・DB・JSON・Cookieの例外内容と個人情報は表示・ログへ出さない。
-+    return invitationResult("invalid-invitation", 400);
-+  }
-+}
-diff --git a/app/(club-app)/welcome/InvitationAuthBridge.tsx b/app/(club-app)/welcome/InvitationAuthBridge.tsx
+diff --git a/src/application/club/invitation/accept-club-invitation.test.ts b/src/application/club/invitation/accept-club-invitation.test.ts
 new file mode 100644
-index 0000000..001c951
+index 0000000..c817b83
 --- /dev/null
-+++ b/app/(club-app)/welcome/InvitationAuthBridge.tsx
-@@ -0,0 +1,131 @@
-+// app/(club-app)/welcome/InvitationAuthBridge.tsx
-+"use client";
++++ b/src/application/club/invitation/accept-club-invitation.test.ts
+@@ -0,0 +1,405 @@
++// src/application/club/invitation/accept-club-invitation.test.ts
 +
-+import {
-+  useEffect,
-+  useRef,
-+  useState,
-+} from "react";
-+
-+const STATUS_MESSAGES = {
-+  "invalid-invitation": "招待の認証を確認できませんでした。招待リンクを開き直してください。",
-+  "switch-account":
-+    "別のアカウントでログイン中です。ログアウトしてから招待リンクを開いてください。",
-+  "login-required": "続けるには、既存のアカウントでパスワードログインしてください。",
-+};
-+
-+type BridgeStatus = keyof typeof STATUS_MESSAGES | null;
-+
-+// fragmentを即時に履歴から除去し、同一originの専用POSTへ一度だけ渡す。
-+export function InvitationAuthBridge({
-+  contextId,
-+}: {
-+  contextId: string;
-+}) {
-+  const started = useRef(false);
-+  const [status, setStatus] = useState<BridgeStatus>(null);
-+
-+  useEffect(() => {
-+    if (started.current) {
-+      return;
-+    }
-+
-+    started.current = true;
-+    const fragment = window.location.hash;
-+
-+    if (!fragment) {
-+      return;
-+    }
-+
-+    // 解析や通信より先に消し、Authのエラー文字列も履歴へ残さない。
-+    window.history.replaceState(
-+      window.history.state,
-+      "",
-+      window.location.pathname + window.location.search,
-+    );
-+
-+    // tokenをstate・DOM・storageへ保存せず、通信に必要な間だけ保持する。
-+    async function confirmInvitation(): Promise<void> {
-+      try {
-+        if (fragment.length > 16_384) {
-+          setStatus("invalid-invitation");
-+          return;
-+        }
-+
-+        const params = new URLSearchParams(fragment.slice(1));
-+        const accessToken = params.get("access_token");
-+        const refreshToken = params.get("refresh_token");
-+
-+        if (
-+          params.getAll("access_token").length !== 1 ||
-+          params.getAll("refresh_token").length !== 1 ||
-+          params.getAll("type").length !== 1 ||
-+          params.get("type") !== "invite" ||
-+          params.getAll("token_type").length !== 1 ||
-+          params.get("token_type") !== "bearer" ||
-+          params.has("error") ||
-+          params.has("error_description") ||
-+          params.has("error_code") ||
-+          !accessToken ||
-+          !refreshToken
-+        ) {
-+          setStatus("invalid-invitation");
-+          return;
-+        }
-+
-+        const response = await fetch("/auth/confirm", {
-+          method: "POST",
-+          credentials: "same-origin",
-+          cache: "no-store",
-+          redirect: "error",
-+          referrerPolicy: "no-referrer",
-+          headers: {
-+            "Content-Type": "application/json",
-+          },
-+          body: JSON.stringify({
-+            contextId,
-+            accessToken,
-+            refreshToken,
-+          }),
-+        });
-+        const result: unknown = await response.json();
-+
-+        if (
-+          typeof result === "object" &&
-+          result !== null &&
-+          "status" in result
-+        ) {
-+          if (response.ok && result.status === "confirmed") {
-+            // 応答のURLは使用せず、遷移先を固定する。
-+            window.location.replace("/welcome");
-+            return;
-+          }
-+
-+          if (
-+            result.status === "switch-account" ||
-+            result.status === "login-required"
-+          ) {
-+            setStatus(result.status);
-+            return;
-+          }
-+        }
-+
-+        setStatus("invalid-invitation");
-+      } catch {
-+        setStatus("invalid-invitation");
-+      }
-+    }
-+
-+    void confirmInvitation();
-+  }, [contextId]);
-+
-+  if (status === null) {
-+    return null;
-+  }
-+
-+  return (
-+    <p role="alert">
-+      {STATUS_MESSAGES[status]}
-+    </p>
-+  );
-+}
-diff --git a/src/infrastructure/supabase/club-invitation-session.test.ts b/src/infrastructure/supabase/club-invitation-session.test.ts
-new file mode 100644
-index 0000000..f470437
---- /dev/null
-+++ b/src/infrastructure/supabase/club-invitation-session.test.ts
-@@ -0,0 +1,492 @@
-+// src/infrastructure/supabase/club-invitation-session.test.ts
-+
-+import type { CookieOptions } from "@supabase/ssr";
-+import type { SupabaseClient } from "@supabase/supabase-js";
 +import {
 +  afterEach,
 +  beforeEach,
@@ -353,936 +15,46 @@ index 0000000..f470437
 +  vi,
 +} from "vitest";
 +
++import { DomainError } from "@/domain/shared/domain-error";
 +import {
-+  getVerifiedClubInvitationSession,
-+  prepareClubInvitationSession,
-+} from "./club-invitation-session";
-+
-+const mocks = vi.hoisted(() => ({
-+  createServerClient: vi.fn(),
-+  createClient: vi.fn(),
-+}));
-+
-+vi.mock("@supabase/ssr", () => ({
-+  createServerClient: mocks.createServerClient,
-+}));
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: mocks.createClient,
-+}));
-+
-+const USER_ID = "11111111-1111-4111-8111-111111111111";
-+const OTHER_ID = "22222222-2222-4222-8222-222222222222";
-+const SESSION_ID = "33333333-3333-4333-8333-333333333333";
-+const PRIVATE_ERROR = "private@example.test access-secret refresh-secret";
-+const NOW = new Date("2026-10-17T00:00:00Z");
-+
-+type CookieAdapter = {
-+  getAll: () => {
-+    name: string;
-+    value: string;
-+  }[];
-+  setAll: (cookies: {
-+    name: string;
-+    value: string;
-+    options: CookieOptions;
-+  }[]) => void;
-+};
-+
-+// Cookie由来userとは別に、Authが返す現在emailを用意する。
-+function user() {
-+  return {
-+    id: USER_ID,
-+    email: "Member@Example.test",
-+  };
-+}
-+
-+// getClaimsに成功した検証済みclaimsだけを模擬する。
-+function claims(amr: unknown = ["otp"]) {
-+  return {
-+    sub: USER_ID,
-+    role: "authenticated",
-+    exp: NOW.getTime() / 1_000 + 3_600,
-+    session_id: SESSION_ID,
-+    amr,
-+  };
-+}
-+
-+// SDKとの境界を模擬し、実Auth通信を行わない。
-+function client(amr: unknown = ["otp"]) {
-+  return {
-+    auth: {
-+      getSession: vi.fn().mockResolvedValue({
-+        data: {
-+          session: { access_token: "current-access" },
-+        },
-+        error: null,
-+      }),
-+      getUser: vi.fn().mockResolvedValue({
-+        data: { user: user() },
-+        error: null,
-+      }),
-+      getClaims: vi.fn().mockResolvedValue({
-+        data: { claims: claims(amr) },
-+        error: null,
-+      }),
-+      refreshSession: vi.fn(),
-+    },
-+  };
-+}
-+
-+// 実際のSDK型との境界だけを型変換する。
-+function asClient(value: ReturnType<typeof client>): SupabaseClient {
-+  return value as unknown as SupabaseClient;
-+}
-+
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  vi.useFakeTimers();
-+  vi.setSystemTime(NOW);
-+  vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "http://127.0.0.1:54321");
-+  vi.stubEnv("NEXT_PUBLIC_SUPABASE_ANON_KEY", "test-anon-key");
-+});
-+
-+afterEach(() => {
-+  vi.useRealTimers();
-+  vi.unstubAllEnvs();
-+});
-+
-+describe("getVerifiedClubInvitationSession", () => {
-+  it.each([
-+    [["password"], "password"],
-+    [[{
-+      method: "password",
-+      timestamp: 1,
-+    }], "password"],
-+    [["otp"], "otp"],
-+    [[{
-+      method: "otp",
-+      timestamp: 1,
-+    }], "otp"],
-+    [["otp", "password"], "password"],
-+    [undefined, "unknown"],
-+    [[], "unknown"],
-+    ["password", "unknown"],
-+    [["oauth"], "unknown"],
-+    [["unknown-method"], "unknown"],
-+    [["password", 1], "unknown"],
-+    [["password", {
-+      method: "otp",
-+      timestamp: 1,
-+    }], "unknown"],
-+    [[{ method: "password" }], "unknown"],
-+    [[{
-+      method: "password",
-+      timestamp: -1,
-+    }], "unknown"],
-+    [[{
-+      method: "password",
-+      timestamp: "1",
-+    }], "unknown"],
-+    [[null], "unknown"],
-+  ])("AMR形式と認証方法を判定する %#", async (amr, expected) => {
-+    const sdk = client();
-+    sdk.auth.getClaims.mockResolvedValue({
-+      data: {
-+        claims: {
-+          ...claims(),
-+          amr,
-+        },
-+      },
-+      error: null,
-+    });
-+    const result = await getVerifiedClubInvitationSession(asClient(sdk));
-+
-+    expect(result?.authenticationMethod).toBe(expected);
-+    expect(result?.user).toEqual({
-+      id: USER_ID,
-+      email: "member@example.test",
-+    });
-+    expect(sdk.auth.getUser).toHaveBeenCalledWith("current-access");
-+    expect(sdk.auth.getClaims).toHaveBeenCalledWith("current-access");
-+    expect(JSON.stringify(result)).not.toContain("current-access");
-+  });
-+
-+  it.each([
-+    { sub: OTHER_ID },
-+    { session_id: "invalid" },
-+    { exp: NOW.getTime() / 1_000 },
-+    { exp: undefined },
-+    { role: "service_role" },
-+  ])("不正な検証済みclaimsを拒否する %#", async (change) => {
-+    const sdk = client();
-+    sdk.auth.getClaims.mockResolvedValue({
-+      data: {
-+        claims: {
-+          ...claims(),
-+          ...change,
-+        },
-+      },
-+      error: null,
-+    });
-+    expect(await getVerifiedClubInvitationSession(asClient(sdk))).toBeNull();
-+  });
-+
-+  it.each(["getSession", "getUser", "getClaims"] as const)(
-+    "%sの秘密を含む例外を外へ出さない",
-+    async (method) => {
-+      const sdk = client();
-+      sdk.auth[method].mockRejectedValue(new Error(PRIVATE_ERROR));
-+      expect(await getVerifiedClubInvitationSession(asClient(sdk))).toBeNull();
-+    },
-+  );
-+
-+  it("Authの現在emailがない場合は拒否する", async () => {
-+    const sdk = client();
-+    sdk.auth.getUser.mockResolvedValue({
-+      data: { user: { id: USER_ID } },
-+      error: null,
-+    });
-+    expect(await getVerifiedClubInvitationSession(asClient(sdk))).toBeNull();
-+  });
-+
-+  it("引数なしでは既存のサーバーclientを使う", async () => {
-+    mocks.createClient.mockResolvedValue(asClient(client(["password"])));
-+    expect((await getVerifiedClubInvitationSession())?.authenticationMethod).toBe("password");
-+  });
-+});
-+
-+describe("prepareClubInvitationSession", () => {
-+  let current: ReturnType<typeof client>;
-+  let incoming: ReturnType<typeof client>;
-+  let adapters: CookieAdapter[];
-+
-+  const input = {
-+    accessToken: "received-access",
-+    refreshToken: "received-refresh",
-+    currentCookies: [
-+      {
-+        name: "existing",
-+        value: "cookie-value",
-+      },
-+    ],
-+  };
-+
-+  beforeEach(() => {
-+    current = client();
-+    current.auth.getSession.mockResolvedValue({
-+      data: { session: null },
-+      error: null,
-+    });
-+    incoming = client();
-+    adapters = [];
-+    mocks.createServerClient.mockImplementation((
-+      _url: string,
-+      _key: string,
-+      options: { cookies: CookieAdapter },
-+    ) => {
-+      adapters.push(options.cookies);
-+      return adapters.length === 1 ? current : incoming;
-+    });
-+    incoming.auth.refreshSession.mockImplementation(async () => {
-+      adapters[1].setAll([
-+        {
-+          name: "sb-test-auth-token.0",
-+          value: "new-part-0",
-+          options: {
-+            path: "/",
-+            sameSite: "lax",
-+            secure: true,
-+          },
-+        },
-+        {
-+          name: "sb-test-auth-token.1",
-+          value: "",
-+          options: {
-+            path: "/",
-+            maxAge: 0,
-+          },
-+        },
-+      ]);
-+      return {
-+        data: {
-+          session: { access_token: "refreshed-access" },
-+        },
-+        error: null,
-+      };
-+    });
-+  });
-+
-+  it("受信・refresh後の同一本人とsessionを照合し、未確定Cookieを返す", async () => {
-+    const result = await prepareClubInvitationSession(input);
-+    expect(result.outcome).toBe("VERIFIED");
-+    expect(incoming.auth.refreshSession).toHaveBeenCalledWith({
-+      refresh_token: input.refreshToken,
-+    });
-+    expect(incoming.auth.getClaims.mock.calls).toEqual([
-+      ["received-access"],
-+      ["refreshed-access"],
-+    ]);
-+    expect(adapters[0].getAll()).toEqual(input.currentCookies);
-+    expect(adapters[1].getAll()).toContainEqual({
-+      name: "sb-test-auth-token.0",
-+      value: "new-part-0",
-+    });
-+    if (result.outcome === "VERIFIED") {
-+      expect(result.cookies).toHaveLength(2);
-+      expect(result.cookies[1].options.maxAge).toBe(0);
-+      expect(JSON.stringify(result.session)).not.toContain("access");
-+    }
-+  });
-+
-+  it("別ユーザーの既存sessionを置き換えない", async () => {
-+    current.auth.getSession.mockResolvedValue({
-+      data: { session: { access_token: "existing-access" } },
-+      error: null,
-+    });
-+    current.auth.getUser.mockResolvedValue({
-+      data: {
-+        user: {
-+          ...user(),
-+          id: OTHER_ID,
-+        },
-+      },
-+      error: null,
-+    });
-+    current.auth.getClaims.mockResolvedValue({
-+      data: {
-+        claims: {
-+          ...claims(),
-+          sub: OTHER_ID,
-+        },
-+      },
-+      error: null,
-+    });
-+    expect(await prepareClubInvitationSession(input)).toEqual({
-+      outcome: "SWITCH_ACCOUNT",
-+    });
-+    expect(incoming.auth.refreshSession).not.toHaveBeenCalled();
-+  });
-+
-+  it("同一本人の既存password認証を維持する", async () => {
-+    current = client(["password"]);
-+    const result = await prepareClubInvitationSession(input);
-+    expect(result.outcome).toBe("VERIFIED");
-+    if (result.outcome === "VERIFIED") {
-+      expect(result.session.authenticationMethod).toBe("password");
-+      expect(result.cookies).toEqual([]);
-+    }
-+  });
-+
-+  it.each([
-+    { sub: OTHER_ID },
-+    { session_id: OTHER_ID },
-+    { amr: ["password"] },
-+    { exp: 1 },
-+  ])("refresh後の不一致をCookieごと破棄する %#", async (change) => {
-+    incoming.auth.getClaims
-+      .mockResolvedValueOnce({
-+        data: { claims: claims() },
-+        error: null,
-+      })
-+      .mockResolvedValueOnce({
-+        data: {
-+          claims: {
-+            ...claims(),
-+            ...change,
-+          },
-+        },
-+        error: null,
-+      });
-+    expect(await prepareClubInvitationSession(input)).toEqual({
-+      outcome: "INVALID_SESSION",
-+    });
-+  });
-+
-+  it("refresh後に現在emailが変わった場合も破棄する", async () => {
-+    incoming.auth.getUser
-+      .mockResolvedValueOnce({
-+        data: { user: user() },
-+        error: null,
-+      })
-+      .mockResolvedValueOnce({
-+        data: {
-+          user: {
-+            ...user(),
-+            email: "changed@example.test",
-+          },
-+        },
-+        error: null,
-+      });
-+    expect((await prepareClubInvitationSession(input)).outcome).toBe("INVALID_SESSION");
-+  });
-+
-+  it.each([
-+    [undefined],
-+    [["password"]],
-+    [["recovery"]],
-+  ])("受信tokenのAMRからotpが確認できなければ拒否する %#", async (amr) => {
-+    incoming.auth.getClaims.mockResolvedValue({
-+      data: {
-+        claims: {
-+          ...claims(),
-+          amr,
-+        },
-+      },
-+      error: null,
-+    });
-+    expect((await prepareClubInvitationSession(input)).outcome).toBe("PASSWORD_LOGIN_REQUIRED");
-+    expect(incoming.auth.refreshSession).not.toHaveBeenCalled();
-+  });
-+
-+  it("検証できない既存sessionを置き換えない", async () => {
-+    current = client();
-+    current.auth.getClaims.mockResolvedValue({
-+      data: null,
-+      error: new Error(PRIVATE_ERROR),
-+    });
-+    expect((await prepareClubInvitationSession(input)).outcome).toBe("INVALID_SESSION");
-+    expect(mocks.createServerClient).toHaveBeenCalledTimes(1);
-+  });
-+
-+  it("偽・期限切れaccess tokenをrefreshだけで救済しない", async () => {
-+    incoming.auth.getClaims.mockResolvedValue({
-+      data: null,
-+      error: new Error(PRIVATE_ERROR),
-+    });
-+    expect((await prepareClubInvitationSession(input)).outcome).toBe("INVALID_SESSION");
-+    expect(incoming.auth.refreshSession).not.toHaveBeenCalled();
-+  });
-+
-+  it("refresh tokenの失効とSDK例外を安全に拒否する", async () => {
-+    incoming.auth.refreshSession.mockRejectedValue(new Error(PRIVATE_ERROR));
-+    expect(await prepareClubInvitationSession(input)).toEqual({
-+      outcome: "INVALID_SESSION",
-+    });
-+  });
-+
-+  it("Cookie更新通知がなければ確立済みと扱わない", async () => {
-+    incoming.auth.refreshSession.mockResolvedValue({
-+      data: { session: { access_token: "refreshed-access" } },
-+      error: null,
-+    });
-+    expect((await prepareClubInvitationSession(input)).outcome).toBe("INVALID_SESSION");
-+  });
-+});
-+
-+// インストール済みSSR SDKのCookie通知を、ネットワークだけ差し替えて確認する。
-+describe("実SSR SDKとの境界", () => {
-+  afterEach(() => {
-+    vi.unstubAllGlobals();
-+  });
-+
-+  it.each([false, true])("refreshで別sessionへ変わる場合は拒否する: %s", async (mismatch) => {
-+    const actual = await vi.importActual<typeof import("@supabase/ssr")>("@supabase/ssr");
-+    mocks.createServerClient.mockImplementation(actual.createServerClient);
-+
-+    // 署名検証の代用には使わず、SDKがAuthへ問い合わせる対称鍵形式のfixtureを作る。
-+    function testToken(sessionId: string): string {
-+      const header = Buffer.from(JSON.stringify({
-+        alg: "HS256",
-+        typ: "JWT",
-+      })).toString("base64url");
-+      const payload = Buffer.from(JSON.stringify({
-+        ...claims(),
-+        aud: "authenticated",
-+        iss: "http://127.0.0.1:54321/auth/v1",
-+        iat: NOW.getTime() / 1_000,
-+        session_id: sessionId,
-+      })).toString("base64url");
-+
-+      return `${header}.${payload}.dGVzdC1zaWduYXR1cmU`;
-+    }
-+
-+    const accessToken = testToken(SESSION_ID);
-+    const refreshedToken = testToken(mismatch ? OTHER_ID : SESSION_ID);
-+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-+      const url = new URL(typeof input === "string" ? input : input.toString());
-+      expect(url.origin).toBe("http://127.0.0.1:54321");
-+
-+      if (url.pathname === "/auth/v1/user") {
-+        return Response.json(user());
-+      }
-+
-+      if (url.pathname === "/auth/v1/token") {
-+        return Response.json({
-+          access_token: refreshedToken,
-+          refresh_token: "new-refresh",
-+          token_type: "bearer",
-+          expires_in: 3_600,
-+          user: user(),
-+        });
-+      }
-+
-+      throw new Error("Unexpected test endpoint");
-+    });
-+    vi.stubGlobal("fetch", fetchMock);
-+
-+    const result = await prepareClubInvitationSession({
-+      accessToken,
-+      refreshToken: "received-refresh",
-+      currentCookies: [],
-+    });
-+
-+    expect(result.outcome).toBe(mismatch ? "INVALID_SESSION" : "VERIFIED");
-+    expect(fetchMock).toHaveBeenCalled();
-+    if (result.outcome === "VERIFIED") {
-+      expect(result.cookies.length).toBeGreaterThan(0);
-+      expect(result.session.authenticationMethod).toBe("otp");
-+      expect(result.cookies.every((cookie) => cookie.options.path === "/")).toBe(true);
-+    }
-+  });
-+});
-diff --git a/src/infrastructure/supabase/club-invitation-session.ts b/src/infrastructure/supabase/club-invitation-session.ts
-new file mode 100644
-index 0000000..941fe34
---- /dev/null
-+++ b/src/infrastructure/supabase/club-invitation-session.ts
-@@ -0,0 +1,250 @@
-+// src/infrastructure/supabase/club-invitation-session.ts
-+
-+import "server-only";
-+
-+import {
-+  createServerClient,
-+  type CookieOptions,
-+} from "@supabase/ssr";
-+import type { SupabaseClient } from "@supabase/supabase-js";
-+import { z } from "zod";
-+
-+import { normalizeEmail } from "@/domain/shared/email";
-+import { createClient } from "@/src/infrastructure/supabase/server";
-+
-+export type VerifiedClubInvitationSession = {
-+  user: {
-+    id: string;
-+    email: string;
-+  };
-+  authenticationMethod: "password" | "otp" | "unknown";
-+  sessionId: string;
-+};
-+
-+type CookieValue = {
-+  name: string;
-+  value: string;
-+};
-+
-+type SessionCookie = CookieValue & {
-+  options: CookieOptions;
-+};
-+
-+export type ClubInvitationSessionResult =
-+  | {
-+      outcome: "VERIFIED";
-+      session: VerifiedClubInvitationSession;
-+      cookies: SessionCookie[];
-+    }
-+  | {
-+      outcome:
-+        | "INVALID_SESSION"
-+        | "SWITCH_ACCOUNT"
-+        | "PASSWORD_LOGIN_REQUIRED";
-+    };
-+
-+const uuidSchema = z.uuid();
-+const emailSchema = z.email().max(254);
-+
-+// SDKの両AMR形式を検査し、不明・混在形式から認証方法を推測しない。
-+function authenticationMethod(
-+  value: unknown,
-+): VerifiedClubInvitationSession["authenticationMethod"] {
-+  if (!Array.isArray(value) || value.length === 0) {
-+    return "unknown";
-+  }
-+
-+  let methods: string[];
-+
-+  if (value.every((entry) => typeof entry === "string" && entry.length > 0)) {
-+    methods = value;
-+  } else if (value.every((entry) => (
-+    typeof entry === "object" &&
-+    entry !== null &&
-+    typeof entry.method === "string" &&
-+    entry.method.length > 0 &&
-+    Number.isSafeInteger(entry.timestamp) &&
-+    entry.timestamp >= 0
-+  ))) {
-+    methods = value.map((entry) => entry.method);
-+  } else {
-+    return "unknown";
-+  }
-+
-+  if (methods.includes("password")) {
-+    return "password";
-+  }
-+
-+  // otp単独ではinviteの証明にならない。呼出元でDB招待も照合する。
-+  return methods.includes("otp") ? "otp" : "unknown";
-+}
-+
-+// 同じaccess tokenをAuthと署名検証済みclaimsの双方で確認する。
-+async function verifyAccessToken(
-+  client: SupabaseClient,
-+  accessToken: string,
-+): Promise<VerifiedClubInvitationSession | null> {
-+  const userResult = await client.auth.getUser(accessToken);
-+  const claimsResult = await client.auth.getClaims(accessToken);
-+  const user = userResult.data.user;
-+  const claims = claimsResult.data?.claims;
-+  const email = normalizeEmail(user?.email ?? "");
-+
-+  if (
-+    userResult.error ||
-+    claimsResult.error ||
-+    !user ||
-+    !claims ||
-+    !uuidSchema.safeParse(user.id).success ||
-+    !emailSchema.safeParse(email).success ||
-+    claims.sub !== user.id ||
-+    claims.role !== "authenticated" ||
-+    !uuidSchema.safeParse(claims.session_id).success ||
-+    !Number.isSafeInteger(claims.exp) ||
-+    claims.exp <= Date.now() / 1_000 ||
-+    user.is_anonymous === true
-+  ) {
-+    return null;
-+  }
-+
-+  return {
-+    user: {
-+      id: user.id,
-+      email,
-+    },
-+    authenticationMethod: authenticationMethod(claims.amr),
-+    sessionId: claims.session_id,
-+  };
-+}
-+
-+// Cookieから読み出したuserを信用せず、現在の同一tokenを再検証する。
-+export async function getVerifiedClubInvitationSession(
-+  client?: SupabaseClient,
-+): Promise<VerifiedClubInvitationSession | null> {
-+  try {
-+    const supabase = client ?? await createClient();
-+    const {
-+      data,
-+      error,
-+    } = await supabase.auth.getSession();
-+
-+    if (error || !data.session?.access_token) {
-+      return null;
-+    }
-+
-+    return await verifyAccessToken(supabase, data.session.access_token);
-+  } catch {
-+    // SDKエラーやtokenを呼出元・ログへ渡さない。
-+    return null;
-+  }
-+}
-+
-+// SDKによるCookie更新はメモリ内に保持し、成功応答を作るまで確定しない。
-+function stagedClient(initialCookies: CookieValue[]) {
-+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-+
-+  if (!url || !key) {
-+    throw new Error("Invitation session configuration unavailable");
-+  }
-+
-+  const jar = new Map(initialCookies.map((cookie) => [cookie.name, cookie.value]));
-+  const pending = new Map<string, SessionCookie>();
-+  const client = createServerClient(url, key, {
-+    cookies: {
-+      // 検証中にrefreshされた値も、次のSDK呼出しから参照できるようにする。
-+      getAll() {
-+        return Array.from(jar, ([name, value]) => ({
-+          name,
-+          value,
-+        }));
-+      },
-+      // 削除Cookieや分割Cookieの属性も省略せず保持する。
-+      setAll(cookies) {
-+        for (const cookie of cookies) {
-+          jar.set(cookie.name, cookie.value);
-+          pending.set(cookie.name, cookie);
-+        }
-+      },
-+    },
-+  });
-+
-+  return {
-+    client,
-+    pending,
-+  };
-+}
-+
-+// 既存の本人と受信token・refresh後の本人を照合し、未確定Cookieだけを返す。
-+export async function prepareClubInvitationSession(input: {
-+  accessToken: string;
-+  refreshToken: string;
-+  currentCookies: CookieValue[];
-+}): Promise<ClubInvitationSessionResult> {
-+  try {
-+    const current = stagedClient(input.currentCookies);
-+    const currentResult = await current.client.auth.getSession();
-+
-+    if (currentResult.error) {
-+      return { outcome: "INVALID_SESSION" };
-+    }
-+
-+    const currentSession = currentResult.data.session;
-+    const existing = currentSession
-+      ? await verifyAccessToken(current.client, currentSession.access_token)
-+      : null;
-+
-+    if (currentSession && !existing) {
-+      return { outcome: "INVALID_SESSION" };
-+    }
-+
-+    const incoming = stagedClient([]);
-+    const received = await verifyAccessToken(incoming.client, input.accessToken);
-+
-+    if (!received) {
-+      return { outcome: "INVALID_SESSION" };
-+    }
-+
-+    if (received.authenticationMethod !== "otp") {
-+      return { outcome: "PASSWORD_LOGIN_REQUIRED" };
-+    }
-+
-+    if (existing && existing.user.id !== received.user.id) {
-+      return { outcome: "SWITCH_ACCOUNT" };
-+    }
-+
-+    // 有効なaccess tokenでもrefresh tokenを実際に検証し、組合せ違いを拒否する。
-+    const refreshed = await incoming.client.auth.refreshSession({
-+      refresh_token: input.refreshToken,
-+    });
-+    const refreshedToken = refreshed.data.session?.access_token;
-+
-+    if (refreshed.error || !refreshedToken) {
-+      return { outcome: "INVALID_SESSION" };
-+    }
-+
-+    const verified = await verifyAccessToken(incoming.client, refreshedToken);
-+
-+    if (
-+      !verified ||
-+      verified.user.id !== received.user.id ||
-+      verified.user.email !== received.user.email ||
-+      verified.sessionId !== received.sessionId ||
-+      verified.authenticationMethod !== "otp" ||
-+      incoming.pending.size === 0
-+    ) {
-+      return { outcome: "INVALID_SESSION" };
-+    }
-+
-+    // 同一本人がpasswordでログイン済みなら、その認証方法を維持する。
-+    const retainPassword = existing?.authenticationMethod === "password";
-+
-+    return {
-+      outcome: "VERIFIED",
-+      session: retainPassword ? existing : verified,
-+      cookies: Array.from((retainPassword ? current : incoming).pending.values()),
-+    };
-+  } catch {
-+    return { outcome: "INVALID_SESSION" };
-+  }
-+}
-diff --git a/tests/club-invitation-auth.local.integration.test.ts b/tests/club-invitation-auth.local.integration.test.ts
-index 8890805..4f3cac7 100644
---- a/tests/club-invitation-auth.local.integration.test.ts
-+++ b/tests/club-invitation-auth.local.integration.test.ts
-@@ -21,6 +21,12 @@ import {
-   createSupabaseAdminClient,
- } from "@/src/infrastructure/supabase/admin";
- 
-+// 【追加：F06粒度5】実Authの戻り形式・AMRとSSR Cookieの確立を確認する。
-+import {
-+  getVerifiedClubInvitationSession,
-+  prepareClubInvitationSession,
-+} from "@/src/infrastructure/supabase/club-invitation-session";
-+
- const describeLocalAuth = process.env.RUN_CLUB_INVITATION_AUTH_TESTS === "1"
-   ? describe
-   : describe.skip;
-@@ -75,7 +81,8 @@ describeLocalAuth("ローカルSupabaseの招待Auth契約", () => {
-       const destination = new URL("/welcome", origin.origin);
-       destination.search = new URLSearchParams({
-         clubSlug: "local-auth-test",
--        token: "local-test-app-token",
-+        // 【変更：F06粒度5】現行入口の43文字token契約に合わせる。
-+        token: "a".repeat(43),
-       }).toString();
-       redirectTo = destination.toString();
-       admin = createSupabaseAdminClient();
-@@ -213,4 +220,96 @@ describeLocalAuth("ローカルSupabaseの招待Auth契約", () => {
-       expect(Boolean(reused.error)).toBe(true);
-     });
-   });
-+
-+  // 【追加：F06粒度5】メールを送らずverifyを一度だけ開き、実際のLocationを検査する。
-+  it("実inviteリンクのimplicit fragmentから同一本人のSSR sessionを確立できる", async () => {
-+    await safeCheck(async () => {
-+      const invitation = await generateClubInvitationAuthLink({
-+        email: email(),
-+        redirectTo,
-+      });
-+      const verificationUrl = new URL(invitation.actionLink);
-+
-+      if (
-+        verificationUrl.origin !== authUrl ||
-+        verificationUrl.pathname !== "/auth/v1/verify" ||
-+        verificationUrl.username ||
-+        verificationUrl.password
-+      ) {
-+        throw new Error("Local invite endpoint required");
-+      }
-+
-+      const response = await fetch(verificationUrl, {
-+        redirect: "manual",
-+        referrerPolicy: "no-referrer",
-+      });
-+      const location = response.headers.get("location");
-+
-+      if (![302, 303].includes(response.status) || !location) {
-+        throw new Error("Invite redirect unavailable");
-+      }
-+
-+      const destination = new URL(location);
-+      const fragment = new URLSearchParams(destination.hash.slice(1));
-+      const accessToken = fragment.get("access_token");
-+      const refreshToken = fragment.get("refresh_token");
-+
-+      expect(destination.origin === new URL(redirectTo).origin).toBe(true);
-+      expect(destination.pathname === "/welcome").toBe(true);
-+      expect(destination.search === new URL(redirectTo).search).toBe(true);
-+      expect(destination.searchParams.has("code")).toBe(false);
-+      expect(fragment.get("type") === "invite").toBe(true);
-+      expect(fragment.get("token_type") === "bearer").toBe(true);
-+
-+      if (!accessToken || !refreshToken) {
-+        throw new Error("Implicit invitation tokens unavailable");
-+      }
-+
-+      const prepared = await prepareClubInvitationSession({
-+        accessToken,
-+        refreshToken,
-+        currentCookies: [],
-+      });
-+
-+      if (prepared.outcome !== "VERIFIED") {
-+        throw new Error("Verified invitation session unavailable");
-+      }
-+
-+      // 実AMRが異なる環境では公開せず、認証方式の計画を再確認する。
-+      expect(prepared.session.user.id === invitation.user.id).toBe(true);
-+      expect(prepared.session.authenticationMethod === "otp").toBe(true);
-+      expect(prepared.cookies.length > 0).toBe(true);
-+    });
-+  });
-+
-+  // 【追加：F06粒度5】inviteと異なり、パスワードログインはpassword AMRを証明する。
-+  it("実パスワードログインの検証済みAMRで既存アカウントを識別できる", async () => {
-+    await safeCheck(async () => {
-+      const target = email();
-+      const password = `Test-Aa1-${randomUUID()}`;
-+      const created = await admin.auth.admin.createUser({
-+        email: target,
-+        password,
-+        email_confirm: true,
-+      });
-+
-+      if (created.error || !created.data.user) {
-+        throw new Error("Password fixture unavailable");
-+      }
-+
-+      const client = verificationClient();
-+      const login = await client.auth.signInWithPassword({
-+        email: target,
-+        password,
-+      });
-+
-+      if (login.error) {
-+        throw new Error("Password login unavailable");
-+      }
-+
-+      const verified = await getVerifiedClubInvitationSession(client);
-+      expect(verified?.user.id === created.data.user.id).toBe(true);
-+      expect(verified?.authenticationMethod === "password").toBe(true);
-+    });
-+  });
- });
-diff --git a/tests/club-invitation-confirm.test.ts b/tests/club-invitation-confirm.test.ts
-new file mode 100644
-index 0000000..f847738
---- /dev/null
-+++ b/tests/club-invitation-confirm.test.ts
-@@ -0,0 +1,490 @@
-+// tests/club-invitation-confirm.test.ts
-+
-+import {
-+  NextRequest,
-+  NextResponse,
-+} from "next/server";
-+import {
-+  afterEach,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+import {
-+  GET,
-+  POST,
-+} from "@/app/(club-app)/auth/confirm/route";
-+import { InvitationAuthBridge } from "@/app/(club-app)/welcome/InvitationAuthBridge";
-+import {
-+  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
 +  createClubInvitationContext,
 +  serializeClubInvitationContext,
 +} from "@/src/infrastructure/security/club-invitation-context";
++import {
++  acceptClubInvitation,
++} from "./accept-club-invitation";
 +
 +const mocks = vi.hoisted(() => ({
-+  prepare: vi.fn(),
-+  findInvitation: vi.fn(),
-+  verifyOtp: vi.fn(),
-+  effect: vi.fn(),
-+  ref: vi.fn(),
-+  state: vi.fn(),
-+  setStatus: vi.fn(),
++  session: vi.fn(),
++  find: vi.fn(),
++  update: vi.fn(),
++  accept: vi.fn(),
 +}));
 +
 +vi.mock("@/src/infrastructure/supabase/club-invitation-session", () => ({
-+  prepareClubInvitationSession: mocks.prepare,
++  getVerifiedClubInvitationSession: mocks.session,
++  updateClubInvitationPassword: mocks.update,
 +}));
 +vi.mock("@/src/infrastructure/prisma/repositories/club-invitation-repository", () => ({
-+  findClubInvitationAcceptanceForUser: mocks.findInvitation,
-+}));
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: async () => ({
-+    auth: { verifyOtp: mocks.verifyOtp },
-+  }),
-+}));
-+vi.mock("react", async (importOriginal) => ({
-+  ...await importOriginal<typeof import("react")>(),
-+  useEffect: mocks.effect,
-+  useRef: mocks.ref,
-+  useState: mocks.state,
++  findClubInvitationAcceptanceForUser: mocks.find,
++  acceptClubInvitationForUser: mocks.accept,
 +}));
 +
-+const ORIGIN = "https://app.example.test";
-+const ACCESS = "header.payload.signature";
-+const REFRESH = "test-refresh-secret";
-+const PRIVATE_ERROR = "private@example.test test-access-secret test-refresh-secret";
++const NOW = new Date("2026-10-18T00:00:00Z");
 +const USER = {
 +  id: "11111111-1111-4111-8111-111111111111",
 +  email: "member@example.test",
 +};
++const SESSION = {
++  user: USER,
++  authenticationMethod: "otp",
++  sessionId: "22222222-2222-4222-8222-222222222222",
++};
++const PASSWORD = "  Private-password1!  ";
++const PRIVATE_ERROR = `${PASSWORD} private@example.test secret-token`;
 +
-+// 粒度4と同じ形式のcontextを用意し、DBやAuthへ接続しない。
-+function context() {
++// 実Cookie形式と表示時のnonceを用意し、passwordを変換せず渡す。
++function input() {
 +  const value = createClubInvitationContext(new URLSearchParams({
 +    clubSlug: "test-club",
 +    token: "a".repeat(43),
@@ -1292,419 +64,1354 @@ index 0000000..f847738
 +    throw new Error("Test context unavailable");
 +  }
 +
-+  return value;
-+}
-+
-+// 認証Cookieの分割・削除・属性を持つ未確定結果を作る。
-+function prepared() {
 +  return {
-+    outcome: "VERIFIED",
-+    session: {
-+      user: USER,
-+      authenticationMethod: "otp",
-+      sessionId: "22222222-2222-4222-8222-222222222222",
-+    },
-+    cookies: [
-+      {
-+        name: "sb-test-auth-token.0",
-+        value: "new-session-secret",
-+        options: {
-+          path: "/",
-+          secure: true,
-+          httpOnly: true,
-+          sameSite: "lax",
-+          maxAge: 3_600,
-+        },
-+      },
-+      {
-+        name: "sb-test-auth-token.1",
-+        value: "",
-+        options: {
-+          path: "/",
-+          maxAge: 0,
-+        },
-+      },
-+    ],
++    context: serializeClubInvitationContext(value),
++    contextId: value.contextId,
++    password: PASSWORD,
++    confirmation: PASSWORD,
 +  };
 +}
 +
-+// 必要な値だけ上書きできる同一originの招待POSTを作る。
-+function request(options: {
-+  headers?: Record<string, string>;
-+  cookie?: string;
-+  body?: string;
-+  path?: string;
-+} = {}) {
-+  const invitationContext = context();
-+  const body = options.body ?? JSON.stringify({
-+    contextId: invitationContext.contextId,
-+    accessToken: ACCESS,
-+    refreshToken: REFRESH,
-+  });
-+  const cookie = options.cookie ?? serializeClubInvitationContext(invitationContext);
-+
-+  return new NextRequest(ORIGIN + (options.path ?? "/auth/confirm"), {
-+    method: "POST",
-+    headers: {
-+      origin: ORIGIN,
-+      "content-type": "application/json",
-+      cookie: `${CLUB_INVITATION_CONTEXT_COOKIE_NAME}=${cookie}; existing=old-session`,
-+      ...options.headers,
++// 有効な読取結果に含まれる内部IDを、Serviceから返さないことも検証する。
++function available() {
++  return {
++    outcome: "AVAILABLE",
++    invitation: {
++      id: "internal-invitation",
++      clubId: "internal-club",
++      membershipId: "internal-membership",
 +    },
-+    body,
-+  });
++    view: {
++      status: "available",
++      clubName: "招待先クラブ",
++      clubSlug: "canonical-club",
++      expiresAt: "2026-10-19T00:00:00Z",
++    },
++  };
++}
++
++// 公開結果に認証情報やパスワード、内部IDが含まれないことを確認する。
++function expectSafe(value: unknown): void {
++  const text = JSON.stringify(value);
++  for (const secret of [PASSWORD, USER.email, USER.id, PRIVATE_ERROR, "internal-"]) {
++    expect(text).not.toContain(secret);
++  }
 +}
 +
 +beforeEach(() => {
 +  vi.resetAllMocks();
-+  mocks.prepare.mockResolvedValue(prepared());
-+  mocks.findInvitation.mockResolvedValue({ outcome: "AVAILABLE" });
-+  mocks.verifyOtp.mockResolvedValue({ error: null });
++  vi.useFakeTimers();
++  vi.setSystemTime(NOW);
++  mocks.session.mockResolvedValue(SESSION);
++  mocks.find.mockResolvedValue(available());
++  mocks.update.mockResolvedValue({
++    outcome: "UPDATED",
++    user: USER,
++  });
++  mocks.accept.mockResolvedValue({
++    outcome: "ACCEPTED",
++    clubSlug: "canonical-club",
++  });
 +});
 +
 +afterEach(() => {
++  vi.useRealTimers();
 +  vi.restoreAllMocks();
-+  vi.unstubAllGlobals();
 +});
 +
-+describe("invite専用confirm POST", () => {
-+  it("本人とDB招待の一致後に全Cookieを付け、固定のwelcomeを返す", async () => {
-+    const req = request();
-+    const response = await POST(req);
-+
-+    expect(response.status).toBe(200);
-+    expect(await response.json()).toEqual({
-+      status: "confirmed",
-+      redirectTo: "/welcome",
++describe("acceptClubInvitation", () => {
++  it("新規は本人・最新招待・Auth更新・DB承諾の順に一度ずつ進む", async () => {
++    const result = await acceptClubInvitation(input());
++    expect(result).toEqual({
++      outcome: "ACCEPTED",
++      clubSlug: "canonical-club",
 +    });
-+    expect(response.headers.get("cache-control")).toBe("no-store");
-+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
-+    expect(response.headers.has("location")).toBe(false);
-+    expect(mocks.prepare).toHaveBeenCalledWith({
-+      accessToken: ACCESS,
-+      refreshToken: REFRESH,
-+      currentCookies: req.cookies.getAll(),
++    expect(mocks.update).toHaveBeenCalledExactlyOnceWith({
++      password: PASSWORD,
++      expectedSession: SESSION,
 +    });
-+    expect(mocks.findInvitation).toHaveBeenCalledWith({
++    expect(mocks.accept).toHaveBeenCalledExactlyOnceWith({
 +      clubSlug: "test-club",
 +      tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
 +      authenticatedUser: USER,
 +    });
-+    expect(response.cookies.get("sb-test-auth-token.0")).toMatchObject({
-+      ...prepared().cookies[0].options,
-+      value: "new-session-secret",
++    expect(mocks.session.mock.invocationCallOrder[0])
++      .toBeLessThan(mocks.find.mock.invocationCallOrder[0]);
++    expect(mocks.find.mock.invocationCallOrder[0])
++      .toBeLessThan(mocks.update.mock.invocationCallOrder[0]);
++    expect(mocks.update.mock.invocationCallOrder[0])
++      .toBeLessThan(mocks.accept.mock.invocationCallOrder[0]);
++    expectSafe(result);
++  });
++
++  it("既存password本人はPW入力を使用せずAuth更新0回で承諾する", async () => {
++    mocks.session.mockResolvedValue({
++      ...SESSION,
++      authenticationMethod: "password",
 +    });
-+    expect(response.cookies.get("sb-test-auth-token.1")?.maxAge).toBe(0);
-+  });
-+
-+  it.each<Record<string, string>>([
-+    { origin: "https://other.example.test" },
-+    { origin: "null" },
-+    { origin: "" },
-+    { "content-type": "text/plain" },
-+    { "content-type": "application/x-www-form-urlencoded" },
-+    { "sec-fetch-site": "cross-site" },
-+    { "content-encoding": "gzip" },
-+  ])("Originと送信形式が不正ならAuthを呼ばない %#", async (headers) => {
-+    const response = await POST(request({ headers }));
-+    expect(response.status).toBe(403);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+    expect(response.cookies.getAll()).toEqual([]);
-+  });
-+
-+  it("UTF-8 JSONを受け付ける", async () => {
-+    expect((await POST(request({
-+      headers: { "content-type": "application/json; charset=utf-8" },
-+    }))).status).toBe(200);
-+  });
-+
-+  it.each(["", "tampered-cookie"])("欠落・改竄contextを拒否する %#", async (cookie) => {
-+    const response = await POST(request({ cookie }));
-+    expect(response.status).toBe(400);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+  });
-+
-+  it("期限切れcontextを拒否する", async () => {
-+    const expired = context();
-+    expired.expiresAt = Date.now() - 1;
-+    expect((await POST(request({
-+      cookie: serializeClubInvitationContext(expired),
-+    }))).status).toBe(400);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
++    const result = await acceptClubInvitation({
++      ...input(),
++      password: new Blob(["invalid password"]),
++      confirmation: null,
++    });
++    expect(result.outcome).toBe("ACCEPTED");
++    expect(mocks.update).not.toHaveBeenCalled();
++    expect(mocks.accept).toHaveBeenCalledTimes(1);
 +  });
 +
 +  it.each([
-+    "{",
-+    "null",
-+    "[]",
-+    JSON.stringify({
-+      contextId: "another-tab",
-+      accessToken: ACCESS,
-+      refreshToken: REFRESH,
-+    }),
-+    "x".repeat(16_385),
-+  ])("不正・過大bodyを安全に拒否する %#", async (body) => {
-+    const response = await POST(request({ body }));
-+    expect(response.status).toBe(400);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+    expect(response.cookies.getAll()).toEqual([]);
++    { context: undefined },
++    { context: "invalid-cookie" },
++    { contextId: "different-tab" },
++    { contextId: undefined },
++  ])("context不正では外部処理をしない %#", async (change) => {
++    expect(await acceptClubInvitation({
++      ...input(),
++      ...change,
++    })).toEqual({
++      outcome: "UNAVAILABLE",
++      reason: "INVALID_INVITATION",
++    });
++    expect(mocks.session).not.toHaveBeenCalled();
++    expect(mocks.update).not.toHaveBeenCalled();
++    expect(mocks.accept).not.toHaveBeenCalled();
++  });
++
++  it("context期限切れでは外部処理をしない", async () => {
++    const values = input();
++    vi.setSystemTime(new Date(NOW.getTime() + 15 * 60_000));
++    expect((await acceptClubInvitation(values)).outcome).toBe("UNAVAILABLE");
++    expect(mocks.session).not.toHaveBeenCalled();
 +  });
 +
 +  it.each([
-+    { accessToken: "invalid" },
-+    { accessToken: "a".repeat(8_193) },
-+    { refreshToken: "" },
-+    { refreshToken: "x".repeat(2_049) },
-+    { refreshToken: "line\nbreak" },
-+    { redirectTo: "https://other.example.test" },
-+  ])("token形式・追加プロパティを拒否する %#", async (change) => {
-+    const value = context();
-+    const response = await POST(request({
-+      cookie: serializeClubInvitationContext(value),
-+      body: JSON.stringify({
-+        contextId: value.contextId,
-+        accessToken: ACCESS,
-+        refreshToken: REFRESH,
-+        ...change,
-+      }),
-+    }));
-+    expect(response.status).toBe(400);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+  });
-+
-+  it("Content-Lengthの事前上限を検査する", async () => {
-+    expect((await POST(request({
-+      headers: { "content-length": "20000" },
-+    }))).status).toBe(400);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
-+  });
-+
-+  it("queryの遷移指定やtokenを受け付けない", async () => {
-+    expect((await POST(request({ path: "/auth/confirm?next=//other.test" }))).status).toBe(403);
-+    expect(mocks.prepare).not.toHaveBeenCalled();
++    [null, "AUTHENTICATION_REQUIRED"],
++    [{
++      ...SESSION,
++      authenticationMethod: "unknown",
++    }, "PASSWORD_LOGIN_REQUIRED"],
++  ])("未認証やAMR不明なら更新しない %#", async (session, outcome) => {
++    mocks.session.mockResolvedValue(session);
++    expect(await acceptClubInvitation(input())).toEqual({ outcome });
++    expect(mocks.find).not.toHaveBeenCalled();
++    expect(mocks.update).not.toHaveBeenCalled();
++    expect(mocks.accept).not.toHaveBeenCalled();
 +  });
 +
 +  it.each([
-+    ["INVALID_SESSION", "invalid-invitation"],
-+    ["SWITCH_ACCOUNT", "switch-account"],
-+    ["PASSWORD_LOGIN_REQUIRED", "login-required"],
-+  ])(
-+    "%sでは既存Cookieを変更せず固定の案内だけ返す",
-+    async (outcome, expectedStatus) => {
-+      mocks.prepare.mockResolvedValue({ outcome });
-+      const response = await POST(request());
-+      expect(response.status).toBe(409);
-+      expect(await response.json()).toEqual({
-+        status: expectedStatus,
++    { password: "short1" },
++    { password: "abcdefgh" },
++    { password: "12345678" },
++    { password: [PASSWORD] },
++    { confirmation: "different" },
++    { confirmation: null },
++  ])("初回入力不正では招待読取・Auth・DB更新0回 %#", async (change) => {
++    const result = await acceptClubInvitation({
++      ...input(),
++      ...change,
++    });
++    expect(result.outcome).toBe("INVALID_INPUT");
++    expect(mocks.find).not.toHaveBeenCalled();
++    expect(mocks.update).not.toHaveBeenCalled();
++    expect(mocks.accept).not.toHaveBeenCalled();
++    expectSafe(result);
++  });
++
++  it.each([
++    "RECIPIENT_MISMATCH",
++    "INVITATION_EMAIL_MISMATCH",
++    "INVITATION_EXPIRED",
++    "INVITATION_CANCELLED",
++    "INVITATION_ALREADY_ACCEPTED",
++    "MEMBERSHIP_MISMATCH",
++  ])("招待が%sならpasswordを更新しない", async (reason) => {
++    mocks.find.mockResolvedValue({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason,
++      },
++    });
++    expect(await acceptClubInvitation(input())).toEqual({
++      outcome: "UNAVAILABLE",
++      reason,
++    });
++    expect(mocks.update).not.toHaveBeenCalled();
++    expect(mocks.accept).not.toHaveBeenCalled();
++  });
++
++  it("読取中のcontext失効ではAuth更新しない", async () => {
++    const values = input();
++    mocks.find.mockImplementation(async () => {
++      vi.setSystemTime(new Date(NOW.getTime() + 15 * 60_000));
++      return available();
++    });
++    expect((await acceptClubInvitation(values)).outcome).toBe("UNAVAILABLE");
++    expect(mocks.update).not.toHaveBeenCalled();
++  });
++
++  it.each(["PASSWORD_REJECTED", "REAUTHENTICATION_REQUIRED"])(
++    "Authが%sを明示した場合はDB更新0回",
++    async (reason) => {
++      mocks.update.mockResolvedValue({
++        outcome: "REJECTED",
++        reason,
 +      });
-+      expect(response.cookies.getAll()).toEqual([]);
-+      expect(mocks.findInvitation).not.toHaveBeenCalled();
++      expect(await acceptClubInvitation(input())).toEqual({
++        outcome: "PASSWORD_UPDATE_REJECTED",
++        reason,
++      });
++      expect(mocks.accept).not.toHaveBeenCalled();
 +    },
 +  );
 +
-+  it("DBが招待の不一致・取消・失効を返せばCookieを確定しない", async () => {
-+    mocks.findInvitation.mockResolvedValue({ outcome: "UNAVAILABLE" });
-+    const response = await POST(request());
-+    expect(response.status).toBe(400);
-+    expect(response.cookies.getAll()).toEqual([]);
-+    expect(await response.json()).toEqual({ status: "invalid-invitation" });
++  it.each([
++    ["AUTHENTICATION_REQUIRED", "AUTHENTICATION_REQUIRED"],
++    ["SESSION_CHANGED", "AUTHENTICATION_REQUIRED"],
++    ["PASSWORD_LOGIN_REQUIRED", "PASSWORD_LOGIN_REQUIRED"],
++  ])("更新直前の%sではDB更新0回", async (adapterOutcome, outcome) => {
++    mocks.update.mockResolvedValue({ outcome: adapterOutcome });
++    expect(await acceptClubInvitation(input())).toEqual({ outcome });
++    expect(mocks.accept).not.toHaveBeenCalled();
 +  });
 +
-+  it.each(["prepare", "findInvitation"] as const)(
-+    "%sの秘密を含む例外を表示・ログへ出さない",
-+    async (method) => {
-+      mocks[method].mockRejectedValue(new Error(PRIVATE_ERROR));
++  it.each([false, true])("Auth結果不明を自動再試行しない: %s", async (throws) => {
++    if (throws) {
++      mocks.update.mockRejectedValue(new Error(PRIVATE_ERROR));
++    } else {
++      mocks.update.mockResolvedValue({ outcome: "UNKNOWN" });
++    }
++    const result = await acceptClubInvitation(input());
++    expect(result).toEqual({
++      outcome: "PASSWORD_UPDATE_UNKNOWN",
++      recovery: "PASSWORD_LOGIN",
++    });
++    expect(mocks.update).toHaveBeenCalledTimes(1);
++    expect(mocks.accept).not.toHaveBeenCalled();
++    expectSafe(result);
++  });
++
++  it.each([
++    { outcome: "CONFLICT" },
++    {
++      outcome: "UNAVAILABLE",
++      reason: "INVITATION_EXPIRED",
++    },
++  ])("Auth成功後のDB不成立を部分成功として返す %#", async (dbResult) => {
++    mocks.accept.mockResolvedValue(dbResult);
++    const result = await acceptClubInvitation(input());
++    expect(result).toEqual({
++      outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE",
++      reason: dbResult.outcome === "CONFLICT" ? "CONFLICT" : "INVITATION_EXPIRED",
++      recovery: "PASSWORD_LOGIN",
++    });
++    expect(mocks.update).toHaveBeenCalledTimes(1);
++    expectSafe(result);
++  });
++
++  it("Auth成功後にcontextが失効したらDB承諾せず部分成功を返す", async () => {
++    const values = input();
++    mocks.update.mockImplementation(async () => {
++      vi.setSystemTime(new Date(NOW.getTime() + 15 * 60_000));
++      return {
++        outcome: "UPDATED",
++        user: USER,
++      };
++    });
++    expect(await acceptClubInvitation(values)).toEqual({
++      outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE",
++      reason: "INVALID_INVITATION",
++      recovery: "PASSWORD_LOGIN",
++    });
++    expect(mocks.accept).not.toHaveBeenCalled();
++  });
++
++  it("Auth成功DB例外後は、passwordログインによる再承諾でAuthを再更新しない", async () => {
++    const values = input();
++    mocks.accept.mockRejectedValueOnce(new DomainError("INTERNAL", PRIVATE_ERROR));
++    const failed = await acceptClubInvitation(values);
++    expect(failed).toEqual({
++      outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE",
++      reason: "PROCESSING_FAILED",
++      recovery: "PASSWORD_LOGIN",
++    });
++    mocks.session.mockResolvedValue({
++      ...SESSION,
++      authenticationMethod: "password",
++    });
++    expect((await acceptClubInvitation(values)).outcome).toBe("ACCEPTED");
++    expect(mocks.update).toHaveBeenCalledTimes(1);
++    expectSafe(failed);
++  });
++
++  it.each(["CONFLICT", "UNAVAILABLE"])("既存本人のDB結果%sを区別する", async (outcome) => {
++    mocks.session.mockResolvedValue({
++      ...SESSION,
++      authenticationMethod: "password",
++    });
++    mocks.accept.mockResolvedValue({
++      outcome,
++      reason: "INVITATION_CANCELLED",
++    });
++    const result = await acceptClubInvitation(input());
++    expect(result).toEqual(outcome === "CONFLICT"
++      ? { outcome: "CONFLICT" }
++      : {
++          outcome: "UNAVAILABLE",
++          reason: "INVITATION_CANCELLED",
++        });
++    expect(mocks.update).not.toHaveBeenCalled();
++  });
++
++  it("同時承諾のDB競合を伝え、Serviceから再更新しない", async () => {
++    mocks.session.mockResolvedValue({
++      ...SESSION,
++      authenticationMethod: "password",
++    });
++    let accepted = false;
++    mocks.accept.mockImplementation(async () => {
++      if (accepted) {
++        return { outcome: "CONFLICT" };
++      }
++      accepted = true;
++      return {
++        outcome: "ACCEPTED",
++        clubSlug: "canonical-club",
++      };
++    });
++    const values = input();
++    const results = await Promise.all([
++      acceptClubInvitation(values),
++      acceptClubInvitation(values),
++    ]);
++    expect(results.filter((result) => result.outcome === "ACCEPTED")).toHaveLength(1);
++    expect(results.filter((result) => result.outcome === "CONFLICT")).toHaveLength(1);
++    expect(mocks.accept).toHaveBeenCalledTimes(2);
++    expect(mocks.update).not.toHaveBeenCalled();
++  });
++
++  it.each(["session", "find", "accept"] as const)(
++    "%sの原文・cause・個人情報を公開結果やログへ渡さない",
++    async (operation) => {
++      mocks.session.mockResolvedValue({
++        ...SESSION,
++        authenticationMethod: "password",
++      });
++      mocks[operation].mockRejectedValue(new DomainError("EXTERNAL_SERVICE", PRIVATE_ERROR, {
++        cause: new Error(PRIVATE_ERROR),
++      }));
 +      const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-+      const response = await POST(request());
-+      expect(response.cookies.getAll()).toEqual([]);
-+      expect(await response.text()).not.toContain(PRIVATE_ERROR);
++      const result = await acceptClubInvitation(input());
++      expect(result).toEqual({ outcome: "PROCESSING_FAILED" });
++      expectSafe(result);
++      expect(log).not.toHaveBeenCalled();
++      expect(mocks.update).not.toHaveBeenCalled();
++    },
++  );
++});
+diff --git a/src/application/club/invitation/accept-club-invitation.ts b/src/application/club/invitation/accept-club-invitation.ts
+new file mode 100644
+index 0000000..fb2c359
+--- /dev/null
++++ b/src/application/club/invitation/accept-club-invitation.ts
+@@ -0,0 +1,231 @@
++// src/application/club/invitation/accept-club-invitation.ts
++
++import "server-only";
++
++import {
++  validateWelcomeInput,
++  type WelcomeFormField,
++} from "@/domain/club/invitation/acceptance-form";
++import type {
++  ClubInvitationAcceptanceViolation,
++} from "@/domain/club/invitation/acceptance-policy";
++import type { FieldErrors } from "@/domain/shared/action-state";
++import {
++  acceptClubInvitationForUser,
++  findClubInvitationAcceptanceForUser,
++} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++import {
++  parseClubInvitationContext,
++} from "@/src/infrastructure/security/club-invitation-context";
++import {
++  getVerifiedClubInvitationSession,
++  updateClubInvitationPassword,
++} from "@/src/infrastructure/supabase/club-invitation-session";
++
++export type AcceptClubInvitationResult =
++  | {
++      outcome: "ACCEPTED";
++      clubSlug: string;
++    }
++  | {
++      outcome: "INVALID_INPUT";
++      fieldErrors: FieldErrors<WelcomeFormField>;
++    }
++  | {
++      outcome: "UNAVAILABLE";
++      reason: ClubInvitationAcceptanceViolation;
++    }
++  | {
++      outcome:
++        | "AUTHENTICATION_REQUIRED"
++        | "PASSWORD_LOGIN_REQUIRED"
++        | "CONFLICT"
++        | "PROCESSING_FAILED";
++    }
++  | {
++      outcome: "PASSWORD_UPDATE_REJECTED";
++      reason: "PASSWORD_REJECTED" | "REAUTHENTICATION_REQUIRED";
++    }
++  | {
++      outcome: "PASSWORD_UPDATE_UNKNOWN";
++      recovery: "PASSWORD_LOGIN";
++    }
++  | {
++      outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE";
++      reason: ClubInvitationAcceptanceViolation | "CONFLICT" | "PROCESSING_FAILED";
++      recovery: "PASSWORD_LOGIN";
++    };
++
++// Auth更新とDB承諾は別処理として扱い、結果不明時に自動で再更新しない。
++export async function acceptClubInvitation(input: {
++  context: unknown;
++  contextId: unknown;
++  password?: unknown;
++  confirmation?: unknown;
++}): Promise<AcceptClubInvitationResult> {
++  const context = parseClubInvitationContext(input.context);
++
++  if (!context || input.contextId !== context.contextId) {
++    return {
++      outcome: "UNAVAILABLE",
++      reason: "INVALID_INVITATION",
++    };
++  }
++
++  let passwordUpdateStarted = false;
++  let passwordUpdated = false;
++
++  try {
++    const session = await getVerifiedClubInvitationSession();
++
++    if (!session) {
++      return {
++        outcome: "AUTHENTICATION_REQUIRED",
++      };
++    }
++
++    if (session.authenticationMethod === "unknown") {
++      return {
++        outcome: "PASSWORD_LOGIN_REQUIRED",
++      };
++    }
++
++    // 経路は検証済みAMRで決める。password認証済みなら入力値を使用しない。
++    const validation = session.authenticationMethod === "otp"
++      ? validateWelcomeInput({
++          password: input.password,
++          confirmation: input.confirmation,
++        })
++      : null;
++
++    if (validation && !validation.success) {
++      return {
++        outcome: "INVALID_INPUT",
++        fieldErrors: validation.fieldErrors,
++      };
++    }
++
++    const invitation = await findClubInvitationAcceptanceForUser({
++      clubSlug: context.clubSlug,
++      tokenHash: context.tokenHash,
++      authenticatedUser: session.user,
++    });
++
++    if (invitation.outcome === "UNAVAILABLE") {
++      return {
++        outcome: "UNAVAILABLE",
++        reason: invitation.view.reason,
++      };
++    }
++
++    if (context.expiresAt <= Date.now()) {
++      return {
++        outcome: "UNAVAILABLE",
++        reason: "INVALID_INVITATION",
++      };
++    }
++
++    let authenticatedUser = session.user;
++
++    if (validation?.success) {
++      passwordUpdateStarted = true;
++      const updated = await updateClubInvitationPassword({
++        password: validation.data.password,
++        expectedSession: session,
++      });
++
++      if (updated.outcome === "UNKNOWN") {
++        return {
++          outcome: "PASSWORD_UPDATE_UNKNOWN",
++          recovery: "PASSWORD_LOGIN",
++        };
++      }
++
++      if (updated.outcome === "REJECTED") {
++        return {
++          outcome: "PASSWORD_UPDATE_REJECTED",
++          reason: updated.reason,
++        };
++      }
++
++      if (updated.outcome === "PASSWORD_LOGIN_REQUIRED") {
++        return {
++          outcome: "PASSWORD_LOGIN_REQUIRED",
++        };
++      }
++
++      if (updated.outcome !== "UPDATED") {
++        return {
++          outcome: "AUTHENTICATION_REQUIRED",
++        };
++      }
++
++      passwordUpdated = true;
++      authenticatedUser = updated.user;
++    }
++
++    if (context.expiresAt <= Date.now()) {
++      return passwordUpdated
++        ? {
++            outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE",
++            reason: "INVALID_INVITATION",
++            recovery: "PASSWORD_LOGIN",
++          }
++        : {
++            outcome: "UNAVAILABLE",
++            reason: "INVALID_INVITATION",
++          };
++    }
++
++    // nowは固定して渡さず、Repositoryが書込時点の期限・状態・本人を再確認する。
++    const accepted = await acceptClubInvitationForUser({
++      clubSlug: context.clubSlug,
++      tokenHash: context.tokenHash,
++      authenticatedUser,
++    });
++
++    if (accepted.outcome === "ACCEPTED") {
++      return {
++        outcome: "ACCEPTED",
++        clubSlug: accepted.clubSlug,
++      };
++    }
++
++    if (passwordUpdated) {
++      return {
++        outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE",
++        reason: accepted.outcome === "UNAVAILABLE" ? accepted.reason : "CONFLICT",
++        recovery: "PASSWORD_LOGIN",
++      };
++    }
++
++    return accepted.outcome === "UNAVAILABLE"
++      ? {
++          outcome: "UNAVAILABLE",
++          reason: accepted.reason,
++        }
++      : {
++          outcome: "CONFLICT",
++        };
++  } catch {
++    // passwordはDBのrollbackで戻せない。DBの成否不明も完了とは扱わない。
++    if (passwordUpdated) {
++      return {
++        outcome: "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE",
++        reason: "PROCESSING_FAILED",
++        recovery: "PASSWORD_LOGIN",
++      };
++    }
++
++    if (passwordUpdateStarted) {
++      return {
++        outcome: "PASSWORD_UPDATE_UNKNOWN",
++        recovery: "PASSWORD_LOGIN",
++      };
++    }
++
++    return {
++      outcome: "PROCESSING_FAILED",
++    };
++  }
++}
+diff --git a/src/application/club/invitation/get-club-invitation-acceptance.test.ts b/src/application/club/invitation/get-club-invitation-acceptance.test.ts
+new file mode 100644
+index 0000000..638f50b
+--- /dev/null
++++ b/src/application/club/invitation/get-club-invitation-acceptance.test.ts
+@@ -0,0 +1,198 @@
++// src/application/club/invitation/get-club-invitation-acceptance.test.ts
++
++import {
++  afterEach,
++  beforeEach,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
++
++import {
++  createClubInvitationContext,
++  serializeClubInvitationContext,
++} from "@/src/infrastructure/security/club-invitation-context";
++import {
++  getClubInvitationAcceptance,
++} from "./get-club-invitation-acceptance";
++
++const mocks = vi.hoisted(() => ({
++  session: vi.fn(),
++  find: vi.fn(),
++}));
++
++vi.mock("@/src/infrastructure/supabase/club-invitation-session", () => ({
++  getVerifiedClubInvitationSession: mocks.session,
++}));
++vi.mock("@/src/infrastructure/prisma/repositories/club-invitation-repository", () => ({
++  findClubInvitationAcceptanceForUser: mocks.find,
++}));
++
++const NOW = new Date("2026-10-18T00:00:00Z");
++const USER = {
++  id: "11111111-1111-4111-8111-111111111111",
++  email: "member@example.test",
++};
++const PRIVATE_ERROR = "private@example.test secret-password1 secret-token";
++const VIEW = {
++  status: "available",
++  clubName: "招待先クラブ",
++  clubSlug: "canonical-club",
++  expiresAt: "2026-10-19T00:00:00.000Z",
++};
++
++// 実際のCookie形式を使い、解析処理も含めて確認する。
++function context(): string {
++  const value = createClubInvitationContext(new URLSearchParams({
++    clubSlug: "test-club",
++    token: "a".repeat(43),
++  }));
++
++  if (!value) {
++    throw new Error("Test context unavailable");
++  }
++
++  return serializeClubInvitationContext(value);
++}
++
++beforeEach(() => {
++  vi.resetAllMocks();
++  vi.useFakeTimers();
++  vi.setSystemTime(NOW);
++  mocks.session.mockResolvedValue({
++    user: USER,
++    authenticationMethod: "otp",
++    sessionId: "22222222-2222-4222-8222-222222222222",
++  });
++  mocks.find.mockResolvedValue({
++    outcome: "AVAILABLE",
++    invitation: {
++      id: "internal-invitation",
++      clubId: "internal-club",
++      membershipId: "internal-membership",
++    },
++    view: {
++      ...VIEW,
++      tokenHash: "internal-hash",
++      email: USER.email,
++    },
++  });
++});
++
++afterEach(() => {
++  vi.useRealTimers();
++  vi.restoreAllMocks();
++});
++
++describe("getClubInvitationAcceptance", () => {
++  it.each(["otp", "password"])("%s本人の表示DTOだけを返す", async (method) => {
++    mocks.session.mockResolvedValue({
++      user: USER,
++      authenticationMethod: method,
++    });
++    const result = await getClubInvitationAcceptance({ context: context() });
++
++    expect(result).toEqual({
++      outcome: "AVAILABLE",
++      authenticationMethod: method,
++      view: VIEW,
++    });
++    expect(mocks.find).toHaveBeenCalledExactlyOnceWith({
++      clubSlug: "test-club",
++      tokenHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
++      authenticatedUser: USER,
++    });
++    expect(JSON.stringify(result)).not.toContain(USER.id);
++    expect(JSON.stringify(result)).not.toContain(USER.email);
++    expect(JSON.stringify(result)).not.toContain("internal-");
++  });
++
++  it.each([undefined, null, "invalid-cookie", {}])(
++    "不正contextでは本人照会もDB読取もしない %#",
++    async (value) => {
++      expect(await getClubInvitationAcceptance({ context: value })).toEqual({
++        outcome: "UNAVAILABLE",
++        view: {
++          status: "unavailable",
++          reason: "INVALID_INVITATION",
++        },
++      });
++      expect(mocks.session).not.toHaveBeenCalled();
++      expect(mocks.find).not.toHaveBeenCalled();
++    },
++  );
++
++  it("本人が未認証なら招待の状態を調べない", async () => {
++    mocks.session.mockResolvedValue(null);
++    expect(await getClubInvitationAcceptance({ context: context() })).toEqual({
++      outcome: "AUTHENTICATION_REQUIRED",
++    });
++    expect(mocks.find).not.toHaveBeenCalled();
++  });
++
++  it("AMRが不明ならパスワードログインへ案内する", async () => {
++    mocks.session.mockResolvedValue({
++      user: USER,
++      authenticationMethod: "unknown",
++    });
++    expect(await getClubInvitationAcceptance({ context: context() })).toEqual({
++      outcome: "PASSWORD_LOGIN_REQUIRED",
++    });
++    expect(mocks.find).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    "RECIPIENT_MISMATCH",
++    "INVITATION_EMAIL_MISMATCH",
++    "INVITATION_CANCELLED",
++    "INVITATION_EXPIRED",
++    "INVITATION_ALREADY_ACCEPTED",
++  ])("本人照合後の理由%sを安全なDTOで返す", async (reason) => {
++    mocks.find.mockResolvedValue({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason,
++        email: PRIVATE_ERROR,
++      },
++    });
++    expect(await getClubInvitationAcceptance({ context: context() })).toEqual({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason,
++      },
++    });
++  });
++
++  it("読取中にcontextが失効したらavailableにしない", async () => {
++    const cookie = context();
++    mocks.find.mockImplementation(async () => {
++      vi.setSystemTime(new Date(NOW.getTime() + 15 * 60_000));
++      return {
++        outcome: "AVAILABLE",
++        view: VIEW,
++      };
++    });
++    expect((await getClubInvitationAcceptance({ context: cookie })).outcome).toBe("UNAVAILABLE");
++  });
++
++  it.each(["session", "find"] as const)(
++    "%sの秘密を含む例外をDTOやログへ渡さない",
++    async (operation) => {
++      mocks[operation].mockRejectedValue(new Error(PRIVATE_ERROR));
++      const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
++      const result = await getClubInvitationAcceptance({ context: context() });
++      expect(result).toEqual({
++        outcome: "ERROR",
++        view: {
++          status: "error",
++          reason: "PROCESSING_FAILED",
++        },
++      });
++      expect(JSON.stringify(result)).not.toContain(PRIVATE_ERROR);
 +      expect(log).not.toHaveBeenCalled();
 +    },
 +  );
-+
-+  it("Cookie書込途中の失敗では作成途中の応答全体を破棄する", async () => {
-+    const prototype = Object.getPrototypeOf(NextResponse.next().cookies);
-+    const original = prototype.set;
-+    let calls = 0;
-+    vi.spyOn(prototype, "set").mockImplementation(function (
-+      this: object,
-+      ...args: unknown[]
-+    ) {
-+      calls += 1;
-+      if (calls === 2) {
-+        throw new Error(PRIVATE_ERROR);
-+      }
-+      return original.apply(this, args);
-+    });
-+    const response = await POST(request());
-+    expect(response.status).toBe(400);
-+    expect(response.cookies.getAll()).toEqual([]);
-+  });
 +});
+diff --git a/src/application/club/invitation/get-club-invitation-acceptance.ts b/src/application/club/invitation/get-club-invitation-acceptance.ts
+new file mode 100644
+index 0000000..d72aa93
+--- /dev/null
++++ b/src/application/club/invitation/get-club-invitation-acceptance.ts
+@@ -0,0 +1,113 @@
++// src/application/club/invitation/get-club-invitation-acceptance.ts
 +
-+describe("recovery GETの回帰", () => {
-+  it("既存のOTP確認後は固定のPW再設定ページへ進む", async () => {
-+    const response = await GET(new Request(
-+      `${ORIGIN}/auth/confirm?token_hash=recovery-test&type=recovery&next=//other.test`,
-+    ));
-+    expect(mocks.verifyOtp).toHaveBeenCalledWith({
-+      token_hash: "recovery-test",
-+      type: "recovery",
++import "server-only";
++
++import type {
++  ClubInvitationAcceptanceView,
++} from "@/domain/club/invitation/acceptance-policy";
++import {
++  findClubInvitationAcceptanceForUser,
++} from "@/src/infrastructure/prisma/repositories/club-invitation-repository";
++import {
++  parseClubInvitationContext,
++} from "@/src/infrastructure/security/club-invitation-context";
++import {
++  getVerifiedClubInvitationSession,
++} from "@/src/infrastructure/supabase/club-invitation-session";
++
++export type GetClubInvitationAcceptanceResult =
++  | {
++      outcome: "AVAILABLE";
++      authenticationMethod: "password" | "otp";
++      view: Extract<ClubInvitationAcceptanceView, { status: "available" }>;
++    }
++  | {
++      outcome: "UNAVAILABLE";
++      view: Extract<ClubInvitationAcceptanceView, { status: "unavailable" }>;
++    }
++  | {
++      outcome: "AUTHENTICATION_REQUIRED" | "PASSWORD_LOGIN_REQUIRED";
++    }
++  | {
++      outcome: "ERROR";
++      view: Extract<ClubInvitationAcceptanceView, { status: "error" }>;
++    };
++
++// 未信頼のCookieと現在の本人を照合し、画面に必要なDTOだけを返す。
++export async function getClubInvitationAcceptance(input: {
++  context: unknown;
++}): Promise<GetClubInvitationAcceptanceResult> {
++  const context = parseClubInvitationContext(input.context);
++
++  if (!context) {
++    return {
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "INVALID_INVITATION",
++      },
++    };
++  }
++
++  try {
++    const session = await getVerifiedClubInvitationSession();
++
++    if (!session) {
++      return {
++        outcome: "AUTHENTICATION_REQUIRED",
++      };
++    }
++
++    if (session.authenticationMethod === "unknown") {
++      return {
++        outcome: "PASSWORD_LOGIN_REQUIRED",
++      };
++    }
++
++    const result = await findClubInvitationAcceptanceForUser({
++      clubSlug: context.clubSlug,
++      tokenHash: context.tokenHash,
++      authenticatedUser: session.user,
 +    });
-+    expect(response.headers.get("location")).toBe(`${ORIGIN}/club-login/reset-password`);
-+    expect(response.headers.get("cache-control")).toBe("no-store");
-+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
++
++    if (context.expiresAt <= Date.now()) {
++      return {
++        outcome: "UNAVAILABLE",
++        view: {
++          status: "unavailable",
++          reason: "INVALID_INVITATION",
++        },
++      };
++    }
++
++    if (result.outcome === "UNAVAILABLE") {
++      return {
++        outcome: "UNAVAILABLE",
++        view: {
++          status: "unavailable",
++          reason: result.view.reason,
++        },
++      };
++    }
++
++    return {
++      outcome: "AVAILABLE",
++      authenticationMethod: session.authenticationMethod,
++      view: {
++        status: "available",
++        clubName: result.view.clubName,
++        clubSlug: result.view.clubSlug,
++        expiresAt: result.view.expiresAt,
++      },
++    };
++  } catch {
++    // DomainErrorの任意メッセージや外部例外も公開結果へ反射しない。
++    return {
++      outcome: "ERROR",
++      view: {
++        status: "error",
++        reason: "PROCESSING_FAILED",
++      },
++    };
++  }
++}
+diff --git a/src/infrastructure/supabase/club-invitation-session.test.ts b/src/infrastructure/supabase/club-invitation-session.test.ts
+index f470437..3b15266 100644
+--- a/src/infrastructure/supabase/club-invitation-session.test.ts
++++ b/src/infrastructure/supabase/club-invitation-session.test.ts
+@@ -14,8 +14,16 @@ import {
+ import {
+   getVerifiedClubInvitationSession,
+   prepareClubInvitationSession,
++  // 【追加：F06粒度6】初回password更新の本人照合と障害境界を検証する。
++  updateClubInvitationPassword,
+ } from "./club-invitation-session";
+ 
++// 【追加：F06粒度6】SDKの固定拒否コードと不明な失敗を区別する。
++import {
++  AuthApiError,
++  AuthWeakPasswordError,
++} from "@supabase/supabase-js";
++
+ const mocks = vi.hoisted(() => ({
+   createServerClient: vi.fn(),
+   createClient: vi.fn(),
+@@ -490,3 +498,259 @@ describe("実SSR SDKとの境界", () => {
+     }
+   });
+ });
++
++// 【追加：F06粒度6】admin APIを使用せず、本人のsessionだけでpasswordを更新する。
++describe("updateClubInvitationPassword", () => {
++  const password = "  Private-password1!  ";
++  const expectedSession = {
++    user: {
++      id: USER_ID,
++      email: "member@example.test",
++    },
++    authenticationMethod: "otp" as const,
++    sessionId: SESSION_ID,
++  };
++  let sdk: ReturnType<typeof client> & {
++    auth: {
++      updateUser: ReturnType<typeof vi.fn>;
++    };
++  };
++
++  beforeEach(() => {
++    sdk = {
++      auth: {
++        ...client().auth,
++        updateUser: vi.fn().mockResolvedValue({
++          data: {
++            user: {
++              ...user(),
++              user_metadata: { private: PRIVATE_ERROR },
++            },
++          },
++          error: null,
++        }),
++      },
++    };
++    mocks.createClient.mockResolvedValue(sdk);
 +  });
 +
-+  it.each(["", "?type=invite&token_hash=test", "?type=recovery"])(
-+    "GETはinviteと不正なrecoveryを従来の失敗先へ戻す %#",
-+    async (query) => {
-+      const response = await GET(new Request(`${ORIGIN}/auth/confirm${query}`));
-+      expect(response.headers.get("location")).toBe(
-+        `${ORIGIN}/club-login/forgot-password?error=invalid-link`,
-+      );
-+      expect(mocks.verifyOtp).not.toHaveBeenCalled();
++  // 入力passwordを加工せず、本人のID・email・sessionを照合した後にだけ実行する。
++  it("再検証後にupdateUserを一度呼び、必要な本人情報だけを返す", async () => {
++    const result = await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    });
++    expect(result).toEqual({
++      outcome: "UPDATED",
++      user: expectedSession.user,
++    });
++    expect(sdk.auth.updateUser).toHaveBeenCalledExactlyOnceWith({ password });
++    expect(sdk.auth.getUser).toHaveBeenCalledWith("current-access");
++    expect(sdk.auth.getClaims).toHaveBeenCalledWith("current-access");
++    expect(sdk.auth.getClaims.mock.invocationCallOrder[0])
++      .toBeLessThan(sdk.auth.updateUser.mock.invocationCallOrder[0]);
++    expect(JSON.stringify(result)).not.toContain(password);
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_ERROR);
++  });
++
++  it.each(["short1", "abcdefgh", "12345678"])(
++    "Domain入力不正ならclientを生成しない: %s",
++    async (invalidPassword) => {
++      expect(await updateClubInvitationPassword({
++        password: invalidPassword,
++        expectedSession,
++      })).toEqual({
++        outcome: "REJECTED",
++        reason: "PASSWORD_REJECTED",
++      });
++      expect(mocks.createClient).not.toHaveBeenCalled();
 +    },
 +  );
 +
-+  it("recoveryのSDKエラーをURLへ露出しない", async () => {
-+    mocks.verifyOtp.mockResolvedValue({ error: new Error(PRIVATE_ERROR) });
-+    const response = await GET(new Request(
-+      `${ORIGIN}/auth/confirm?token_hash=test&type=recovery`,
-+    ));
-+    expect(response.headers.get("location")).toBe(
-+      `${ORIGIN}/club-login/forgot-password?error=invalid-link`,
-+    );
-+  });
-+});
-+
-+describe("InvitationAuthBridge", () => {
-+  let effects: (() => void)[];
-+  let browser: {
-+    location: {
-+      hash: string;
-+      pathname: string;
-+      search: string;
-+      replace: ReturnType<typeof vi.fn>;
-+    };
-+    history: {
-+      state: object;
-+      replaceState: ReturnType<typeof vi.fn>;
-+    };
-+  };
-+  let fetchMock: ReturnType<typeof vi.fn>;
-+
-+  beforeEach(() => {
-+    effects = [];
-+    browser = {
-+      location: {
-+        hash: "#" + new URLSearchParams({
-+          access_token: ACCESS,
-+          refresh_token: REFRESH,
-+          token_type: "bearer",
-+          type: "invite",
-+          expires_in: "3600",
-+        }),
-+        pathname: "/welcome",
-+        search: "",
-+        replace: vi.fn(),
++  it.each([
++    {
++      user: {
++        ...expectedSession.user,
++        id: OTHER_ID,
 +      },
-+      history: {
-+        state: { preserve: true },
-+        replaceState: vi.fn(),
++    },
++    {
++      user: {
++        ...expectedSession.user,
++        email: "other@example.test",
 +      },
-+    };
-+    browser.history.replaceState.mockImplementation(() => {
-+      browser.location.hash = "";
++    },
++    { sessionId: OTHER_ID },
++  ])("本人やsessionが変われば更新しない %#", async (change) => {
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession: {
++        ...expectedSession,
++        ...change,
++      },
++    })).toEqual({
++      outcome: "SESSION_CHANGED",
 +    });
-+    fetchMock = vi.fn().mockImplementation(async () => {
-+      expect(browser.location.hash).toBe("");
-+      return {
-+        ok: true,
-+        json: async () => ({
-+          status: "confirmed",
-+          redirectTo: "https://ignored.example.test",
-+        }),
-+      };
-+    });
-+    mocks.effect.mockImplementation((effect) => effects.push(effect));
-+    mocks.ref.mockReturnValue({ current: false });
-+    mocks.state.mockReturnValue([null, mocks.setStatus]);
-+    vi.stubGlobal("window", browser);
-+    vi.stubGlobal("fetch", fetchMock);
++    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
 +  });
 +
-+  // Effectだけを実行し、DOMやブラウザSDKへtokenを渡さないことを確認する。
-+  function runBridge(): void {
-+    InvitationAuthBridge({ contextId: "display-context-id" });
-+    effects[0]();
-+  }
-+
-+  it("履歴を先に消し、同一origin POSTのbodyだけへtokenを渡す", async () => {
-+    runBridge();
-+    await vi.waitFor(() => expect(browser.location.replace).toHaveBeenCalledWith("/welcome"));
-+    expect(browser.history.replaceState).toHaveBeenCalledWith(
-+      browser.history.state,
-+      "",
-+      "/welcome",
-+    );
-+    expect(fetchMock).toHaveBeenCalledWith("/auth/confirm", expect.objectContaining({
-+      method: "POST",
-+      credentials: "same-origin",
-+      redirect: "error",
-+      referrerPolicy: "no-referrer",
-+      body: JSON.stringify({
-+        contextId: "display-context-id",
-+        accessToken: ACCESS,
-+        refreshToken: REFRESH,
-+      }),
-+    }));
-+    expect(mocks.setStatus).not.toHaveBeenCalled();
++  it.each(["password", "unknown"])("現在の認証方法が%sなら更新しない", async (method) => {
++    sdk.auth.getClaims.mockResolvedValue({
++      data: { claims: claims(method === "password" ? ["password"] : undefined) },
++      error: null,
++    });
++    // claims()の既定値を使わず、欠損AMRを明示する。
++    if (method === "unknown") {
++      sdk.auth.getClaims.mockResolvedValue({
++        data: {
++          claims: {
++            ...claims(),
++            amr: undefined,
++          },
++        },
++        error: null,
++      });
++    }
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "PASSWORD_LOGIN_REQUIRED",
++    });
++    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
 +  });
 +
-+  it("Strict ModeでEffectが再実行されてもPOSTを重複させない", async () => {
-+    runBridge();
-+    effects[0]();
-+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
++  it("未認証の場合は更新しない", async () => {
++    sdk.auth.getSession.mockResolvedValue({
++      data: { session: null },
++      error: null,
++    });
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "AUTHENTICATION_REQUIRED",
++    });
++    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
++  });
++
++  it("受け取った予定sessionがpassword認証なら初回更新しない", async () => {
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession: {
++        ...expectedSession,
++        authenticationMethod: "password",
++      },
++    })).toEqual({
++      outcome: "PASSWORD_LOGIN_REQUIRED",
++    });
++    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
++  });
++
++  it("client準備で失敗した場合は更新未実行として扱う", async () => {
++    mocks.createClient.mockRejectedValue(new Error(PRIVATE_ERROR));
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "AUTHENTICATION_REQUIRED",
++    });
++    expect(sdk.auth.updateUser).not.toHaveBeenCalled();
 +  });
 +
 +  it.each([
-+    "#error=access_denied&error_description=secret",
-+    "#code=pkce-without-verifier",
-+    `#access_token=${ACCESS}&refresh_token=${REFRESH}&type=recovery&token_type=bearer`,
-+    `#access_token=${ACCESS}&access_token=duplicate&type=invite&token_type=bearer`,
-+    "#" + "x".repeat(16_385),
-+  ])("失敗fragmentや未対応flowは除去し、SDKへ送らない %#", async (hash) => {
-+    browser.location.hash = hash;
-+    runBridge();
-+    await vi.waitFor(() => expect(mocks.setStatus).toHaveBeenCalledWith("invalid-invitation"));
-+    expect(browser.location.hash).toBe("");
-+    expect(fetchMock).not.toHaveBeenCalled();
++    ["same_password", "PASSWORD_REJECTED"],
++    ["weak_password", "PASSWORD_REJECTED"],
++    ["reauthentication_needed", "REAUTHENTICATION_REQUIRED"],
++    ["reauthentication_not_valid", "REAUTHENTICATION_REQUIRED"],
++    ["reauth_nonce_missing", "REAUTHENTICATION_REQUIRED"],
++    ["session_not_found", "REAUTHENTICATION_REQUIRED"],
++    ["session_expired", "REAUTHENTICATION_REQUIRED"],
++  ])("SDKの明示拒否%sを固定の理由へ変換する", async (code, reason) => {
++    sdk.auth.updateUser.mockResolvedValue({
++      data: { user: null },
++      error: new AuthApiError(PRIVATE_ERROR, 422, code),
++    });
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "REJECTED",
++      reason,
++    });
++    expect(sdk.auth.updateUser).toHaveBeenCalledTimes(1);
 +  });
 +
-+  it("fragmentのない通常表示では処理しない", () => {
-+    browser.location.hash = "";
-+    runBridge();
-+    expect(fetchMock).not.toHaveBeenCalled();
-+    expect(browser.history.replaceState).not.toHaveBeenCalled();
++  it("SDK固有の弱いpasswordエラーも原文を返さない", async () => {
++    sdk.auth.updateUser.mockResolvedValue({
++      data: { user: null },
++      error: new AuthWeakPasswordError(PRIVATE_ERROR, 422, ["length"]),
++    });
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "REJECTED",
++      reason: "PASSWORD_REJECTED",
++    });
 +  });
 +
-+  it.each(["switch-account", "login-required"])(
-+    "%sの案内にtokenやSDKエラーを使わない",
-+    async (status) => {
-+      fetchMock.mockResolvedValue({
-+        ok: false,
-+        json: async () => ({ status }),
-+      });
-+      runBridge();
-+      await vi.waitFor(() => expect(mocks.setStatus).toHaveBeenCalledWith(status));
-+      expect(browser.location.replace).not.toHaveBeenCalled();
++  it.each([
++    new AuthApiError(PRIVATE_ERROR, 500, "unexpected_failure"),
++    new AuthApiError(PRIVATE_ERROR, 504, "request_timeout"),
++    new AuthApiError(PRIVATE_ERROR, 400, "unknown_code"),
++    new Error(PRIVATE_ERROR),
++  ])("不明なSDK結果は失敗と断定せず自動再試行しない %#", async (error) => {
++    sdk.auth.updateUser.mockResolvedValue({
++      data: { user: null },
++      error,
++    });
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "UNKNOWN",
++    });
++    expect(sdk.auth.updateUser).toHaveBeenCalledTimes(1);
++  });
++
++  it.each([
++    null,
++    {
++      ...user(),
++      id: OTHER_ID,
 +    },
-+  );
++    {
++      ...user(),
++      email: "changed@example.test",
++    },
++  ])("更新応答の本人を確認できなければUNKNOWNにする %#", async (updatedUser) => {
++    sdk.auth.updateUser.mockResolvedValue({
++      data: { user: updatedUser },
++      error: null,
++    });
++    expect(await updateClubInvitationPassword({
++      password,
++      expectedSession,
++    })).toEqual({
++      outcome: "UNKNOWN",
++    });
++  });
 +
-+  it("通信例外を固定の案内へ変換する", async () => {
-+    fetchMock.mockRejectedValue(new Error(PRIVATE_ERROR));
-+    runBridge();
-+    await vi.waitFor(() => expect(mocks.setStatus).toHaveBeenCalledWith("invalid-invitation"));
++  it("更新開始後の例外をUNKNOWNにし、秘密をログへ渡さない", async () => {
++    sdk.auth.updateUser.mockRejectedValue(new Error(PRIVATE_ERROR));
++    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
++    try {
++      expect(await updateClubInvitationPassword({
++        password,
++        expectedSession,
++      })).toEqual({
++        outcome: "UNKNOWN",
++      });
++      expect(log).not.toHaveBeenCalled();
++      expect(sdk.auth.updateUser).toHaveBeenCalledTimes(1);
++    } finally {
++      log.mockRestore();
++    }
 +  });
 +});
+diff --git a/src/infrastructure/supabase/club-invitation-session.ts b/src/infrastructure/supabase/club-invitation-session.ts
+index d8ab944..58cd664 100644
+--- a/src/infrastructure/supabase/club-invitation-session.ts
++++ b/src/infrastructure/supabase/club-invitation-session.ts
+@@ -7,9 +7,16 @@ import {
+   createServerClient,
+   type CookieOptions,//クッキーの取り扱いルール
+ } from "@supabase/ssr";
+-import type { SupabaseClient } from "@supabase/supabase-js";
++// 【追加：F06粒度6】SDKの拒否結果を固定の理由へ変換する。
++import {
++  isAuthApiError,
++  isAuthWeakPasswordError,
++  type SupabaseClient,
++} from "@supabase/supabase-js";
+ import { z } from "zod";
+ 
++// 【追加：F06粒度6】初回設定の入力規則をadapterの直接呼出しでも共用する。
++import { validateWelcomeInput } from "@/domain/club/invitation/acceptance-form";
+ import { normalizeEmail } from "@/domain/shared/email";//メアド正規化関数
+ import { createClient } from "@/src/infrastructure/supabase/server";
+ 
+@@ -256,3 +263,142 @@ export async function prepareClubInvitationSession(input: {
+     return { outcome: "INVALID_SESSION" };
+   }
+ }
++
++// 【追加：F06粒度6】パスワードやSDK原文を持たない更新結果。
++export type ClubInvitationPasswordUpdateResult =
++  | {
++      outcome: "UPDATED";
++      user: VerifiedClubInvitationSession["user"];
++    }
++  | {
++      outcome:
++        | "AUTHENTICATION_REQUIRED"
++        | "SESSION_CHANGED"
++        | "PASSWORD_LOGIN_REQUIRED";
++    }
++  | {
++      outcome: "REJECTED";
++      reason: "PASSWORD_REJECTED" | "REAUTHENTICATION_REQUIRED";
++    }
++  | {
++      outcome: "UNKNOWN";
++    };
++
++// 【追加：F06粒度6】明確な拒否だけを識別し、通信障害や未知の結果は断定しない。
++function passwordUpdateRejection(error: unknown): ClubInvitationPasswordUpdateResult {
++  if (
++    (isAuthApiError(error) || isAuthWeakPasswordError(error)) &&
++    error.status !== undefined &&
++    error.status >= 400 &&
++    error.status < 500
++  ) {
++    if (error.code === "weak_password" || error.code === "same_password") {
++      return {
++        outcome: "REJECTED",
++        reason: "PASSWORD_REJECTED",
++      };
++    }
++
++    if (
++      error.code === "reauthentication_needed" ||
++      error.code === "reauthentication_not_valid" ||
++      error.code === "reauth_nonce_missing" ||
++      error.code === "session_not_found" ||
++      error.code === "session_expired"
++    ) {
++      return {
++        outcome: "REJECTED",
++        reason: "REAUTHENTICATION_REQUIRED",
++      };
++    }
++  }
++
++  return {
++    outcome: "UNKNOWN",
++  };
++}
++
++// 【追加：F06粒度6】現在の本人を再照合し、本人のsessionで初回passwordだけを更新する。
++export async function updateClubInvitationPassword(input: {
++  password: string;
++  expectedSession: VerifiedClubInvitationSession;
++}): Promise<ClubInvitationPasswordUpdateResult> {
++  const validation = validateWelcomeInput({
++    password: input.password,
++    confirmation: input.password,
++  });
++
++  if (!validation.success) {
++    return {
++      outcome: "REJECTED",
++      reason: "PASSWORD_REJECTED",
++    };
++  }
++
++  let updateStarted = false;
++
++  try {
++    const client = await createClient();
++    const current = await getVerifiedClubInvitationSession(client);
++
++    if (!current) {
++      return {
++        outcome: "AUTHENTICATION_REQUIRED",
++      };
++    }
++
++    if (
++      current.user.id !== input.expectedSession.user.id ||
++      current.user.email !== input.expectedSession.user.email ||
++      current.sessionId !== input.expectedSession.sessionId
++    ) {
++      return {
++        outcome: "SESSION_CHANGED",
++      };
++    }
++
++    if (
++      current.authenticationMethod !== "otp" ||
++      input.expectedSession.authenticationMethod !== "otp"
++    ) {
++      return {
++        outcome: "PASSWORD_LOGIN_REQUIRED",
++      };
++    }
++
++    updateStarted = true;
++    const {
++      data,
++      error,
++    } = await client.auth.updateUser({
++      password: validation.data.password,
++    });
++
++    if (error) {
++      return passwordUpdateRejection(error);
++    }
++
++    if (
++      !data.user ||
++      data.user.id !== current.user.id ||
++      normalizeEmail(data.user.email ?? "") !== current.user.email
++    ) {
++      return {
++        outcome: "UNKNOWN",
++      };
++    }
++
++    // Authの応答で更新を確認する。RSC用Cookie書込のcatchは成功の根拠にしない。
++    return {
++      outcome: "UPDATED",
++      user: {
++        id: current.user.id,
++        email: current.user.email,
++      },
++    };
++  } catch {
++    return {
++      outcome: updateStarted ? "UNKNOWN" : "AUTHENTICATION_REQUIRED",
++    };
++  }
++}
