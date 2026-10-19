@@ -1,7 +1,13 @@
 // app/(club-app)/welcome/InvitationAuthBridge.tsx
-//招待メールのリンクをクリックした後のページ：招待認証が成功すると新規PW設定ページへ遷移。エラーならメッセージ表示
+//招待メールのリンクをクリックした後、招待承諾ページに行く前のページ：招待認証が成功すると新規ユーザーは新規PW設定ページへ既存ユーザーは既存アカウントでログインするボタンが表示される。エラーならメッセージ表示
 
 "use client";
+
+// 【追加：F06粒度9】fragment確認前のフォーム操作と遷移を抑止する。
+import type {
+  ReactNode,
+} from "react";
+import Link from "next/link";
 
 import {
   useEffect,
@@ -18,13 +24,15 @@ const STATUS_MESSAGES = {
 };
 
 //招待メールのリンクをクリックした後のページ：招待認証が成功すると新規PW設定ページへ遷移でエラーならメッセージ表示
-type BridgeStatus = keyof typeof STATUS_MESSAGES | null;
+type BridgeStatus = keyof typeof STATUS_MESSAGES | "ready" | null;
 
 //招待認証をする直前ページ
 export function InvitationAuthBridge({
+  children,
   contextId,//背景データのID（リンクを押してから登録の間の15分間の手続きで用いるため一時的なIDであることからDBのカラムとしては設けていない）
 }: {
-  contextId: string;
+  contextId?: string;
+  children?: ReactNode;
 }) {
   const started = useRef(false);
   const [status, setStatus] = useState<BridgeStatus>(null);
@@ -38,6 +46,8 @@ export function InvitationAuthBridge({
     const fragment = window.location.hash;//現在開いているURLの末尾にある #以降の文字列を取得するコード
 
     if (!fragment) {
+      // 【追加：F06粒度9】通常表示では既存のPage内容を表示する。
+      queueMicrotask(() => setStatus("ready"));
       return;
     }
 
@@ -47,6 +57,12 @@ export function InvitationAuthBridge({
       "",
       window.location.pathname + window.location.search,
     );
+
+    // 【追加：F06粒度9】contextがなくてもfragmentを消し、認証POSTは行わない。
+    if (!contextId) {
+      queueMicrotask(() => setStatus("invalid-invitation"));
+      return;
+    }
 
     //URLの末尾にある #以降の文字列を取得するコードからアクセストークンとリフレッシュトークンを取得して検証し、POST関数に送って結果を受け取りトライキャッチで返す
     async function confirmInvitation(): Promise<void> {
@@ -123,13 +139,24 @@ export function InvitationAuthBridge({
     void confirmInvitation();
   }, [contextId]);
 
+  // 【変更：F06粒度9】認証中はフォームを隠し、秘密を含まない固定の案内だけを出す。
+  if (status === "ready") {
+    return children ?? null;
+  }
+
   if (status === null) {
-    return null;
+    return <p role="status">招待の認証を確認しています...</p>;
   }
 
   return (
-    <p role="alert">
-      {STATUS_MESSAGES[status]}
-    </p>
+    <div className="space-y-4">
+      <p role="alert">{STATUS_MESSAGES[status]}</p>
+      <Link href="/club-login" prefetch={false} className="block underline">
+        既存アカウントでログインする
+      </Link>
+      <Link href="/club/select" prefetch={false} className="block underline">
+        通常のクラブ利用へ進む
+      </Link>
+    </div>
   );
 }

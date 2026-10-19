@@ -105,7 +105,7 @@ export default async function ClubLoginPage({
     }
   }
 
-  // 再招待可能（他のクラブに所属しているユーザーが新たに別のクラブに招待された際の処理）の場合は、招待手続きページへ遷移させる
+  // 再招待可能（他のクラブに所属しているユーザーが新たに別のクラブに招待された際の処理）の場合は、既存ユーザー向けの招待承諾ページへ遷移させる
   if (resumeInvitation) {
     redirect("/club-invitations/accept");
   }

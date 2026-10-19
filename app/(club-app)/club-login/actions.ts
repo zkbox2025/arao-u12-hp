@@ -1,6 +1,6 @@
 // app/(club-app)/club-login/actions.ts
 //クラブ運営アプリのログインのアクション関数
-// 別のクラブに所属しており招待途中の場合は、再招待処理としてログイン後にマイページではなく招待手続きページ("/club-invitations/accept")へ遷移させる
+// 別のクラブに所属しており招待途中の場合は、再招待処理としてログイン後にマイページではなく既存ユーザー向けの招待承諾ページ("/club-invitations/accept")へ遷移させる
 
 "use server";
 
@@ -224,7 +224,7 @@ export async function loginAction(
 
 
   if (resumeInvitation) {
-    redirect("/club-invitations/accept");//招待承諾ページへ遷移
+    redirect("/club-invitations/accept");//別のクラブに既に所属しているユーザー向けの招待承諾ページへ遷移
   }
 
   /*

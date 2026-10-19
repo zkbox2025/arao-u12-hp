@@ -1,5 +1,5 @@
 // app/(club-app)/club-invitations/accept/actions.ts
-//既にアカウントを持っているユーザーかつログイン済みの場合のフォーム処理
+//既にアカウントを持っているユーザーかつログイン済みの場合の招待承諾アクション
 "use server";
 
 import "server-only";

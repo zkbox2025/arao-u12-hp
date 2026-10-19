@@ -1,277 +1,610 @@
-diff --git a/app/(club-app)/club-login/actions.ts b/app/(club-app)/club-login/actions.ts
-index c52ff46..82b3343 100644
---- a/app/(club-app)/club-login/actions.ts
-+++ b/app/(club-app)/club-login/actions.ts
-@@ -5,7 +5,11 @@
- 
- import {
-   redirect,
-+  // 【追加：F06粒度8】招待照会で発生したNext.js制御例外を再送出する。
+diff --git a/app/(club-app)/club-invitations/accept/AcceptInvitationForm.tsx b/app/(club-app)/club-invitations/accept/AcceptInvitationForm.tsx
+new file mode 100644
+index 0000000..b7a7e79
+--- /dev/null
++++ b/app/(club-app)/club-invitations/accept/AcceptInvitationForm.tsx
+@@ -0,0 +1,70 @@
++// app/(club-app)/club-invitations/accept/AcceptInvitationForm.tsx
++
++"use client";
++
++import {
++  useActionState,
++} from "react";
++
++import {
++  FormErrorAlert,
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  useScrollToFormError,
++} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
++import type {
++  WelcomeActionState,
++} from "@/domain/club/invitation/acceptance-form";
++
++import {
++  acceptExistingClubInvitationAction,
++} from "./actions";
++
++type Props = {
++  contextId: string;
++  initialState: WelcomeActionState;
++};
++
++// 既存アカウントの承諾では、パスワード欄を持たず表示時のcontextIdだけを送る。
++export function AcceptInvitationForm({
++  contextId,
++  initialState,
++}: Props) {
++  const [
++    state,
++    formAction,
++    isPending,
++  ] = useActionState(
++    acceptExistingClubInvitationAction,
++    initialState,
++  );
++  const formRef = useScrollToFormError(state);
++
++  return (
++    <form
++      ref={formRef}
++      action={formAction}
++      className="space-y-5"
++      aria-busy={isPending}
++    >
++      <input
++        type="hidden"
++        name="requestId"
++        value={state.requestId}
++      />
++      <input
++        type="hidden"
++        name="contextId"
++        value={contextId}
++      />
++      <FormErrorAlert message={state.formError} />
++      <button
++        type="submit"
++        disabled={isPending}
++        className="w-full rounded bg-slate-900 px-4 py-2 text-white disabled:opacity-50"
++      >
++        {isPending ? "承諾しています..." : "招待を承諾する"}
++      </button>
++    </form>
++  );
++}
+diff --git a/app/(club-app)/club-invitations/accept/page.tsx b/app/(club-app)/club-invitations/accept/page.tsx
+new file mode 100644
+index 0000000..de1781c
+--- /dev/null
++++ b/app/(club-app)/club-invitations/accept/page.tsx
+@@ -0,0 +1,23 @@
++// app/(club-app)/club-invitations/accept/page.tsx
++
++import {
++  InvitationAcceptanceScreen,
++} from "../../welcome/InvitationAcceptanceScreen";
++
++export const dynamic = "force-dynamic";
++
++// 既存アカウントにも、描画時に最新の本人情報と招待状態を照合する。
++export default async function AcceptInvitationPage({
++  searchParams,
++}: {
++  searchParams: Promise<{
++    error?: string | string[];
++  }>;
++}) {
++  const query = await searchParams;
++
++  return InvitationAcceptanceScreen({
++    mode: "existing",
++    invalidLink: query.error !== undefined,
++  });
++}
+diff --git a/app/(club-app)/welcome/InvitationAcceptanceScreen.tsx b/app/(club-app)/welcome/InvitationAcceptanceScreen.tsx
+new file mode 100644
+index 0000000..c2c1c62
+--- /dev/null
++++ b/app/(club-app)/welcome/InvitationAcceptanceScreen.tsx
+@@ -0,0 +1,202 @@
++// app/(club-app)/welcome/InvitationAcceptanceScreen.tsx
++// 本人確認済みの表示情報だけで、初回設定と既存承諾の画面を組み立てる。
++
++import "server-only";
++
++import Link from "next/link";
++import {
++  cookies,
++} from "next/headers";
++import {
 +  unstable_rethrow,
- } from "next/navigation";
-+// 【追加：F06粒度8】戻り先はqueryではなく既存の招待Cookieから判断する。
-+import { cookies } from "next/headers";
- import { z } from "zod";
- 
- import {
-@@ -28,6 +32,18 @@ import {
-   createClient,
- } from "@/src/infrastructure/supabase/server";
- 
-+// 【追加：F06粒度8】本人の招待だけを再開し、通常の所属判定は変更しない。
++} from "next/navigation";
++
++import type {
++  WelcomeActionState,
++  WelcomeFormValues,
++} from "@/domain/club/invitation/acceptance-form";
++import type {
++  ClubInvitationAcceptanceViolation,
++} from "@/domain/club/invitation/acceptance-policy";
++import {
++  createInitialActionState,
++} from "@/domain/shared/action-state";
 +import {
 +  getClubInvitationAcceptance,
++  type GetClubInvitationAcceptanceResult,
 +} from "@/src/application/club/invitation/get-club-invitation-acceptance";
 +import {
 +  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
 +  parseClubInvitationContext,
++  type ClubInvitationContext,
 +} from "@/src/infrastructure/security/club-invitation-context";
-+import {
-+  getVerifiedClubInvitationSession,
-+} from "@/src/infrastructure/supabase/club-invitation-session";
 +
- export type LoginFormValues = {
-   email: string;
- };
-@@ -53,19 +69,33 @@ const loginSchema = z.object({
-     ),
- });
- 
-+// 【追加：F06粒度8】招待情報やpasswordを含まないログイン再開エラーを返す。
-+function invitationResumeError(
-+  email: string,
-+  requestId: string,
-+  message: string,
-+): LoginActionState {
-+  return {
-+    status: "error",
-+    values: {
-+      email,
-+    },
-+    fieldErrors: {},
-+    formError: message,
-+    requestId,
-+  };
++import {
++  AcceptInvitationForm,
++} from "../club-invitations/accept/AcceptInvitationForm";
++import {
++  InvitationAuthBridge,
++} from "./InvitationAuthBridge";
++import {
++  WelcomeForm,
++} from "./WelcomeForm";
++
++const UNAVAILABLE_MESSAGES: Record<ClubInvitationAcceptanceViolation, string> = {
++  INVALID_INVITATION:
++    "招待を確認できません。招待メールのリンクから開き直してください。",
++  RECIPIENT_MISMATCH:
++    "招待されたアカウントでログインし直してください。",
++  INVITATION_EMAIL_MISMATCH:
++    "招待先のメールアドレスと一致しません。運営者へお問い合わせください。",
++  INVITATION_ALREADY_ACCEPTED:
++    "この招待は承諾済みです。クラブ一覧から参加先を確認してください。",
++  INVITATION_CANCELLED:
++    "この招待は取り消されています。運営者へ新しい招待を依頼してください。",
++  INVITATION_EXPIRED:
++    "この招待の有効期限は切れています。運営者へ新しい招待を依頼してください。",
++  MEMBERSHIP_MISMATCH:
++    "招待の状態を確認できません。運営者へお問い合わせください。",
++  INVALID_INVITATION_STATE:
++    "招待の状態を確認できません。運営者へお問い合わせください。",
++};
++
++// 認証方法や利用不可の理由は、読取Serviceで照合した結果だけを案内する。
++function acceptanceMessage(
++  result: GetClubInvitationAcceptanceResult,
++): string {
++  switch (result.outcome) {
++    case "AVAILABLE":
++      return result.authenticationMethod === "password"
++        ? "ログイン中のアカウントで参加します。パスワードの再設定は不要です。"
++        : "初回パスワードを設定して、招待を承諾してください。";
++    case "AUTHENTICATION_REQUIRED":
++      return "新規の方は招待メールの認証リンクを開いてください。" +
++        "既存の方は招待されたアカウントでログインしてください。";
++    case "PASSWORD_LOGIN_REQUIRED":
++      return "認証方法を確認できません。既存のアカウントでパスワードログインしてください。";
++    case "UNAVAILABLE":
++      return UNAVAILABLE_MESSAGES[result.view.reason];
++    default:
++      return "招待情報を取得できませんでした。時間をおいてページを開き直してください。";
++  }
 +}
 +
-+// 【変更：F06粒度8】認証成功後、通常の所属遷移より先に招待の再開可否を確認する。
- export async function loginAction(
-   previousState: LoginActionState,
-   formData: FormData,
- ): Promise<LoginActionState> {
--  const email = normalizeEmail(
--    String(
--      formData.get("email") ?? "",
--    ),
--  );
--
--  const password = String(
--    formData.get("password") ?? "",
--  );
-+  // 【変更：F06粒度8】Fileをログイン資格情報へ文字列化しない。
-+  const emailValue = formData.get("email");
-+  const passwordValue = formData.get("password");
-+  const email = typeof emailValue === "string" ? normalizeEmail(emailValue) : "";
-+  const password = typeof passwordValue === "string" ? passwordValue : "";
- 
-   /*
-    * requestIdはログの追跡などに使用する識別子であり、
-@@ -141,6 +171,65 @@ export async function loginAction(
-     };
-   }
- 
-+  // 【追加：F06粒度8】成功応答の本人と、保存されたCookieの本人を別々に照合する。
-+  let resumeInvitation = false;
++// Cookieは読取だけに使い、本人確認前のクラブ名や秘密情報をClientへ渡さない。
++export async function InvitationAcceptanceScreen({
++  mode,
++  invalidLink,
++}: {
++  mode: "welcome" | "existing";
++  invalidLink: boolean;
++}) {
++  let context: ClubInvitationContext | null = null;
++  let result: GetClubInvitationAcceptanceResult = {
++    outcome: "ERROR",
++    view: {
++      status: "error",
++      reason: "PROCESSING_FAILED",
++    },
++  };
 +
 +  try {
 +    const cookieStore = await cookies();
-+    const rawContext = cookieStore.get(CLUB_INVITATION_CONTEXT_COOKIE_NAME)?.value;
-+
-+    if (parseClubInvitationContext(rawContext)) {
-+      const session = await getVerifiedClubInvitationSession();
-+
-+      if (
-+        !session ||
-+        session.user.id !== data.user.id ||
-+        session.user.email !== normalizeEmail(data.user.email ?? "") ||
-+        session.authenticationMethod !== "password"
-+      ) {
-+        return invitationResumeError(
-+          email,
-+          requestIdValue,
-+          "ログインを確認できませんでした。パスワードでログインし直してください。",
-+        );
-+      }
-+
-+      const invitation = await getClubInvitationAcceptance({ context: rawContext });
-+
-+      if (
-+        invitation.outcome === "AVAILABLE" &&
-+        invitation.authenticationMethod === "password"
-+      ) {
-+        resumeInvitation = true;
-+      } else if (
-+        invitation.outcome !== "UNAVAILABLE" ||
-+        invitation.view.reason === "INVALID_INVITATION" ||
-+        invitation.view.reason === "RECIPIENT_MISMATCH" ||
-+        invitation.view.reason === "INVITATION_EMAIL_MISMATCH"
-+      ) {
-+        // 本人不一致と改変を区別せず、他人のクラブ名・メール・状態を開示しない。
-+        return invitationResumeError(
-+          email,
-+          requestIdValue,
-+          "招待を再開できませんでした。招待されたアカウントでログインし直すか、" +
-+            "ページを開き直して通常のクラブへ進んでください。",
-+        );
-+      }
-+    }
++    const rawContext = invalidLink
++      ? undefined
++      : cookieStore.get(CLUB_INVITATION_CONTEXT_COOKIE_NAME)?.value;
++    context = parseClubInvitationContext(rawContext);
++    result = await getClubInvitationAcceptance({
++      context: rawContext,
++    });
 +  } catch (error) {
 +    unstable_rethrow(error);
-+    return invitationResumeError(
-+      email,
-+      requestIdValue,
-+      "招待を確認できませんでした。ページを開き直して招待状況を確認してください。",
-+    );
 +  }
 +
-+  // 【追加：F06粒度8】制御例外をcatchせず、受け取ったURLを使わない固定先へ戻す。
-+  if (resumeInvitation) {
-+    redirect("/club-invitations/accept");
-+  }
-+
-   /*
-    * フォームからclubIdを受け取らず、
-    * 認証済みのSupabase Auth user.idから
-diff --git a/app/(club-app)/club-login/page.tsx b/app/(club-app)/club-login/page.tsx
-index 2274198..cc1fd92 100644
---- a/app/(club-app)/club-login/page.tsx
-+++ b/app/(club-app)/club-login/page.tsx
-@@ -3,8 +3,12 @@
- 
- import {
-   redirect,
-+  // 【追加：F06粒度8】Cookie・招待照会の制御例外を通常エラーへ変換しない。
-+  unstable_rethrow,
- } from "next/navigation";
- 
-+// 【追加：F06粒度8】短時間の招待contextを通常redirectより先に確認する。
-+import { cookies } from "next/headers";
- import Link from "next/link";
- 
- import {
-@@ -20,6 +24,15 @@ import {
-   createClient,
- } from "@/src/infrastructure/supabase/server";
- 
-+// 【追加：F06粒度8】表示は固定の案内だけとし、Serviceの招待情報は渡さない。
-+import {
-+  getClubInvitationAcceptance,
-+} from "@/src/application/club/invitation/get-club-invitation-acceptance";
-+import {
-+  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
-+  parseClubInvitationContext,
-+} from "@/src/infrastructure/security/club-invitation-context";
-+
- import {
-   LoginForm,
- } from "./LoginForm";
-@@ -36,6 +49,7 @@ type Props = {
-   }>;
- };
- 
-+// 【追加：F06粒度8】AMR不足・本人不一致時はフォームを表示して自動遷移ループを防ぐ。
- export default async function ClubLoginPage({
-   searchParams,
- }: Props) {
-@@ -57,6 +71,46 @@ export default async function ClubLoginPage({
-     },
-   } = await supabase.auth.getUser();
- 
-+  // 【追加：F06粒度8】照合できない招待も通常のクラブへ進む選択を妨げない。
-+  let invitationMessage: string | null = null;
-+  let normalDestination: string | null = null;
-+  let resumeInvitation = false;
-+
-+  if (user) {
-+    try {
-+      const cookieStore = await cookies();
-+      const rawContext = cookieStore.get(CLUB_INVITATION_CONTEXT_COOKIE_NAME)?.value;
-+
-+      if (parseClubInvitationContext(rawContext)) {
-+        const invitation = await getClubInvitationAcceptance({ context: rawContext });
-+
-+        if (
-+          invitation.outcome === "AVAILABLE" &&
-+          invitation.authenticationMethod === "password"
-+        ) {
-+          resumeInvitation = true;
-+        } else if (
-+          invitation.outcome !== "UNAVAILABLE" ||
-+          invitation.view.reason === "INVALID_INVITATION" ||
-+          invitation.view.reason === "RECIPIENT_MISMATCH" ||
-+          invitation.view.reason === "INVITATION_EMAIL_MISMATCH"
-+        ) {
-+          invitationMessage =
-+            "招待を再開するには、招待されたアカウントでパスワードログインしてください。";
-+        }
++  const invitation = result.outcome === "AVAILABLE" &&
++    context !== null
++    ? {
++        view: result.view,
++        authenticationMethod: result.authenticationMethod,
++        contextId: context.contextId,
 +      }
-+    } catch (error) {
-+      unstable_rethrow(error);
-+      invitationMessage =
-+        "招待を確認できませんでした。ログインし直すか、通常のクラブへ進んでください。";
-+    }
-+  }
++    : null;
++  const showWelcome = invitation !== null &&
++    mode === "welcome" &&
++    invitation.authenticationMethod === "otp";
++  const showAcceptance = invitation !== null &&
++    mode === "existing" &&
++    invitation.authenticationMethod === "password";
++  const initialState: WelcomeActionState =
++    createInitialActionState<WelcomeFormValues>({});
 +
-+  // 【追加：F06粒度8】承諾はここでは行わず、本人の有効な招待だけ固定先へ戻す。
-+  if (resumeInvitation) {
-+    redirect("/club-invitations/accept");
-+  }
-+
-   /*
-    * すでにログインしている場合、
-    * ACTIVEかつアプリ利用可能なMembership数から
-@@ -73,7 +127,12 @@ export default async function ClubLoginPage({
-         memberships,
-       );
- 
--    redirect(destination);
-+    // 【変更：F06粒度8】再ログイン時も既存Domainが決めた通常導線を残す。
-+    if (invitationMessage) {
-+      normalDestination = destination;
-+    } else {
-+      redirect(destination);
-+    }
-   }
- 
-   const initialState: LoginActionState =
-@@ -86,6 +145,17 @@ export default async function ClubLoginPage({
-   return (
-     <main className="mx-auto w-full max-w-md px-4 py-12">
-       <div className="space-y-8">
-+        {/* 【追加：F06粒度8】他人の情報を表示せず、フォームと通常導線を提供する。 */}
-+        {invitationMessage && (
-+          <div role="status" className="space-y-2 text-sm text-gray-700">
-+            <p>{invitationMessage}</p>
-+            {normalDestination && (
-+              <Link href={normalDestination} className="underline">
-+                通常のクラブへ進む
++  return (
++    <main className="min-h-screen bg-slate-50 px-4 py-12">
++      <section className="mx-auto max-w-md space-y-5 rounded-lg bg-white p-6 shadow-sm">
++        <h1 className="text-2xl font-bold text-slate-900">
++          {mode === "welcome" ? "初回設定・招待の確認" : "クラブ招待の承諾"}
++        </h1>
++        <InvitationAuthBridge contextId={context?.contextId}>
++          <p role={result.outcome === "ERROR" ? "alert" : undefined}>
++            {acceptanceMessage(result)}
++          </p>
++          {invitation && (
++            <dl className="space-y-2">
++              <dt className="font-bold">招待先クラブ</dt>
++              <dd>{invitation.view.clubName}</dd>
++              <dt className="font-bold">招待の有効期限</dt>
++              <dd>
++                <time dateTime={invitation.view.expiresAt}>
++                  {new Intl.DateTimeFormat("ja-JP", {
++                    dateStyle: "medium",
++                    timeStyle: "short",
++                    timeZone: "Asia/Tokyo",
++                  }).format(new Date(invitation.view.expiresAt))}（日本時間）
++                </time>
++              </dd>
++            </dl>
++          )}
++          {showWelcome &&
++            invitation && (
++              <WelcomeForm
++                key={invitation.contextId}
++                contextId={invitation.contextId}
++                initialState={initialState}
++              />
++            )}
++          {showAcceptance &&
++            invitation && (
++              <AcceptInvitationForm
++                key={invitation.contextId}
++                contextId={invitation.contextId}
++                initialState={initialState}
++              />
++            )}
++          {invitation &&
++            !showWelcome &&
++            !showAcceptance && (
++              <Link
++                href={mode === "welcome" ? "/club-invitations/accept" : "/welcome"}
++                prefetch={false}
++                className="block underline"
++              >
++                {mode === "welcome" ? "招待の承諾へ進む" : "初回設定へ進む"}
 +              </Link>
 +            )}
-+          </div>
-+        )}
-        {isPasswordResetSuccess && (
-   <div
-     role="status"
-diff --git a/tests/club-invitation-login-resume.test.ts b/tests/club-invitation-login-resume.test.ts
-new file mode 100644
-index 0000000..9923ad6
---- /dev/null
-+++ b/tests/club-invitation-login-resume.test.ts
-@@ -0,0 +1,672 @@
-+// tests/club-invitation-login-resume.test.ts
++          <Link
++            href="/club-login"
++            prefetch={false}
++            className="block underline"
++          >
++            既存アカウントでログインする
++          </Link>
++          <Link
++            href="/club/select"
++            prefetch={false}
++            className="block underline"
++          >
++            通常のクラブ利用へ進む
++          </Link>
++        </InvitationAuthBridge>
++      </section>
++    </main>
++  );
++}
+diff --git a/app/(club-app)/welcome/InvitationAuthBridge.tsx b/app/(club-app)/welcome/InvitationAuthBridge.tsx
+index 6b8f20d..7bfde05 100644
+--- a/app/(club-app)/welcome/InvitationAuthBridge.tsx
++++ b/app/(club-app)/welcome/InvitationAuthBridge.tsx
+@@ -3,6 +3,12 @@
+ 
+ "use client";
+ 
++// 【追加：F06粒度9】fragment確認前のフォーム操作と遷移を抑止する。
++import type {
++  ReactNode,
++} from "react";
++import Link from "next/link";
 +
-+import { createElement } from "react";
-+import { renderToStaticMarkup } from "react-dom/server";
+ import {
+   useEffect,
+   useRef,
+@@ -18,13 +24,16 @@ const STATUS_MESSAGES = {
+ };
+ 
+ //招待メールのリンクをクリックした後のページ：招待認証が成功すると新規PW設定ページへ遷移でエラーならメッセージ表示
+-type BridgeStatus = keyof typeof STATUS_MESSAGES | null;
++// 【変更：F06粒度9】fragmentのない表示だけ、Pageの内容を解放する。
++type BridgeStatus = keyof typeof STATUS_MESSAGES | "ready" | null;
+ 
+ //招待認証をする直前ページ
+ export function InvitationAuthBridge({
++  children,
+   contextId,//背景データのID（リンクを押してから登録の間の15分間の手続きで用いるため一時的なIDであることからDBのカラムとしては設けていない）
+ }: {
+-  contextId: string;
++  contextId?: string;
++  children?: ReactNode;
+ }) {
+   const started = useRef(false);
+   const [status, setStatus] = useState<BridgeStatus>(null);
+@@ -38,6 +47,8 @@ export function InvitationAuthBridge({
+     const fragment = window.location.hash;//現在開いているURLの末尾にある #以降の文字列を取得するコード
+ 
+     if (!fragment) {
++      // 【追加：F06粒度9】通常表示では既存のPage内容を表示する。
++      queueMicrotask(() => setStatus("ready"));
+       return;
+     }
+ 
+@@ -48,6 +59,12 @@ export function InvitationAuthBridge({
+       window.location.pathname + window.location.search,
+     );
+ 
++    // 【追加：F06粒度9】contextがなくてもfragmentを消し、認証POSTは行わない。
++    if (!contextId) {
++      queueMicrotask(() => setStatus("invalid-invitation"));
++      return;
++    }
++
+     //URLの末尾にある #以降の文字列を取得するコードからアクセストークンとリフレッシュトークンを取得して検証し、POST関数に送って結果を受け取りトライキャッチで返す
+     async function confirmInvitation(): Promise<void> {
+       try {
+@@ -123,13 +140,24 @@ export function InvitationAuthBridge({
+     void confirmInvitation();
+   }, [contextId]);
+ 
++  // 【変更：F06粒度9】認証中はフォームを隠し、秘密を含まない固定の案内だけを出す。
++  if (status === "ready") {
++    return children ?? null;
++  }
++
+   if (status === null) {
+-    return null;
++    return <p role="status">招待の認証を確認しています...</p>;
+   }
+ 
+   return (
+-    <p role="alert">
+-      {STATUS_MESSAGES[status]}
+-    </p>
++    <div className="space-y-4">
++      <p role="alert">{STATUS_MESSAGES[status]}</p>
++      <Link href="/club-login" prefetch={false} className="block underline">
++        既存アカウントでログインする
++      </Link>
++      <Link href="/club/select" prefetch={false} className="block underline">
++        通常のクラブ利用へ進む
++      </Link>
++    </div>
+   );
+ }
+diff --git a/app/(club-app)/welcome/WelcomeForm.tsx b/app/(club-app)/welcome/WelcomeForm.tsx
+new file mode 100644
+index 0000000..ab64d9c
+--- /dev/null
++++ b/app/(club-app)/welcome/WelcomeForm.tsx
+@@ -0,0 +1,155 @@
++// app/(club-app)/welcome/WelcomeForm.tsx
++
++"use client";
++
++import Link from "next/link";
++import {
++  useActionState,
++  useState,
++} from "react";
++
++import {
++  FieldErrorList,
++} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
++import {
++  FormErrorAlert,
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  useScrollToFormError,
++} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
++import {
++  WELCOME_PASSWORD_MIN_LENGTH,
++  type WelcomeActionState,
++} from "@/domain/club/invitation/acceptance-form";
++
++import {
++  completeClubInvitationAction,
++} from "./actions";
++
++type Props = {
++  contextId: string;
++  initialState: WelcomeActionState;
++};
++
++// パスワードは非制御入力とし、ActionStateや再表示用の値へ保存しない。
++export function WelcomeForm({
++  contextId,
++  initialState,
++}: Props) {
++  const [
++    state,
++    formAction,
++    isPending,
++  ] = useActionState(
++    completeClubInvitationAction,
++    initialState,
++  );
++  const [showPassword, setShowPassword] = useState(false);
++  const formRef = useScrollToFormError(state);
++
++  return (
++    <form
++      ref={formRef}
++      action={formAction}
++      className="space-y-5"
++      aria-busy={isPending}
++    >
++      <input
++        type="hidden"
++        name="requestId"
++        value={state.requestId}
++      />
++      <input
++        type="hidden"
++        name="contextId"
++        value={contextId}
++      />
++      <FormErrorAlert message={state.formError} />
++      <fieldset
++        disabled={isPending}
++        className="space-y-5"
++      >
++        <legend className="font-bold">初回パスワードの設定</legend>
++        <p
++          id="welcome-password-help"
++          className="text-sm text-slate-600"
++        >
++          8文字以上で、英字と数字を各1文字以上含めてください。記号も使用できます。
++        </p>
++        <div>
++          <label
++            htmlFor="welcome-password"
++            className="block font-bold"
++          >
++            パスワード
++          </label>
++          <input
++            id="welcome-password"
++            name="password"
++            type={showPassword ? "text" : "password"}
++            autoComplete="new-password"
++            minLength={WELCOME_PASSWORD_MIN_LENGTH}
++            required
++            aria-invalid={Boolean(state.fieldErrors.password?.length)}
++            aria-describedby="welcome-password-help welcome-password-errors"
++            className="w-full rounded border border-slate-300 px-3 py-2"
++          />
++          <FieldErrorList
++            id="welcome-password-errors"
++            errors={state.fieldErrors.password}
++          />
++        </div>
++        <div>
++          <label
++            htmlFor="welcome-confirmation"
++            className="block font-bold"
++          >
++            パスワード（確認）
++          </label>
++          <input
++            id="welcome-confirmation"
++            name="confirmation"
++            type={showPassword ? "text" : "password"}
++            autoComplete="new-password"
++            minLength={WELCOME_PASSWORD_MIN_LENGTH}
++            required
++            aria-invalid={Boolean(state.fieldErrors.confirmation?.length)}
++            aria-describedby="welcome-confirmation-errors"
++            className="w-full rounded border border-slate-300 px-3 py-2"
++          />
++          <FieldErrorList
++            id="welcome-confirmation-errors"
++            errors={state.fieldErrors.confirmation}
++          />
++        </div>
++        <button
++          type="button"
++          aria-pressed={showPassword}
++          aria-controls="welcome-password welcome-confirmation"
++          onClick={() => setShowPassword((visible) => !visible)}
++          className="underline"
++        >
++          {showPassword ? "パスワードを隠す" : "パスワードを表示する"}
++        </button>
++        <button
++          type="submit"
++          disabled={isPending}
++          className="w-full rounded bg-slate-900 px-4 py-2 text-white disabled:opacity-50"
++        >
++          {isPending ? "処理しています..." : "パスワードを設定して招待を承諾する"}
++        </button>
++      </fieldset>
++      <p className="text-sm">
++        設定結果が不明な場合や設定後に承諾できなかった場合は再送信せず、
++        <Link
++          href="/club-login"
++          prefetch={false}
++          className="underline"
++        >
++          設定したパスワードでログイン
++        </Link>
++        して確認してください。
++      </p>
++    </form>
++  );
++}
+diff --git a/app/(club-app)/welcome/page.tsx b/app/(club-app)/welcome/page.tsx
+new file mode 100644
+index 0000000..e40fef2
+--- /dev/null
++++ b/app/(club-app)/welcome/page.tsx
+@@ -0,0 +1,23 @@
++// app/(club-app)/welcome/page.tsx
++
++import {
++  InvitationAcceptanceScreen,
++} from "./InvitationAcceptanceScreen";
++
++export const dynamic = "force-dynamic";
++
++// URL交換に失敗した場合は、以前のCookieで別の招待を表示しない。
++export default async function WelcomePage({
++  searchParams,
++}: {
++  searchParams: Promise<{
++    error?: string | string[];
++  }>;
++}) {
++  const query = await searchParams;
++
++  return InvitationAcceptanceScreen({
++    mode: "welcome",
++    invalidLink: query.error !== undefined,
++  });
++}
+diff --git a/tests/club-invitation-acceptance-pages.test.ts b/tests/club-invitation-acceptance-pages.test.ts
+new file mode 100644
+index 0000000..42c3d94
+--- /dev/null
++++ b/tests/club-invitation-acceptance-pages.test.ts
+@@ -0,0 +1,504 @@
++// tests/club-invitation-acceptance-pages.test.ts
++// node試験でPageの開示範囲・フォームの接続・bridgeの表示制御を確認する。
++
++import {
++  createElement,
++  isValidElement,
++  type ReactNode,
++} from "react";
++import {
++  renderToStaticMarkup,
++} from "react-dom/server";
 +import {
 +  afterEach,
 +  beforeEach,
@@ -281,662 +614,487 @@ index 0000000..9923ad6
 +  vi,
 +} from "vitest";
 +
-+import ClubLoginPage from "@/app/(club-app)/club-login/page";
++import WelcomePage from "@/app/(club-app)/welcome/page";
++import AcceptInvitationPage from "@/app/(club-app)/club-invitations/accept/page";
 +import {
-+  loginAction,
-+  type LoginActionState,
-+} from "@/app/(club-app)/club-login/actions";
++  WelcomeForm,
++} from "@/app/(club-app)/welcome/WelcomeForm";
++import {
++  AcceptInvitationForm,
++} from "@/app/(club-app)/club-invitations/accept/AcceptInvitationForm";
++import {
++  InvitationAuthBridge,
++} from "@/app/(club-app)/welcome/InvitationAuthBridge";
++import {
++  completeClubInvitationAction,
++} from "@/app/(club-app)/welcome/actions";
++import {
++  acceptExistingClubInvitationAction,
++} from "@/app/(club-app)/club-invitations/accept/actions";
 +import type {
-+  ClubLoginMembership,
-+} from "@/domain/club/club-login-destination";
++  WelcomeActionState,
++} from "@/domain/club/invitation/acceptance-form";
 +import type {
-+  ClubInvitationAcceptanceInvitation,
-+  ClubInvitationAcceptanceMembership,
-+} from "@/domain/club/invitation/acceptance-policy";
++  GetClubInvitationAcceptanceResult,
++} from "@/src/application/club/invitation/get-club-invitation-acceptance";
 +import {
 +  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
 +  createClubInvitationContext,
 +  serializeClubInvitationContext,
-+  type ClubInvitationContext,
 +} from "@/src/infrastructure/security/club-invitation-context";
 +
-+// 認証adapter・読取Service・Repository・通常所属判定は実装を残す。
++// 認可Serviceの結果を固定し、画面側で再解釈・秘密の転送をしないことを確認する。
 +const mocks = vi.hoisted(() => ({
 +  cookies: vi.fn(),
-+  cookieGet: vi.fn(),
-+  cookieSet: vi.fn(),
-+  createClient: vi.fn(),
-+  getSession: vi.fn(),
-+  getUser: vi.fn(),
-+  getClaims: vi.fn(),
-+  signIn: vi.fn(),
-+  signOut: vi.fn(),
-+  updateUser: vi.fn(),
-+  findInvitation: vi.fn(),
-+  findMemberships: vi.fn(),
-+  transaction: vi.fn(),
++  get: vi.fn(),
++  set: vi.fn(),
 +  read: vi.fn(),
-+  redirect: vi.fn(),
-+  form: vi.fn(),
++  complete: vi.fn(),
++  accept: vi.fn(),
++  actionState: vi.fn(),
++  effect: vi.fn(),
++  setStatus: vi.fn(),
++  setVisibility: vi.fn(),
++  phase: "ready" as string | null,
++  visible: false,
 +}));
 +
-+vi.mock("next/headers", () => ({ cookies: mocks.cookies }));
-+vi.mock("next/navigation", async (importOriginal) => ({
-+  ...await importOriginal<typeof import("next/navigation")>(),
-+  redirect: mocks.redirect,
++vi.mock("next/headers", () => ({
++  cookies: mocks.cookies,
 +}));
-+vi.mock("@/app/(club-app)/club-login/LoginForm", () => ({ LoginForm: mocks.form }));
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: mocks.createClient,
-+}));
-+vi.mock("@/src/infrastructure/prisma/client", () => ({
-+  prisma: {
-+    clubMembership: { findMany: mocks.findMemberships },
-+    clubInvitation: { findFirst: mocks.findInvitation },
-+    $transaction: mocks.transaction,
-+  },
-+}));
-+vi.mock("@/src/application/club/invitation/get-club-invitation-acceptance", async (original) => ({
-+  ...await original<
-+    typeof import("@/src/application/club/invitation/get-club-invitation-acceptance")
-+  >(),
++vi.mock("@/src/application/club/invitation/get-club-invitation-acceptance", () => ({
 +  getClubInvitationAcceptance: mocks.read,
++}));
++vi.mock("@/app/(club-app)/welcome/actions", () => ({
++  completeClubInvitationAction: mocks.complete,
++}));
++vi.mock("@/app/(club-app)/club-invitations/accept/actions", () => ({
++  acceptExistingClubInvitationAction: mocks.accept,
++}));
++vi.mock("react", async (original) => ({
++  ...await original<typeof import("react")>(),
++  useActionState: mocks.actionState,
++  useEffect: mocks.effect,
++  // DOMを生成せず、refの契約だけを再現する。
++  useRef: (initial: unknown) => ({
++    current: initial,
++  }),
++  // PWそのものの状態を持たないことも、呼び出し引数で検査する。
++  useState: (initial: unknown) => initial === false
++    ? [mocks.visible, mocks.setVisibility]
++    : [mocks.phase, mocks.setStatus],
 +}));
 +
 +const NOW = new Date("2026-10-19T00:00:00Z");
-+const USER_ID = "11111111-1111-4111-8111-111111111111";
-+const OTHER_ID = "22222222-2222-4222-8222-222222222222";
-+const SESSION_ID = "33333333-3333-4333-8333-333333333333";
-+const REQUEST_ID = "44444444-4444-4444-8444-444444444444";
-+const EMAIL = "recipient@example.test";
-+const PASSWORD = "  Existing-password1!  ";
-+const PRIVATE_DETAIL = `${PASSWORD} secret-token service-role-secret`;
-+const INVITATION_CLUB_NAME = "他人へ開示しない招待先クラブ";
++const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
++const PRIVATE_DETAIL = "secret-token recipient@example.test private-auth-id";
++const CLUB_NAME = "本人だけに表示するクラブ";
 +
-+type AuthUser = {
-+  id: string;
-+  email: string;
-+};
-+type StoredMembership = {
-+  id: string;
-+  userId: string;
-+  status: "ACTIVE" | "INVITED" | "SUSPENDED";
-+  role: ClubLoginMembership["role"];
-+  club: ClubLoginMembership["club"];
-+};
-+type Row = ClubInvitationAcceptanceInvitation & {
-+  id: string;
-+  club: {
-+    name: string;
-+    slug: string;
-+  };
-+  membership: ClubInvitationAcceptanceMembership & {
-+    user: {
-+      email: string;
-+    };
-+  };
-+};
-+
-+let currentUser: AuthUser | null;
-+let loginTarget: AuthUser;
-+let currentAmr: unknown;
-+let rawContext: string | undefined;
-+let context: ClubInvitationContext;
-+let row: Row;
-+let memberships: StoredMembership[];
-+
-+// Authサーバーで検証された本人を模擬する。
-+function user(id = USER_ID, email = EMAIL): AuthUser {
-+  return {
-+    id,
-+    email,
-+  };
-+}
-+
-+// 通常の所属先を実Domainで0・1・複数とプラン別に判定させる。
-+function membership(
-+  suffix: string,
-+  planType: ClubLoginMembership["club"]["planType"] = "STANDARD",
-+  status: StoredMembership["status"] = "ACTIVE",
-+  userId = USER_ID,
-+): StoredMembership {
-+  return {
-+    id: `membership-${suffix}`,
-+    userId,
-+    status,
-+    role: "MEMBER",
-+    club: {
-+      id: `club-${suffix}`,
-+      name: `通常クラブ${suffix}`,
-+      slug: `normal-${suffix}`,
-+      planType,
-+    },
-+  };
-+}
-+
-+// 実際のCookieを作成し、ログイン後も同じ招待を保持する。
-+function makeContext(): ClubInvitationContext {
-+  const value = createClubInvitationContext(new URLSearchParams({
-+    clubSlug: "invitation-club",
-+    token: "a".repeat(43),
-+  }));
-+  if (!value) {
-+    throw new Error("Test context unavailable");
-+  }
-+  return value;
-+}
-+
-+// LoginFormの既存state契約を使用する。
-+function state(): LoginActionState {
++// パスワード値のない既存のActionStateを作る。
++function state(): WelcomeActionState {
 +  return {
 +    status: "idle",
-+    values: { email: "" },
++    values: {},
 +    fieldErrors: {},
 +    formError: null,
 +    requestId: REQUEST_ID,
 +  };
 +}
 +
-+// パスワードは加工せず、メールだけ既存の正規化を通す。
-+function form(): FormData {
-+  const values = new FormData();
-+  values.set("email", "  RECIPIENT@EXAMPLE.TEST  ");
-+  values.set("password", PASSWORD);
-+  values.set("requestId", REQUEST_ID);
-+  return values;
-+}
-+
-+// ブラウザやLoginFormのpropsを変えず、Server Componentの返却HTMLを確認する。
-+async function renderPage(params: Record<string, string | string[]> = {}): Promise<string> {
-+  const element = await ClubLoginPage({ searchParams: Promise.resolve(params) });
-+  return renderToStaticMarkup(element);
-+}
-+
-+// Next.jsの実unstable_rethrowで識別できる制御例外を作る。
-+function navigationError(digest: string): Error & { digest: string } {
-+  return Object.assign(new Error("NEXT_NAVIGATION"), { digest });
-+}
-+
-+// 自分の入力email以外に、password・招待情報・外部原文をstateへ出さない。
-+function expectSafeState(result: LoginActionState): void {
-+  expect(result.values).toEqual({ email: EMAIL });
-+  const serialized = JSON.stringify(result);
-+  const secrets = [
-+    PASSWORD,
-+    PRIVATE_DETAIL,
-+    context.tokenHash,
-+    USER_ID,
-+    INVITATION_CLUB_NAME,
-+  ];
-+  for (const secret of secrets) {
-+    expect(serialized).not.toContain(secret);
++// Pageを通じたClient境界のpropsを調べるため、要素だけを辿る。
++function elements(node: ReactNode): React.ReactElement<Record<string, unknown>>[] {
++  if (Array.isArray(node)) {
++    return node.flatMap(elements);
 +  }
-+  expect(result.data).toBeUndefined();
++  if (!isValidElement<Record<string, unknown>>(node)) {
++    return [];
++  }
++  return [
++    node,
++    ...elements(node.props.children as ReactNode),
++  ];
 +}
 +
-+beforeEach(async () => {
++// 最初のHTMLに残る内容を確認し、DOMの操作結果とは区別する。
++function html(node: ReactNode): string {
++  return renderToStaticMarkup(createElement("div", null, node));
++}
++
++// 安全な表示DTOだけを用意し、認証方法はServiceの結果として渡す。
++function available(
++  authenticationMethod: "otp" | "password",
++): GetClubInvitationAcceptanceResult {
++  return {
++    outcome: "AVAILABLE",
++    authenticationMethod,
++    view: {
++      status: "available",
++      clubName: CLUB_NAME,
++      clubSlug: "invited-club",
++      expiresAt: "2026-10-20T00:00:00Z",
++    },
++  };
++}
++
++let context: NonNullable<ReturnType<typeof createClubInvitationContext>>;
++
++beforeEach(() => {
 +  vi.resetAllMocks();
 +  vi.useFakeTimers();
 +  vi.setSystemTime(NOW);
-+  currentUser = null;
-+  loginTarget = user();
-+  currentAmr = ["password"];
-+  context = makeContext();
-+  rawContext = serializeClubInvitationContext(context);
-+  row = {
-+    id: "invitation-a",
-+    clubId: "invitation-club-id",
-+    tokenHash: context.tokenHash,
-+    authUserId: USER_ID,
-+    email: EMAIL,
-+    membershipId: "invited-membership",
-+    status: "SENT",
-+    acceptedAt: null,
-+    expiresAt: new Date(NOW.getTime() + 60_000),
-+    club: {
-+      name: INVITATION_CLUB_NAME,
-+      slug: context.clubSlug,
-+    },
-+    membership: {
-+      id: "invited-membership",
-+      clubId: "invitation-club-id",
-+      userId: USER_ID,
-+      status: "INVITED",
-+      user: { email: EMAIL },
-+    },
-+  };
-+  memberships = [];
++  mocks.phase = "ready";
++  mocks.visible = false;
++  context = createClubInvitationContext(new URLSearchParams({
++    clubSlug: "invited-club",
++    token: "a".repeat(43),
++  }))!;
 +  mocks.cookies.mockResolvedValue({
-+    get: mocks.cookieGet,
-+    set: mocks.cookieSet,
++    get: mocks.get,
++    set: mocks.set,
 +  });
-+  mocks.cookieGet.mockImplementation((name: string) => (
-+    name === CLUB_INVITATION_CONTEXT_COOKIE_NAME && rawContext !== undefined
-+      ? { value: rawContext }
-+      : undefined
-+  ));
-+  mocks.getUser.mockImplementation(async () => ({
-+    data: { user: currentUser },
-+    error: null,
-+  }));
-+  mocks.getSession.mockImplementation(async () => ({
-+    data: {
-+      session: currentUser ? { access_token: "test-access-token" } : null,
-+    },
-+    error: null,
-+  }));
-+  mocks.getClaims.mockImplementation(async () => ({
-+    data: {
-+      claims: {
-+        sub: currentUser?.id,
-+        role: "authenticated",
-+        session_id: SESSION_ID,
-+        exp: NOW.getTime() / 1_000 + 3_600,
-+        amr: currentAmr,
-+      },
-+    },
-+    error: null,
-+  }));
-+  mocks.signIn.mockImplementation(async () => {
-+    currentUser = loginTarget;
-+    currentAmr = ["password"];
-+    return {
-+      data: { user: loginTarget },
-+      error: null,
-+    };
++  mocks.get.mockReturnValue({
++    value: serializeClubInvitationContext(context),
 +  });
-+  mocks.createClient.mockResolvedValue({
-+    auth: {
-+      getSession: mocks.getSession,
-+      getUser: mocks.getUser,
-+      getClaims: mocks.getClaims,
-+      signInWithPassword: mocks.signIn,
-+      signOut: mocks.signOut,
-+      updateUser: mocks.updateUser,
-+    },
-+  });
-+  mocks.findInvitation.mockImplementation(async (input: {
-+    where: {
-+      tokenHash: string;
-+      authUserId: string;
-+      club: {
-+        is: {
-+          slug: string;
-+        };
-+      };
-+    };
-+  }) => (
-+    input.where.tokenHash === row.tokenHash &&
-+    input.where.authUserId === row.authUserId &&
-+    input.where.club.is.slug === row.club.slug
-+      ? structuredClone(row)
-+      : null
-+  ));
-+  mocks.findMemberships.mockImplementation(async (input: {
-+    where: {
-+      userId: string;
-+      status: string;
-+    };
-+  }) => memberships.filter((item) => (
-+    item.userId === input.where.userId && item.status === input.where.status
-+  )));
-+  const original = await vi.importActual<
-+    typeof import("@/src/application/club/invitation/get-club-invitation-acceptance")
-+  >("@/src/application/club/invitation/get-club-invitation-acceptance");
-+  mocks.read.mockImplementation(original.getClubInvitationAcceptance);
-+  mocks.form.mockImplementation(() => createElement("form", { "data-login-form": "true" }));
-+  mocks.redirect.mockImplementation((path: string) => {
-+    throw navigationError(`NEXT_REDIRECT;push;${path};303;`);
-+  });
++  mocks.read.mockResolvedValue(available("otp"));
++  mocks.actionState.mockImplementation((_action, initial) => [
++    initial,
++    mocks.complete,
++    false,
++  ]);
 +});
 +
 +afterEach(() => {
-+  expect(mocks.signOut).not.toHaveBeenCalled();
-+  expect(mocks.updateUser).not.toHaveBeenCalled();
-+  expect(mocks.transaction).not.toHaveBeenCalled();
-+  expect(mocks.cookieSet).not.toHaveBeenCalled();
++  expect(mocks.set).not.toHaveBeenCalled();
++  expect(mocks.complete).not.toHaveBeenCalled();
++  expect(mocks.accept).not.toHaveBeenCalled();
 +  vi.useRealTimers();
-+  vi.restoreAllMocks();
++  vi.unstubAllGlobals();
 +});
 +
-+describe("未ログインから招待へ戻る", () => {
-+  it("ログインフォームを表示し、passwordログイン後に同じ招待へ固定遷移する", async () => {
-+    expect(await renderPage()).toContain("data-login-form");
-+    expect(mocks.read).not.toHaveBeenCalled();
-+    const cookieBefore = rawContext;
-+    await expect(loginAction(state(), form())).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
++describe.each([
++  ["welcome", WelcomePage],
++  ["existing", AcceptInvitationPage],
++] as const)("%s Page", (mode, Page) => {
++  it.each(["otp", "password"] as const)("%sの認証方法で適切な画面を返す", async (method) => {
++    mocks.read.mockResolvedValue(available(method));
++    const tree = await Page({
++      searchParams: Promise.resolve({}),
 +    });
-+    expect(mocks.signIn).toHaveBeenCalledExactlyOnceWith({
-+      email: EMAIL,
-+      password: PASSWORD,
++    const nodes = elements(tree);
++    const welcome = nodes.find((node) => node.type === WelcomeForm);
++    const existing = nodes.find((node) => node.type === AcceptInvitationForm);
++    const expectedForm = mode === "welcome" &&
++      method === "otp"
++      ? welcome
++      : mode === "existing" &&
++        method === "password"
++        ? existing
++        : undefined;
++    const output = html(tree);
++
++    expect(output).toContain(CLUB_NAME);
++    expect(output).toContain("日本時間");
++    expect(mocks.get).toHaveBeenCalledWith(CLUB_INVITATION_CONTEXT_COOKIE_NAME);
++    expect(mocks.read).toHaveBeenCalledWith({
++      context: serializeClubInvitationContext(context),
 +    });
-+    expect(mocks.read).toHaveBeenCalledExactlyOnceWith({ context: cookieBefore });
-+    expect(rawContext).toBe(cookieBefore);
-+    expect(mocks.findMemberships).not.toHaveBeenCalled();
-+    expect(mocks.findInvitation).toHaveBeenCalledWith(expect.objectContaining({
-+      where: {
-+        tokenHash: context.tokenHash,
-+        authUserId: USER_ID,
-+        club: { is: { slug: context.clubSlug } },
-+      },
-+    }));
-+  });
-+
-+  it("Authの拒否では招待照会も通常所属取得も実行しない", async () => {
-+    mocks.signIn.mockResolvedValue({
-+      data: { user: null },
-+      error: new Error(PRIVATE_DETAIL),
-+    });
-+    const result = await loginAction(state(), form());
-+    expect(result.status).toBe("error");
-+    expectSafeState(result);
-+    expect(mocks.read).not.toHaveBeenCalled();
-+    expect(mocks.findMemberships).not.toHaveBeenCalled();
-+  });
-+
-+  it("ログイン成功応答とCookieの本人が違う場合は再開しない", async () => {
-+    mocks.signIn.mockImplementation(async () => {
-+      currentUser = user(OTHER_ID, "other@example.test");
-+      return {
-+        data: { user: user() },
-+        error: null,
-+      };
-+    });
-+    const result = await loginAction(state(), form());
-+    expect(result.formError).toContain("ログインし直し");
-+    expectSafeState(result);
-+    expect(mocks.read).not.toHaveBeenCalled();
-+    expect(mocks.findMemberships).not.toHaveBeenCalled();
-+  });
-+
-+  it("成功後のAMRを確認できなければ自動遷移しない", async () => {
-+    mocks.signIn.mockImplementation(async () => {
-+      currentUser = user();
-+      currentAmr = undefined;
-+      return {
-+        data: { user: user() },
-+        error: null,
-+      };
-+    });
-+    expect((await loginAction(state(), form())).status).toBe("error");
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+  });
-+
-+  it("別アカウントでログインしても招待先の情報を返さず切替を案内する", async () => {
-+    loginTarget = user(OTHER_ID, "other@example.test");
-+    const result = await loginAction(state(), form());
-+    expect(result.formError).toContain("招待されたアカウント");
-+    expectSafeState(result);
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+  });
-+
-+  it("別人の既存sessionは明示的なpasswordログインで本人へ切り替えて再開できる", async () => {
-+    currentUser = user(OTHER_ID, "other@example.test");
-+    expect(await renderPage()).toContain("data-login-form");
-+    await expect(loginAction(state(), form())).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
-+    });
-+    expect(currentUser?.id).toBe(USER_ID);
-+    expect(mocks.signIn).toHaveBeenCalledTimes(1);
-+  });
-+
-+  it.each(["email", "password"])("%sのFileを資格情報へ文字列化しない", async (field) => {
-+    const values = form();
-+    values.set(field, new Blob([PRIVATE_DETAIL]), `${field}.txt`);
-+    const result = await loginAction(state(), values);
-+    expect(result.status).toBe("error");
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+    expect(mocks.signIn).not.toHaveBeenCalled();
-+  });
-+
-+  it("不正requestIdではログインも招待再開もしない", async () => {
-+    const values = form();
-+    values.set("requestId", "invalid");
-+    expect((await loginAction(state(), values)).status).toBe("error");
-+    expect(mocks.signIn).not.toHaveBeenCalled();
-+    expect(mocks.read).not.toHaveBeenCalled();
-+  });
-+
-+  it("hiddenのnextやID・roleを再開先や所属照会へ使用しない", async () => {
-+    const values = form();
-+    for (const field of ["next", "redirectTo", "clubId", "role", "userId"]) {
-+      values.set(field, "https://attacker.example.test");
-+    }
-+    await expect(loginAction(state(), values)).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
-+    });
-+  });
-+});
-+
-+describe("既ログインPageの招待再開", () => {
-+  beforeEach(() => {
-+    currentUser = user();
-+  });
-+
-+  it.each([
-+    ["password"],
-+    [{
-+      method: "password",
-+      timestamp: 1,
-+    }],
-+  ])("検証済みpassword AMRなら通常所属より先に戻る %#", async (...amr) => {
-+    currentAmr = amr;
-+    await expect(renderPage()).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
-+    });
-+    expect(mocks.signIn).not.toHaveBeenCalled();
-+    expect(mocks.findMemberships).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    [undefined],
-+    [["otp"]],
-+    [["oauth"]],
-+    ["password"],
-+    [[]],
-+  ])(
-+    "passwordの証拠不足ではフォームと通常導線を表示する %#",
-+    async (amr) => {
-+      currentAmr = amr;
-+      memberships = [membership("one")];
-+      const html = await renderPage();
-+      expect(html).toContain("data-login-form");
-+      expect(html).toContain("パスワードログイン");
-+      expect(html).toContain('href="/club/normal-one/events"');
-+      expect(html).not.toContain(INVITATION_CLUB_NAME);
-+      expect(html).not.toContain(context.tokenHash);
-+      expect(mocks.redirect).not.toHaveBeenCalled();
-+      expect(mocks.form.mock.calls[0][0]).toEqual({
-+        initialState: expect.objectContaining({ values: { email: "" } }),
-+      });
-+    },
-+  );
-+
-+  it("他人の招待では自動置換せず、通常導線付きの切替案内にする", async () => {
-+    currentUser = user(OTHER_ID, "other@example.test");
-+    row.status = "CANCELLED";
-+    memberships = [membership("other", "STANDARD", "ACTIVE", OTHER_ID)];
-+    const html = await renderPage();
-+    expect(html).toContain("招待されたアカウント");
-+    expect(html).toContain("data-login-form");
-+    expect(html).toContain('href="/club/normal-other/events"');
-+    for (const secret of [EMAIL, INVITATION_CLUB_NAME, context.tokenHash, "CANCELLED"]) {
-+      expect(html).not.toContain(secret);
-+    }
-+    expect(mocks.signIn).not.toHaveBeenCalled();
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+  });
-+
-+  it("emailが変わった本人にも招待の詳細を表示しない", async () => {
-+    currentUser = user(USER_ID, "changed@example.test");
-+    const html = await renderPage();
-+    expect(html).toContain("data-login-form");
-+    expect(html).not.toContain(INVITATION_CLUB_NAME);
-+    expect(html).not.toContain(EMAIL);
-+  });
-+
-+  it("AMR不足のPageを再表示しても自分自身へredirectしない", async () => {
-+    currentAmr = undefined;
-+    for (let attempt = 0; attempt < 3; attempt += 1) {
-+      expect(await renderPage()).toContain("data-login-form");
-+    }
-+    expect(mocks.redirect).not.toHaveBeenCalled();
-+  });
-+
-+  it("再ログイン後は同じ招待へ戻れる", async () => {
-+    currentAmr = ["otp"];
-+    expect(await renderPage()).toContain("data-login-form");
-+    await expect(loginAction(state(), form())).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
-+    });
-+  });
-+});
-+
-+describe.each(["page", "action"] as const)("%sの通常導線", (kind) => {
-+  beforeEach(() => {
-+    rawContext = undefined;
-+    if (kind === "page") {
-+      currentUser = user();
-+    }
-+  });
-+
-+  // 通常のPageとActionを同じ条件で確認する。
-+  async function invoke(): Promise<unknown> {
-+    return kind === "page" ? renderPage() : loginAction(state(), form());
-+  }
-+
-+  it.each([
-+    [[], "/club/select"],
-+    [[membership("one")], "/club/normal-one/events"],
-+    [[membership("one"), membership("two")], "/club/select"],
-+    [[membership("starter", "STARTER")], "/club/select"],
-+    [[membership("pro", "PRO")], "/club/select"],
-+    [[membership("starter", "STARTER"), membership("one")], "/club/normal-one/events"],
-+    [[membership("invited", "STANDARD", "INVITED")], "/club/select"],
-+    [[membership("suspended", "STANDARD", "SUSPENDED")], "/club/select"],
-+  ] as const)("既存の所属数・プラン・ACTIVE限定を維持する %#", async (stored, path) => {
-+    memberships = [...stored];
-+    await expect(invoke()).rejects.toMatchObject({
-+      digest: `NEXT_REDIRECT;push;${path};303;`,
-+    });
-+    expect(mocks.findMemberships).toHaveBeenCalledWith(expect.objectContaining({
-+      where: {
-+        userId: USER_ID,
-+        status: "ACTIVE",
-+      },
-+    }));
-+    expect(mocks.read).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([undefined, "invalid-cookie", ""])("pending欠損・形式改変でも通常導線へ進む %#", async (value) => {
-+    rawContext = value;
-+    await expect(invoke()).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club/select;303;",
-+    });
-+    expect(mocks.read).not.toHaveBeenCalled();
-+  });
-+
-+  it("期限切れCookieが通常ログインを繰り返し妨げない", async () => {
-+    rawContext = serializeClubInvitationContext({
-+      ...context,
-+      expiresAt: Date.now(),
-+    });
-+    await expect(invoke()).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club/select;303;",
-+    });
-+    expect(mocks.read).not.toHaveBeenCalled();
-+  });
-+
-+  it("Cookie内に戻り先を追加しても信用しない", async () => {
-+    rawContext = Buffer.from(JSON.stringify({
-+      ...context,
-+      returnTo: "https://attacker.example.test",
-+    })).toString("base64url");
-+    await expect(invoke()).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club/select;303;",
-+    });
-+  });
-+
-+  it.each(["CANCELLED", "EXPIRED", "ACCEPTED"] as const)(
-+    "本人の招待が%sなら通常の所属判定を妨げない",
-+    async (status) => {
-+      rawContext = serializeClubInvitationContext(context);
-+      row.status = status;
-+      await expect(invoke()).rejects.toMatchObject({
-+        digest: "NEXT_REDIRECT;push;/club/select;303;",
-+      });
-+    },
-+  );
-+
-+  it("形式が正しいhash改変でも他人の情報を返さず、通常導線を残す", async () => {
-+    rawContext = serializeClubInvitationContext({
-+      ...context,
-+      tokenHash: "f".repeat(64),
-+    });
-+    if (kind === "page") {
-+      const html = await renderPage();
-+      expect(html).toContain('href="/club/select"');
-+      expect(html).not.toContain(INVITATION_CLUB_NAME);
++    if (
++      mode === "welcome" &&
++      method === "otp"
++    ) {
++      expect(welcome).toBeDefined();
++      expect(existing).toBeUndefined();
++      expect(output).toContain('name="password"');
++    } else if (
++      mode === "existing" &&
++      method === "password"
++    ) {
++      expect(existing).toBeDefined();
++      expect(welcome).toBeUndefined();
++      expect(output).not.toContain('name="password"');
 +    } else {
-+      const result = await loginAction(state(), form());
-+      expect(result.formError).toContain("通常のクラブ");
-+      expectSafeState(result);
++      expect(welcome).toBeUndefined();
++      expect(existing).toBeUndefined();
++      expect(output).toContain(mode === "welcome"
++        ? 'href="/club-invitations/accept"'
++        : 'href="/welcome"');
 +    }
++    if (expectedForm) {
++      expect(Object.keys(expectedForm.props).sort()).toEqual([
++        "contextId",
++        "initialState",
++      ]);
++      expect(expectedForm.props.contextId).toBe(context.contextId);
++      expect(expectedForm.props.initialState).toMatchObject({
++        values: {},
++        fieldErrors: {},
++      });
++      expect(expectedForm.key).toBe(context.contextId);
++    }
++    expect(output).not.toContain(context.tokenHash);
++    expect(output).not.toContain(PRIVATE_DETAIL);
 +  });
-+});
 +
-+describe("安全な案内と制御例外", () => {
-+  it("PW再設定成功の通知とLoginFormのprops契約を維持する", async () => {
-+    const html = await renderPage({ "password-reset": "success" });
-+    expect(html).toContain("パスワードの変更に成功しました。");
-+    expect(mocks.form.mock.calls[0][0]).toEqual({
-+      initialState: expect.objectContaining({
-+        status: "idle",
-+        values: { email: "" },
++  it.each([
++    "AUTHENTICATION_REQUIRED",
++    "PASSWORD_LOGIN_REQUIRED",
++    "ERROR",
++  ] as const)("%sでは本人情報もフォームも公開しない", async (outcome) => {
++    mocks.read.mockResolvedValue(outcome === "ERROR" ? {
++      outcome,
++      view: {
++        status: "error",
++        reason: "PROCESSING_FAILED",
++      },
++    } : {
++      outcome,
++    });
++    const tree = await Page({
++      searchParams: Promise.resolve({}),
++    });
++    const output = html(tree);
++    expect(output).not.toContain(CLUB_NAME);
++    expect(output).not.toContain('name="contextId"');
++    expect(output).not.toContain('name="password"');
++    expect(output).toContain('href="/club-login"');
++    expect(output).toContain('href="/club/select"');
++    expect(output).not.toContain(context.tokenHash);
++  });
++
++  it.each([
++    ["INVALID_INVITATION", "招待を確認できません"],
++    ["RECIPIENT_MISMATCH", "招待されたアカウント"],
++    ["INVITATION_EMAIL_MISMATCH", "メールアドレスと一致しません"],
++    ["INVITATION_ALREADY_ACCEPTED", "承諾済み"],
++    ["INVITATION_CANCELLED", "取り消されています"],
++    ["INVITATION_EXPIRED", "有効期限は切れています"],
++    ["MEMBERSHIP_MISMATCH", "招待の状態を確認できません"],
++    ["INVALID_INVITATION_STATE", "招待の状態を確認できません"],
++  ])("%sを安全な固定文で案内する", async (reason, message) => {
++    mocks.read.mockResolvedValue({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason,
++      },
++    });
++    const output = html(await Page({
++      searchParams: Promise.resolve({}),
++    }));
++    expect(output).toContain(message);
++    expect(output).toContain('href="/club/select"');
++    expect(output).not.toContain(CLUB_NAME);
++    expect(output).not.toContain('type="submit"');
++    expect(output).not.toContain(context.tokenHash);
++  });
++
++  it("URL交換エラーでは、以前のCookieを承諾に使わない", async () => {
++    mocks.read.mockResolvedValue({
++      outcome: "UNAVAILABLE",
++      view: {
++        status: "unavailable",
++        reason: "INVALID_INVITATION",
++      },
++    });
++    const output = html(await Page({
++      searchParams: Promise.resolve({
++        error: "invalid-invitation",
 +      }),
++    }));
++    expect(mocks.read).toHaveBeenCalledWith({
++      context: undefined,
 +    });
++    expect(mocks.get).not.toHaveBeenCalled();
++    expect(output).not.toContain(CLUB_NAME);
 +  });
 +
-+  it("queryの任意nextをPageの遷移先に使わない", async () => {
-+    currentUser = user();
-+    rawContext = undefined;
-+    await expect(renderPage({ next: "https://attacker.example.test" })).rejects.toMatchObject({
-+      digest: "NEXT_REDIRECT;push;/club/select;303;",
++  it.each([undefined, "malformed", "expired"])("無効なcontextではフォームを出さない %#", async (raw) => {
++    mocks.get.mockReturnValue(raw === undefined ? undefined : {
++      value: raw === "expired"
++        ? serializeClubInvitationContext({
++            ...context,
++            expiresAt: NOW.getTime() - 1,
++          })
++        : raw,
 +    });
++    const tree = await Page({
++      searchParams: Promise.resolve({}),
++    });
++    expect(elements(tree).some((node) => node.type === WelcomeForm)).toBe(false);
++    expect(elements(tree).some((node) => node.type === AcceptInvitationForm)).toBe(false);
++    expect(elements(tree).find((node) => node.type === InvitationAuthBridge)?.props.contextId)
++      .toBeUndefined();
 +  });
 +
-+  it.each(["page", "action"] as const)("%sの照会例外原文を表示・ログへ出さない", async (kind) => {
-+    currentUser = user();
++  it("Serviceの想定外例外に含まれる秘密を表示しない", async () => {
 +    mocks.read.mockRejectedValue(new Error(PRIVATE_DETAIL));
-+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
-+    if (kind === "page") {
-+      const html = await renderPage();
-+      expect(html).toContain("招待を確認できませんでした");
-+      expect(html).not.toContain(PRIVATE_DETAIL);
-+    } else {
-+      const result = await loginAction(state(), form());
-+      expectSafeState(result);
-+    }
-+    expect(log).not.toHaveBeenCalled();
++    const output = html(await Page({
++      searchParams: Promise.resolve({}),
++    }));
++    expect(output).toContain("招待情報を取得できませんでした");
++    expect(output).not.toContain(PRIVATE_DETAIL);
++    expect(output).not.toContain(CLUB_NAME);
++    expect(output).not.toContain('type="submit"');
 +  });
 +
-+  it.each(["page", "action"] as const)("%sでDB照会が失敗しても固定案内にする", async (kind) => {
-+    currentUser = user();
-+    mocks.findInvitation.mockRejectedValue(new Error(PRIVATE_DETAIL));
-+    if (kind === "page") {
-+      const html = await renderPage();
-+      expect(html).toContain("data-login-form");
-+      expect(html).not.toContain(PRIVATE_DETAIL);
-+    } else {
-+      expectSafeState(await loginAction(state(), form()));
++  it("別の招待に切り替われば新しい表示時nonceでフォームを作る", async () => {
++    const method = mode === "welcome" ? "otp" : "password";
++    mocks.read.mockResolvedValue(available(method));
++    const previousId = context.contextId;
++    context = {
++      ...context,
++      contextId: "22222222-2222-4222-8222-222222222222",
++    };
++    mocks.get.mockReturnValue({
++      value: serializeClubInvitationContext(context),
++    });
++    const tree = await Page({
++      searchParams: Promise.resolve({}),
++    });
++    const form = elements(tree).find((node) =>
++      node.type === WelcomeForm ||
++      node.type === AcceptInvitationForm);
++    expect(form?.props.contextId).toBe(context.contextId);
++    expect(form?.key).toBe(context.contextId);
++    expect(html(tree)).not.toContain(previousId);
++  });
++
++  it("Cookieの読取例外を固定のエラーにする", async () => {
++    mocks.cookies.mockRejectedValue(new Error(PRIVATE_DETAIL));
++    const output = html(await Page({
++      searchParams: Promise.resolve({}),
++    }));
++    expect(output).toContain("招待情報を取得できませんでした");
++    expect(output).not.toContain(PRIVATE_DETAIL);
++    expect(mocks.read).not.toHaveBeenCalled();
++  });
++});
++
++describe("招待フォーム", () => {
++  it("初回フォームはPWを再表示せず、項目エラーと表示切替を持つ", () => {
++    const initial = state();
++    const errors: WelcomeActionState = {
++      ...initial,
++      status: "error",
++      formError: "入力内容を確認してください。",
++      fieldErrors: {
++        password: ["英字と数字を含めてください。"],
++        confirmation: ["パスワードが一致しません。"],
++      },
++    };
++    mocks.actionState.mockReturnValue([errors, mocks.complete, false]);
++    const tree = WelcomeForm({
++      contextId: context.contextId,
++      initialState: initial,
++    });
++    const output = html(tree);
++    const nodes = elements(tree);
++    const passwordInputs = nodes.filter((node) =>
++      node.type === "input" &&
++      node.props.autoComplete === "new-password");
++    expect(passwordInputs).toHaveLength(2);
++    for (const input of passwordInputs) {
++      expect(input.props.value).toBeUndefined();
++      expect(input.props.defaultValue).toBeUndefined();
++      expect(input.props.required).toBe(true);
++      expect(input.props.minLength).toBe(8);
++      expect(input.props["aria-invalid"]).toBe(true);
++    }
++    expect(output).toContain("英字と数字");
++    expect(output).toContain("パスワードが一致しません。");
++    expect(output).toContain('name="confirmation"');
++    expect(mocks.actionState).toHaveBeenCalledWith(completeClubInvitationAction, initial);
++    const toggle = nodes.find((node) => node.props["aria-controls"]);
++    (toggle?.props.onClick as () => void)();
++    const update = mocks.setVisibility.mock.calls[0][0] as (value: boolean) => boolean;
++    expect(update(false)).toBe(true);
++    expect(update(true)).toBe(false);
++    mocks.visible = true;
++    expect(html(WelcomeForm({
++      contextId: context.contextId,
++      initialState: initial,
++    }))).toContain('type="text"');
++  });
++
++  it.each([WelcomeForm, AcceptInvitationForm])("pending時は送信を無効にする %#", (Form) => {
++    const initial = state();
++    mocks.actionState.mockReturnValue([initial, mocks.complete, true]);
++    const nodes = elements(Form({
++      contextId: context.contextId,
++      initialState: initial,
++    }));
++    expect(nodes.find((node) => node.type === "form")?.props["aria-busy"]).toBe(true);
++    expect(nodes.find((node) => node.props.type === "submit")?.props.disabled).toBe(true);
++    expect(nodes.find((node) => node.props.name === "contextId")?.props.value)
++      .toBe(context.contextId);
++    expect(nodes.find((node) => node.props.name === "requestId")?.props.value)
++      .toBe(REQUEST_ID);
++    if (Form === WelcomeForm) {
++      expect(nodes.find((node) => node.type === "fieldset")?.props.disabled).toBe(true);
 +    }
 +  });
 +
-+  it.each(["page", "action"] as const)("%sでCookieのNext制御例外を再送出する", async (kind) => {
-+    currentUser = user();
-+    const error = navigationError("NEXT_HTTP_ERROR_FALLBACK;404");
-+    mocks.cookies.mockRejectedValue(error);
-+    await expect(kind === "page" ? renderPage() : loginAction(state(), form())).rejects.toBe(error);
++  it("既存フォームは承諾Actionだけを接続し、PW欄を作らない", () => {
++    const initial = state();
++    const tree = AcceptInvitationForm({
++      contextId: context.contextId,
++      initialState: initial,
++    });
++    expect(mocks.actionState).toHaveBeenCalledWith(acceptExistingClubInvitationAction, initial);
++    expect(elements(tree).filter((node) => node.type === "input").map((node) => node.props.name))
++      .toEqual(["requestId", "contextId"]);
++  });
++});
++
++describe("Pageとbridgeの接続", () => {
++  it.each([null, "invalid-invitation", "switch-account", "login-required"])(
++    "認証途中・失敗時はフォームを操作させない %s",
++    (phase) => {
++      mocks.phase = phase;
++      const output = html(createElement(InvitationAuthBridge, {
++        contextId: context.contextId,
++      }, createElement("form", null, "秘密のフォーム")));
++      expect(output).not.toContain("秘密のフォーム");
++      expect(output).not.toContain(context.tokenHash);
++    },
++  );
++
++  it("fragmentがない場合にだけPageの内容を表示する", async () => {
++    mocks.phase = null;
++    const browser = {
++      location: {
++        hash: "",
++      },
++    };
++    vi.stubGlobal("window", browser);
++    InvitationAuthBridge({
++      contextId: context.contextId,
++    });
++    mocks.effect.mock.calls[0][0]();
++    await Promise.resolve();
++    expect(mocks.setStatus).toHaveBeenCalledWith("ready");
++  });
++
++  it("contextがなくてもfragmentを消し、POSTしない", async () => {
++    const fetchMock = vi.fn();
++    const replaceState = vi.fn();
++    vi.stubGlobal("fetch", fetchMock);
++    vi.stubGlobal("window", {
++      location: {
++        hash: `#access_token=${PRIVATE_DETAIL}`,
++        pathname: "/welcome",
++        search: "",
++      },
++      history: {
++        state: null,
++        replaceState,
++      },
++    });
++    InvitationAuthBridge({});
++    mocks.effect.mock.calls[0][0]();
++    expect(replaceState).toHaveBeenCalledWith(null, "", "/welcome");
++    expect(fetchMock).not.toHaveBeenCalled();
++    await Promise.resolve();
++    expect(mocks.setStatus).toHaveBeenCalledWith("invalid-invitation");
 +  });
 +});
