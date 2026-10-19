@@ -1,1268 +1,1066 @@
-diff --git a/docs/runbooks/club-invitation-acceptance.md b/docs/runbooks/club-invitation-acceptance.md
+diff --git a/docs/implementation/phases/F07.md b/docs/implementation/phases/F07.md
+index e9323b1..0604a87 100644
+--- a/docs/implementation/phases/F07.md
++++ b/docs/implementation/phases/F07.md
+@@ -4,6 +4,12 @@ F07. マイページ・AppUser・複数Child管理
+ 目的
+ 利用者が自分の氏名と子どもの情報を管理し、権限別の導線やクラブ切替を利用できるようにします。
+ 確定するChild方針
++<!-- 【追加：F07粒度1】ユーザー回答に基づく学年・状態遷移・表示契約。 -->
++- 学年は未設定を許可し、Child.grade = nullで保存する。
++- 現在所属の一覧は、自分のChildかつ現在クラブのACTIVEなChildClubMembershipがあるものに限定する。
++  現在クラブへの追加候補は、本人が追加操作を始めたときに別取得・別表示する。
++- 未所属ならChildClubMembershipを作成し、再有効化はWITHDRAWNからACTIVEだけを許可する。
++  ACTIVEは重複とし、SUSPENDED・INVITEDを本人操作でACTIVEへ戻さない。
+ - AppUserは複数のChildを持てる。
+ - Childは親に属するグローバルデータとし、クラブ所属はChildClubMembershipで表す。
+ - マイページには現在クラブへ所属するChildだけを表示する。
+@@ -19,7 +25,8 @@ F07. マイページ・AppUser・複数Child管理
+ 5. ChildとMembershipの所有者・clubId一致を全Actionで確認する。
+ 6. 複数Childを表示・操作できるUIにする。
+ 7. OWNER、COACH、OFFICER、MEMBERごとのリンクを表示する。
+-8. ACTIVE Membershipが2件以上の場合だけクラブ切替を表示する。
++<!-- 【変更：F07粒度1】利用可能なACTIVE件数という確定回答を反映する。 -->
++8. アプリを利用できるACTIVE Membershipが2件以上の場合だけクラブ切替を表示する。
+ 9. 規約、プライバシー、公式HP、Instagram、ログアウトへのリンクを表示する。
+ 10. PlatformAdmin用リンクはPlatformAdmin本人にだけ表示する。
+ 受入条件
+@@ -32,3 +39,23 @@ F07. マイページ・AppUser・複数Child管理
+ - Child本体とChildClubMembershipの違い
+ - AppUser氏名とChild情報がクラブ横断データであること
+ - 物理削除をMVPから外す理由
++
++<!-- 【追加：F07粒度1】純粋関数の契約と後続粒度の責務を明記する。 -->
++粒度1の入力・表示・結果契約
++- 本人氏名とChild氏名は前後空白を除去し、空欄を拒否して100文字以内とする。
++  既存のAppUser.name = nullは未登録として表示し、氏名更新にChild入力を要求しない。
++- Childの学年はYOUJIとELEMENTARY_1〜6、または未設定を許可する。
++  FormDataではname・gradeを各1個の文字列として要求し、gradeの空文字だけをnullへ変換する。
++  直接検証時は明示nullも許可する。欠損、File、重複、不正な学年を未設定へ丸めない。
++- 対象childIdはUUID v4形式を確認する。IDの形式一致は所有者・現在クラブ所属の証明ではない。
++- 入力検証の成功値・ActionStateの値はname、grade、対象childIdなど操作ごとの許可項目だけを持つ。
++  email、親のID、clubId、role、statusを入力からコピーしない。
++- ClubAccountViewは本人氏名、表示専用のAuth emailとAppUser.email、現在クラブの表示情報、
++  ロール、現在所属Child、サーバーで判定したリンク表示用boolを持つ。
++  Auth UserやDBレコード全体、親のID、他クラブ所属の詳細を含めない。
++- 既存Child候補の取得結果は通常表示と分け、Childのid・name・gradeだけを返す。
++- 更新結果は固定outcomeと内部再検証用の影響slug、必要な状態違反理由だけを返す。
++  任意のDBメッセージや入力値を失敗結果・完了メッセージへ反射しない。
++- 入力・状態の純粋関数は、認証、本人所有、現在クラブ一致、DBの一回限り更新を保証しない。
++  Repository、Service、Action、Pageへの接続と実データの再照合は後続粒度で行う。
++- 規約・プライバシーの公開URLと文面は未確定であり、粒度1で仮の公開先や本文を追加しない。
+diff --git a/domain/club/account/account-form.test.ts b/domain/club/account/account-form.test.ts
 new file mode 100644
-index 0000000..c84dc84
+index 0000000..931950e
 --- /dev/null
-+++ b/docs/runbooks/club-invitation-acceptance.md
-@@ -0,0 +1,204 @@
-+<!-- docs/runbooks/club-invitation-acceptance.md -->
-+
-+# F06 招待承諾の受入・再開手順
-+
-+F06粒度10の確認手順です。実装済み、mock試験済み、実DB・Auth試験済み、
-+実ブラウザ確認済みを分けて記録します。未実施・skip・未達があればF06受入完了にしません。
-+この手順書の追加やpatch作成だけでは、実DB・Auth・実メールを操作しません。
-+運営者向けの送信・取消・PREPARING復旧は[既存手順](./club-member-invitations.md)を使用します。
-+
-+## 到達点と処理の境界
-+
-+| 操作 | 実装箇所・入出力 | DB変更 |
-+| --- | --- | --- |
-+| 招待URLを開く | `proxy.ts` の `proxy` がslug・raw tokenを検証し、短期context Cookieとclean URLへ交換 | なし |
-+| 新規Authの本人確認 | `welcome/InvitationAuthBridge.tsx` がfragmentを履歴から消し、tokenを同一originのPOST bodyだけで送る | なし |
-+| SSR sessionを確立 | `auth/confirm/route.ts` のPOSTがcontextId・Auth ID・現在email・招待を照合し、検証後にAuth Cookieを返す | 招待の読取のみ |
-+| 利用可能な画面を表示 | `welcome/InvitationAcceptanceScreen.tsx` → `getClubInvitationAcceptance` が安全な表示DTOを返す | 読取のみ |
-+| 新規の初回設定 | `completeClubInvitationAction` → `acceptClubInvitation` → `updateClubInvitationPassword` | AuthのPW更新後にアプリDB承諾 |
-+| 既存のログイン・再開 | `club-login/actions.ts` の `loginAction` が検証済みpassword sessionとpending招待から固定の承諾画面へ案内 | 読取のみ |
-+| 既存の承諾 | `acceptExistingClubInvitationAction` → `acceptClubInvitation`。PW欄・PW更新なし | アプリDB承諾のみ |
-+| DB承諾 | `club-invitation-repository.ts` の `acceptClubInvitationForUser`。slug・hash・本人・email・期限・INVITEDを再確認 | 同一transactionでInvitationをACCEPTED、acceptedAt設定、MembershipをACTIVEへ条件付き更新 |
-+| 完了 | Actionがcontext Cookieを失効させ、会員管理・account・クラブ選択を再検証して対象eventsへ固定遷移 | 再承諾なし |
-+
-+画面・Actionのパスは `app/(club-app)/` 配下です。Serviceは
-+`src/application/club/invitation/`、Repositoryは `src/infrastructure/prisma/repositories/`、
-+Auth adapterは `src/infrastructure/supabase/club-invitation-session.ts` です。
-+後続粒度待ちの接続はありません。実ブラウザの確認結果は別途必要です。
-+
-+新規・既存はAppUserの有無やCookieの自己申告で決めません。
-+検証済みAMRがotpなら初回設定、passwordなら既存承諾へ進み、不明ならログインへ戻します。
-+contextIdは表示時の招待を固定するnonceで、本人認証やDBの一回限り保証を代行しません。
-+PW・確認値はtrimや正規化をせず、ActionStateへ保持しません。
-+
-+## 実行前のローカル環境
-+
-+1. データを捨てられる専用のSupabaseローカル環境を用意します。日常の開発DBや本番は使いません。
-+2. DBとAuthが同じローカルstackであること、既存migrationが適用済みであることを確認します。
-+   テストはstack起動、migration、seed、パッケージ追加、スキーマ変更を代行しません。
-+3. Authの通知先はローカルの受信箱に限定し、外部SMTP・実配送・本番hookを接続しません。
-+   テストは `generateLink` と `createUser` を使い、Resendや `inviteUserByEmail` を呼びません。
-+4. 設定を承認された方法でプロセス環境へ渡します。この手順では.envを表示・自動読込しません。
-+   キー・PW・接続文字列をコマンド引数、チャット、テスト報告へ貼り付けません。
-+5. 本番ではないことに加え、使い捨てであることを確認した担当者だけが
-+   `CLUB_INVITATION_ACCEPTANCE_DISPOSABLE=1` を環境へ設定します。
-+
-+| 設定 | 許可する値・用途 |
-+| --- | --- |
-+| `DATABASE_URL` | localhostまたは127.0.0.1、54322、DB名postgres、postgres/postgresql、認証あり。query・fragmentなし |
-+| `NEXT_PUBLIC_SUPABASE_URL` | `http://localhost:54321` または `http://127.0.0.1:54321`。path・認証・query・fragmentなし |
-+| `APP_BASE_URL` | 同じloopback stackのHTTPポート3000。path・認証・query・fragmentなし |
-+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | 上記ローカルAuthのanon key |
-+| `SUPABASE_SERVICE_ROLE_KEY` | 上記ローカルAuthの管理key。fixture作成だけに使用 |
-+| `CLUB_INVITATION_ACCEPTANCE_DISPOSABLE` | 担当者が確認後に明示する `1` |
-+
-+既存 `supabase/config.toml` の `/welcome` とクエリの許可を使います。
-+Site URL、共用password policy、JWT hook、cookie domain、OTP期限を勝手に変更しません。
-+実際のAuth版・CLI版と設定反映を記録します。URLのloopback判定だけでは、
-+転送されたDBやリモートへproxyするローカルサービス、同じstackであることまでは証明できません。
-+
-+## 自動確認
-+
-+通常の `npm test` は3つの実行flagを設定しない環境で実行します。
-+新しいflowテストの接続ガード17件はDB・Authなしで動き、実接続の24件はskipします。
-+既存DB試験は単独のDB用flagで有効になるため、通常実行へflagを持ち越しません。
-+
-+F06とF05送信の主な回帰は、flagなしで次を実行します。
-+
-+```sh
-+npm test -- \
-+  domain/club/invitation \
-+  src/application/club/invitation \
-+  src/infrastructure/security/club-invitation-context.test.ts \
-+  src/infrastructure/supabase/club-invitation-session.test.ts \
-+  src/infrastructure/supabase/club-invitation-auth.test.ts \
-+  tests/club-invitation-entry.test.ts \
-+  tests/club-invitation-confirm.test.ts \
-+  tests/club-invitation-actions.test.ts \
-+  tests/club-invitation-acceptance-actions.test.ts \
-+  tests/club-invitation-login-resume.test.ts \
-+  tests/club-invitation-acceptance-pages.test.ts \
-+  tests/club-invitation-acceptance-repository.integration.test.ts \
-+  tests/club-invitation-acceptance.flow.integration.test.ts
-+```
-+
-+実DB・実Authの統合は、上記の事前確認後に次だけを明示実行します。
-+
-+```sh
-+npm run test:club-invitation:acceptance:local
-+```
-+
-+このscriptは専用flowファイルだけを選び、次の3つをすべて `1` にします。
-+`RUN_CLUB_INVITATION_ACCEPTANCE_TESTS`、`RUN_DB_INTEGRATION_TESTS`、
-+`RUN_CLUB_INVITATION_AUTH_TESTS`。使い捨て確認flagはscriptが自動設定しません。
-+flag不足ではskip、明示起動後の接続設定不正や接続不可では失敗です。
-+どちらも実DB・Authの成功として記録しません。
-+
-+flow試験は実SDK・実Auth・実Service・実Repository・実Actionを使います。
-+F05の送信済み招待をDB fixtureで用意し、メール配送そのものは対象にしません。
-+`next/headers` のrequest Cookieと `next/cache` の再検証だけをテスト境界に置き換えます。
-+共有Prisma clientのdotenv読込を避け、専用clientをガード後に注入します。
-+Auth通信は許可したloopback originだけとし、自動redirectを拒否します。
-+実verifyリンクはmanual redirectでLocationを検査します。
-+
-+ブラウザでのCookie保存・同時送信・hydrationやNextのHTTP Action受付を再現する試験ではありません。
-+2並行のケースは検証済み本人による実RepositoryのDB承諾であり、
-+AuthのPW更新まで全体を一回限りにする保証には使用しません。
-+DB障害ケースは実Auth更新後、transaction開始を一度だけ故障注入し、
-+実PWログイン・既存Actionによる再開を確認します。ネットワーク断自体の再現ではありません。
-+
-+既存のDB制約・F05 Repository・復旧は専用環境で別途実行します。
-+
-+```sh
-+npm run test:db
-+npm run test:club-invitation:auth:local
-+```
-+
-+これらの既存scriptはflow専用と同じ接続ガードを持つとは限りません。
-+実行前に専用環境・接続先を確認します。F05 Auth単独試験の成功を、
-+F06のブラウザCookie・本人照合・DB承諾の代替にはしません。
-+
-+## 受入条件と確認先
-+
-+| 確認する条件 | 自動試験 | 実ブラウザでの確認 |
-+| --- | --- | --- |
-+| 新規の有効招待・初回PW・ACTIVE化 | flowのnew、有効招待Action | 初回設定だけを表示し、英字・数字・8文字・確認一致を検証。記号と前後空白を勝手に変更しない |
-+| 既存の有効招待・別クラブ追加 | flowのexisting、PW更新0回・既存所属保持 | PW再設定を要求せず、ログイン前のpending招待から承諾を再開 |
-+| 別Authがtokenだけ所持 | flowの両経路、既存認可・読取Service試験 | 他人のクラブ名・取消・期限・承諾済みを開示せず更新しない |
-+| 現在email変更 | flowの両経路 | 招待と不一致なら更新しない。JWTの古いemailだけで許可しない |
-+| 期限境界・取消・使用済み | flowの両経路、既存Domain試験 | 本人だけに安全な理由。承諾済みは再更新せず通常利用へ |
-+| 2並行・取消／再送競合・旧token | flowの両経路、実DB Repository試験 | 連打・2タブでもDB承諾1件。再送後の旧リンクは利用不可 |
-+| Auth成功DB失敗後の再開 | flowの両経路、Service／Action故障試験 | 設定済みPWでログイン。PWを再設定せず承諾を再開 |
-+| Auth結果不明 | 既存Service／Action試験 | 自動再送せず、入力したPWでログインして状態を確認 |
-+| Cookie改変・別タブ・直接Action | flowの両経路、Action／Page試験 | 古い表示時nonceで別招待を承諾しない。File・重複field・余分なIDも試す |
-+| inviteの実戻り形式・SSR Cookie再読取 | flowのnew、Auth単独試験 | fragment除去、実Set-Cookie、refresh、再読込、戻る操作を下記手順で確認 |
-+| Originと任意戻り先 | flowのconfirm Origin拒否・固定遷移、既存Action試験 | HTTP経由でforeign OriginのActionを拒否。外部next／redirectToへ遷移しない |
-+| no-store／no-referrer・秘密の非出力 | Route／entry／Service／Action試験 | 実応答・Referer・URL履歴・アプリ／インフラログを確認 |
-+
-+自動試験のファイルは `tests/club-invitation-*` と
-+`src/application/club/invitation/*.test.ts`、Domainは
-+`domain/club/invitation/acceptance-*.test.ts` です。追加flowは
-+`tests/club-invitation-acceptance.flow.integration.test.ts` です。
-+
-+## 実ブラウザの確認
-+
-+1. 同じ専用stackへ接続したアプリをポート3000で起動し、新規・既存のテスト対象を用意します。
-+   fixtureは自動試験がDBを片付けるため、手動試験と同時に使い回しません。
-+   配送の代わりにローカルの管理された手段でテストリンクを生成します。
-+   このテストはリンクやtokenを出力しないため、テストログからリンクを取得しません。
-+2. 新規リンクを開き、Auth→`/welcome` の実戻りを確認します。
-+   `/auth/confirm` POST前にfragmentが履歴から除去され、送信先が同一originであることを確認します。
-+   生値をHAR、スクリーンショット、エラー報告へ保存しません。
-+3. GETのqueryが短期Cookieへ交換され、clean URLになること、context CookieがHttpOnly・
-+   SameSite=Lax・host-only・path=/・約15分であることを確認します。
-+   HTTPS本番相当ではSecureが付くことも別途確認します。ローカルHTTPではSecureなしです。
-+   Supabase Auth CookieはSDKの設定を確認し、contextと同じHttpOnly属性だと決めつけません。
-+4. 実レスポンスでno-storeとno-referrerを確認します。外部リンクへ秘密のRefererが出ないこと、
-+   第三者スクリプト・解析・外部画像から流出しないこと、URL/bodyを保存するログがないことを確認します。
-+   インフラ設定は運用担当へ確認し、アクセスログへ生値を出して検証しません。
-+5. 認証待ちではフォームを操作できず、PW認証済みには再設定を求めないことを確認します。
-+   PW表示切替・label・項目エラー・エラーフォーカス・Tab／Enter操作・pending抑止を確認します。
-+   エラー後、再読込、戻る、ブラウザの自動入力についてもPWがstateやHTMLへ反射されないことを確認します。
-+6. 同じ本人への別クラブ招待を2タブで開き、古いフォームから送信します。
-+   別の招待は承諾されず、再表示で選んだ招待だけが対象になることをDBの安全な状態表示で確認します。
-+7. 新規・既存の両方で有効、期限切れ、取消、承諾済み、別本人、email変更を確認します。
-+   自動試験のDB境界時刻は実ブラウザの待ち時間で代替しません。
-+8. HTTP経由の直接Action、foreign Origin、Cookie改変、任意戻り先を試します。
-+   NextのAction IDやセッションを外部へ出さず、同じ使い捨て環境だけで行います。
-+   関数直接呼出しのmock試験だけでHTTPのOrigin保護を確認済みにしません。
-+9. 完了後は正規slugのeventsへ進み、既存所属が残ること、戻る／再読込で再承諾しないことを確認します。
-+
-+## 部分成功と再開
-+
-+| 状態・表示 | 操作 |
-+| --- | --- |
-+| PW更新は成功、DB承諾は未完了 | 再設定・再送信を避け、設定したPWでログインして同じ招待を再開 |
-+| PW更新結果が不明 | 自動再試行しない。入力したPWでログインして最新状態を確認。失敗が続けば運営者へ連絡 |
-+| DB承諾済み、Cookie削除・再検証失敗 | 承諾をやり直さず、クラブ一覧から利用先を確認 |
-+| context期限切れ・別タブ差替え | 招待メールから開き直す。新contextが有効でも表示時nonceが古いフォームは使わない |
-+| アプリ招待期限切れ・取消 | OWNERへ新しい招待を依頼。Authユーザー削除や手動ACTIVE化で回避しない |
-+| 承諾済み | 通常のクラブ利用へ。tokenを再利用しない |
-+| 別本人・email不一致・認証方法不明 | 対象アカウントでログインし直す。合わなければ運営者へ確認 |
-+
-+AuthのOTP期限は現設定3600秒、アプリ招待期限は24時間、contextは15分です。
-+各期限は独立です。Authが先に失効した場合はOWNERから再送します。
-+既存accountの承諾にPW再設定は不要です。共用のOTP期限・password policyを変更する場合は、
-+HPの回復導線への影響を別の変更として検討します。この粒度では変更しません。
-+
-+## 後片付けと記録
-+
-+flow試験はUUIDで追跡したクラブ・AppUserのDB fixtureだけを終了時に削除します。
-+Authのテストユーザーは残ります。使い捨てstackであることを確認し、管理された手順で環境を再作成します。
-+テスト失敗・強制終了でDB fixtureが残る場合も、既存データの一括削除へ切り替えません。
-+
-+実行記録には日時、コミット、SDK・CLI・Auth版、対象環境の非秘密の識別名、
-+実行コマンド、passed／failed／skipped、未実施項目と担当者を残します。
-+実接続試験は失敗の原文を伏せるため、ケース名を使って設定・状態を安全に確認します。
-+PW、メール、token、Cookie、接続文字列、service role keyは添付しません。
-+
-+| 確認区分 | patch作成時の扱い |
-+| --- | --- |
-+| 接続ガード・既存mock回帰 | 最終報告のコマンドと結果を参照 |
-+| 実DB＋実Auth flow | 未実施。通常実行のskipを成功扱いしない |
-+| 既存実DB／Auth単独 | 未実施の場合は未確認と記録 |
-+| 実ブラウザ・実応答ヘッダー・インフラログ | 未実施。全受入を満たすまではF06完了としない |
-diff --git a/docs/runbooks/club-member-invitations.md b/docs/runbooks/club-member-invitations.md
-index 55e3ac8..aee03b1 100644
---- a/docs/runbooks/club-member-invitations.md
-+++ b/docs/runbooks/club-member-invitations.md
-@@ -7,12 +7,17 @@
- 
- ## 現在の到達点
- 
-+<!-- 【変更：F06粒度10】受取人側の到達点と専用手順だけを更新する。 -->
-+
- - OWNER管理画面で新規招待・再送・取消・期限切れ表示を操作できます。
- - 新規ユーザーのメールはSupabaseの認証リンク、既存ユーザーはアプリの参加リンクを使用します。
- - `/welcome?clubSlug=...&token=...` と `/club-invitations/accept?clubSlug=...&token=...` は確定契約です。
--- 受入画面、Authから戻ったセッションCookieの生成、承諾によるACTIVE化は後続F06です。
--  現時点ではメール・DB状態までを確認できても、入会完了の受入確認を完了と扱えません。
--- `/auth/confirm` はパスワード再設定専用です。invite対応済みとして使用しません。
-+- F06で初回設定・既存承諾画面、Auth確認後のSSR Cookie生成、条件付き承諾によるACTIVE化を接続しています。
-+  新規アカウントだけ初回PWを設定し、既存アカウントはログインして承諾します。
-+- `/auth/confirm` は既存のrecovery GETと、同一originのinvite確認POSTを扱います。
-+  招待メールのリンク先を手動で `/auth/confirm` へ差し替えません。
-+- 実DB・実Auth・ブラウザの受入結果は分けて記録します。接続済みだけではF06受入完了と扱いません。
-+  [F06招待承諾の受入・再開手順](./club-invitation-acceptance.md)を使用してください。
- 
- ## 接続先と設定
- 
-@@ -69,7 +74,8 @@ npm run test:club-invitation:auth:local
- 
- ## 実配送の受入確認
- 
--F06実装までは、本番への入会導線の公開・入会完了テストは保留します。
-+<!-- 【変更：F06粒度10】公開前の受入はF06専用手順で確認する。 -->
-+F06のローカル統合・実ブラウザ受入が完了するまでは、本番への入会導線の公開を保留します。
- 実配送は管理された検証先・送信ドメイン・対象クラブを確認してから、OWNER画面で個別に実行します。
- `RESEND_API_KEY` と `MAIL_FROM_ADDRESS` を確認し、実ユーザーへ一括送信しません。
- 
-@@ -82,7 +88,7 @@ F06実装までは、本番への入会導線の公開・入会完了テスト
- | 配送不明・受付後DB失敗 | READY_TO_SENDとleaseを保持する。未送信と決めつけて自動で再送しない |
- | 取消 | 未承諾INVITEDだけを削除し、CANCELLED履歴とAppUserを残す。古い処理がSENTへ戻せない |
- | 期限切れ | 一覧取得でEXPIRED化し、tokenを拒否する。INVITEDは保持する |
--| 初回設定・受入 | F06後にCookie・本人ID・クラブ・招待期限を照合し、tokenだけでACTIVE化しないことを確認する |
-+| 初回設定・受入 | [F06専用手順](./club-invitation-acceptance.md)で本人照合・PW更新の区別・一回限りのACTIVE化を確認する |
- 
- Resendの受付は受信者への到着を保証しません。到着・迷惑メール分類は管理された受信箱で確認します。
- スクリーンショット・障害報告・分析情報・インフラのリクエストログへリンクやクエリの機密値を残しません。
-diff --git a/package.json b/package.json
-index 655bdaf..268edea 100644
---- a/package.json
-+++ b/package.json
-@@ -24,7 +24,8 @@
-     "club:line:init": "node --conditions=react-server --import tsx scripts/initialize-club-line-setting.ts",
-     "club:invitation:recover": "node --conditions=react-server --import tsx scripts/recover-club-invitation.ts",
-     "test:club-invitation:recovery": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-invitation-recovery.integration.test.ts",
--    "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts"
-+    "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts",
-+    "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts"
-   },
-   "dependencies": {
-     "@axiomhq/js": "^1.8.0",
-diff --git a/tests/club-invitation-acceptance.flow.integration.test.ts b/tests/club-invitation-acceptance.flow.integration.test.ts
-new file mode 100644
-index 0000000..d44ba3d
---- /dev/null
-+++ b/tests/club-invitation-acceptance.flow.integration.test.ts
-@@ -0,0 +1,994 @@
-+// tests/club-invitation-acceptance.flow.integration.test.ts
-+// 実DB・実Authの接続は明示flagと使い捨てloopback設定が揃った場合だけ許可する。
++++ b/domain/club/account/account-form.test.ts
+@@ -0,0 +1,162 @@
++// domain/club/account/account-form.test.ts
++// 本人氏名の境界・FormData改ざん・表示と状態の契約を確認する。
 +
 +import {
-+  AsyncLocalStorage,
-+} from "node:async_hooks";
-+import {
-+  randomUUID,
-+} from "node:crypto";
-+
-+import {
-+  PrismaClient,
-+} from "@prisma/client";
-+import {
-+  PrismaPg,
-+} from "@prisma/adapter-pg";
-+import {
-+  createClient,
-+  type SupabaseClient,
-+} from "@supabase/supabase-js";
-+import {
-+  NextRequest,
-+  type NextResponse,
-+} from "next/server";
-+import {
-+  afterAll,
-+  afterEach,
-+  beforeAll,
 +  describe,
 +  expect,
++  expectTypeOf,
 +  it,
-+  vi,
 +} from "vitest";
 +
 +import type {
-+  WelcomeActionState,
-+} from "@/domain/club/invitation/acceptance-form";
++  ClubAccountChildView,
++  ClubAccountMutationResult,
++  ClubAccountView,
++} from "./account-types";
 +import {
-+  createInitialActionState,
-+} from "@/domain/shared/action-state";
-+import {
-+  createClubInvitationContext,
-+  serializeClubInvitationContext,
-+  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
-+  type ClubInvitationContext,
-+} from "@/src/infrastructure/security/club-invitation-context";
-+import {
-+  createSecureToken,
-+  hashToken,
-+} from "@/src/infrastructure/security/token";
++  ACCOUNT_NAME_MAX_LENGTH,
++  getAccountFeedbackMessage,
++  parseAccountNameFormData,
++  validateAccountNameInput,
++  type AccountNameActionState,
++  type AccountNameFormValues,
++} from "./account-form";
 +
-+type Environment = Record<string, string | undefined>;
-+type LocalConfiguration = {
-+  databaseUrl: string;
-+  authOrigin: string;
-+  appOrigin: string;
-+  anonKey: string;
-+  serviceKey: string;
-+};
-+type RequestState = {
-+  cookies: Map<string, string>;
-+  passwordWrites: number;
-+};
-+type AccountKind = "new" | "existing";
-+type Fixture = {
-+  kind: AccountKind;
-+  clubId: string;
-+  slug: string;
-+  ownerMembershipId: string;
-+  membershipId: string;
-+  invitationId: string;
-+  userId: string;
-+  email: string;
-+  password: string;
-+  rawToken: string;
-+  authLink: string | null;
-+  priorClubId: string | null;
-+};
-+
-+// 単独のDB用flagや既存F05 Auth用flagだけでは起動させない。
-+function enabled(environment: Environment): boolean {
-+  return environment.RUN_CLUB_INVITATION_ACCEPTANCE_TESTS === "1" &&
-+    environment.RUN_DB_INTEGRATION_TESTS === "1" &&
-+    environment.RUN_CLUB_INVITATION_AUTH_TESTS === "1";
-+}
-+
-+// URLのqueryによる接続先上書きも拒否し、秘密を含む入力はエラーへ渡さない。
-+function localConfiguration(environment: Environment): LocalConfiguration {
-+  try {
-+    const database = new URL(environment.DATABASE_URL ?? "invalid");
-+    const auth = new URL(environment.NEXT_PUBLIC_SUPABASE_URL ?? "invalid");
-+    const app = new URL(environment.APP_BASE_URL ?? "invalid");
-+    const loopback = ["localhost", "127.0.0.1"];
-+    const anonKey = environment.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-+    const serviceKey = environment.SUPABASE_SERVICE_ROLE_KEY;
-+
-+    if (
-+      !enabled(environment) ||
-+      environment.CLUB_INVITATION_ACCEPTANCE_DISPOSABLE !== "1" ||
-+      environment.NODE_ENV === "production" ||
-+      !["postgres:", "postgresql:"].includes(database.protocol) ||
-+      !loopback.includes(database.hostname) ||
-+      database.port !== "54322" ||
-+      database.pathname !== "/postgres" ||
-+      database.search !== "" ||
-+      database.hash !== "" ||
-+      !database.username ||
-+      !database.password ||
-+      !anonKey?.trim() ||
-+      !serviceKey?.trim()
-+    ) {
-+      throw new Error("Invalid configuration");
-+    }
-+
-+    const origins = [
-+      [auth, "54321"],
-+      [app, "3000"],
-+    ] as const;
-+    for (const [url, port] of origins) {
-+      if (
-+        url.protocol !== "http:" ||
-+        !loopback.includes(url.hostname) ||
-+        url.port !== port ||
-+        url.pathname !== "/" ||
-+        url.username ||
-+        url.password ||
-+        url.search ||
-+        url.hash
-+      ) {
-+        throw new Error("Invalid origin");
-+      }
-+    }
-+
-+    return {
-+      databaseUrl: database.toString(),
-+      authOrigin: auth.origin,
-+      appOrigin: app.origin,
-+      anonKey,
-+      serviceKey,
++describe("本人氏名の入力", () => {
++  it("前後だけtrimし、内部空白や表記は変更しない", () => {
++    const input = {
++      name: "　 Ａ子  太郎　 ",
 +    };
-+  } catch {
-+    throw new Error("使い捨てローカルDB・Authの設定と明示flagを確認してください。");
-+  }
-+}
++    expect(validateAccountNameInput(input)).toEqual({
++      success: true,
++      data: {
++        name: "Ａ子  太郎",
++      },
++    });
++    expect(input.name).toBe("　 Ａ子  太郎　 ");
++  });
 +
-+// SDK・DBの原文や、Vitestが保持するアサーションの実値を公開しない。
-+async function safeCheck(operation: () => Promise<void>): Promise<void> {
-+  try {
-+    await operation();
-+  } catch {
-+    throw new Error("F06ローカル統合確認に失敗しました。手順書と対象ケースを確認してください。");
-+  }
-+}
++  it.each([
++    undefined,
++    null,
++    [],
++    "氏名",
++    {},
++    { name: undefined },
++    { name: null },
++    { name: 123 },
++    { name: "" },
++    { name: "　 \t\n " },
++    { name: new File(["個人情報"], "name.txt") },
++  ])("欠損・不正値を固定エラーにする %#", (input) => {
++    expect(validateAccountNameInput(input)).toEqual({
++      success: false,
++      fieldErrors: {
++        name: ["氏名を入力してください。"],
++      },
++    });
++  });
 +
-+// 通常実行の試験データに実キー・実接続設定は使わない。
-+function sampleEnvironment(): Environment {
++  it("trim後の100文字を許可し、101文字を拒否する", () => {
++    expect(validateAccountNameInput({
++      name: ` ${"あ".repeat(ACCOUNT_NAME_MAX_LENGTH)} `,
++    }).success).toBe(true);
++    const result = validateAccountNameInput({
++      name: "あ".repeat(ACCOUNT_NAME_MAX_LENGTH + 1),
++    });
++    expect(result).toEqual({
++      success: false,
++      fieldErrors: {
++        name: ["氏名は100文字以内で入力してください。"],
++      },
++    });
++    expect(result).not.toHaveProperty("data");
++  });
++
++  it("入力にemailや親・クラブ・役割があっても成功値にコピーしない", () => {
++    const input = {
++      name: " 本人氏名 ",
++      email: "private@example.test",
++      parentId: "foreign-parent",
++      clubId: "foreign-club",
++      role: "OWNER",
++      status: "ACTIVE",
++    };
++    expect(validateAccountNameInput(input)).toEqual({
++      success: true,
++      data: {
++        name: "本人氏名",
++      },
++    });
++  });
++});
++
++describe("本人氏名のFormData", () => {
++  it("氏名だけを検証し、その他の項目を引き継がない", () => {
++    const form = new FormData();
++    form.set("name", " 本人氏名 ");
++    form.set("email", "private@example.test");
++    form.set("childId", "unrelated-child");
++    expect(parseAccountNameFormData(form)).toEqual({
++      success: true,
++      data: {
++        name: "本人氏名",
++      },
++    });
++  });
++
++  it.each(["missing", "file", "duplicate", "same-duplicate"])(
++    "nameが%sなら拒否する",
++    (kind) => {
++      const form = new FormData();
++      if (kind === "file") {
++        form.set("name", new File(["氏名"], "name.txt"));
++      } else if (kind !== "missing") {
++        form.append("name", "氏名");
++        form.append("name", kind === "same-duplicate" ? "氏名" : "別の氏名");
++      }
++      expect(parseAccountNameFormData(form).success).toBe(false);
++    },
++  );
++});
++
++describe("完了メッセージと型契約", () => {
++  it.each([
++    ["name-saved", "氏名を保存しました。"],
++    ["child-created", "子どもを追加しました。"],
++    ["child-updated", "子どもの情報を保存しました。"],
++    ["child-added", "子どもを現在クラブへ追加しました。"],
++    ["child-withdrawn", "子どもを現在クラブから外しました。"],
++    ["saved-reload", "保存は完了しています。再送信せず、ページを開き直して確認してください。"],
++  ])("%sは固定の文言だけを返す", (key, message) => {
++    expect(getAccountFeedbackMessage(key)).toBe(message);
++  });
++
++  it.each([
++    undefined,
++    null,
++    "private@example.test",
++    "<script>private-token</script>",
++    "__proto__",
++    "constructor",
++    ["name-saved"],
++    {},
++  ])("未定義・不正識別子を表示しない %#", (value) => {
++    expect(getAccountFeedbackMessage(value)).toBeNull();
++  });
++
++  it("表示情報と更新入力・内部結果を分離する", () => {
++    expectTypeOf<keyof AccountNameFormValues>().toEqualTypeOf<"name">();
++    expectTypeOf<AccountNameActionState["data"]>().toEqualTypeOf<undefined>();
++    expectTypeOf<keyof ClubAccountChildView>()
++      .toEqualTypeOf<"id" | "name" | "grade">();
++    expectTypeOf<Extract<
++      keyof ClubAccountView,
++      "authUserId" | "parentId" | "tokenHash" | "affectedClubSlugs"
++    >>().toEqualTypeOf<never>();
++    expectTypeOf<Extract<
++      ClubAccountMutationResult,
++      { outcome: "UPDATED" }
++    >["affectedClubSlugs"]>().toEqualTypeOf<readonly string[]>();
++  });
++});
+diff --git a/domain/club/account/account-form.ts b/domain/club/account/account-form.ts
+new file mode 100644
+index 0000000..cb1326d
+--- /dev/null
++++ b/domain/club/account/account-form.ts
+@@ -0,0 +1,101 @@
++// domain/club/account/account-form.ts
++// 本人氏名だけの入力契約と、値を反射しない固定の完了メッセージを定義する。
++
++import type {
++  ActionState,
++  FieldErrors,
++} from "@/domain/shared/action-state";
++
++export const ACCOUNT_NAME_MAX_LENGTH = 100;
++
++export type AccountNameFormValues = {
++  name: string;
++};
++
++export type AccountNameFormField = keyof AccountNameFormValues;
++
++export type AccountNameActionState = ActionState<
++  AccountNameFormValues,
++  AccountNameFormField
++>;
++
++export type AccountNameValidationResult =
++  | {
++      success: true;
++      data: AccountNameFormValues;
++    }
++  | {
++      success: false;
++      fieldErrors: FieldErrors<AccountNameFormField>;
++    };
++
++// 氏名は前後空白だけを除去し、emailや所有者などの余分な項目は引き継がない。
++export function validateAccountNameInput(
++  input: unknown,
++): AccountNameValidationResult {
++  const rawName = typeof input === "object" &&
++    input !== null &&
++    !Array.isArray(input) &&
++    "name" in input
++    ? input.name
++    : undefined;
++  const name = typeof rawName === "string" ? rawName.trim() : "";
++
++  if (!name) {
++    return {
++      success: false,
++      fieldErrors: {
++        name: ["氏名を入力してください。"],
++      },
++    };
++  }
++
++  if (name.length > ACCOUNT_NAME_MAX_LENGTH) {
++    return {
++      success: false,
++      fieldErrors: {
++        name: [`氏名は${ACCOUNT_NAME_MAX_LENGTH}文字以内で入力してください。`],
++      },
++    };
++  }
++
 +  return {
-+    RUN_CLUB_INVITATION_ACCEPTANCE_TESTS: "1",
-+    RUN_DB_INTEGRATION_TESTS: "1",
-+    RUN_CLUB_INVITATION_AUTH_TESTS: "1",
-+    CLUB_INVITATION_ACCEPTANCE_DISPOSABLE: "1",
-+    NODE_ENV: "test",
-+    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
-+    NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
-+    APP_BASE_URL: "http://127.0.0.1:3000",
-+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "fixture-anon",
-+    SUPABASE_SERVICE_ROLE_KEY: "fixture-service",
++    success: true,
++    data: {
++      name,
++    },
 +  };
 +}
 +
-+describe("F06統合試験の接続ガード（DB・Authなし）", () => {
-+  it.each([
-+    "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS",
-+    "RUN_DB_INTEGRATION_TESTS",
-+    "RUN_CLUB_INVITATION_AUTH_TESTS",
-+  ])("%sだけが不足しても実接続を許可しない", (flag) => {
-+    const environment = sampleEnvironment();
-+    delete environment[flag];
-+    expect(enabled(environment)).toBe(false);
-+    expect(() => localConfiguration(environment)).toThrow("使い捨てローカル");
++// File・重複項目・欠損を先勝ちや文字列変換で受理しない。
++export function parseAccountNameFormData(
++  formData: FormData,
++): AccountNameValidationResult {
++  const names = formData instanceof FormData ? formData.getAll("name") : [];
++
++  return validateAccountNameInput({
++    name: names.length === 1 ? names[0] : undefined,
 +  });
++}
 +
-+  it.each([
-+    ["CLUB_INVITATION_ACCEPTANCE_DISPOSABLE", "0"],
-+    ["NODE_ENV", "production"],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@remote.test:54322/postgres"],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.test"],
-+    ["NEXT_PUBLIC_SUPABASE_URL", "https://remote.test"],
-+    ["NEXT_PUBLIC_SUPABASE_URL", "http://127.0.0.1:54321/?redirect=remote"],
-+    ["APP_BASE_URL", "http://remote.test:3000"],
-+    ["APP_BASE_URL", "http://fixture:secret@127.0.0.1:3000"],
-+    ["NEXT_PUBLIC_SUPABASE_ANON_KEY", ""],
-+    ["SUPABASE_SERVICE_ROLE_KEY", ""],
-+  ])("不正な%sを接続前に拒否する %#", (key, value) => {
-+    expect(() => localConfiguration({
-+      ...sampleEnvironment(),
-+      [key]: value,
-+    })).toThrow("使い捨てローカル");
-+  });
-+
-+  it("標準loopback設定を受け付けても接続は行わない", () => {
-+    expect(localConfiguration(sampleEnvironment()).appOrigin).toBe("http://127.0.0.1:3000");
-+  });
-+
-+  it("接続設定エラーに秘密を含めない", () => {
-+    let message = "";
-+    try {
-+      localConfiguration({
-+        ...sampleEnvironment(),
-+        DATABASE_URL: "private-connection-token",
-+      });
-+    } catch (error) {
-+      message = error instanceof Error ? error.message : "";
-+    }
-+    expect(message).not.toContain("private-connection-token");
-+    expect(message).toContain("使い捨てローカル");
-+  });
-+});
-+
-+// HTTPサーバーやブラウザは再現せず、requestごとのCookie境界だけを注入する。
-+const boundary = vi.hoisted(() => ({
-+  cookies: vi.fn(),
-+  revalidate: vi.fn(),
-+}));
-+vi.mock("next/headers", () => ({
-+  cookies: boundary.cookies,
-+}));
-+vi.mock("next/cache", () => ({
-+  revalidatePath: boundary.revalidate,
-+}));
-+
-+const describeLocal = enabled(process.env) ? describe : describe.skip;
-+
-+describeLocal("F06実DB・実Auth（3つの実行flagがない通常実行ではskip）", () => {
-+  const requests = new AsyncLocalStorage<RequestState>();
-+  const clubIds = new Set<string>();
-+  const userIds = new Set<string>();
-+  let configuration: LocalConfiguration;
-+  let db: PrismaClient | undefined;
-+  let admin: SupabaseClient;
-+  let repository: typeof import(
-+    "@/src/infrastructure/prisma/repositories/club-invitation-repository"
-+  );
-+  let service: typeof import("@/src/application/club/invitation/accept-club-invitation");
-+  let read: typeof import("@/src/application/club/invitation/get-club-invitation-acceptance");
-+  let session: typeof import("@/src/infrastructure/supabase/club-invitation-session");
-+  let server: typeof import("@/src/infrastructure/supabase/server");
-+  let route: typeof import("@/app/(club-app)/auth/confirm/route");
-+  let welcome: typeof import("@/app/(club-app)/welcome/actions");
-+  let existing: typeof import("@/app/(club-app)/club-invitations/accept/actions");
-+  let login: typeof import("@/app/(club-app)/club-login/actions");
-+
-+  // 共有Prisma clientのdotenv評価を避け、ガード後に専用clientを作る。
-+  beforeAll(async () => {
-+    await safeCheck(async () => {
-+      configuration = localConfiguration(process.env);
-+      const nativeFetch = globalThis.fetch.bind(globalThis);
-+      vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
-+        const url = new URL(input instanceof Request ? input.url : String(input));
-+        if (url.origin !== configuration.authOrigin) {
-+          throw new Error("ローカルAuth以外への通信は許可されていません。");
-+        }
-+        const current = requests.getStore();
-+        if (
-+          current &&
-+          url.pathname === "/auth/v1/user" &&
-+          init?.method?.toUpperCase() === "PUT" &&
-+          typeof init.body === "string" &&
-+          Object.hasOwn(JSON.parse(init.body), "password")
-+        ) {
-+          current.passwordWrites += 1;
-+        }
-+        try {
-+          return await nativeFetch(input, {
-+            ...init,
-+            redirect: init?.redirect ?? "error",
-+          });
-+        } catch {
-+          throw new Error("ローカルAuthへの通信に失敗しました。");
-+        }
-+      });
-+      boundary.cookies.mockImplementation(async () => ({
-+        // Cookieの値は原文ログやアサーションの実値へ渡さない。
-+        get(name: string) {
-+          const value = request().cookies.get(name);
-+          return value === undefined ? undefined : {
-+            name,
-+            value,
-+          };
-+        },
-+        getAll() {
-+          return Array.from(request().cookies, ([name, value]) => ({
-+            name,
-+            value,
-+          }));
-+        },
-+        set(name: string, value: string) {
-+          if (value) {
-+            request().cookies.set(name, value);
-+          } else {
-+            request().cookies.delete(name);
-+          }
-+        },
-+      }));
-+      db = new PrismaClient({
-+        adapter: new PrismaPg({
-+          connectionString: configuration.databaseUrl,
-+          max: 4,
-+        }),
-+        log: [],
-+      });
-+      await db.$connect();
-+      vi.doMock("@/src/infrastructure/prisma/client", () => ({
-+        prisma: db,
-+      }));
-+      repository = await import(
-+        "@/src/infrastructure/prisma/repositories/club-invitation-repository"
-+      );
-+      service = await import("@/src/application/club/invitation/accept-club-invitation");
-+      read = await import("@/src/application/club/invitation/get-club-invitation-acceptance");
-+      session = await import("@/src/infrastructure/supabase/club-invitation-session");
-+      server = await import("@/src/infrastructure/supabase/server");
-+      route = await import("@/app/(club-app)/auth/confirm/route");
-+      welcome = await import("@/app/(club-app)/welcome/actions");
-+      existing = await import("@/app/(club-app)/club-invitations/accept/actions");
-+      login = await import("@/app/(club-app)/club-login/actions");
-+      admin = createClient(configuration.authOrigin, configuration.serviceKey, {
-+        auth: {
-+          persistSession: false,
-+          autoRefreshToken: false,
-+          detectSessionInUrl: false,
-+        },
-+      });
-+    });
-+  }, 30_000);
-+
-+  // fault injectionを次の実ケースへ持ち越さない。
-+  afterEach(() => {
-+    vi.restoreAllMocks();
-+    boundary.revalidate.mockClear();
-+  });
-+
-+  // UUIDで追跡したDB fixtureだけを消す。Authユーザーは使い捨て環境の再作成で処分する。
-+  afterAll(async () => {
-+    try {
-+      await safeCheck(async () => {
-+        if (db) {
-+          await db.club.deleteMany({
-+            where: {
-+              id: {
-+                in: [...clubIds],
-+              },
-+            },
-+          });
-+          await db.appUser.deleteMany({
-+            where: {
-+              id: {
-+                in: [...userIds],
-+              },
-+            },
-+          });
-+        }
-+      });
-+    } finally {
-+      await safeCheck(async () => {
-+        await db?.$disconnect();
-+      });
-+      vi.doUnmock("@/src/infrastructure/prisma/client");
-+      vi.unstubAllGlobals();
-+    }
-+  });
-+
-+  // 並列送信でもCookieを他のrequestと混ぜない。
-+  function request(): RequestState {
-+    const value = requests.getStore();
-+    if (!value) {
-+      throw new Error("統合確認のrequest境界がありません。");
-+    }
-+    return value;
++// URL等の識別子から固定文言だけを返し、任意の文字列や配列は表示しない。
++export function getAccountFeedbackMessage(
++  value: unknown,
++): string | null {
++  switch (value) {
++    case "name-saved":
++      return "氏名を保存しました。";
++    case "child-created":
++      return "子どもを追加しました。";
++    case "child-updated":
++      return "子どもの情報を保存しました。";
++    case "child-added":
++      return "子どもを現在クラブへ追加しました。";
++    case "child-withdrawn":
++      return "子どもを現在クラブから外しました。";
++    case "saved-reload":
++      return "保存は完了しています。再送信せず、ページを開き直して確認してください。";
++    default:
++      return null;
 +  }
++}
+diff --git a/domain/club/account/account-types.ts b/domain/club/account/account-types.ts
+new file mode 100644
+index 0000000..e133e08
+--- /dev/null
++++ b/domain/club/account/account-types.ts
+@@ -0,0 +1,68 @@
++// domain/club/account/account-types.ts
++// マイページの表示用情報と内部更新結果を、DBレコードやAuth Userから分離する。
 +
-+  // 明示suite以外からDB clientを取り出さない。
-+  function database(): PrismaClient {
-+    if (!db) {
-+      throw new Error("統合確認のDBが準備されていません。");
-+    }
-+    return db;
-+  }
++import type {
++  ClubMemberRole,
++  Grade,
++} from "@/types/prisma";
 +
-+  // 使い捨てクラブとAuthアカウントを作り、SMTP・Resendは呼ばない。
-+  async function fixture(kind: AccountKind): Promise<Fixture> {
-+    const clubId = randomUUID();
-+    const ownerId = randomUUID();
-+    const ownerMembershipId = randomUUID();
-+    const membershipId = randomUUID();
-+    const invitationId = randomUUID();
-+    const slug = `f06-flow-${clubId}`;
-+    const email = `f06-flow-${randomUUID()}@example.test`;
-+    const password = `  Flow-Aa1-${randomUUID()}!  `;
-+    const rawToken = createSecureToken();
-+    const destination = new URL("/welcome", configuration.appOrigin);
-+    destination.search = new URLSearchParams({
-+      clubSlug: slug,
-+      token: rawToken,
-+    }).toString();
-+    let userId: string;
-+    let authLink: string | null = null;
-+    if (kind === "new") {
-+      const created = await admin.auth.admin.generateLink({
-+        type: "invite",
-+        email,
-+        options: {
-+          redirectTo: destination.toString(),
-+        },
-+      });
-+      if (
-+        created.error ||
-+        !created.data.user ||
-+        !created.data.properties
-+      ) {
-+        throw new Error("新規Auth fixtureを生成できませんでした。");
-+      }
-+      userId = created.data.user.id;
-+      authLink = created.data.properties.action_link;
-+    } else {
-+      const created = await admin.auth.admin.createUser({
-+        email,
-+        password,
-+        email_confirm: true,
-+      });
-+      if (
-+        created.error ||
-+        !created.data.user
-+      ) {
-+        throw new Error("既存Auth fixtureを生成できませんでした。");
-+      }
-+      userId = created.data.user.id;
++import type {
++  ChildMembershipViolation,
++} from "./child-membership-policy";
++
++// 現在の子ども一覧と、本人が明示的に要求した追加候補で使う最小の表示情報。
++export type ClubAccountChildView = {
++  id: string;
++  name: string;
++  grade: Grade | null;
++};
++
++// 現在クラブの表示DTO。他クラブの所属詳細や親のIDは含めない。
++export type ClubAccountView = {
++  name: string | null;
++  authEmail: string | null;
++  appUserEmail: string | null;
++  club: {
++    name: string;
++    slug: string;
++    websiteUrl: string | null;
++    instagramUrl: string | null;
++  };
++  role: ClubMemberRole;
++  children: readonly ClubAccountChildView[];
++  canSwitchClub: boolean;
++  isPlatformAdmin: boolean;
++};
++
++export type ClubAccountReadResult =
++  | {
++      outcome: "FOUND";
++      view: ClubAccountView;
 +    }
-+    const priorClubId = kind === "existing" ? randomUUID() : null;
-+    clubIds.add(clubId);
-+    if (priorClubId) {
-+      clubIds.add(priorClubId);
-+    }
-+    userIds.add(ownerId);
-+    userIds.add(userId);
-+    await database().$transaction(async (tx) => {
-+      await tx.appUser.createMany({
-+        data: [
-+          {
-+            id: ownerId,
-+            email: `f06-owner-${ownerId}@example.test`,
-+          },
-+          {
-+            id: userId,
-+            email,
-+          },
-+        ],
-+      });
-+      await tx.club.create({
-+        data: {
-+          id: clubId,
-+          slug,
-+          name: "F06統合確認クラブ",
-+          planType: "STANDARD",
-+        },
-+      });
-+      await tx.clubMembership.createMany({
-+        data: [
-+          {
-+            id: ownerMembershipId,
-+            clubId,
-+            userId: ownerId,
-+            role: "OWNER",
-+            status: "ACTIVE",
-+          },
-+          {
-+            id: membershipId,
-+            clubId,
-+            userId,
-+            role: "MEMBER",
-+            status: "INVITED",
-+          },
-+        ],
-+      });
-+      await tx.clubInvitation.create({
-+        data: {
-+          id: invitationId,
-+          clubId,
-+          email,
-+          role: "MEMBER",
-+          status: "SENT",
-+          tokenHash: hashToken(rawToken),
-+          expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1_000),
-+          authUserId: userId,
-+          membershipId,
-+          invitedByMembershipId: ownerMembershipId,
-+        },
-+      });
-+      if (priorClubId) {
-+        await tx.club.create({
-+          data: {
-+            id: priorClubId,
-+            slug: `f06-prior-${priorClubId}`,
-+            name: "既存所属の確認クラブ",
-+            planType: "STANDARD",
-+          },
-+        });
-+        await tx.clubMembership.create({
-+          data: {
-+            clubId: priorClubId,
-+            userId,
-+            role: "MEMBER",
-+            status: "ACTIVE",
-+          },
-+        });
-+      }
-+    });
-+    return {
-+      kind,
-+      clubId,
-+      slug,
-+      ownerMembershipId,
-+      membershipId,
-+      invitationId,
-+      userId,
-+      email,
-+      password,
-+      rawToken,
-+      authLink,
-+      priorClubId,
++  | {
++      outcome: "UNAVAILABLE" | "FETCH_FAILED";
 +    };
-+  }
 +
-+  // proxyと同じ純粋な交換関数を使う。HTTPのredirectとブラウザ履歴は手動確認する。
-+  function openInvitation(value: Fixture): ClubInvitationContext {
-+    const context = createClubInvitationContext(new URLSearchParams({
-+      clubSlug: value.slug,
-+      token: value.rawToken,
-+    }));
-+    if (!context) {
-+      throw new Error("招待contextを作成できませんでした。");
++// 候補一覧は通常の表示DTOと分け、追加操作を開始したときだけ取得する。
++export type ClubAccountChildCandidatesResult =
++  | {
++      outcome: "FOUND";
++      children: readonly ClubAccountChildView[];
 +    }
-+    request().cookies.set(
-+      CLUB_INVITATION_CONTEXT_COOKIE_NAME,
-+      serializeClubInvitationContext(context),
-+    );
-+    return context;
-+  }
++  | {
++      outcome: "UNAVAILABLE" | "FETCH_FAILED";
++    };
 +
-+  // SDKのCookie出力を新しいrequestで読み直す。ブラウザの保存属性の再現は行わない。
-+  function receiveCookies(response: NextResponse): void {
-+    for (const cookie of response.cookies.getAll()) {
-+      if (cookie.value) {
-+        request().cookies.set(cookie.name, cookie.value);
-+      } else {
-+        request().cookies.delete(cookie.name);
-+      }
++// 影響slugはサーバー内部の再検証用。Clientの入力やActionStateに流用しない。
++export type ClubAccountMutationResult =
++  | {
++      outcome: "UPDATED";
++      affectedClubSlugs: readonly string[];
 +    }
-+  }
-+
-+  // 実verifyの戻りを受け、実Routeから出たSSR Cookieを実adapterで再検証する。
-+  async function authenticate(value: Fixture, context: ClubInvitationContext): Promise<void> {
-+    if (value.kind === "existing") {
-+      const client = await server.createClient();
-+      const result = await client.auth.signInWithPassword({
-+        email: value.email,
-+        password: value.password,
-+      });
-+      expect(Boolean(result.error)).toBe(false);
-+    } else {
-+      const link = new URL(value.authLink ?? "invalid");
-+      if (
-+        link.origin !== configuration.authOrigin ||
-+        link.pathname !== "/auth/v1/verify"
-+      ) {
-+        throw new Error("ローカルverifyリンクが必要です。");
-+      }
-+      const response = await fetch(link, {
-+        redirect: "manual",
-+        referrerPolicy: "no-referrer",
-+      });
-+      const location = new URL(response.headers.get("location") ?? "invalid");
-+      expect(location.origin === configuration.appOrigin).toBe(true);
-+      expect(location.pathname === "/welcome").toBe(true);
-+      expect(location.searchParams.get("token") === value.rawToken).toBe(true);
-+      expect(location.searchParams.get("clubSlug") === value.slug).toBe(true);
-+      const fragment = new URLSearchParams(location.hash.slice(1));
-+      expect(fragment.get("type") === "invite").toBe(true);
-+      const confirmed = await route.POST(new NextRequest(
-+        new URL("/auth/confirm", configuration.appOrigin),
-+        {
-+          method: "POST",
-+          headers: {
-+            origin: configuration.appOrigin,
-+            "content-type": "application/json",
-+            cookie: `${CLUB_INVITATION_CONTEXT_COOKIE_NAME}=` +
-+              serializeClubInvitationContext(context),
-+          },
-+          body: JSON.stringify({
-+            contextId: context.contextId,
-+            accessToken: fragment.get("access_token"),
-+            refreshToken: fragment.get("refresh_token"),
-+          }),
-+        },
-+      ));
-+      expect(confirmed.status).toBe(200);
-+      expect(confirmed.cookies.getAll().length > 0).toBe(true);
-+      expect(confirmed.headers.get("cache-control")).toBe("no-store");
-+      expect(confirmed.headers.get("referrer-policy")).toBe("no-referrer");
-+      receiveCookies(confirmed);
++  | {
++      outcome: "NOT_FOUND" | "FORBIDDEN" | "CONFLICT" | "UPDATE_FAILED";
 +    }
-+    const verified = await session.getVerifiedClubInvitationSession();
-+    expect(verified?.user.id === value.userId).toBe(true);
-+    expect(verified?.authenticationMethod).toBe(value.kind === "new" ? "otp" : "password");
-+    expect((await read.getClubInvitationAcceptance({
-+      context: serializeClubInvitationContext(context),
-+    })).outcome).toBe("AVAILABLE");
-+  }
++  | {
++      outcome: "RULE_VIOLATION";
++      reason: ChildMembershipViolation;
++    };
+diff --git a/domain/club/account/child-form.test.ts b/domain/club/account/child-form.test.ts
+new file mode 100644
+index 0000000..f028627
+--- /dev/null
++++ b/domain/club/account/child-form.test.ts
+@@ -0,0 +1,239 @@
++// domain/club/account/child-form.test.ts
++// 学年未設定と不正値を区別し、氏名・対象ID・FormDataの境界を確認する。
 +
-+  // PWの比較はboolに変換し、失敗時も入力値を表示しない。
-+  async function canLogin(value: Fixture): Promise<boolean> {
-+    const client = createClient(configuration.authOrigin, configuration.anonKey, {
-+      auth: {
-+        persistSession: false,
-+        autoRefreshToken: false,
-+        detectSessionInUrl: false,
++import {
++  describe,
++  expect,
++  expectTypeOf,
++  it,
++} from "vitest";
++
++import type {
++  Grade,
++} from "@/types/prisma";
++
++import {
++  CHILD_GRADE_OPTIONS,
++  parseChildFormData,
++  parseChildIdFormData,
++  validateChildIdInput,
++  validateChildInput,
++  type ChildActionState,
++  type ChildMembershipActionState,
++} from "./child-form";
++
++const CHILD_ID = "550e8400-e29b-41d4-a716-446655440000";
++
++// 選択肢の空文字は未設定として送る。フィールドそのものは省略しない。
++function form(): FormData {
++  const value = new FormData();
++  value.set("name", " 子ども氏名 ");
++  value.set("grade", "");
++  return value;
++}
++
++describe("子どもの氏名・学年", () => {
++  it.each(["", null])("明示的な未設定だけをnullにする %#", (grade) => {
++    expect(validateChildInput({
++      name: " 子ども氏名 ",
++      grade,
++    })).toEqual({
++      success: true,
++      data: {
++        name: "子ども氏名",
++        grade: null,
 +      },
 +    });
-+    const result = await client.auth.signInWithPassword({
-+      email: value.email,
-+      password: value.password,
-+    });
-+    return !result.error &&
-+      result.data.user?.id === value.userId;
-+  }
++  });
 +
-+  // 画面入力と同じ値を渡す。既存PW経路では、余分なPW値が無視されることも確認する。
-+  function input(value: Fixture, context: ClubInvitationContext) {
-+    return {
-+      context: serializeClubInvitationContext(context),
-+      contextId: context.contextId,
-+      password: value.kind === "new" ? value.password : "ignored-password1",
-+      confirmation: value.kind === "new" ? value.password : "ignored-confirmation1",
++  it.each(CHILD_GRADE_OPTIONS)("$valueを受け付ける", ({ value }) => {
++    expect(validateChildInput({
++      name: "子ども氏名",
++      grade: value,
++    })).toEqual({
++      success: true,
++      data: {
++        name: "子ども氏名",
++        grade: value,
++      },
++    });
++  });
++
++  it.each([
++    undefined,
++    " ",
++    " ELEMENTARY_1 ",
++    "elementary_1",
++    "ELEMENTARY_7",
++    "__proto__",
++    1,
++    [],
++    {},
++    new File(["ELEMENTARY_1"], "grade.txt"),
++  ])("不正学年を未設定へ丸めない %#", (grade) => {
++    const result = validateChildInput({
++      name: "子ども氏名",
++      grade,
++    });
++    expect(result).toEqual({
++      success: false,
++      fieldErrors: {
++        grade: ["学年は未設定、または選択肢から選んでください。"],
++      },
++    });
++    expect(result).not.toHaveProperty("data");
++  });
++
++  it("氏名と学年のエラーを同時に返し、入力を含めない", () => {
++    expect(validateChildInput({
++      name: " ",
++      grade: "private-input",
++    })).toEqual({
++      success: false,
++      fieldErrors: {
++        name: ["氏名を入力してください。"],
++        grade: ["学年は未設定、または選択肢から選んでください。"],
++      },
++    });
++  });
++
++  it("氏名だけの検証で学年欠損を未設定扱いしない", () => {
++    expect(validateChildInput({
++      name: "子ども氏名",
++    }).success).toBe(false);
++  });
++
++  it("氏名は100文字以内とし、入力を変更しない", () => {
++    const input = {
++      name: ` ${"子".repeat(100)} `,
++      grade: "",
 +    };
-+  }
++    const original = {
++      ...input,
++    };
++    expect(validateChildInput(input).success).toBe(true);
++    expect(input).toEqual(original);
++    expect(validateChildInput({
++      ...input,
++      name: "子".repeat(101),
++    }).success).toBe(false);
++  });
 +
-+  // 独立したCookie jarを持つテストだけを登録し、テスト名には機密値を含めない。
-+  function liveTest(name: string, operation: () => Promise<void>): void {
-+    it(name, () => safeCheck(() => requests.run({
-+      cookies: new Map(),
-+      passwordWrites: 0,
-+    }, operation)), 60_000);
-+  }
-+
-+  // Nextの制御例外だけを成功遷移として扱う。例外原文を結果へ含めない。
-+  async function destination(operation: () => Promise<unknown>, path: string): Promise<boolean> {
-+    try {
-+      await operation();
-+      return false;
-+    } catch (error) {
-+      return typeof error === "object" &&
-+        error !== null &&
-+        "digest" in error &&
-+        typeof error.digest === "string" &&
-+        error.digest.startsWith("NEXT_REDIRECT;") &&
-+        error.digest.includes(`;${path};`);
-+    }
-+  }
-+
-+  // 初期stateと表示時nonceを持つ実Actionへ接続する。
-+  async function submit(value: Fixture, context: ClubInvitationContext): Promise<boolean> {
-+    const state: WelcomeActionState = createInitialActionState({});
-+    const form = new FormData();
-+    form.set("requestId", state.requestId);
-+    form.set("contextId", context.contextId);
-+    form.set("password", value.password);
-+    form.set("confirmation", value.password);
-+    form.set("redirectTo", "https://untrusted.example.test");
-+    form.set("clubId", randomUUID());
-+    return destination(
-+      () => value.kind === "new"
-+        ? welcome.completeClubInvitationAction(state, form)
-+        : existing.acceptExistingClubInvitationAction(state, form),
-+      `/club/${value.slug}/events`,
-+    );
-+  }
-+
-+  describe.each(["new", "existing"] as const)("%sアカウント", (kind) => {
-+    liveTest("有効な招待をActionから承諾し、PW更新回数と既存所属を確認する", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      expect(await submit(value, context)).toBe(true);
-+      expect(request().passwordWrites).toBe(kind === "new" ? 1 : 0);
-+      expect(await canLogin(value)).toBe(true);
-+      const invitation = await database().clubInvitation.findUniqueOrThrow({
-+        where: {
-+          id: value.invitationId,
-+        },
-+      });
-+      expect(invitation.status).toBe("ACCEPTED");
-+      expect(invitation.acceptedAt instanceof Date).toBe(true);
-+      expect(await database().clubMembership.count({
-+        where: {
-+          userId: value.userId,
-+          status: "ACTIVE",
-+        },
-+      })).toBe(kind === "existing" ? 2 : 1);
-+      if (value.priorClubId) {
-+        expect(await database().clubMembership.count({
-+          where: {
-+            clubId: value.priorClubId,
-+            userId: value.userId,
-+            role: "MEMBER",
-+            status: "ACTIVE",
-+          },
-+        })).toBe(1);
-+      }
-+      expect(request().cookies.has(CLUB_INVITATION_CONTEXT_COOKIE_NAME)).toBe(false);
-+      expect(boundary.revalidate).toHaveBeenCalledWith("/club/select");
-+      const reused = await service.acceptClubInvitation(input(value, context));
-+      expect(reused.outcome).toBe("UNAVAILABLE");
-+      expect(request().passwordWrites).toBe(kind === "new" ? 1 : 0);
-+    });
-+
-+    liveTest("別Authがtokenだけ持っても、取消などの詳細を開示せず更新しない", async () => {
-+      const value = await fixture(kind);
-+      const other = await fixture("existing");
-+      const context = openInvitation(value);
-+      const client = await server.createClient();
-+      await client.auth.signInWithPassword({
-+        email: other.email,
-+        password: other.password,
-+      });
-+      const result = await service.acceptClubInvitation(input(value, context));
-+      expect(result.outcome).toBe("UNAVAILABLE");
-+      expect(result.outcome === "UNAVAILABLE" &&
-+        result.reason === "INVALID_INVITATION")
-+        .toBe(true);
-+      expect(request().passwordWrites).toBe(0);
-+    });
-+
-+    liveTest("Authの現在emailを変えると古い招待で更新できない", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      const updated = await admin.auth.admin.updateUserById(value.userId, {
-+        email: `changed-${randomUUID()}@example.test`,
-+        email_confirm: true,
-+      });
-+      expect(Boolean(updated.error)).toBe(false);
-+      const result = await service.acceptClubInvitation(input(value, context));
-+      expect(result.outcome).toBe("UNAVAILABLE");
-+      expect(request().passwordWrites).toBe(0);
-+    });
-+
-+    liveTest("期限ちょうどを拒否し、直前の読取だけを許可する", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      const deadline = new Date(Date.now() + 60_000);
-+      await database().clubInvitation.update({
-+        where: {
-+          id: value.invitationId,
-+        },
-+        data: {
-+          expiresAt: deadline,
-+        },
-+      });
-+      const lookup = {
-+        clubSlug: value.slug,
-+        tokenHash: context.tokenHash,
-+        authenticatedUser: {
-+          id: value.userId,
-+          email: value.email,
-+        },
-+      };
-+      expect((await repository.findClubInvitationAcceptanceForUser({
-+        ...lookup,
-+        now: new Date(deadline.getTime() - 1),
-+      })).outcome).toBe("AVAILABLE");
-+      expect((await repository.acceptClubInvitationForUser({
-+        ...lookup,
-+        now: deadline,
-+      })).outcome).toBe("UNAVAILABLE");
-+      expect(request().passwordWrites).toBe(0);
-+    });
-+
-+    liveTest("取消後にServiceを呼んでもACTIVE化しない", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      await repository.cancelClubInvitation({
-+        clubId: value.clubId,
-+        actorMembershipId: value.ownerMembershipId,
-+        invitationId: value.invitationId,
-+      });
-+      expect((await service.acceptClubInvitation(input(value, context))).outcome)
-+        .toBe("UNAVAILABLE");
-+      expect(request().passwordWrites).toBe(0);
-+      expect(await database().clubMembership.count({
-+        where: {
-+          id: value.membershipId,
-+        },
-+      })).toBe(0);
-+    });
-+
-+    liveTest("再送claim後の旧tokenをServiceでも拒否する", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      await repository.claimClubInvitationResend({
-+        clubId: value.clubId,
-+        actorMembershipId: value.ownerMembershipId,
-+        invitationId: value.invitationId,
-+        tokenHash: hashToken(createSecureToken()),
-+      });
-+      const row = await database().clubInvitation.findUniqueOrThrow({
-+        where: {
-+          id: value.invitationId,
-+        },
-+      });
-+      expect(row.tokenHash === context.tokenHash).toBe(false);
-+      expect((await service.acceptClubInvitation(input(value, context))).outcome)
-+        .toBe("UNAVAILABLE");
-+      expect(request().passwordWrites).toBe(0);
-+      expect(await database().clubMembership.count({
-+        where: {
-+          id: value.membershipId,
-+          status: "INVITED",
-+        },
-+      })).toBe(1);
-+    });
-+
-+    liveTest("2並行のDB承諾で1件だけ更新する", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      const verified = await session.getVerifiedClubInvitationSession();
-+      const operation = {
-+        clubSlug: value.slug,
-+        tokenHash: context.tokenHash,
-+        authenticatedUser: verified?.user ?? null,
-+      };
-+      const results = await Promise.all([
-+        repository.acceptClubInvitationForUser(operation),
-+        repository.acceptClubInvitationForUser(operation),
-+      ]);
-+      expect(results.filter((result) => result.outcome === "ACCEPTED").length).toBe(1);
-+      expect(await database().clubMembership.count({
-+        where: {
-+          id: value.membershipId,
-+          status: "ACTIVE",
-+        },
-+      })).toBe(1);
-+    });
-+
-+    liveTest("取消・再送との競合後も、同じ旧tokenを再利用できない", async () => {
-+      for (const operation of ["cancel", "resend"] as const) {
-+        request().cookies.clear();
-+        const value = await fixture(kind);
-+        const context = openInvitation(value);
-+        await authenticate(value, context);
-+        const owner = {
-+          clubId: value.clubId,
-+          invitationId: value.invitationId,
-+          actorMembershipId: value.ownerMembershipId,
-+        };
-+        await Promise.all([
-+          repository.acceptClubInvitationForUser({
-+            clubSlug: value.slug,
-+            tokenHash: context.tokenHash,
-+            authenticatedUser: {
-+              id: value.userId,
-+              email: value.email,
-+            },
-+          }),
-+          operation === "cancel"
-+            ? repository.cancelClubInvitation(owner)
-+            : repository.claimClubInvitationResend({
-+                ...owner,
-+                tokenHash: hashToken(createSecureToken()),
-+              }),
-+        ]);
-+        const row = await database().clubInvitation.findUniqueOrThrow({
-+          where: {
-+            id: value.invitationId,
-+          },
-+          include: {
-+            membership: true,
-+          },
-+        });
-+        expect(row.status === "ACCEPTED"
-+          ? row.membership?.status === "ACTIVE"
-+          : operation === "cancel"
-+            ? row.status === "CANCELLED" &&
-+              row.membership === null
-+            : row.status === "PREPARING" &&
-+              row.membership?.status === "INVITED")
-+          .toBe(true);
-+        expect((await service.acceptClubInvitation(input(value, context))).outcome)
-+          .toBe("UNAVAILABLE");
-+        expect(request().passwordWrites).toBe(0);
-+      }
-+    });
-+
-+    liveTest("DB障害後は実パスワードログインで再開し、再設定をしない", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      vi.spyOn(database(), "$transaction").mockRejectedValueOnce(new Error("Injected DB failure"));
-+      const failed = await service.acceptClubInvitation(input(value, context));
-+      expect(failed.outcome).toBe(kind === "new"
-+        ? "PASSWORD_UPDATED_ACCEPTANCE_INCOMPLETE"
-+        : "PROCESSING_FAILED");
-+      expect(await canLogin(value)).toBe(true);
-+      const state = createInitialActionState({
-+        email: "",
-+      });
-+      const form = new FormData();
-+      form.set("requestId", state.requestId);
-+      form.set("email", value.email);
-+      form.set("password", value.password);
-+      form.set("next", "https://untrusted.example.test");
-+      expect(await destination(
-+        () => login.loginAction(state, form),
-+        "/club-invitations/accept",
-+      )).toBe(true);
-+      expect(await submit({
-+        ...value,
-+        kind: "existing",
-+      }, context)).toBe(true);
-+      expect(request().passwordWrites).toBe(kind === "new" ? 1 : 0);
-+    });
-+
-+    liveTest("別タブのcontextに差し替わった後の古い直接Actionを拒否する", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      const other = await fixture("existing");
-+      openInvitation(other);
-+      expect(await submit(value, context)).toBe(false);
-+      expect(request().passwordWrites).toBe(0);
-+      expect(await database().clubInvitation.count({
-+        where: {
-+          id: {
-+            in: [value.invitationId, other.invitationId],
-+          },
-+          acceptedAt: {
-+            not: null,
-+          },
-+        },
-+      })).toBe(0);
-+    });
-+
-+    liveTest("Cookieのhash改変で、表示時nonceが同じでも直接Actionを拒否する", async () => {
-+      const value = await fixture(kind);
-+      const context = openInvitation(value);
-+      await authenticate(value, context);
-+      request().cookies.set(CLUB_INVITATION_CONTEXT_COOKIE_NAME, serializeClubInvitationContext({
-+        ...context,
-+        tokenHash: hashToken(createSecureToken()),
-+      }));
-+      expect(await submit(value, context)).toBe(false);
-+      expect(request().passwordWrites).toBe(0);
-+      expect((await database().clubInvitation.findUniqueOrThrow({
-+        where: {
-+          id: value.invitationId,
-+        },
-+      })).status).toBe("SENT");
-+    });
-+
-+    liveTest("foreign Originからのconfirmを拒否しCookieを返さない", async () => {
-+      const value = await fixture(kind);
-+      openInvitation(value);
-+      const response = await route.POST(new NextRequest(
-+        new URL("/auth/confirm", configuration.appOrigin),
-+        {
-+          method: "POST",
-+          headers: {
-+            origin: "https://untrusted.example.test",
-+            "content-type": "application/json",
-+          },
-+          body: "{}",
-+        },
-+      ));
-+      expect(response.status).toBe(403);
-+      expect(response.cookies.getAll().length).toBe(0);
-+      expect(request().passwordWrites).toBe(0);
++  it("親・クラブ・対象ID・権限を氏名編集payloadに含めない", () => {
++    expect(validateChildInput({
++      name: "子ども氏名",
++      grade: "",
++      childId: CHILD_ID,
++      parentId: "foreign-parent",
++      parentUserId: "foreign-parent",
++      clubId: "foreign-club",
++      email: "private@example.test",
++      role: "OWNER",
++      status: "ACTIVE",
++    })).toEqual({
++      success: true,
++      data: {
++        name: "子ども氏名",
++        grade: null,
++      },
 +    });
 +  });
 +});
++
++describe("子どものFormData", () => {
++  it("空選択をnullへ変換する", () => {
++    expect(parseChildFormData(form())).toEqual({
++      success: true,
++      data: {
++        name: "子ども氏名",
++        grade: null,
++      },
++    });
++  });
++
++  it.each(["name", "grade"])("%sのFile・欠損・重複を拒否する", (field) => {
++    for (const kind of ["file", "missing", "duplicate"] as const) {
++      const value = form();
++      if (kind === "file") {
++        value.set(field, new File(["個人情報"], "field.txt"));
++      } else if (kind === "missing") {
++        value.delete(field);
++      } else {
++        value.append(field, value.get(field)!);
++      }
++      expect(parseChildFormData(value).success).toBe(false);
++    }
++  });
++
++  it("学年の空文字が重複していても未設定として受理しない", () => {
++    const value = form();
++    value.append("grade", "");
++    expect(parseChildFormData(value).success).toBe(false);
++  });
++
++  it("追加の機密項目を結果へコピーしない", () => {
++    const value = form();
++    value.set("parentId", "foreign-parent");
++    value.set("status", "ACTIVE");
++    value.set("email", "private@example.test");
++    expect(parseChildFormData(value)).toEqual(parseChildFormData(form()));
++  });
++});
++
++describe("対象Child ID", () => {
++  it("UUID v4の形式を受け付け、認可済みとは扱わない", () => {
++    expect(validateChildIdInput(CHILD_ID)).toEqual({
++      success: true,
++      data: {
++        childId: CHILD_ID,
++      },
++    });
++  });
++
++  it.each([
++    undefined,
++    null,
++    "",
++    "not-a-uuid",
++    ` ${CHILD_ID} `,
++    "550e8400-e29b-11d4-a716-446655440000",
++    "550e8400-e29b-41d4-7716-446655440000",
++    new File([CHILD_ID], "child.txt"),
++  ])("不正IDを固定エラーで拒否する %#", (value) => {
++    expect(validateChildIdInput(value)).toEqual({
++      success: false,
++      fieldErrors: {
++        childId: ["対象の子どもを選び直してください。"],
++      },
++    });
++  });
++
++  it("単一のchildIdだけを取り出す", () => {
++    const value = new FormData();
++    value.set("childId", CHILD_ID);
++    value.set("clubId", "foreign-club");
++    value.set("parentUserId", "foreign-parent");
++    expect(parseChildIdFormData(value)).toEqual({
++      success: true,
++      data: {
++        childId: CHILD_ID,
++      },
++    });
++    value.append("childId", CHILD_ID);
++    expect(parseChildIdFormData(value).success).toBe(false);
++  });
++
++  it("FileのIDを文字列化しない", () => {
++    const value = new FormData();
++    value.set("childId", new File([CHILD_ID], "id.txt"));
++    expect(parseChildIdFormData(value).success).toBe(false);
++    expect(parseChildIdFormData(new FormData()).success).toBe(false);
++  });
++
++  it("Grade選択肢とstateの型を既存契約に合わせる", () => {
++    expectTypeOf<(typeof CHILD_GRADE_OPTIONS)[number]["value"]>().toEqualTypeOf<Grade>();
++    expectTypeOf<ChildActionState["data"]>().toEqualTypeOf<undefined>();
++    expectTypeOf<keyof ChildActionState["values"]>().toEqualTypeOf<"name" | "grade">();
++    expectTypeOf<keyof ChildMembershipActionState["values"]>().toEqualTypeOf<"childId">();
++  });
++});
+diff --git a/domain/club/account/child-form.ts b/domain/club/account/child-form.ts
+new file mode 100644
+index 0000000..a050a6d
+--- /dev/null
++++ b/domain/club/account/child-form.ts
+@@ -0,0 +1,189 @@
++// domain/club/account/child-form.ts
++// 子どもの氏名・任意の学年・対象IDを検証し、所有者やクラブの自己申告は引き継がない。
++
++import type {
++  ActionState,
++  FieldErrors,
++} from "@/domain/shared/action-state";
++import {
++  isRequestId,
++} from "@/domain/shared/request-id";
++import type {
++  Grade,
++} from "@/types/prisma";
++
++import {
++  validateAccountNameInput,
++} from "./account-form";
++
++// 未設定の選択肢はvalue=""で扱う。ここにはDBと同じ7種類だけを列挙する。
++export const CHILD_GRADE_OPTIONS = [
++  {
++    value: "YOUJI",
++    label: "幼児",
++  },
++  {
++    value: "ELEMENTARY_1",
++    label: "小学1年",
++  },
++  {
++    value: "ELEMENTARY_2",
++    label: "小学2年",
++  },
++  {
++    value: "ELEMENTARY_3",
++    label: "小学3年",
++  },
++  {
++    value: "ELEMENTARY_4",
++    label: "小学4年",
++  },
++  {
++    value: "ELEMENTARY_5",
++    label: "小学5年",
++  },
++  {
++    value: "ELEMENTARY_6",
++    label: "小学6年",
++  },
++] as const satisfies ReadonlyArray<{
++  value: Grade;
++  label: string;
++}>;
++
++export type ChildFormValues = {
++  name: string;
++  grade: string;
++};
++
++export type ChildFormField = keyof ChildFormValues;
++
++export type ChildActionState = ActionState<
++  ChildFormValues,
++  ChildFormField
++>;
++
++export type ChildValidationResult =
++  | {
++      success: true;
++      data: {
++        name: string;
++        grade: Grade | null;
++      };
++    }
++  | {
++      success: false;
++      fieldErrors: FieldErrors<ChildFormField>;
++    };
++
++export type ChildMembershipFormValues = {
++  childId: string;
++};
++
++export type ChildMembershipActionState = ActionState<
++  ChildMembershipFormValues,
++  "childId"
++>;
++
++export type ChildIdValidationResult =
++  | {
++      success: true;
++      data: ChildMembershipFormValues;
++    }
++  | {
++      success: false;
++      fieldErrors: FieldErrors<"childId">;
++    };
++
++// Gradeをtrimや大文字化で補正せず、選択肢と完全一致する値だけを許可する。
++function isGrade(value: unknown): value is Grade {
++  return CHILD_GRADE_OPTIONS.some((option) => option.value === value);
++}
++
++// 氏名と学年だけを返す。学年の空選択・明示nullと、欠損・不正値は区別する。
++export function validateChildInput(
++  input: unknown,
++): ChildValidationResult {
++  const nameResult = validateAccountNameInput(input);
++  const rawGrade = typeof input === "object" &&
++    input !== null &&
++    !Array.isArray(input) &&
++    "grade" in input
++    ? input.grade
++    : undefined;
++  const grade = rawGrade === "" ||
++    rawGrade === null
++    ? null
++    : isGrade(rawGrade)
++      ? rawGrade
++      : undefined;
++  const fieldErrors: FieldErrors<ChildFormField> = {};
++
++  if (!nameResult.success) {
++    fieldErrors.name = nameResult.fieldErrors.name;
++  }
++  if (grade === undefined) {
++    fieldErrors.grade = ["学年は未設定、または選択肢から選んでください。"];
++  }
++
++  if (
++    !nameResult.success ||
++    grade === undefined
++  ) {
++    return {
++      success: false,
++      fieldErrors,
++    };
++  }
++
++  return {
++    success: true,
++    data: {
++      name: nameResult.data.name,
++      grade,
++    },
++  };
++}
++
++// optionalな学年でもfieldを一つ要求し、Fileや重複を空選択へ変換しない。
++export function parseChildFormData(
++  formData: FormData,
++): ChildValidationResult {
++  const names = formData instanceof FormData ? formData.getAll("name") : [];
++  const grades = formData instanceof FormData ? formData.getAll("grade") : [];
++
++  return validateChildInput({
++    name: names.length === 1 ? names[0] : undefined,
++    grade: grades.length === 1 ? grades[0] : undefined,
++  });
++}
++
++// UUID v4の形式だけを確認する。本人所有・現在クラブ所属の照合は後続の責務。
++export function validateChildIdInput(
++  childId: unknown,
++): ChildIdValidationResult {
++  if (!isRequestId(childId)) {
++    return {
++      success: false,
++      fieldErrors: {
++        childId: ["対象の子どもを選び直してください。"],
++      },
++    };
++  }
++
++  return {
++    success: true,
++    data: {
++      childId,
++    },
++  };
++}
++
++// 所属操作の対象IDも単一の文字列だけを受け付ける。
++export function parseChildIdFormData(
++  formData: FormData,
++): ChildIdValidationResult {
++  const ids = formData instanceof FormData ? formData.getAll("childId") : [];
++
++  return validateChildIdInput(ids.length === 1 ? ids[0] : undefined);
++}
+diff --git a/domain/club/account/child-membership-policy.test.ts b/domain/club/account/child-membership-policy.test.ts
+new file mode 100644
+index 0000000..45be1b3
+--- /dev/null
++++ b/domain/club/account/child-membership-policy.test.ts
+@@ -0,0 +1,115 @@
++// domain/club/account/child-membership-policy.test.ts
++// 既存所属の追加・再有効化・解除を、認可やDB処理とは独立して確認する。
++
++import {
++  describe,
++  expect,
++  it,
++} from "vitest";
++
++import {
++  evaluateChildMembershipAddition,
++  evaluateChildMembershipWithdrawal,
++} from "./child-membership-policy";
++
++describe("既存Childの所属追加", () => {
++  it("明示的な未所属は新しい所属の作成とする", () => {
++    expect(evaluateChildMembershipAddition({
++      status: null,
++    })).toEqual({
++      allowed: true,
++      operation: "CREATE",
++    });
++  });
++
++  it("WITHDRAWNだけを再有効化する", () => {
++    expect(evaluateChildMembershipAddition({
++      status: "WITHDRAWN",
++    })).toEqual({
++      allowed: true,
++      operation: "REACTIVATE",
++    });
++  });
++
++  it("ACTIVEは二重所属として拒否する", () => {
++    expect(evaluateChildMembershipAddition({
++      status: "ACTIVE",
++    })).toEqual({
++      allowed: false,
++      reason: "ALREADY_ACTIVE",
++    });
++  });
++
++  it.each(["SUSPENDED", "INVITED"])("%sを本人操作で再有効化しない", (status) => {
++    expect(evaluateChildMembershipAddition({
++      status,
++    })).toEqual({
++      allowed: false,
++      reason: "STATUS_CHANGE_NOT_ALLOWED",
++    });
++  });
++});
++
++describe("現在クラブからの所属解除", () => {
++  it("ACTIVEだけをWITHDRAWNへ変更する判断を返す", () => {
++    const input = {
++      status: "ACTIVE",
++    };
++    expect(evaluateChildMembershipWithdrawal(input)).toEqual({
++      allowed: true,
++      operation: "WITHDRAW",
++    });
++    expect(input.status).toBe("ACTIVE");
++  });
++
++  it("所属がなければ解除を許可しない", () => {
++    expect(evaluateChildMembershipWithdrawal({
++      status: null,
++    })).toEqual({
++      allowed: false,
++      reason: "MEMBERSHIP_NOT_FOUND",
++    });
++  });
++
++  it("WITHDRAWNは再解除として区別する", () => {
++    expect(evaluateChildMembershipWithdrawal({
++      status: "WITHDRAWN",
++    })).toEqual({
++      allowed: false,
++      reason: "ALREADY_WITHDRAWN",
++    });
++  });
++
++  it.each(["SUSPENDED", "INVITED"])("%sを解除処理で変更しない", (status) => {
++    expect(evaluateChildMembershipWithdrawal({
++      status,
++    })).toEqual({
++      allowed: false,
++      reason: "STATUS_CHANGE_NOT_ALLOWED",
++    });
++  });
++});
++
++describe.each([
++  ["追加", evaluateChildMembershipAddition],
++  ["解除", evaluateChildMembershipWithdrawal],
++] as const)("%sの不正状態", (_name, evaluate) => {
++  it.each([
++    undefined,
++    "",
++    "active",
++    " ACTIVE ",
++    "__proto__",
++    "UNKNOWN",
++    0,
++    {},
++    [],
++  ])("不明な状態を未所属やACTIVEへ置き換えない %#", (status) => {
++    expect(evaluate({
++      status,
++    })).toEqual({
++      allowed: false,
++      reason: "INVALID_STATUS",
++    });
++  });
++});
+diff --git a/domain/club/account/child-membership-policy.ts b/domain/club/account/child-membership-policy.ts
+new file mode 100644
+index 0000000..ff80ca4
+--- /dev/null
++++ b/domain/club/account/child-membership-policy.ts
+@@ -0,0 +1,99 @@
++// domain/club/account/child-membership-policy.ts
++// 本人・現在クラブとの対応を確認した後に使う、子どもの所属状態だけの純粋な判定。
++
++import type {
++  ClubMembershipStatus,
++} from "@/types/prisma";
++
++export type ChildMembershipViolation =
++  | "ALREADY_ACTIVE"
++  | "ALREADY_WITHDRAWN"
++  | "MEMBERSHIP_NOT_FOUND"
++  | "STATUS_CHANGE_NOT_ALLOWED"
++  | "INVALID_STATUS";
++
++export type ChildMembershipAdditionEvaluation =
++  | {
++      allowed: true;
++      operation: "CREATE" | "REACTIVATE";
++    }
++  | {
++      allowed: false;
++      reason: ChildMembershipViolation;
++    };
++
++export type ChildMembershipWithdrawalEvaluation =
++  | {
++      allowed: true;
++      operation: "WITHDRAW";
++    }
++  | {
++      allowed: false;
++      reason: ChildMembershipViolation;
++    };
++
++// DB由来でも未知の状態は許可しない。nullだけを未所属の明示値として扱う。
++function isMembershipStatus(value: unknown): value is ClubMembershipStatus {
++  return value === "ACTIVE" ||
++    value === "WITHDRAWN" ||
++    value === "INVITED" ||
++    value === "SUSPENDED";
++}
++
++// 新規所属、WITHDRAWNの再有効化だけを許可し、停止・招待中を自己解除しない。
++export function evaluateChildMembershipAddition(input: {
++  status: unknown;
++}): ChildMembershipAdditionEvaluation {
++  if (input.status === null) {
++    return {
++      allowed: true,
++      operation: "CREATE",
++    };
++  }
++  if (!isMembershipStatus(input.status)) {
++    return {
++      allowed: false,
++      reason: "INVALID_STATUS",
++    };
++  }
++  if (input.status === "WITHDRAWN") {
++    return {
++      allowed: true,
++      operation: "REACTIVATE",
++    };
++  }
++
++  return {
++    allowed: false,
++    reason: input.status === "ACTIVE" ? "ALREADY_ACTIVE" : "STATUS_CHANGE_NOT_ALLOWED",
++  };
++}
++
++// 現在のACTIVE所属だけを外す。Child本体や他クラブ所属の削除は表現しない。
++export function evaluateChildMembershipWithdrawal(input: {
++  status: unknown;
++}): ChildMembershipWithdrawalEvaluation {
++  if (input.status === null) {
++    return {
++      allowed: false,
++      reason: "MEMBERSHIP_NOT_FOUND",
++    };
++  }
++  if (!isMembershipStatus(input.status)) {
++    return {
++      allowed: false,
++      reason: "INVALID_STATUS",
++    };
++  }
++  if (input.status === "ACTIVE") {
++    return {
++      allowed: true,
++      operation: "WITHDRAW",
++    };
++  }
++
++  return {
++    allowed: false,
++    reason: input.status === "WITHDRAWN" ? "ALREADY_WITHDRAWN" : "STATUS_CHANGE_NOT_ALLOWED",
++  };
++}
