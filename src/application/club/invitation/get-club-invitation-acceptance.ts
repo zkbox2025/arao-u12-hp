@@ -35,7 +35,7 @@ export type GetClubInvitationAcceptanceResult =
       view: Extract<ClubInvitationAcceptanceView, { status: "error" }>;//招待リンクを開いたときに何を表示させるかを定義した型にエラーを入れる
     };
 
-//招待リンクを開いた時の結果表示までの処理
+//招待状（Context）が今も有効か、ログイン中のユーザーが対象者として正しいかを検証し、その結果を返す関数
 export async function getClubInvitationAcceptance(input: {
   context: unknown;
 }): Promise<GetClubInvitationAcceptanceResult> {//クラブ招待リンクを開いた時の結果の型
