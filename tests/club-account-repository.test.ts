@@ -11,6 +11,14 @@ import {
   vi,
 } from "vitest";
 
+// 【追加：F07粒度3】実DBを起動せず、既知Prismaエラーを生成する。
+import {
+  Prisma,
+} from "@prisma/client";
+import {
+  DomainError,
+} from "@/domain/shared/domain-error";
+
 import type {
   ClubMemberRole,
   ClubMembershipStatus,
@@ -20,6 +28,7 @@ import type {
 import {
   findAttachableChildrenForUser,
   findClubAccountForUser,
+  updateAccountNameForUser, // 【追加：F07粒度3】本人氏名更新。
   type ClubAccountForUserResult,
   type ClubAccountReadScope,
 } from "@/src/infrastructure/prisma/repositories/club-account-repository";
@@ -29,6 +38,12 @@ const mocks = vi.hoisted(() => ({
   children: vi.fn(),
   admin: vi.fn(),
   write: vi.fn(),
+  // 【追加：F07粒度3】transaction内の許可された更新だけを独立して検証する。
+  transaction: vi.fn(),
+  nameActor: vi.fn(),
+  nameUser: vi.fn(),
+  nameUpdate: vi.fn(),
+  nameMemberships: vi.fn(),
 }));
 
 // 共有clientを評価せずに置換し、dotenvや本物の接続を起動しない。
@@ -55,7 +70,7 @@ vi.mock("@/src/infrastructure/prisma/client", () => ({
     platformAdmin: {
       findFirst: mocks.admin,
     },
-    $transaction: mocks.write,
+    $transaction: mocks.transaction, // 【変更：F07粒度3】読取からの呼出しは引き続き禁止。
   },
 }));
 
@@ -164,6 +179,8 @@ async function invoke<T>(
     admins,
   });
   const result = await reader(input);
+  // 【追加：F07粒度3】読取から氏名更新transactionへ接続しない。
+  expect(mocks.transaction).not.toHaveBeenCalled();
   expect({
     memberships,
     children,
@@ -725,5 +742,466 @@ describe("異常な取得結果と型境界", () => {
       keyof View,
       "authEmail" | "canSwitchClub" | "userId" | "parentId"
     >>().toEqualTypeOf<never>();
+  });
+});
+
+// 【追加：F07粒度3】以下は本人氏名更新専用。SQL・実DBの競合動作は代替しない。
+describe("本人氏名更新", () => {
+  let storedUser: {
+    id: string;
+    name: string | null;
+    email: string | null;
+  } | null;
+
+  // 個人情報入りの既知エラーでも、結果に原文やmetaを含めないことを試す。
+  function prismaError(code: string) {
+    return new Prisma.PrismaClientKnownRequestError(PRIVATE_DETAIL, {
+      code,
+      clientVersion: "test",
+      meta: {
+        detail: PRIVATE_DETAIL,
+      },
+    });
+  }
+
+  // 本人の全所属を用意し、非ACTIVEや利用不可プランの影響先も残す。
+  beforeEach(() => {
+    storedUser = {
+      id: SCOPE.userId,
+      name: "変更前",
+      email: "unchanged@example.test",
+    };
+    const actor = structuredClone(memberships[0]);
+    for (const status of ["INVITED", "SUSPENDED", "WITHDRAWN"] as const) {
+      const other = structuredClone(actor);
+      other.id = `membership-${status}`;
+      other.clubId = `club-${status}`;
+      other.status = status;
+      other.club = {
+        ...actor.club!,
+        id: other.clubId,
+        slug: `club-${status.toLowerCase()}`,
+        planType: "STARTER",
+      };
+      memberships.push(other);
+    }
+    const anotherUser = structuredClone(actor);
+    anotherUser.id = "other-user-membership";
+    anotherUser.userId = "other-user";
+    anotherUser.club = {
+      ...actor.club!,
+      slug: "other-user-private-club",
+    };
+    memberships.push(anotherUser);
+
+    mocks.nameActor.mockImplementation(async ({ where }) =>
+      memberships.find((row) =>
+        row.id === where.id &&
+        row.clubId === where.clubId &&
+        row.userId === where.userId &&
+        row.status === where.status) ?? null);
+    mocks.nameUser.mockImplementation(async ({ where }) =>
+      storedUser && storedUser.id === where.id ? {
+        id: storedUser.id,
+      } : null);
+    mocks.nameUpdate.mockImplementation(async ({ where, data }) => {
+      // SQLの代替ではなく、本人・所属・プランの条件が省略されないことを確認する。
+      expect(where).toEqual({
+        id: SCOPE.userId,
+        memberships: {
+          some: {
+            id: SCOPE.actorMembershipId,
+            clubId: SCOPE.clubId,
+            userId: SCOPE.userId,
+            status: "ACTIVE",
+            club: {
+              is: {
+                id: SCOPE.clubId,
+                planType: "STANDARD",
+              },
+            },
+          },
+        },
+      });
+      expect(Object.keys(data)).toEqual(["name"]);
+      const actor = memberships.find((row) =>
+        row.id === SCOPE.actorMembershipId &&
+        row.clubId === SCOPE.clubId &&
+        row.userId === SCOPE.userId &&
+        row.status === "ACTIVE" &&
+        row.club?.planType === "STANDARD");
+      if (!storedUser || storedUser.id !== where.id || !actor) {
+        return {
+          count: 0,
+        };
+      }
+      storedUser.name = data.name;
+      return {
+        count: 1,
+      };
+    });
+    mocks.nameMemberships.mockImplementation(async ({ where }) =>
+      memberships.filter((row) => row.userId === where.userId).map((row) => ({
+        club: {
+          slug: row.club!.slug,
+        },
+      })));
+    mocks.transaction.mockImplementation(async (callback, options) => {
+      expect(options).toEqual({
+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      });
+      const before = structuredClone(storedUser);
+      try {
+        return await callback({
+          clubMembership: {
+            findFirst: mocks.nameActor,
+            findMany: mocks.nameMemberships,
+          },
+          appUser: {
+            findUnique: mocks.nameUser,
+            updateMany: mocks.nameUpdate,
+          },
+        });
+      } catch (error) {
+        storedUser = before;
+        throw error;
+      }
+    });
+  });
+
+  it("本人氏名だけを更新し、全状態の本人所属slugだけを返す", async () => {
+    const input = {
+      ...SCOPE,
+      name: "  新しい氏名  ",
+      email: "attack@example.test",
+      role: "OWNER",
+      status: "WITHDRAWN",
+      children: [PRIVATE_DETAIL],
+    };
+    expect(await updateAccountNameForUser(input)).toEqual({
+      outcome: "UPDATED",
+      affectedClubSlugs: [
+        "club-a",
+        "club-invited",
+        "club-suspended",
+        "club-withdrawn",
+      ],
+    });
+    expect(storedUser).toEqual({
+      id: SCOPE.userId,
+      name: "新しい氏名",
+      email: "unchanged@example.test",
+    });
+    expect(mocks.nameActor).toHaveBeenCalledWith({
+      where: {
+        id: SCOPE.actorMembershipId,
+        clubId: SCOPE.clubId,
+        userId: SCOPE.userId,
+        status: "ACTIVE",
+      },
+      select: {
+        id: true,
+        clubId: true,
+        userId: true,
+        status: true,
+        club: {
+          select: {
+            id: true,
+            planType: true,
+          },
+        },
+      },
+    });
+    expect(mocks.nameUser).toHaveBeenCalledWith({
+      where: {
+        id: SCOPE.userId,
+      },
+      select: {
+        id: true,
+      },
+    });
+    expect(mocks.nameMemberships).toHaveBeenCalledWith({
+      where: {
+        userId: SCOPE.userId,
+      },
+      select: {
+        club: {
+          select: {
+            slug: true,
+          },
+        },
+      },
+    });
+    expect(mocks.nameUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.membership).not.toHaveBeenCalled();
+    expect(mocks.children).not.toHaveBeenCalled();
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+
+  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)(
+    "%sでも本人のnullable氏名を更新できる",
+    async (role) => {
+      memberships[0].role = role;
+      storedUser!.name = null;
+      expect(await updateAccountNameForUser({
+        ...SCOPE,
+        name: "あ".repeat(100),
+      })).toMatchObject({
+        outcome: "UPDATED",
+      });
+      expect(storedUser!.name).toHaveLength(100);
+    },
+  );
+
+  it.each(["clubId", "actorMembershipId", "userId"] as const)(
+    "%sが他人・別クラブなら更新しない",
+    async (field) => {
+      expect(await updateAccountNameForUser({
+        ...SCOPE,
+        [field]: "other",
+        name: "新氏名",
+      })).toEqual({
+        outcome: "FORBIDDEN",
+      });
+      expect(mocks.nameUpdate).not.toHaveBeenCalled();
+      expect(storedUser!.name).toBe("変更前");
+    },
+  );
+
+  it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
+    "親Membershipが%sなら更新しない",
+    async (status) => {
+      memberships[0].status = status;
+      expect(await updateAccountNameForUser({
+        ...SCOPE,
+        name: "新氏名",
+      })).toEqual({
+        outcome: "FORBIDDEN",
+      });
+      expect(mocks.nameUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["STARTER", "PRO"] as const)(
+    "%sプランは更新しない",
+    async (planType) => {
+      memberships[0].club!.planType = planType;
+      expect(await updateAccountNameForUser({
+        ...SCOPE,
+        name: "新氏名",
+      })).toEqual({
+        outcome: "FORBIDDEN",
+      });
+      expect(mocks.nameUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["", "  ", "あ".repeat(101), null, undefined, 123])(
+    "不正な氏名%jではtransactionを開始しない",
+    async (name) => {
+      expect(await updateAccountNameForUser({
+        ...SCOPE,
+        name: name as string,
+      })).toEqual({
+        outcome: "UPDATE_FAILED",
+      });
+      expect(mocks.transaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["clubId", "actorMembershipId", "userId"] as const)(
+    "%sの欠損ではwhere条件を広げない",
+    async (field) => {
+      expect(await updateAccountNameForUser({
+        ...SCOPE,
+        [field]: undefined,
+        name: "新氏名",
+      })).toEqual({
+        outcome: "FORBIDDEN",
+      });
+      expect(mocks.transaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it("AppUser欠損をupsertで修復しない", async () => {
+    storedUser = null;
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "NOT_FOUND",
+    });
+    expect(mocks.nameUpdate).not.toHaveBeenCalled();
+  });
+
+  it("現在Membershipが欠損した場合は更新しない", async () => {
+    memberships = memberships.filter((row) => row.id !== SCOPE.actorMembershipId);
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "FORBIDDEN",
+    });
+    expect(mocks.nameUpdate).not.toHaveBeenCalled();
+  });
+
+  it("重複した影響slugを1件にまとめる", async () => {
+    mocks.nameMemberships.mockResolvedValueOnce([
+      {
+        club: {
+          slug: "club-a",
+        },
+      },
+      {
+        club: {
+          slug: "club-a",
+        },
+      },
+    ]);
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "UPDATED",
+      affectedClubSlugs: ["club-a"],
+    });
+  });
+
+  it("更新件数の不整合はrollbackし、成功を返さない", async () => {
+    mocks.nameUpdate.mockImplementationOnce(async () => {
+      storedUser!.name = "不正な部分更新";
+      return {
+        count: 2,
+      };
+    });
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "UPDATE_FAILED",
+    });
+    expect(storedUser!.name).toBe("変更前");
+    expect(mocks.nameMemberships).not.toHaveBeenCalled();
+  });
+
+  it("更新直前に所属が失効した場合は条件付き更新が0件になる", async () => {
+    mocks.nameUser.mockImplementationOnce(async () => {
+      memberships[0].status = "SUSPENDED";
+      return {
+        id: SCOPE.userId,
+      };
+    });
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "NOT_FOUND",
+    });
+    expect(storedUser!.name).toBe("変更前");
+    expect(mocks.nameMemberships).not.toHaveBeenCalled();
+  });
+
+  it("影響slug取得失敗は更新もrollbackし、部分成功を返さない", async () => {
+    mocks.nameMemberships.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "UPDATE_FAILED",
+    });
+    expect(mocks.nameUpdate).toHaveBeenCalledTimes(1);
+    expect(storedUser!.name).toBe("変更前");
+  });
+
+  it("更新後のP2034はrollback後に認可確認から再試行する", async () => {
+    mocks.nameMemberships.mockRejectedValueOnce(prismaError("P2034"));
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toMatchObject({
+      outcome: "UPDATED",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(2);
+    expect(mocks.nameActor).toHaveBeenCalledTimes(2);
+    expect(storedUser!.name).toBe("新氏名");
+  });
+
+  it("P2034の再試行上限は初回に加えて3回だけ", async () => {
+    mocks.nameMemberships.mockRejectedValue(prismaError("P2034"));
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "CONFLICT",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(4);
+    expect(storedUser!.name).toBe("変更前");
+  });
+
+  it("再試行時に認可が失効していれば更新しない", async () => {
+    mocks.nameMemberships.mockImplementationOnce(async () => {
+      memberships[0].status = "WITHDRAWN";
+      throw prismaError("P2034");
+    });
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "FORBIDDEN",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(2);
+    expect(mocks.nameUpdate).toHaveBeenCalledTimes(1);
+    expect(storedUser!.name).toBe("変更前");
+  });
+
+  it.each([
+    ["P2002", "CONFLICT"],
+    ["P2025", "NOT_FOUND"],
+    ["P2003", "UPDATE_FAILED"],
+    ["P9999", "UPDATE_FAILED"],
+  ])("%sは再試行せず固定結果%sを返す", async (code, outcome) => {
+    mocks.nameUpdate.mockRejectedValueOnce(prismaError(code));
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome,
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    expect(storedUser!.name).toBe("変更前");
+  });
+
+  it.each([
+    new Error(PRIVATE_DETAIL),
+    new DomainError("CONFLICT", PRIVATE_DETAIL, {
+      cause: PRIVATE_DETAIL,
+    }),
+    {
+      code: "P2034",
+      message: PRIVATE_DETAIL,
+      cause: PRIVATE_DETAIL,
+    },
+  ])("任意の例外を反射・再試行しない: %#", async (error) => {
+    mocks.nameActor.mockRejectedValueOnce(error);
+    expect(await updateAccountNameForUser({
+      ...SCOPE,
+      name: "新氏名",
+    })).toEqual({
+      outcome: "UPDATE_FAILED",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    expect(mocks.nameUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// 【追加：F07粒度3】想定外のDB応答も安全な失敗へ閉じる。
+describe("本人氏名更新の不整合境界", () => {
+  it.each([null, undefined])("スコープ%jではtransactionを開始しない", async (input) => {
+    expect(await updateAccountNameForUser(
+      input as unknown as Parameters<typeof updateAccountNameForUser>[0],
+    )).toEqual({
+      outcome: "FORBIDDEN",
+    });
+    expect(mocks.transaction).not.toHaveBeenCalled();
   });
 });

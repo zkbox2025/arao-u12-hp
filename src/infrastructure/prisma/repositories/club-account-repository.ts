@@ -6,16 +6,21 @@
 
 import "server-only";
 
-import type {
+import {
   Prisma,
 } from "@prisma/client";
 
 import type {
   ClubAccountChildCandidatesResult,//クラブアカウントに紐づけられている子供アカウントの検索結果の型
+  ClubAccountMutationResult, //クラブアカウントのデータを変更・更新した結果を表す型
   ClubAccountChildView,// 子供のアカウントの表示情報
   ClubAccountReadResult,//クラブアカウントの表示用データを取得した結果の型
   ClubAccountView,// クラブアカウントの表示情報
 } from "@/domain/club/account/account-types";
+
+import {
+  validateAccountNameInput,//アカウント名の入力値のバリデーション関数
+} from "@/domain/club/account/account-form";
 import {
   evaluateChildMembershipAddition,// 子どものメンバーシップを追加する際の許可判定関数
 } from "@/domain/club/account/child-membership-policy";
@@ -383,5 +388,181 @@ export async function findAttachableChildrenForUser(
     return {
       outcome: "FETCH_FAILED",//取得失敗
     };
+  }
+}
+
+// 初回実行後、P2034だけを最大3回再試行する。
+const ACCOUNT_NAME_MAX_RETRIES = 3;
+
+//ユーザーのアカウント名を更新する入力値の型
+export type UpdateAccountNameForUserInput = ClubAccountReadScope & {//クラブアカウントのデータを読み込む際のアクセス権限のチェック範囲型と名前
+  name: string;
+};
+
+// アカウント名のプリズマエラーが正しいPrismaの既知のエラーであるかどうかをチェックする関数
+function isAccountNamePrismaError(
+  error: unknown,
+  code: string,
+): boolean {
+  return error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === code;
+}
+
+//ユーザーのアカウント名を書き換える関数
+export async function updateAccountNameForUser(
+  input: UpdateAccountNameForUserInput,//ユーザーのアカウント名を更新する入力値の型
+): Promise<ClubAccountMutationResult> {//クラブアカウントのデータを変更・更新した結果を表す型
+  if (!hasReadScope(input)) {//クラブアカウントのデータを読み込む許可が取れない場合、
+    return {
+      outcome: "FORBIDDEN",//閲覧禁止
+    };
+  }
+
+  const validation = validateAccountNameInput({//アカウント名の入力値のバリデーション関数
+    name: input.name,
+  });
+  if (!validation.success) {
+    return {
+      outcome: "UPDATE_FAILED",//更新失敗
+    };
+  }
+
+  let retryCount = 0;
+  while (true) {
+    try {
+      return await prisma.$transaction(//同時に以下の処理を実行する
+        async (transaction): Promise<ClubAccountMutationResult> => {//クラブアカウントのデータを変更・更新した結果を表す型
+          const actor = await transaction.clubMembership.findFirst({//DBからクラブメンバーシップにあるデータを一件取得する
+            where: {
+              id: input.actorMembershipId,
+              clubId: input.clubId,
+              userId: input.userId,
+              status: "ACTIVE",
+            },
+            select: {
+              id: true,
+              clubId: true,
+              userId: true,
+              status: true,
+              club: {
+                select: {
+                  id: true,
+                  planType: true,
+                },
+              },
+            },
+          });
+          if (
+            !actor ||
+            actor.id !== input.actorMembershipId ||
+            actor.clubId !== input.clubId ||
+            actor.userId !== input.userId ||
+            actor.status !== "ACTIVE" ||
+            !actor.club ||
+            actor.club.id !== input.clubId ||
+            !hasClubFeature(actor.club.planType, "CLUB_APP")
+          ) {
+            return {
+              outcome: "FORBIDDEN",//閲覧禁止
+            };
+          }
+
+          const user = await transaction.appUser.findUnique({//DBのユーザーテーブルから合致するユーザーIDを一件取得する
+            where: {
+              id: input.userId,
+            },
+            select: {
+              id: true,
+            },
+          });
+          if (!user || user.id !== input.userId) {
+            return {
+              outcome: "NOT_FOUND",
+            };
+          }
+
+          const updated = await transaction.appUser.updateMany({//DBのユーザーテーブルの名前の情報を更新する
+            where: {
+              id: input.userId,
+              memberships: {
+                some: {
+                  id: input.actorMembershipId,
+                  clubId: input.clubId,
+                  userId: input.userId,
+                  status: "ACTIVE",
+                  club: {
+                    is: {
+                      id: input.clubId,
+                      planType: actor.club.planType,
+                    },
+                  },
+                },
+              },
+            },
+            data: {
+              name: validation.data.name,
+            },
+          });
+          if (updated.count === 0) {
+            return {
+              outcome: "NOT_FOUND",
+            };
+          }
+          if (updated.count !== 1) {
+            throw new Error("本人氏名の更新件数を確認できません。");
+          }
+
+          //DBのクラブメンバーシップテーブルに紐づいたクラブスラッグを取得する関数
+          const memberships = await transaction.clubMembership.findMany({
+            where: {
+              userId: input.userId,
+            },
+            select: {
+              club: {
+                select: {
+                  slug: true,
+                },
+              },
+            },
+          });
+
+          //以下更新結果を報告する
+          return {
+            outcome: "UPDATED",
+            affectedClubSlugs: [//どのクラブが書き変わったか（クラブスラッグの配列を作り重複除去と並べ替えを行う）
+              ...new Set(memberships.map((membership) => membership.club.slug)),
+            ].sort(),
+          };
+        },
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,//トランザクションのバグを防ぐ
+        },
+      );
+    } catch (error) {
+      if (isAccountNamePrismaError(error, "P2034")) {// アカウント名のプリズマエラーが正しいPrismaの既知のエラーであるかどうかをチェックする関数
+        if (retryCount < ACCOUNT_NAME_MAX_RETRIES) {//初回実行後、P2034だけを最大3回再試行する。
+          retryCount += 1;
+          continue;
+        }
+        return {
+          outcome: "CONFLICT",//競合している
+        };
+      }
+      if (isAccountNamePrismaError(error, "P2002")) {// アカウント名のプリズマエラーが正しいPrismaの既知のエラーであるかどうかをチェックする関数
+        return {
+          outcome: "CONFLICT",//競合している
+        };
+      }
+      if (isAccountNamePrismaError(error, "P2025")) {// アカウント名のプリズマエラーが正しいPrismaの既知のエラーであるかどうかをチェックする関数
+        return {
+          outcome: "NOT_FOUND",
+        };
+      }
+
+      //それ以外のエラーは以下
+      return {
+        outcome: "UPDATE_FAILED",
+      };
+    }
   }
 }

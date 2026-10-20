@@ -54,7 +54,7 @@ export type ClubAccountChildCandidatesResult =
       outcome: "UNAVAILABLE" | "FETCH_FAILED";//「利用できない」か「取得失敗」
     };
 
-//クラブアカウントのデータを変更・更新（Mutation）した結果を表す型
+//クラブアカウントのデータを変更・更新した結果を表す型
 export type ClubAccountMutationResult =
   | {
       outcome: "UPDATED";//更新済み
