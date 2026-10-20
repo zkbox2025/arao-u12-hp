@@ -62,7 +62,7 @@ export function evaluateChildMembershipAddition(input: {
   if (input.status === "WITHDRAWN") {
     return {
       allowed: true,
-      operation: "REACTIVATE",
+      operation: "REACTIVATE",//再度アクティブにできる
     };
   }
 

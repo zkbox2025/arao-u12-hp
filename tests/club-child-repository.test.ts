@@ -17,6 +17,10 @@ import {
   DomainError,
 } from "@/domain/shared/domain-error";
 import {
+  // 【追加：F07粒度5】所属操作の公開関数。
+  addChildToClubForUser,
+  withdrawChildFromClubForUser,
+  type ChildMembershipForUserInput,
   createChildForUser,
   updateChildForUser,
   type ChildForUserInput,
@@ -35,6 +39,10 @@ const mocks = vi.hoisted(() => ({
   updateChild: vi.fn(),
   affected: vi.fn(),
   forbidden: vi.fn(),
+  // 【追加：F07粒度5】所属操作用delegateを分離する。
+  findChild: vi.fn(),
+  findMembership: vi.fn(),
+  updateMembership: vi.fn(),
 }));
 
 // dotenv・本物のclientを評価せず、transaction外のDB操作も禁止する。
@@ -293,16 +301,20 @@ beforeEach(() => {
           update: mocks.forbidden,
         },
         child: {
+          // 【追加：F07粒度5】既存Childの本人所有を照合する。
+          findFirst: mocks.findChild,
           create: mocks.createChild,
           updateMany: mocks.updateChild,
           upsert: mocks.forbidden,
           delete: mocks.forbidden,
         },
         childClubMembership: {
+          // 【追加：F07粒度5】現在所属の取得と条件付き変更を許可する。
+          findFirst: mocks.findMembership,
           create: mocks.createMembership,
           findMany: mocks.affected,
           update: mocks.forbidden,
-          updateMany: mocks.forbidden,
+          updateMany: mocks.updateMembership, // 【変更：F07粒度5】専用mockで条件を検証。
           upsert: mocks.forbidden,
           delete: mocks.forbidden,
         },
@@ -809,5 +821,416 @@ describe.each([
       outcome: "UPDATE_FAILED",
     });
     expect(mocks.transaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+// 【追加：F07粒度5】以下は所属追加・解除専用。実SQLの競合動作の代替ではない。
+describe("既存Childの現在クラブ所属", () => {
+  const membershipInput: ChildMembershipForUserInput = {
+    clubId: INPUT.clubId,
+    actorMembershipId: INPUT.actorMembershipId,
+    userId: INPUT.userId,
+    childId: CHILD_ID,
+  };
+
+  // 所属操作の前後でChild本体と他クラブ所属の不変性を確認する。
+  async function invokeMembership(
+    operation: typeof addChildToClubForUser,
+    input = membershipInput,
+  ) {
+    const beforeChildren = structuredClone(children);
+    const beforeOtherMemberships = structuredClone(
+      memberships.filter((row) => row.clubId !== INPUT.clubId),
+    );
+    const result = await operation(input);
+    expect(children).toEqual(beforeChildren);
+    expect(memberships.filter((row) => row.clubId !== INPUT.clubId))
+      .toEqual(beforeOtherMemberships);
+    return result;
+  }
+
+  // 所属操作で使う条件をassertし、storeで状態遷移とrollback境界を確認する。
+  beforeEach(() => {
+    mocks.findChild.mockImplementation(async ({ where, select }) => {
+      expect(where).toEqual({
+        id: CHILD_ID,
+        parentId: INPUT.userId,
+      });
+      expect(select).toEqual({
+        id: true,
+        parentId: true,
+      });
+      return children.find((row) =>
+        row.id === where.id && row.parentId === where.parentId) ?? null;
+    });
+    mocks.findMembership.mockImplementation(async ({ where, select }) => {
+      expect(where).toEqual({
+        clubId: INPUT.clubId,
+        childId: CHILD_ID,
+      });
+      expect(select).toEqual({
+        id: true,
+        clubId: true,
+        childId: true,
+        parentUserId: true,
+        status: true,
+      });
+      return structuredClone(memberships.find((row) =>
+        row.clubId === where.clubId && row.childId === where.childId) ?? null);
+    });
+    const create = mocks.createMembership.getMockImplementation()!;
+    mocks.createMembership.mockImplementation(async (query) => {
+      expect(query).toEqual({
+        data: {
+          clubId: INPUT.clubId,
+          childId: CHILD_ID,
+          parentUserId: INPUT.userId,
+          status: "ACTIVE",
+        },
+        select: {
+          id: true,
+        },
+      });
+      if (memberships.some((row) =>
+        row.clubId === query.data.clubId && row.childId === query.data.childId)) {
+        throw prismaError("P2002");
+      }
+      return create(query);
+    });
+    mocks.updateMembership.mockImplementation(async ({ where, data }) => {
+      expect(["ACTIVE", "WITHDRAWN"]).toContain(where.status);
+      expect(where).toEqual({
+        id: "child-membership-a",
+        clubId: INPUT.clubId,
+        childId: CHILD_ID,
+        parentUserId: INPUT.userId,
+        status: where.status,
+        child: {
+          is: {
+            id: CHILD_ID,
+            parentId: INPUT.userId,
+          },
+        },
+        parentMembership: {
+          is: {
+            ...actorWhere(),
+            club: {
+              is: {
+                id: INPUT.clubId,
+                planType: "STANDARD",
+              },
+            },
+          },
+        },
+      });
+      expect(data).toEqual({
+        status: where.status === "ACTIVE" ? "WITHDRAWN" : "ACTIVE",
+      });
+      const membership = memberships.find((row) =>
+        row.id === where.id &&
+        row.clubId === where.clubId &&
+        row.childId === where.childId &&
+        row.parentUserId === where.parentUserId &&
+        row.status === where.status);
+      const child = children.find((row) =>
+        row.id === CHILD_ID && row.parentId === INPUT.userId);
+      if (!membership || !child || !canUseCurrentClub()) {
+        return {
+          count: 0,
+        };
+      }
+      membership.status = data.status;
+      return {
+        count: 1,
+      };
+    });
+  });
+
+  // 所属操作からChild本体・全クラブの再検証取得へ処理を広げない。
+  afterEach(() => {
+    expect(mocks.createChild).not.toHaveBeenCalled();
+    expect(mocks.updateChild).not.toHaveBeenCalled();
+    expect(mocks.affected).not.toHaveBeenCalled();
+  });
+
+  it("未所属の既存Childを複製せず現在クラブだけへ追加する", async () => {
+    memberships = memberships.filter((row) => row.clubId !== INPUT.clubId);
+    expect(await invokeMembership(addChildToClubForUser)).toEqual({
+      outcome: "UPDATED",
+      affectedClubSlugs: ["club-a"],
+    });
+    expect(memberships.filter((row) => row.clubId === INPUT.clubId)).toEqual([
+      {
+        id: "new-child-membership",
+        clubId: INPUT.clubId,
+        childId: CHILD_ID,
+        parentUserId: INPUT.userId,
+        status: "ACTIVE",
+      },
+    ]);
+    expect(mocks.updateMembership).not.toHaveBeenCalled();
+  });
+
+  it("WITHDRAWNの本人所属だけを条件付きで再有効化する", async () => {
+    memberships[0].status = "WITHDRAWN";
+    expect(await invokeMembership(addChildToClubForUser)).toEqual({
+      outcome: "UPDATED",
+      affectedClubSlugs: ["club-a"],
+    });
+    expect(memberships[0].status).toBe("ACTIVE");
+    expect(mocks.createMembership).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["ACTIVE", "ALREADY_ACTIVE"],
+    ["SUSPENDED", "STATUS_CHANGE_NOT_ALLOWED"],
+    ["INVITED", "STATUS_CHANGE_NOT_ALLOWED"],
+  ] as const)("追加時の%sは%sで拒否する", async (status, reason) => {
+    memberships[0].status = status;
+    expect(await invokeMembership(addChildToClubForUser)).toEqual({
+      outcome: "RULE_VIOLATION",
+      reason,
+    });
+    expect(memberships[0].status).toBe(status);
+    expect(mocks.createMembership).not.toHaveBeenCalled();
+    expect(mocks.updateMembership).not.toHaveBeenCalled();
+  });
+
+  it("現在クラブのACTIVE所属だけを解除し、再解除は既解除を返す", async () => {
+    expect(await invokeMembership(withdrawChildFromClubForUser)).toEqual({
+      outcome: "UPDATED",
+      affectedClubSlugs: ["club-a"],
+    });
+    expect(memberships[0].status).toBe("WITHDRAWN");
+    expect(await invokeMembership(withdrawChildFromClubForUser)).toEqual({
+      outcome: "RULE_VIOLATION",
+      reason: "ALREADY_WITHDRAWN",
+    });
+    expect(mocks.updateMembership).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["SUSPENDED", "INVITED"] as const)("解除時の%sは変更しない", async (status) => {
+    memberships[0].status = status;
+    expect(await invokeMembership(withdrawChildFromClubForUser)).toEqual({
+      outcome: "RULE_VIOLATION",
+      reason: "STATUS_CHANGE_NOT_ALLOWED",
+    });
+    expect(mocks.updateMembership).not.toHaveBeenCalled();
+  });
+
+  it("未所属の解除で他クラブ所属を代用しない", async () => {
+    memberships = memberships.filter((row) => row.clubId !== INPUT.clubId);
+    expect(await invokeMembership(withdrawChildFromClubForUser)).toEqual({
+      outcome: "RULE_VIOLATION",
+      reason: "MEMBERSHIP_NOT_FOUND",
+    });
+  });
+
+  it("同時追加の2送信は現在所属を1件だけ作る", async () => {
+    memberships = memberships.filter((row) => row.clubId !== INPUT.clubId);
+    const results = await Promise.all([
+      addChildToClubForUser(membershipInput),
+      addChildToClubForUser(membershipInput),
+    ]);
+    expect(results).toEqual([
+      {
+        outcome: "UPDATED",
+        affectedClubSlugs: ["club-a"],
+      },
+      {
+        outcome: "RULE_VIOLATION",
+        reason: "ALREADY_ACTIVE",
+      },
+    ]);
+    expect(memberships.filter((row) => row.clubId === INPUT.clubId)).toHaveLength(1);
+  });
+
+  it("同時追加の一意衝突は修復や再試行をせず競合とする", async () => {
+    memberships = memberships.filter((row) => row.clubId !== INPUT.clubId);
+    mocks.createMembership.mockRejectedValueOnce(prismaError("P2002"));
+    expect(await invokeMembership(addChildToClubForUser)).toEqual({
+      outcome: "CONFLICT",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+  });
+
+  it("WITHDRAWNへの追加と解除が続いても現在クラブの1行だけを遷移させる", async () => {
+    memberships[0].status = "WITHDRAWN";
+    const results = await Promise.all([
+      addChildToClubForUser(membershipInput),
+      withdrawChildFromClubForUser(membershipInput),
+    ]);
+    expect(results.map((result) => result.outcome)).toEqual(["UPDATED", "UPDATED"]);
+    expect(memberships[0].status).toBe("WITHDRAWN");
+    expect(memberships).toHaveLength(2);
+  });
+
+  // 追加・解除の両公開関数で本人・クラブ・例外の境界を確認する。
+  describe.each([
+    ["追加", addChildToClubForUser],
+    ["解除", withdrawChildFromClubForUser],
+  ] as const)("%sの境界", (_label, operation) => {
+    beforeEach(() => {
+      memberships[0].status = operation === addChildToClubForUser ? "WITHDRAWN" : "ACTIVE";
+    });
+
+    it.each(["clubId", "actorMembershipId", "userId"] as const)(
+      "%sが別人・別クラブなら拒否する",
+      async (field) => {
+        expect(await invokeMembership(operation, {
+          ...membershipInput,
+          [field]: "other",
+        })).toEqual({
+          outcome: "FORBIDDEN",
+        });
+        expect(mocks.findChild).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
+      "親Membershipが%sなら拒否する",
+      async (status) => {
+        actor!.status = status;
+        expect(await invokeMembership(operation)).toEqual({
+          outcome: "FORBIDDEN",
+        });
+      },
+    );
+
+    it.each(["STARTER", "PRO"] as const)("%sプランでは拒否する", async (planType) => {
+      actor!.club!.planType = planType;
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "FORBIDDEN",
+      });
+    });
+
+    it.each(["other-parent", null])("他人・欠損Child %jを変更しない", async (parentId) => {
+      if (parentId === null) {
+        children = children.filter((row) => row.id !== CHILD_ID);
+      } else {
+        children[0].parentId = parentId;
+      }
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "NOT_FOUND",
+      });
+      expect(mocks.findMembership).not.toHaveBeenCalled();
+    });
+
+    it("現在所属のparentUserIdが他人でも未所属と誤認して修復しない", async () => {
+      memberships[0].parentUserId = "other-parent";
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "FORBIDDEN",
+      });
+      expect(mocks.createMembership).not.toHaveBeenCalled();
+      expect(mocks.updateMembership).not.toHaveBeenCalled();
+    });
+
+    it.each(["clubId", "childId"] as const)("取得行の%s不整合も拒否する", async (field) => {
+      mocks.findMembership.mockResolvedValueOnce({
+        ...memberships[0],
+        [field]: "other",
+      });
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "FORBIDDEN",
+      });
+    });
+
+    it.each(["clubId", "actorMembershipId", "userId"] as const)(
+      "%s欠損でwhereを広げない",
+      async (field) => {
+        expect(await invokeMembership(operation, {
+          ...membershipInput,
+          [field]: undefined,
+        })).toEqual({
+          outcome: "FORBIDDEN",
+        });
+        expect(mocks.transaction).not.toHaveBeenCalled();
+      },
+    );
+
+    it("不正childIdをDBへ渡さない", async () => {
+      expect(await invokeMembership(operation, {
+        ...membershipInput,
+        childId: "invalid-id",
+      })).toEqual({
+        outcome: "UPDATE_FAILED",
+      });
+      expect(mocks.transaction).not.toHaveBeenCalled();
+    });
+
+    it("旧状態が変わって更新0件なら成功にしない", async () => {
+      const update = mocks.updateMembership.getMockImplementation()!;
+      mocks.updateMembership.mockImplementationOnce(async (query) => {
+        memberships[0].status = "SUSPENDED";
+        return update(query);
+      });
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "CONFLICT",
+      });
+    });
+
+    it("親の認可失効も更新条件で拒否する", async () => {
+      const update = mocks.updateMembership.getMockImplementation()!;
+      mocks.updateMembership.mockImplementationOnce(async (query) => {
+        actor!.status = "WITHDRAWN";
+        return update(query);
+      });
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "CONFLICT",
+      });
+    });
+
+    it("更新件数不整合ではrollbackする", async () => {
+      const before = structuredClone(memberships);
+      mocks.updateMembership.mockImplementationOnce(async () => {
+        memberships[0].status = "SUSPENDED";
+        return {
+          count: 2,
+        };
+      });
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "UPDATE_FAILED",
+      });
+      expect(memberships).toEqual(before);
+    });
+
+    it("P2034はrollback後に認可と状態確認から再試行する", async () => {
+      const update = mocks.updateMembership.getMockImplementation()!;
+      mocks.updateMembership.mockImplementationOnce(async (query) => {
+        await update(query);
+        throw prismaError("P2034");
+      });
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "UPDATED",
+        affectedClubSlugs: ["club-a"],
+      });
+      expect(mocks.actor).toHaveBeenCalledTimes(2);
+      expect(mocks.updateMembership).toHaveBeenCalledTimes(2);
+    });
+
+    it("P2034の再試行は初回に加えて最大3回", async () => {
+      mocks.updateMembership.mockRejectedValue(prismaError("P2034"));
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "CONFLICT",
+      });
+      expect(mocks.transaction).toHaveBeenCalledTimes(4);
+    });
+
+    it.each([
+      new Error(PRIVATE_DETAIL),
+      new DomainError("CONFLICT", PRIVATE_DETAIL, {
+        cause: PRIVATE_DETAIL,
+      }),
+      {
+        code: "P2034",
+        message: PRIVATE_DETAIL,
+      },
+    ])("任意の例外を反射・再試行しない: %#", async (error) => {
+      mocks.findMembership.mockRejectedValueOnce(error);
+      expect(await invokeMembership(operation)).toEqual({
+        outcome: "UPDATE_FAILED",
+      });
+      expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    });
   });
 });
