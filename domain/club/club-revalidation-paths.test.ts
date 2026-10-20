@@ -10,6 +10,7 @@ import {
 } from "vitest";
 
 import {
+  getClubAccountRevalidationPaths, // 【追加：F07粒度6】account専用パス。
   getClubEventRevalidationPaths,
   getClubMemberRevalidationPaths,
   getClubNoticeRevalidationPaths,
@@ -126,4 +127,20 @@ describe("不正なパスパラメータ", () => {
       ),
     ).toThrow(RangeError);
   });
+});
+
+// 【追加：F07粒度6】Childの変更で会員管理やイベントへ対象を広げない。
+describe("getClubAccountRevalidationPaths", () => {
+  it("指定クラブのaccountだけを返す", () => {
+    expect(getClubAccountRevalidationPaths("arao-u12")).toEqual([
+      "/club/arao-u12/account",
+    ]);
+  });
+
+  it.each(["", "../other-club", "club/other", "club?query", "Club-A"])(
+    "不正slug %jを拒否する",
+    (slug) => {
+      expect(() => getClubAccountRevalidationPaths(slug)).toThrow(RangeError);
+    },
+  );
 });

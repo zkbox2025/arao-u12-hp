@@ -144,3 +144,13 @@ export function getClubSettingsRevalidationPaths(
     `${basePath}/admin/settings/line`,
   ];
 }
+
+// クラブアカウントページの再検証(revalidate)パスを生成する関数
+export function getClubAccountRevalidationPaths(
+  clubSlug: string,
+): string[] {
+  const basePath = getClubBasePath(clubSlug);//クラブスラッグが正しい形か確認した上で、pathを作成する関数
+  return [
+    `${basePath}/account`,
+  ];
+}

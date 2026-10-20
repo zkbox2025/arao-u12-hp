@@ -13,10 +13,11 @@ import {
 } from "next/cache";
 
 import {
-  getClubEventRevalidationPaths,
-  getClubMemberRevalidationPaths,
-  getClubNoticeRevalidationPaths,
-  getClubSettingsRevalidationPaths,
+  getClubAccountRevalidationPaths, // クラブアカウントページの再検証(revalidate)パスを生成する関数
+  getClubEventRevalidationPaths,//イベントの再検証(revalidate)パスを生成する関数
+  getClubMemberRevalidationPaths,//(オーナー用)メンバー管理・設定ページとマイページの再検証(revalidate)パスを生成する関数
+  getClubNoticeRevalidationPaths,// お知らせの再検証パスを生成する
+  getClubSettingsRevalidationPaths,//（オーナー用）ライン通知グループ管理ページの再検証(revalidate)パスを生成する関数
 } from "@/domain/club/club-revalidation-paths";
 
 
@@ -34,8 +35,8 @@ export function revalidateClubEventPaths(
   clubSlug: string,
   eventId?: string,
 ): void {
-  revalidatePaths(
-    getClubEventRevalidationPaths(
+  revalidatePaths(//URLパスを受け取り、キャッシュをクリアにする関数
+    getClubEventRevalidationPaths(//イベントの再検証(revalidate)パスを生成する関数
       clubSlug,
       eventId,
     ),
@@ -47,8 +48,8 @@ export function revalidateClubNoticePaths(
   clubSlug: string,
   noticeId?: string,
 ): void {
-  revalidatePaths(
-    getClubNoticeRevalidationPaths(
+  revalidatePaths(//URLパスを受け取り、キャッシュをクリアにする関数
+    getClubNoticeRevalidationPaths(// お知らせの再検証パスを生成する
       clubSlug,
       noticeId,
     ),
@@ -59,8 +60,8 @@ export function revalidateClubNoticePaths(
 export function revalidateClubMemberPaths(
   clubSlug: string,
 ): void {
-  revalidatePaths(
-    getClubMemberRevalidationPaths(
+  revalidatePaths(//URLパスを受け取り、キャッシュをクリアにする関数
+    getClubMemberRevalidationPaths(//(オーナー用)メンバー管理・設定ページとマイページの再検証(revalidate)パスを生成する関数
       clubSlug,
     ),
   );
@@ -70,9 +71,28 @@ export function revalidateClubMemberPaths(
 export function revalidateClubSettingsPaths(
   clubSlug: string,
 ): void {
-  revalidatePaths(
-    getClubSettingsRevalidationPaths(
+  revalidatePaths(//URLパスを受け取り、キャッシュをクリアにする関数
+    getClubSettingsRevalidationPaths(//（オーナー用）ライン通知グループ管理ページの再検証(revalidate)パスを生成する関数
       clubSlug,
     ),
   );
+}
+
+//クラブアカウント名の更新をした時の影響のあるクラブのページのrevalidatePath実行関数
+// Repositoryが返した影響先だけを受け取り、全パス検証後に再検証する。
+export function revalidateClubAccountNamePaths(
+  affectedClubSlugs: readonly string[],
+): void {
+  const paths = [...new Set(affectedClubSlugs.flatMap((slug) =>
+    getClubMemberRevalidationPaths(slug)))];//(オーナー用)メンバー管理・設定ページとマイページの再検証(revalidate)パスを生成する関数
+  revalidatePaths(paths);//URLパスを受け取り、キャッシュをクリアにする関数
+}
+
+// 子どもの情報を変更したときのクラブのアカウント関連ページのrevalidatePath実行関数
+export function revalidateClubAccountPaths(
+  affectedClubSlugs: readonly string[],
+): void {
+  const paths = [...new Set(affectedClubSlugs.flatMap((slug) =>
+    getClubAccountRevalidationPaths(slug)))];// クラブアカウントページの再検証(revalidate)パスを生成する関数
+  revalidatePaths(paths);//URLパスを受け取り、キャッシュをクリアにする関数
 }
