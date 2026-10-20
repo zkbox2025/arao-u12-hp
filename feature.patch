@@ -1,1066 +1,1119 @@
-diff --git a/docs/implementation/phases/F07.md b/docs/implementation/phases/F07.md
-index e9323b1..0604a87 100644
---- a/docs/implementation/phases/F07.md
-+++ b/docs/implementation/phases/F07.md
-@@ -4,6 +4,12 @@ F07. マイページ・AppUser・複数Child管理
- 目的
- 利用者が自分の氏名と子どもの情報を管理し、権限別の導線やクラブ切替を利用できるようにします。
- 確定するChild方針
-+<!-- 【追加：F07粒度1】ユーザー回答に基づく学年・状態遷移・表示契約。 -->
-+- 学年は未設定を許可し、Child.grade = nullで保存する。
-+- 現在所属の一覧は、自分のChildかつ現在クラブのACTIVEなChildClubMembershipがあるものに限定する。
-+  現在クラブへの追加候補は、本人が追加操作を始めたときに別取得・別表示する。
-+- 未所属ならChildClubMembershipを作成し、再有効化はWITHDRAWNからACTIVEだけを許可する。
-+  ACTIVEは重複とし、SUSPENDED・INVITEDを本人操作でACTIVEへ戻さない。
- - AppUserは複数のChildを持てる。
- - Childは親に属するグローバルデータとし、クラブ所属はChildClubMembershipで表す。
- - マイページには現在クラブへ所属するChildだけを表示する。
-@@ -19,7 +25,8 @@ F07. マイページ・AppUser・複数Child管理
- 5. ChildとMembershipの所有者・clubId一致を全Actionで確認する。
- 6. 複数Childを表示・操作できるUIにする。
- 7. OWNER、COACH、OFFICER、MEMBERごとのリンクを表示する。
--8. ACTIVE Membershipが2件以上の場合だけクラブ切替を表示する。
-+<!-- 【変更：F07粒度1】利用可能なACTIVE件数という確定回答を反映する。 -->
-+8. アプリを利用できるACTIVE Membershipが2件以上の場合だけクラブ切替を表示する。
- 9. 規約、プライバシー、公式HP、Instagram、ログアウトへのリンクを表示する。
- 10. PlatformAdmin用リンクはPlatformAdmin本人にだけ表示する。
- 受入条件
-@@ -32,3 +39,23 @@ F07. マイページ・AppUser・複数Child管理
- - Child本体とChildClubMembershipの違い
- - AppUser氏名とChild情報がクラブ横断データであること
- - 物理削除をMVPから外す理由
-+
-+<!-- 【追加：F07粒度1】純粋関数の契約と後続粒度の責務を明記する。 -->
-+粒度1の入力・表示・結果契約
-+- 本人氏名とChild氏名は前後空白を除去し、空欄を拒否して100文字以内とする。
-+  既存のAppUser.name = nullは未登録として表示し、氏名更新にChild入力を要求しない。
-+- Childの学年はYOUJIとELEMENTARY_1〜6、または未設定を許可する。
-+  FormDataではname・gradeを各1個の文字列として要求し、gradeの空文字だけをnullへ変換する。
-+  直接検証時は明示nullも許可する。欠損、File、重複、不正な学年を未設定へ丸めない。
-+- 対象childIdはUUID v4形式を確認する。IDの形式一致は所有者・現在クラブ所属の証明ではない。
-+- 入力検証の成功値・ActionStateの値はname、grade、対象childIdなど操作ごとの許可項目だけを持つ。
-+  email、親のID、clubId、role、statusを入力からコピーしない。
-+- ClubAccountViewは本人氏名、表示専用のAuth emailとAppUser.email、現在クラブの表示情報、
-+  ロール、現在所属Child、サーバーで判定したリンク表示用boolを持つ。
-+  Auth UserやDBレコード全体、親のID、他クラブ所属の詳細を含めない。
-+- 既存Child候補の取得結果は通常表示と分け、Childのid・name・gradeだけを返す。
-+- 更新結果は固定outcomeと内部再検証用の影響slug、必要な状態違反理由だけを返す。
-+  任意のDBメッセージや入力値を失敗結果・完了メッセージへ反射しない。
-+- 入力・状態の純粋関数は、認証、本人所有、現在クラブ一致、DBの一回限り更新を保証しない。
-+  Repository、Service、Action、Pageへの接続と実データの再照合は後続粒度で行う。
-+- 規約・プライバシーの公開URLと文面は未確定であり、粒度1で仮の公開先や本文を追加しない。
-diff --git a/domain/club/account/account-form.test.ts b/domain/club/account/account-form.test.ts
+diff --git a/src/infrastructure/prisma/repositories/club-account-repository.ts b/src/infrastructure/prisma/repositories/club-account-repository.ts
 new file mode 100644
-index 0000000..931950e
+index 0000000..3f47d45
 --- /dev/null
-+++ b/domain/club/account/account-form.test.ts
-@@ -0,0 +1,162 @@
-+// domain/club/account/account-form.test.ts
-+// 本人氏名の境界・FormData改ざん・表示と状態の契約を確認する。
++++ b/src/infrastructure/prisma/repositories/club-account-repository.ts
+@@ -0,0 +1,378 @@
++// src/infrastructure/prisma/repositories/club-account-repository.ts
++// 認可済みの本人・現在クラブに限定して、マイページと既存Child追加候補を読み取る。
 +
-+import {
-+  describe,
-+  expect,
-+  expectTypeOf,
-+  it,
-+} from "vitest";
++import "server-only";
 +
 +import type {
++  Prisma,
++} from "@prisma/client";
++
++import type {
++  ClubAccountChildCandidatesResult,
 +  ClubAccountChildView,
-+  ClubAccountMutationResult,
++  ClubAccountReadResult,
 +  ClubAccountView,
-+} from "./account-types";
++} from "@/domain/club/account/account-types";
 +import {
-+  ACCOUNT_NAME_MAX_LENGTH,
-+  getAccountFeedbackMessage,
-+  parseAccountNameFormData,
-+  validateAccountNameInput,
-+  type AccountNameActionState,
-+  type AccountNameFormValues,
-+} from "./account-form";
++  evaluateChildMembershipAddition,
++} from "@/domain/club/account/child-membership-policy";
++import {
++  hasClubFeature,
++} from "@/domain/club/plan-features";
++import {
++  prisma,
++} from "@/src/infrastructure/prisma/client";
 +
-+describe("本人氏名の入力", () => {
-+  it("前後だけtrimし、内部空白や表記は変更しない", () => {
-+    const input = {
-+      name: "　 Ａ子  太郎　 ",
-+    };
-+    expect(validateAccountNameInput(input)).toEqual({
-+      success: true,
-+      data: {
-+        name: "Ａ子  太郎",
-+      },
-+    });
-+    expect(input.name).toBe("　 Ａ子  太郎　 ");
-+  });
-+
-+  it.each([
-+    undefined,
-+    null,
-+    [],
-+    "氏名",
-+    {},
-+    { name: undefined },
-+    { name: null },
-+    { name: 123 },
-+    { name: "" },
-+    { name: "　 \t\n " },
-+    { name: new File(["個人情報"], "name.txt") },
-+  ])("欠損・不正値を固定エラーにする %#", (input) => {
-+    expect(validateAccountNameInput(input)).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        name: ["氏名を入力してください。"],
-+      },
-+    });
-+  });
-+
-+  it("trim後の100文字を許可し、101文字を拒否する", () => {
-+    expect(validateAccountNameInput({
-+      name: ` ${"あ".repeat(ACCOUNT_NAME_MAX_LENGTH)} `,
-+    }).success).toBe(true);
-+    const result = validateAccountNameInput({
-+      name: "あ".repeat(ACCOUNT_NAME_MAX_LENGTH + 1),
-+    });
-+    expect(result).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        name: ["氏名は100文字以内で入力してください。"],
-+      },
-+    });
-+    expect(result).not.toHaveProperty("data");
-+  });
-+
-+  it("入力にemailや親・クラブ・役割があっても成功値にコピーしない", () => {
-+    const input = {
-+      name: " 本人氏名 ",
-+      email: "private@example.test",
-+      parentId: "foreign-parent",
-+      clubId: "foreign-club",
-+      role: "OWNER",
-+      status: "ACTIVE",
-+    };
-+    expect(validateAccountNameInput(input)).toEqual({
-+      success: true,
-+      data: {
-+        name: "本人氏名",
-+      },
-+    });
-+  });
-+});
-+
-+describe("本人氏名のFormData", () => {
-+  it("氏名だけを検証し、その他の項目を引き継がない", () => {
-+    const form = new FormData();
-+    form.set("name", " 本人氏名 ");
-+    form.set("email", "private@example.test");
-+    form.set("childId", "unrelated-child");
-+    expect(parseAccountNameFormData(form)).toEqual({
-+      success: true,
-+      data: {
-+        name: "本人氏名",
-+      },
-+    });
-+  });
-+
-+  it.each(["missing", "file", "duplicate", "same-duplicate"])(
-+    "nameが%sなら拒否する",
-+    (kind) => {
-+      const form = new FormData();
-+      if (kind === "file") {
-+        form.set("name", new File(["氏名"], "name.txt"));
-+      } else if (kind !== "missing") {
-+        form.append("name", "氏名");
-+        form.append("name", kind === "same-duplicate" ? "氏名" : "別の氏名");
-+      }
-+      expect(parseAccountNameFormData(form).success).toBe(false);
-+    },
-+  );
-+});
-+
-+describe("完了メッセージと型契約", () => {
-+  it.each([
-+    ["name-saved", "氏名を保存しました。"],
-+    ["child-created", "子どもを追加しました。"],
-+    ["child-updated", "子どもの情報を保存しました。"],
-+    ["child-added", "子どもを現在クラブへ追加しました。"],
-+    ["child-withdrawn", "子どもを現在クラブから外しました。"],
-+    ["saved-reload", "保存は完了しています。再送信せず、ページを開き直して確認してください。"],
-+  ])("%sは固定の文言だけを返す", (key, message) => {
-+    expect(getAccountFeedbackMessage(key)).toBe(message);
-+  });
-+
-+  it.each([
-+    undefined,
-+    null,
-+    "private@example.test",
-+    "<script>private-token</script>",
-+    "__proto__",
-+    "constructor",
-+    ["name-saved"],
-+    {},
-+  ])("未定義・不正識別子を表示しない %#", (value) => {
-+    expect(getAccountFeedbackMessage(value)).toBeNull();
-+  });
-+
-+  it("表示情報と更新入力・内部結果を分離する", () => {
-+    expectTypeOf<keyof AccountNameFormValues>().toEqualTypeOf<"name">();
-+    expectTypeOf<AccountNameActionState["data"]>().toEqualTypeOf<undefined>();
-+    expectTypeOf<keyof ClubAccountChildView>()
-+      .toEqualTypeOf<"id" | "name" | "grade">();
-+    expectTypeOf<Extract<
-+      keyof ClubAccountView,
-+      "authUserId" | "parentId" | "tokenHash" | "affectedClubSlugs"
-+    >>().toEqualTypeOf<never>();
-+    expectTypeOf<Extract<
-+      ClubAccountMutationResult,
-+      { outcome: "UPDATED" }
-+    >["affectedClubSlugs"]>().toEqualTypeOf<readonly string[]>();
-+  });
-+});
-diff --git a/domain/club/account/account-form.ts b/domain/club/account/account-form.ts
-new file mode 100644
-index 0000000..cb1326d
---- /dev/null
-+++ b/domain/club/account/account-form.ts
-@@ -0,0 +1,101 @@
-+// domain/club/account/account-form.ts
-+// 本人氏名だけの入力契約と、値を反射しない固定の完了メッセージを定義する。
-+
-+import type {
-+  ActionState,
-+  FieldErrors,
-+} from "@/domain/shared/action-state";
-+
-+export const ACCOUNT_NAME_MAX_LENGTH = 100;
-+
-+export type AccountNameFormValues = {
-+  name: string;
++// 呼出元は認証・認可結果から渡す。クライアントの自己申告を渡してはいけない。
++export type ClubAccountReadScope = {
++  clubId: string;
++  actorMembershipId: string;
++  userId: string;
 +};
 +
-+export type AccountNameFormField = keyof AccountNameFormValues;
-+
-+export type AccountNameActionState = ActionState<
-+  AccountNameFormValues,
-+  AccountNameFormField
-+>;
-+
-+export type AccountNameValidationResult =
++// Auth emailとクラブ切替判定は、既存の取得処理を使う後続Serviceで補う。
++export type ClubAccountForUserResult =
 +  | {
-+      success: true;
-+      data: AccountNameFormValues;
++      outcome: "FOUND";
++      view: Omit<ClubAccountView, "authEmail" | "canSwitchClub">;
 +    }
-+  | {
-+      success: false;
-+      fieldErrors: FieldErrors<AccountNameFormField>;
-+    };
++  | Exclude<ClubAccountReadResult, {
++      outcome: "FOUND";
++    }>;
 +
-+// 氏名は前後空白だけを除去し、emailや所有者などの余分な項目は引き継がない。
-+export function validateAccountNameInput(
-+  input: unknown,
-+): AccountNameValidationResult {
-+  const rawName = typeof input === "object" &&
-+    input !== null &&
-+    !Array.isArray(input) &&
-+    "name" in input
-+    ? input.name
-+    : undefined;
-+  const name = typeof rawName === "string" ? rawName.trim() : "";
++// 未指定のwhere条件がPrismaで省略され、対象が広がることを防ぐ。
++function hasReadScope(input: ClubAccountReadScope): boolean {
++  return input !== null &&
++    typeof input === "object" &&
++    typeof input.clubId === "string" &&
++    input.clubId.trim().length > 0 &&
++    typeof input.actorMembershipId === "string" &&
++    input.actorMembershipId.trim().length > 0 &&
++    typeof input.userId === "string" &&
++    input.userId.trim().length > 0;
++}
 +
-+  if (!name) {
-+    return {
-+      success: false,
-+      fieldErrors: {
-+        name: ["氏名を入力してください。"],
++// 現在の親MembershipとAppUserの対応を読み、認可後の状態変化も確認する。
++async function findAccountMembership(input: ClubAccountReadScope) {
++  const membership = await prisma.clubMembership.findFirst({
++    where: {
++      id: input.actorMembershipId,
++      clubId: input.clubId,
++      userId: input.userId,
++      status: "ACTIVE",
++    },
++    select: {
++      id: true,
++      clubId: true,
++      userId: true,
++      status: true,
++      role: true,
++      club: {
++        select: {
++          id: true,
++          name: true,
++          slug: true,
++          planType: true,
++          websiteUrl: true,
++          instagramUrl: true,
++        },
 +      },
-+    };
++      user: {
++        select: {
++          id: true,
++          name: true,
++          email: true,
++        },
++      },
++    },
++  });
++
++  if (!membership) {
++    return null;
++  }
++  if (
++    !membership.user ||
++    !membership.club
++  ) {
++    throw new Error("アカウントの対応を確認できません。");
++  }
++  if (
++    membership.id !== input.actorMembershipId ||
++    membership.clubId !== input.clubId ||
++    membership.userId !== input.userId ||
++    membership.status !== "ACTIVE" ||
++    membership.user.id !== input.userId ||
++    membership.club.id !== input.clubId ||
++    !hasClubFeature(membership.club.planType, "CLUB_APP")
++  ) {
++    return null;
 +  }
 +
-+  if (name.length > ACCOUNT_NAME_MAX_LENGTH) {
-+    return {
-+      success: false,
-+      fieldErrors: {
-+        name: [`氏名は${ACCOUNT_NAME_MAX_LENGTH}文字以内で入力してください。`],
++  return membership;
++}
++
++// 候補の認可確認では、氏名・email・外部URLを取得しない。
++async function findCandidateMembership(input: ClubAccountReadScope) {
++  const membership = await prisma.clubMembership.findFirst({
++    where: {
++      id: input.actorMembershipId,
++      clubId: input.clubId,
++      userId: input.userId,
++      status: "ACTIVE",
++    },
++    select: {
++      id: true,
++      clubId: true,
++      userId: true,
++      status: true,
++      user: {
++        select: {
++          id: true,
++        },
 +      },
-+    };
++      club: {
++        select: {
++          id: true,
++          planType: true,
++        },
++      },
++    },
++  });
++
++  if (!membership) {
++    return null;
++  }
++  if (
++    !membership.user ||
++    !membership.club
++  ) {
++    throw new Error("アカウントの対応を確認できません。");
++  }
++  if (
++    membership.id !== input.actorMembershipId ||
++    membership.clubId !== input.clubId ||
++    membership.userId !== input.userId ||
++    membership.status !== "ACTIVE" ||
++    membership.user.id !== input.userId ||
++    membership.club.id !== input.clubId ||
++    !hasClubFeature(membership.club.planType, "CLUB_APP")
++  ) {
++    return null;
 +  }
 +
++  return membership;
++}
++
++// 未所属候補でも、親自身の現在クラブMembershipがACTIVEであることを条件に入れる。
++function childScope(input: ClubAccountReadScope): Prisma.ChildWhereInput {
 +  return {
-+    success: true,
-+    data: {
-+      name,
++    parentId: input.userId,
++    parent: {
++      is: {
++        id: input.userId,
++        memberships: {
++          some: {
++            id: input.actorMembershipId,
++            clubId: input.clubId,
++            userId: input.userId,
++            status: "ACTIVE",
++          },
++        },
++      },
 +    },
 +  };
 +}
 +
-+// File・重複項目・欠損を先勝ちや文字列変換で受理しない。
-+export function parseAccountNameFormData(
-+  formData: FormData,
-+): AccountNameValidationResult {
-+  const names = formData instanceof FormData ? formData.getAll("name") : [];
-+
-+  return validateAccountNameInput({
-+    name: names.length === 1 ? names[0] : undefined,
-+  });
++// 照合用の親・所属情報は内部だけで使い、他クラブの所属情報は取得しない。
++function childSelection(input: ClubAccountReadScope) {
++  return {
++    id: true,
++    parentId: true,
++    name: true,
++    grade: true,
++    clubMemberships: {
++      where: {
++        clubId: input.clubId,
++      },
++      select: {
++        childId: true,
++        clubId: true,
++        parentUserId: true,
++        status: true,
++      },
++    },
++  } as const satisfies Prisma.ChildSelect;
 +}
 +
-+// URL等の識別子から固定文言だけを返し、任意の文字列や配列は表示しない。
-+export function getAccountFeedbackMessage(
-+  value: unknown,
-+): string | null {
-+  switch (value) {
-+    case "name-saved":
-+      return "氏名を保存しました。";
-+    case "child-created":
-+      return "子どもを追加しました。";
-+    case "child-updated":
-+      return "子どもの情報を保存しました。";
-+    case "child-added":
-+      return "子どもを現在クラブへ追加しました。";
-+    case "child-withdrawn":
-+      return "子どもを現在クラブから外しました。";
-+    case "saved-reload":
-+      return "保存は完了しています。再送信せず、ページを開き直して確認してください。";
-+    default:
-+      return null;
++type AccountChildRow = Prisma.ChildGetPayload<{
++  select: ReturnType<typeof childSelection>;
++}>;
++
++// DBの対応を照合し、明示的にid・name・gradeだけのDTOへ投影する。
++function childView(
++  child: AccountChildRow,
++  input: ClubAccountReadScope,
++  purpose: "CURRENT" | "CANDIDATE",
++): ClubAccountChildView {
++  if (
++    child.parentId !== input.userId ||
++    child.clubMemberships.length > 1 ||
++    child.clubMemberships.some((membership) =>
++      membership.childId !== child.id ||
++      membership.clubId !== input.clubId ||
++      membership.parentUserId !== input.userId)
++  ) {
++    throw new Error("子どもの所属の対応を確認できません。");
++  }
++
++  const [membership] = child.clubMemberships;
++  if (purpose === "CURRENT") {
++    if (
++      !membership ||
++      membership.status !== "ACTIVE"
++    ) {
++      throw new Error("現在の所属を確認できません。");
++    }
++  } else {
++    const evaluation = evaluateChildMembershipAddition({
++      status: membership ? membership.status : null,
++    });
++    if (!evaluation.allowed) {
++      throw new Error("追加候補の所属を確認できません。");
++    }
++  }
++
++  return {
++    id: child.id,
++    name: child.name,
++    grade: child.grade,
++  };
++}
++
++// 現在クラブのACTIVEな本人所属Childだけを返す。読取時に修復・更新は行わない。
++export async function findClubAccountForUser(
++  input: ClubAccountReadScope,
++): Promise<ClubAccountForUserResult> {
++  if (!hasReadScope(input)) {
++    return {
++      outcome: "UNAVAILABLE",
++    };
++  }
++
++  try {
++    const membership = await findAccountMembership(input);
++    if (!membership) {
++      return {
++        outcome: "UNAVAILABLE",
++      };
++    }
++
++    const [children, platformAdmin] = await Promise.all([
++      prisma.child.findMany({
++        where: {
++          ...childScope(input),
++          clubMemberships: {
++            some: {
++              clubId: input.clubId,
++              parentUserId: input.userId,
++              status: "ACTIVE",
++            },
++          },
++        },
++        select: childSelection(input),
++        orderBy: {
++          id: "asc",
++        },
++      }),
++      prisma.platformAdmin.findFirst({
++        where: {
++          id: input.userId,
++          isActive: true,
++        },
++        select: {
++          id: true,
++        },
++      }),
++    ]);
++
++    return {
++      outcome: "FOUND",
++      view: {
++        name: membership.user.name,
++        appUserEmail: membership.user.email,
++        club: {
++          name: membership.club.name,
++          slug: membership.club.slug,
++          websiteUrl: membership.club.websiteUrl,
++          instagramUrl: membership.club.instagramUrl,
++        },
++        role: membership.role,
++        children: children.map((child) => childView(child, input, "CURRENT")),
++        isPlatformAdmin: platformAdmin?.id === input.userId,
++      },
++    };
++  } catch {
++    // Prisma原文・個人情報・任意のDomainErrorを結果やログへ渡さない。
++    return {
++      outcome: "FETCH_FAILED",
++    };
 +  }
 +}
-diff --git a/domain/club/account/account-types.ts b/domain/club/account/account-types.ts
++
++// 追加操作用に、自分の未所属・WITHDRAWNのChildだけを別取得する。
++export async function findAttachableChildrenForUser(
++  input: ClubAccountReadScope,
++): Promise<ClubAccountChildCandidatesResult> {
++  if (!hasReadScope(input)) {
++    return {
++      outcome: "UNAVAILABLE",
++    };
++  }
++
++  try {
++    const membership = await findCandidateMembership(input);
++    if (!membership) {
++      return {
++        outcome: "UNAVAILABLE",
++      };
++    }
++
++    const children = await prisma.child.findMany({
++      where: {
++        ...childScope(input),
++        OR: [
++          {
++            clubMemberships: {
++              none: {
++                clubId: input.clubId,
++              },
++            },
++          },
++          {
++            clubMemberships: {
++              some: {
++                clubId: input.clubId,
++                parentUserId: input.userId,
++                status: "WITHDRAWN",
++              },
++            },
++          },
++        ],
++      },
++      select: childSelection(input),
++      orderBy: {
++        id: "asc",
++      },
++    });
++
++    return {
++      outcome: "FOUND",
++      children: children.map((child) => childView(child, input, "CANDIDATE")),
++    };
++  } catch {
++    // 所属不整合をupsert等で修復せず、取得失敗として扱う。
++    return {
++      outcome: "FETCH_FAILED",
++    };
++  }
++}
+diff --git a/tests/club-account-repository.test.ts b/tests/club-account-repository.test.ts
 new file mode 100644
-index 0000000..e133e08
+index 0000000..31cfab9
 --- /dev/null
-+++ b/domain/club/account/account-types.ts
-@@ -0,0 +1,68 @@
-+// domain/club/account/account-types.ts
-+// マイページの表示用情報と内部更新結果を、DBレコードやAuth Userから分離する。
++++ b/tests/club-account-repository.test.ts
+@@ -0,0 +1,729 @@
++// tests/club-account-repository.test.ts
++// 実DB・dotenv・Authを使わず、本人向け読取の条件とDTOの非開示境界を確認する。
++
++import {
++  afterEach,
++  beforeEach,
++  describe,
++  expect,
++  expectTypeOf,
++  it,
++  vi,
++} from "vitest";
 +
 +import type {
 +  ClubMemberRole,
++  ClubMembershipStatus,
 +  Grade,
++  PlanType,
 +} from "@/types/prisma";
++import {
++  findAttachableChildrenForUser,
++  findClubAccountForUser,
++  type ClubAccountForUserResult,
++  type ClubAccountReadScope,
++} from "@/src/infrastructure/prisma/repositories/club-account-repository";
 +
-+import type {
-+  ChildMembershipViolation,
-+} from "./child-membership-policy";
++const mocks = vi.hoisted(() => ({
++  membership: vi.fn(),
++  children: vi.fn(),
++  admin: vi.fn(),
++  write: vi.fn(),
++}));
 +
-+// 現在の子ども一覧と、本人が明示的に要求した追加候補で使う最小の表示情報。
-+export type ClubAccountChildView = {
-+  id: string;
-+  name: string;
-+  grade: Grade | null;
++// 共有clientを評価せずに置換し、dotenvや本物の接続を起動しない。
++vi.mock("@/src/infrastructure/prisma/client", () => ({
++  prisma: {
++    clubMembership: {
++      findFirst: mocks.membership,
++      update: mocks.write,
++    },
++    child: {
++      findMany: mocks.children,
++      create: mocks.write,
++      update: mocks.write,
++      delete: mocks.write,
++    },
++    appUser: {
++      upsert: mocks.write,
++      update: mocks.write,
++    },
++    childClubMembership: {
++      upsert: mocks.write,
++      update: mocks.write,
++    },
++    platformAdmin: {
++      findFirst: mocks.admin,
++    },
++    $transaction: mocks.write,
++  },
++}));
++
++const SCOPE: ClubAccountReadScope = {
++  clubId: "club-a",
++  actorMembershipId: "membership-a",
++  userId: "parent-a",
 +};
++const PRIVATE_DETAIL = "private@example.test secret-token database-connection-secret";
 +
-+// 現在クラブの表示DTO。他クラブの所属詳細や親のIDは含めない。
-+export type ClubAccountView = {
-+  name: string | null;
-+  authEmail: string | null;
-+  appUserEmail: string | null;
++type ParentMembership = {
++  id: string;
++  clubId: string;
++  userId: string;
++  status: ClubMembershipStatus;
++  role: ClubMemberRole;
 +  club: {
++    id: string;
 +    name: string;
 +    slug: string;
++    planType: PlanType;
 +    websiteUrl: string | null;
 +    instagramUrl: string | null;
-+  };
-+  role: ClubMemberRole;
-+  children: readonly ClubAccountChildView[];
-+  canSwitchClub: boolean;
-+  isPlatformAdmin: boolean;
++  } | null;
++  user: {
++    id: string;
++    name: string | null;
++    email: string | null;
++  } | null;
 +};
-+
-+export type ClubAccountReadResult =
-+  | {
-+      outcome: "FOUND";
-+      view: ClubAccountView;
-+    }
-+  | {
-+      outcome: "UNAVAILABLE" | "FETCH_FAILED";
-+    };
-+
-+// 候補一覧は通常の表示DTOと分け、追加操作を開始したときだけ取得する。
-+export type ClubAccountChildCandidatesResult =
-+  | {
-+      outcome: "FOUND";
-+      children: readonly ClubAccountChildView[];
-+    }
-+  | {
-+      outcome: "UNAVAILABLE" | "FETCH_FAILED";
-+    };
-+
-+// 影響slugはサーバー内部の再検証用。Clientの入力やActionStateに流用しない。
-+export type ClubAccountMutationResult =
-+  | {
-+      outcome: "UPDATED";
-+      affectedClubSlugs: readonly string[];
-+    }
-+  | {
-+      outcome: "NOT_FOUND" | "FORBIDDEN" | "CONFLICT" | "UPDATE_FAILED";
-+    }
-+  | {
-+      outcome: "RULE_VIOLATION";
-+      reason: ChildMembershipViolation;
-+    };
-diff --git a/domain/club/account/child-form.test.ts b/domain/club/account/child-form.test.ts
-new file mode 100644
-index 0000000..f028627
---- /dev/null
-+++ b/domain/club/account/child-form.test.ts
-@@ -0,0 +1,239 @@
-+// domain/club/account/child-form.test.ts
-+// 学年未設定と不正値を区別し、氏名・対象ID・FormDataの境界を確認する。
-+
-+import {
-+  describe,
-+  expect,
-+  expectTypeOf,
-+  it,
-+} from "vitest";
-+
-+import type {
-+  Grade,
-+} from "@/types/prisma";
-+
-+import {
-+  CHILD_GRADE_OPTIONS,
-+  parseChildFormData,
-+  parseChildIdFormData,
-+  validateChildIdInput,
-+  validateChildInput,
-+  type ChildActionState,
-+  type ChildMembershipActionState,
-+} from "./child-form";
-+
-+const CHILD_ID = "550e8400-e29b-41d4-a716-446655440000";
-+
-+// 選択肢の空文字は未設定として送る。フィールドそのものは省略しない。
-+function form(): FormData {
-+  const value = new FormData();
-+  value.set("name", " 子ども氏名 ");
-+  value.set("grade", "");
-+  return value;
-+}
-+
-+describe("子どもの氏名・学年", () => {
-+  it.each(["", null])("明示的な未設定だけをnullにする %#", (grade) => {
-+    expect(validateChildInput({
-+      name: " 子ども氏名 ",
-+      grade,
-+    })).toEqual({
-+      success: true,
-+      data: {
-+        name: "子ども氏名",
-+        grade: null,
-+      },
-+    });
-+  });
-+
-+  it.each(CHILD_GRADE_OPTIONS)("$valueを受け付ける", ({ value }) => {
-+    expect(validateChildInput({
-+      name: "子ども氏名",
-+      grade: value,
-+    })).toEqual({
-+      success: true,
-+      data: {
-+        name: "子ども氏名",
-+        grade: value,
-+      },
-+    });
-+  });
-+
-+  it.each([
-+    undefined,
-+    " ",
-+    " ELEMENTARY_1 ",
-+    "elementary_1",
-+    "ELEMENTARY_7",
-+    "__proto__",
-+    1,
-+    [],
-+    {},
-+    new File(["ELEMENTARY_1"], "grade.txt"),
-+  ])("不正学年を未設定へ丸めない %#", (grade) => {
-+    const result = validateChildInput({
-+      name: "子ども氏名",
-+      grade,
-+    });
-+    expect(result).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        grade: ["学年は未設定、または選択肢から選んでください。"],
-+      },
-+    });
-+    expect(result).not.toHaveProperty("data");
-+  });
-+
-+  it("氏名と学年のエラーを同時に返し、入力を含めない", () => {
-+    expect(validateChildInput({
-+      name: " ",
-+      grade: "private-input",
-+    })).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        name: ["氏名を入力してください。"],
-+        grade: ["学年は未設定、または選択肢から選んでください。"],
-+      },
-+    });
-+  });
-+
-+  it("氏名だけの検証で学年欠損を未設定扱いしない", () => {
-+    expect(validateChildInput({
-+      name: "子ども氏名",
-+    }).success).toBe(false);
-+  });
-+
-+  it("氏名は100文字以内とし、入力を変更しない", () => {
-+    const input = {
-+      name: ` ${"子".repeat(100)} `,
-+      grade: "",
-+    };
-+    const original = {
-+      ...input,
-+    };
-+    expect(validateChildInput(input).success).toBe(true);
-+    expect(input).toEqual(original);
-+    expect(validateChildInput({
-+      ...input,
-+      name: "子".repeat(101),
-+    }).success).toBe(false);
-+  });
-+
-+  it("親・クラブ・対象ID・権限を氏名編集payloadに含めない", () => {
-+    expect(validateChildInput({
-+      name: "子ども氏名",
-+      grade: "",
-+      childId: CHILD_ID,
-+      parentId: "foreign-parent",
-+      parentUserId: "foreign-parent",
-+      clubId: "foreign-club",
-+      email: "private@example.test",
-+      role: "OWNER",
-+      status: "ACTIVE",
-+    })).toEqual({
-+      success: true,
-+      data: {
-+        name: "子ども氏名",
-+        grade: null,
-+      },
-+    });
-+  });
-+});
-+
-+describe("子どものFormData", () => {
-+  it("空選択をnullへ変換する", () => {
-+    expect(parseChildFormData(form())).toEqual({
-+      success: true,
-+      data: {
-+        name: "子ども氏名",
-+        grade: null,
-+      },
-+    });
-+  });
-+
-+  it.each(["name", "grade"])("%sのFile・欠損・重複を拒否する", (field) => {
-+    for (const kind of ["file", "missing", "duplicate"] as const) {
-+      const value = form();
-+      if (kind === "file") {
-+        value.set(field, new File(["個人情報"], "field.txt"));
-+      } else if (kind === "missing") {
-+        value.delete(field);
-+      } else {
-+        value.append(field, value.get(field)!);
-+      }
-+      expect(parseChildFormData(value).success).toBe(false);
-+    }
-+  });
-+
-+  it("学年の空文字が重複していても未設定として受理しない", () => {
-+    const value = form();
-+    value.append("grade", "");
-+    expect(parseChildFormData(value).success).toBe(false);
-+  });
-+
-+  it("追加の機密項目を結果へコピーしない", () => {
-+    const value = form();
-+    value.set("parentId", "foreign-parent");
-+    value.set("status", "ACTIVE");
-+    value.set("email", "private@example.test");
-+    expect(parseChildFormData(value)).toEqual(parseChildFormData(form()));
-+  });
-+});
-+
-+describe("対象Child ID", () => {
-+  it("UUID v4の形式を受け付け、認可済みとは扱わない", () => {
-+    expect(validateChildIdInput(CHILD_ID)).toEqual({
-+      success: true,
-+      data: {
-+        childId: CHILD_ID,
-+      },
-+    });
-+  });
-+
-+  it.each([
-+    undefined,
-+    null,
-+    "",
-+    "not-a-uuid",
-+    ` ${CHILD_ID} `,
-+    "550e8400-e29b-11d4-a716-446655440000",
-+    "550e8400-e29b-41d4-7716-446655440000",
-+    new File([CHILD_ID], "child.txt"),
-+  ])("不正IDを固定エラーで拒否する %#", (value) => {
-+    expect(validateChildIdInput(value)).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        childId: ["対象の子どもを選び直してください。"],
-+      },
-+    });
-+  });
-+
-+  it("単一のchildIdだけを取り出す", () => {
-+    const value = new FormData();
-+    value.set("childId", CHILD_ID);
-+    value.set("clubId", "foreign-club");
-+    value.set("parentUserId", "foreign-parent");
-+    expect(parseChildIdFormData(value)).toEqual({
-+      success: true,
-+      data: {
-+        childId: CHILD_ID,
-+      },
-+    });
-+    value.append("childId", CHILD_ID);
-+    expect(parseChildIdFormData(value).success).toBe(false);
-+  });
-+
-+  it("FileのIDを文字列化しない", () => {
-+    const value = new FormData();
-+    value.set("childId", new File([CHILD_ID], "id.txt"));
-+    expect(parseChildIdFormData(value).success).toBe(false);
-+    expect(parseChildIdFormData(new FormData()).success).toBe(false);
-+  });
-+
-+  it("Grade選択肢とstateの型を既存契約に合わせる", () => {
-+    expectTypeOf<(typeof CHILD_GRADE_OPTIONS)[number]["value"]>().toEqualTypeOf<Grade>();
-+    expectTypeOf<ChildActionState["data"]>().toEqualTypeOf<undefined>();
-+    expectTypeOf<keyof ChildActionState["values"]>().toEqualTypeOf<"name" | "grade">();
-+    expectTypeOf<keyof ChildMembershipActionState["values"]>().toEqualTypeOf<"childId">();
-+  });
-+});
-diff --git a/domain/club/account/child-form.ts b/domain/club/account/child-form.ts
-new file mode 100644
-index 0000000..a050a6d
---- /dev/null
-+++ b/domain/club/account/child-form.ts
-@@ -0,0 +1,189 @@
-+// domain/club/account/child-form.ts
-+// 子どもの氏名・任意の学年・対象IDを検証し、所有者やクラブの自己申告は引き継がない。
-+
-+import type {
-+  ActionState,
-+  FieldErrors,
-+} from "@/domain/shared/action-state";
-+import {
-+  isRequestId,
-+} from "@/domain/shared/request-id";
-+import type {
-+  Grade,
-+} from "@/types/prisma";
-+
-+import {
-+  validateAccountNameInput,
-+} from "./account-form";
-+
-+// 未設定の選択肢はvalue=""で扱う。ここにはDBと同じ7種類だけを列挙する。
-+export const CHILD_GRADE_OPTIONS = [
-+  {
-+    value: "YOUJI",
-+    label: "幼児",
-+  },
-+  {
-+    value: "ELEMENTARY_1",
-+    label: "小学1年",
-+  },
-+  {
-+    value: "ELEMENTARY_2",
-+    label: "小学2年",
-+  },
-+  {
-+    value: "ELEMENTARY_3",
-+    label: "小学3年",
-+  },
-+  {
-+    value: "ELEMENTARY_4",
-+    label: "小学4年",
-+  },
-+  {
-+    value: "ELEMENTARY_5",
-+    label: "小学5年",
-+  },
-+  {
-+    value: "ELEMENTARY_6",
-+    label: "小学6年",
-+  },
-+] as const satisfies ReadonlyArray<{
-+  value: Grade;
-+  label: string;
-+}>;
-+
-+export type ChildFormValues = {
-+  name: string;
-+  grade: string;
-+};
-+
-+export type ChildFormField = keyof ChildFormValues;
-+
-+export type ChildActionState = ActionState<
-+  ChildFormValues,
-+  ChildFormField
-+>;
-+
-+export type ChildValidationResult =
-+  | {
-+      success: true;
-+      data: {
-+        name: string;
-+        grade: Grade | null;
-+      };
-+    }
-+  | {
-+      success: false;
-+      fieldErrors: FieldErrors<ChildFormField>;
-+    };
-+
-+export type ChildMembershipFormValues = {
++type ChildMembership = {
 +  childId: string;
++  clubId: string;
++  parentUserId: string;
++  status: ClubMembershipStatus;
++};
++type StoredChild = {
++  id: string;
++  parentId: string;
++  name: string;
++  grade: Grade | null;
++  clubMemberships: ChildMembership[];
++  privateDetail: string;
++};
++type ActorWhere = {
++  id: string;
++  clubId: string;
++  userId: string;
++  status: "ACTIVE";
++};
++type ChildQuery = {
++  where: {
++    parentId: string;
++    parent: {
++      is: {
++        id: string;
++        memberships: {
++          some: ActorWhere;
++        };
++      };
++    };
++    clubMemberships?: unknown;
++    OR?: unknown;
++  };
++  select: unknown;
++  orderBy: unknown;
 +};
 +
-+export type ChildMembershipActionState = ActionState<
-+  ChildMembershipFormValues,
-+  "childId"
-+>;
++let memberships: ParentMembership[];
++let children: StoredChild[];
++let admins: {
++  id: string;
++  isActive: boolean;
++}[];
 +
-+export type ChildIdValidationResult =
-+  | {
-+      success: true;
-+      data: ChildMembershipFormValues;
-+    }
-+  | {
-+      success: false;
-+      fieldErrors: FieldErrors<"childId">;
-+    };
-+
-+// Gradeをtrimや大文字化で補正せず、選択肢と完全一致する値だけを許可する。
-+function isGrade(value: unknown): value is Grade {
-+  return CHILD_GRADE_OPTIONS.some((option) => option.value === value);
-+}
-+
-+// 氏名と学年だけを返す。学年の空選択・明示nullと、欠損・不正値は区別する。
-+export function validateChildInput(
-+  input: unknown,
-+): ChildValidationResult {
-+  const nameResult = validateAccountNameInput(input);
-+  const rawGrade = typeof input === "object" &&
-+    input !== null &&
-+    !Array.isArray(input) &&
-+    "grade" in input
-+    ? input.grade
-+    : undefined;
-+  const grade = rawGrade === "" ||
-+    rawGrade === null
-+    ? null
-+    : isGrade(rawGrade)
-+      ? rawGrade
-+      : undefined;
-+  const fieldErrors: FieldErrors<ChildFormField> = {};
-+
-+  if (!nameResult.success) {
-+    fieldErrors.name = nameResult.fieldErrors.name;
-+  }
-+  if (grade === undefined) {
-+    fieldErrors.grade = ["学年は未設定、または選択肢から選んでください。"];
-+  }
-+
-+  if (
-+    !nameResult.success ||
-+    grade === undefined
-+  ) {
-+    return {
-+      success: false,
-+      fieldErrors,
-+    };
-+  }
-+
++// 所有者Aの子どもを作り、必要なら現在クラブの状態を指定する。
++function child(
++  id: string,
++  status: ClubMembershipStatus | null,
++): StoredChild {
 +  return {
-+    success: true,
-+    data: {
-+      name: nameResult.data.name,
-+      grade,
-+    },
++    id,
++    parentId: SCOPE.userId,
++    name: `子ども-${id}`,
++    grade: null,
++    clubMemberships: status === null ? [] : [
++      {
++        childId: id,
++        clubId: SCOPE.clubId,
++        parentUserId: SCOPE.userId,
++        status,
++      },
++    ],
++    privateDetail: PRIVATE_DETAIL,
 +  };
 +}
 +
-+// optionalな学年でもfieldを一つ要求し、Fileや重複を空選択へ変換しない。
-+export function parseChildFormData(
-+  formData: FormData,
-+): ChildValidationResult {
-+  const names = formData instanceof FormData ? formData.getAll("name") : [];
-+  const grades = formData instanceof FormData ? formData.getAll("grade") : [];
-+
-+  return validateChildInput({
-+    name: names.length === 1 ? names[0] : undefined,
-+    grade: grades.length === 1 ? grades[0] : undefined,
++// 読取前後でstoreを比較し、状態更新や修復が発生しないことを確認する。
++async function invoke<T>(
++  reader: (input: ClubAccountReadScope) => Promise<T>,
++  input: ClubAccountReadScope = SCOPE,
++): Promise<T> {
++  const before = structuredClone({
++    memberships,
++    children,
++    admins,
 +  });
++  const result = await reader(input);
++  expect({
++    memberships,
++    children,
++    admins,
++  }).toEqual(before);
++  return result;
 +}
 +
-+// UUID v4の形式だけを確認する。本人所有・現在クラブ所属の照合は後続の責務。
-+export function validateChildIdInput(
-+  childId: unknown,
-+): ChildIdValidationResult {
-+  if (!isRequestId(childId)) {
-+    return {
-+      success: false,
-+      fieldErrors: {
-+        childId: ["対象の子どもを選び直してください。"],
++beforeEach(() => {
++  vi.resetAllMocks();
++  vi.spyOn(console, "error").mockImplementation(() => undefined);
++  vi.spyOn(console, "warn").mockImplementation(() => undefined);
++  vi.spyOn(console, "log").mockImplementation(() => undefined);
++  memberships = [
++    {
++      id: SCOPE.actorMembershipId,
++      clubId: SCOPE.clubId,
++      userId: SCOPE.userId,
++      status: "ACTIVE",
++      role: "MEMBER",
++      club: {
++        id: SCOPE.clubId,
++        name: "現在クラブ",
++        slug: "club-a",
++        planType: "STANDARD",
++        websiteUrl: "https://club.example.test",
++        instagramUrl: null,
++      },
++      user: {
++        id: SCOPE.userId,
++        name: "本人氏名",
++        email: "parent@example.test",
++      },
++    },
++  ];
++  children = [
++    child("active", "ACTIVE"),
++    child("withdrawn", "WITHDRAWN"),
++    child("invited", "INVITED"),
++    child("suspended", "SUSPENDED"),
++    child("none", null),
++  ];
++  admins = [];
++
++  // actor・クラブ・本人・ACTIVEの全条件が一致した行だけを返す。
++  mocks.membership.mockImplementation(async ({ where }: {
++    where: ActorWhere;
++  }) => memberships.find((row) =>
++    row.id === where.id &&
++    row.clubId === where.clubId &&
++    row.userId === where.userId &&
++    row.status === where.status) ?? null);
++
++  // SQL実行の代替ではなく、検索条件の契約とテスト用storeの分離を検査する。
++  mocks.children.mockImplementation(async (query: ChildQuery) => {
++    const candidate = query.where.OR !== undefined;
++    const scope = {
++      parentId: SCOPE.userId,
++      parent: {
++        is: {
++          id: SCOPE.userId,
++          memberships: {
++            some: {
++              id: SCOPE.actorMembershipId,
++              clubId: SCOPE.clubId,
++              userId: SCOPE.userId,
++              status: "ACTIVE",
++            },
++          },
++        },
 +      },
 +    };
-+  }
++    expect(query.where).toEqual(candidate ? {
++      ...scope,
++      OR: [
++        {
++          clubMemberships: {
++            none: {
++              clubId: SCOPE.clubId,
++            },
++          },
++        },
++        {
++          clubMemberships: {
++            some: {
++              clubId: SCOPE.clubId,
++              parentUserId: SCOPE.userId,
++              status: "WITHDRAWN",
++            },
++          },
++        },
++      ],
++    } : {
++      ...scope,
++      clubMemberships: {
++        some: {
++          clubId: SCOPE.clubId,
++          parentUserId: SCOPE.userId,
++          status: "ACTIVE",
++        },
++      },
++    });
++    const actor = memberships.find((row) =>
++      row.id === SCOPE.actorMembershipId &&
++      row.clubId === SCOPE.clubId &&
++      row.userId === SCOPE.userId &&
++      row.status === "ACTIVE");
++    if (!actor) {
++      return [];
++    }
++    return children.filter((row) => {
++      if (row.parentId !== SCOPE.userId) {
++        return false;
++      }
++      const current = row.clubMemberships.filter((item) => item.clubId === SCOPE.clubId);
++      return candidate
++        ? current.length === 0 || current.some((item) =>
++            item.parentUserId === SCOPE.userId &&
++            item.status === "WITHDRAWN")
++        : current.some((item) =>
++            item.parentUserId === SCOPE.userId &&
++            item.status === "ACTIVE");
++    }).map((row) => ({
++      ...row,
++      clubMemberships: row.clubMemberships.filter((item) => item.clubId === SCOPE.clubId),
++    }));
++  });
++  mocks.admin.mockImplementation(async ({ where }: {
++    where: {
++      id: string;
++      isActive: boolean;
++    };
++  }) => admins.find((row) =>
++    row.id === where.id &&
++    row.isActive === where.isActive) ?? null);
++});
 +
-+  return {
-+    success: true,
-+    data: {
-+      childId,
-+    },
-+  };
-+}
++afterEach(() => {
++  expect(mocks.write).not.toHaveBeenCalled();
++  expect(console.error).not.toHaveBeenCalled();
++  expect(console.warn).not.toHaveBeenCalled();
++  expect(console.log).not.toHaveBeenCalled();
++  vi.restoreAllMocks();
++});
 +
-+// 所属操作の対象IDも単一の文字列だけを受け付ける。
-+export function parseChildIdFormData(
-+  formData: FormData,
-+): ChildIdValidationResult {
-+  const ids = formData instanceof FormData ? formData.getAll("childId") : [];
++describe("現在クラブの本人向け表示", () => {
++  it("ACTIVEな本人Childだけを投影し、内部の親・所属・秘密を返さない", async () => {
++    const result = await invoke(findClubAccountForUser);
++    expect(result).toEqual({
++      outcome: "FOUND",
++      view: {
++        name: "本人氏名",
++        appUserEmail: "parent@example.test",
++        club: {
++          name: "現在クラブ",
++          slug: "club-a",
++          websiteUrl: "https://club.example.test",
++          instagramUrl: null,
++        },
++        role: "MEMBER",
++        children: [
++          {
++            id: "active",
++            name: "子ども-active",
++            grade: null,
++          },
++        ],
++        isPlatformAdmin: false,
++      },
++    });
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++    expect(result).not.toHaveProperty("view.authEmail");
++    expect(result).not.toHaveProperty("view.canSwitchClub");
++    expect(result).not.toHaveProperty("view.userId");
++  });
 +
-+  return validateChildIdInput(ids.length === 1 ? ids[0] : undefined);
-+}
-diff --git a/domain/club/account/child-membership-policy.test.ts b/domain/club/account/child-membership-policy.test.ts
-new file mode 100644
-index 0000000..45be1b3
---- /dev/null
-+++ b/domain/club/account/child-membership-policy.test.ts
-@@ -0,0 +1,115 @@
-+// domain/club/account/child-membership-policy.test.ts
-+// 既存所属の追加・再有効化・解除を、認可やDB処理とは独立して確認する。
++  it("複数ChildとGradeを返し、他親・別クラブだけの子どもを混ぜない", async () => {
++    const second = child("active-2", "ACTIVE");
++    second.grade = "ELEMENTARY_3";
++    const foreign = child("foreign", "ACTIVE");
++    foreign.parentId = "parent-b";
++    const otherClub = child("other-club", "ACTIVE");
++    otherClub.clubMemberships[0].clubId = "club-b";
++    children.push(second, foreign, otherClub);
++    const result = await invoke(findClubAccountForUser);
++    expect(result.outcome).toBe("FOUND");
++    if (result.outcome === "FOUND") {
++      expect(result.view.children.map((row) => row.id)).toEqual(["active", "active-2"]);
++      expect(result.view.children[1].grade).toBe("ELEMENTARY_3");
++    }
++  });
 +
-+import {
-+  describe,
-+  expect,
-+  it,
-+} from "vitest";
-+
-+import {
-+  evaluateChildMembershipAddition,
-+  evaluateChildMembershipWithdrawal,
-+} from "./child-membership-policy";
-+
-+describe("既存Childの所属追加", () => {
-+  it("明示的な未所属は新しい所属の作成とする", () => {
-+    expect(evaluateChildMembershipAddition({
-+      status: null,
-+    })).toEqual({
-+      allowed: true,
-+      operation: "CREATE",
++  it("0件やnullableな本人情報を修復せず返す", async () => {
++    children = [];
++    memberships[0].user!.name = null;
++    memberships[0].user!.email = null;
++    const result = await invoke(findClubAccountForUser);
++    expect(result).toMatchObject({
++      outcome: "FOUND",
++      view: {
++        name: null,
++        appUserEmail: null,
++        children: [],
++      },
 +    });
 +  });
 +
-+  it("WITHDRAWNだけを再有効化する", () => {
-+    expect(evaluateChildMembershipAddition({
-+      status: "WITHDRAWN",
-+    })).toEqual({
-+      allowed: true,
-+      operation: "REACTIVATE",
++  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)("%s本人も取得できる", async (role) => {
++    memberships[0].role = role;
++    const result = await invoke(findClubAccountForUser);
++    expect(result).toMatchObject({
++      outcome: "FOUND",
++      view: {
++        role,
++      },
 +    });
 +  });
 +
-+  it("ACTIVEは二重所属として拒否する", () => {
-+    expect(evaluateChildMembershipAddition({
-+      status: "ACTIVE",
-+    })).toEqual({
-+      allowed: false,
-+      reason: "ALREADY_ACTIVE",
++  it.each([true, false])("PlatformAdmin isActive=%sを本人idと併用する", async (isActive) => {
++    admins = [
++      {
++        id: SCOPE.userId,
++        isActive,
++      },
++      {
++        id: "parent-b",
++        isActive: true,
++      },
++    ];
++    const result = await invoke(findClubAccountForUser);
++    expect(result).toMatchObject({
++      outcome: "FOUND",
++      view: {
++        isPlatformAdmin: isActive,
++      },
++    });
++    expect(mocks.admin).toHaveBeenCalledExactlyOnceWith({
++      where: {
++        id: SCOPE.userId,
++        isActive: true,
++      },
++      select: {
++        id: true,
++      },
 +    });
 +  });
 +
-+  it.each(["SUSPENDED", "INVITED"])("%sを本人操作で再有効化しない", (status) => {
-+    expect(evaluateChildMembershipAddition({
-+      status,
-+    })).toEqual({
-+      allowed: false,
-+      reason: "STATUS_CHANGE_NOT_ALLOWED",
++  it("他人だけがPlatformAdminでも本人には付与しない", async () => {
++    admins = [
++      {
++        id: "parent-b",
++        isActive: true,
++      },
++    ];
++    expect(await invoke(findClubAccountForUser)).toMatchObject({
++      outcome: "FOUND",
++      view: {
++        isPlatformAdmin: false,
++      },
++    });
++  });
++
++  it("照合用の最小selectと安定した並び順を使う", async () => {
++    await invoke(findClubAccountForUser);
++    expect(mocks.membership).toHaveBeenCalledExactlyOnceWith({
++      where: {
++        id: SCOPE.actorMembershipId,
++        clubId: SCOPE.clubId,
++        userId: SCOPE.userId,
++        status: "ACTIVE",
++      },
++      select: {
++        id: true,
++        clubId: true,
++        userId: true,
++        status: true,
++        role: true,
++        club: {
++          select: {
++            id: true,
++            name: true,
++            slug: true,
++            planType: true,
++            websiteUrl: true,
++            instagramUrl: true,
++          },
++        },
++        user: {
++          select: {
++            id: true,
++            name: true,
++            email: true,
++          },
++        },
++      },
++    });
++    expect(mocks.children.mock.calls[0][0].select).toEqual({
++      id: true,
++      parentId: true,
++      name: true,
++      grade: true,
++      clubMemberships: {
++        where: {
++          clubId: SCOPE.clubId,
++        },
++        select: {
++          childId: true,
++          clubId: true,
++          parentUserId: true,
++          status: true,
++        },
++      },
++    });
++    expect(mocks.children.mock.calls[0][0].orderBy).toEqual({
++      id: "asc",
 +    });
 +  });
 +});
 +
-+describe("現在クラブからの所属解除", () => {
-+  it("ACTIVEだけをWITHDRAWNへ変更する判断を返す", () => {
-+    const input = {
-+      status: "ACTIVE",
-+    };
-+    expect(evaluateChildMembershipWithdrawal(input)).toEqual({
-+      allowed: true,
-+      operation: "WITHDRAW",
++describe("既存Childの追加候補", () => {
++  it("未所属・WITHDRAWNだけを別取得し、他クラブ名を返さない", async () => {
++    const otherClub = child("other-club", "ACTIVE");
++    otherClub.clubMemberships[0].clubId = "club-b";
++    const foreign = child("foreign", null);
++    foreign.parentId = "parent-b";
++    children.push(otherClub, foreign);
++    const result = await invoke(findAttachableChildrenForUser);
++    expect(result).toEqual({
++      outcome: "FOUND",
++      children: [
++        {
++          id: "withdrawn",
++          name: "子ども-withdrawn",
++          grade: null,
++        },
++        {
++          id: "none",
++          name: "子ども-none",
++          grade: null,
++        },
++        {
++          id: "other-club",
++          name: "子ども-other-club",
++          grade: null,
++        },
++      ],
 +    });
-+    expect(input.status).toBe("ACTIVE");
++    expect(mocks.admin).not.toHaveBeenCalled();
++    expect(JSON.stringify(result)).not.toContain("club-b");
++    expect(JSON.stringify(result)).not.toContain("parent-b");
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
 +  });
 +
-+  it("所属がなければ解除を許可しない", () => {
-+    expect(evaluateChildMembershipWithdrawal({
-+      status: null,
-+    })).toEqual({
-+      allowed: false,
-+      reason: "MEMBERSHIP_NOT_FOUND",
++  it("候補取得の認可確認では本人氏名やemail・外部URLをselectしない", async () => {
++    await invoke(findAttachableChildrenForUser);
++    expect(mocks.membership).toHaveBeenCalledExactlyOnceWith({
++      where: {
++        id: SCOPE.actorMembershipId,
++        clubId: SCOPE.clubId,
++        userId: SCOPE.userId,
++        status: "ACTIVE",
++      },
++      select: {
++        id: true,
++        clubId: true,
++        userId: true,
++        status: true,
++        user: {
++          select: {
++            id: true,
++          },
++        },
++        club: {
++          select: {
++            id: true,
++            planType: true,
++          },
++        },
++      },
 +    });
 +  });
 +
-+  it("WITHDRAWNは再解除として区別する", () => {
-+    expect(evaluateChildMembershipWithdrawal({
-+      status: "WITHDRAWN",
-+    })).toEqual({
-+      allowed: false,
-+      reason: "ALREADY_WITHDRAWN",
-+    });
-+  });
-+
-+  it.each(["SUSPENDED", "INVITED"])("%sを解除処理で変更しない", (status) => {
-+    expect(evaluateChildMembershipWithdrawal({
-+      status,
-+    })).toEqual({
-+      allowed: false,
-+      reason: "STATUS_CHANGE_NOT_ALLOWED",
++  it.each(["ACTIVE", "INVITED", "SUSPENDED"] as const)("%sは候補にしない", async (status) => {
++    children = [child("target", status)];
++    expect(await invoke(findAttachableChildrenForUser)).toEqual({
++      outcome: "FOUND",
++      children: [],
 +    });
 +  });
 +});
 +
 +describe.each([
-+  ["追加", evaluateChildMembershipAddition],
-+  ["解除", evaluateChildMembershipWithdrawal],
-+] as const)("%sの不正状態", (_name, evaluate) => {
++  ["通常表示", findClubAccountForUser],
++  ["追加候補", findAttachableChildrenForUser],
++] as const)("%sの読取境界", (_name, reader) => {
++  it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
++    "親Membershipが%sなら関連情報を取得しない",
++    async (status) => {
++      memberships[0].status = status;
++      expect(await invoke(async (scope) => reader(scope))).toEqual({
++        outcome: "UNAVAILABLE",
++      });
++      expect(mocks.children).not.toHaveBeenCalled();
++      expect(mocks.admin).not.toHaveBeenCalled();
++    },
++  );
++
 +  it.each([
-+    undefined,
-+    "",
-+    "active",
-+    " ACTIVE ",
-+    "__proto__",
-+    "UNKNOWN",
-+    0,
-+    {},
-+    [],
-+  ])("不明な状態を未所属やACTIVEへ置き換えない %#", (status) => {
-+    expect(evaluate({
-+      status,
++    { clubId: "club-b" },
++    { userId: "parent-b" },
++    { actorMembershipId: "membership-b" },
++  ])("別のクラブ・親・actorを混在させない %#", async (change) => {
++    expect(await invoke(async (scope) => reader(scope), {
++      ...SCOPE,
++      ...change,
 +    })).toEqual({
-+      allowed: false,
-+      reason: "INVALID_STATUS",
++      outcome: "UNAVAILABLE",
++    });
++    expect(mocks.children).not.toHaveBeenCalled();
++    expect(mocks.admin).not.toHaveBeenCalled();
++  });
++
++  it.each(["clubId", "actorMembershipId", "userId"] as const)(
++    "%sが欠損・不正ならwhereへ渡さない",
++    async (key) => {
++      for (const value of [undefined, null, "", " ", [], 123]) {
++        expect(await invoke(async (scope) => reader(scope), {
++          ...SCOPE,
++          [key]: value,
++        } as ClubAccountReadScope)).toEqual({
++          outcome: "UNAVAILABLE",
++        });
++      }
++      expect(mocks.membership).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each(["STARTER", "PRO"] as const)("%sの現在クラブでは取得しない", async (planType) => {
++    memberships[0].club!.planType = planType;
++    expect(await invoke(async (scope) => reader(scope))).toEqual({
++      outcome: "UNAVAILABLE",
++    });
++    expect(mocks.children).not.toHaveBeenCalled();
++    expect(mocks.admin).not.toHaveBeenCalled();
++  });
++
++  it("AppUser欠損をupsertせず固定の取得失敗にする", async () => {
++    memberships[0].user = null;
++    expect(await invoke(async (scope) => reader(scope))).toEqual({
++      outcome: "FETCH_FAILED",
++    });
++  });
++
++  it("返却されたChildの親が異なれば部分的なDTOも返さない", async () => {
++    const row = child("foreign", "WITHDRAWN");
++    row.parentId = "parent-b";
++    mocks.children.mockResolvedValueOnce([row]);
++    expect(await invoke(async (scope) => reader(scope))).toEqual({
++      outcome: "FETCH_FAILED",
++    });
++  });
++
++  it.each(["childId", "clubId", "parentUserId"] as const)(
++    "ChildClubMembershipの%sが不一致なら返さない",
++    async (key) => {
++      const row = child("mismatch", "ACTIVE");
++      row.clubMemberships[0][key] = "foreign-value";
++      mocks.children.mockResolvedValueOnce([row]);
++      expect(await invoke(async (scope) => reader(scope))).toEqual({
++        outcome: "FETCH_FAILED",
++      });
++    },
++  );
++
++  it("Membership・AppUser・Clubの返却対応も確認する", async () => {
++    mocks.membership.mockResolvedValueOnce({
++      ...memberships[0],
++      user: {
++        id: "parent-b",
++        name: PRIVATE_DETAIL,
++        email: PRIVATE_DETAIL,
++      },
++    });
++    expect(await invoke(async (scope) => reader(scope))).toEqual({
++      outcome: "UNAVAILABLE",
++    });
++    expect(mocks.children).not.toHaveBeenCalled();
++  });
++
++  it("任意の公開メッセージを持つ例外オブジェクトも反射しない", async () => {
++    mocks.children.mockRejectedValueOnce({
++      publicMessage: PRIVATE_DETAIL,
++      cause: PRIVATE_DETAIL,
++    });
++    expect(await invoke(async (scope) => reader(scope))).toEqual({
++      outcome: "FETCH_FAILED",
++    });
++  });
++
++  it.each(["membership", "children"] as const)("%sの原文エラーを返さない", async (stage) => {
++    mocks[stage].mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
++    expect(await invoke(async (scope) => reader(scope))).toEqual({
++      outcome: "FETCH_FAILED",
 +    });
 +  });
 +});
-diff --git a/domain/club/account/child-membership-policy.ts b/domain/club/account/child-membership-policy.ts
-new file mode 100644
-index 0000000..ff80ca4
---- /dev/null
-+++ b/domain/club/account/child-membership-policy.ts
-@@ -0,0 +1,99 @@
-+// domain/club/account/child-membership-policy.ts
-+// 本人・現在クラブとの対応を確認した後に使う、子どもの所属状態だけの純粋な判定。
 +
-+import type {
-+  ClubMembershipStatus,
-+} from "@/types/prisma";
++describe("異常な取得結果と型境界", () => {
++  it.each(["WITHDRAWN", "INVITED", "SUSPENDED"] as const)(
++    "通常一覧へ混入した%sを返さない",
++    async (status) => {
++      mocks.children.mockResolvedValueOnce([child("unexpected", status)]);
++      expect(await invoke(findClubAccountForUser)).toEqual({
++        outcome: "FETCH_FAILED",
++      });
++    },
++  );
 +
-+export type ChildMembershipViolation =
-+  | "ALREADY_ACTIVE"
-+  | "ALREADY_WITHDRAWN"
-+  | "MEMBERSHIP_NOT_FOUND"
-+  | "STATUS_CHANGE_NOT_ALLOWED"
-+  | "INVALID_STATUS";
++  it.each(["ACTIVE", "INVITED", "SUSPENDED"] as const)(
++    "追加候補へ混入した%sを返さない",
++    async (status) => {
++      mocks.children.mockResolvedValueOnce([child("unexpected", status)]);
++      expect(await invoke(findAttachableChildrenForUser)).toEqual({
++        outcome: "FETCH_FAILED",
++      });
++    },
++  );
 +
-+export type ChildMembershipAdditionEvaluation =
-+  | {
-+      allowed: true;
-+      operation: "CREATE" | "REACTIVATE";
-+    }
-+  | {
-+      allowed: false;
-+      reason: ChildMembershipViolation;
-+    };
++  it("通常一覧へ混入した未所属Childを返さない", async () => {
++    mocks.children.mockResolvedValueOnce([child("unexpected", null)]);
++    expect(await invoke(findClubAccountForUser)).toEqual({
++      outcome: "FETCH_FAILED",
++    });
++  });
 +
-+export type ChildMembershipWithdrawalEvaluation =
-+  | {
-+      allowed: true;
-+      operation: "WITHDRAW";
-+    }
-+  | {
-+      allowed: false;
-+      reason: ChildMembershipViolation;
-+    };
++  it("PlatformAdmin取得エラーでも氏名等を部分的に返さない", async () => {
++    mocks.admin.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
++    expect(await invoke(findClubAccountForUser)).toEqual({
++      outcome: "FETCH_FAILED",
++    });
++  });
 +
-+// DB由来でも未知の状態は許可しない。nullだけを未所属の明示値として扱う。
-+function isMembershipStatus(value: unknown): value is ClubMembershipStatus {
-+  return value === "ACTIVE" ||
-+    value === "WITHDRAWN" ||
-+    value === "INVITED" ||
-+    value === "SUSPENDED";
-+}
++  it("同一クラブの重複所属という不整合を修復しない", async () => {
++    const row = child("duplicate", "WITHDRAWN");
++    row.clubMemberships.push({
++      ...row.clubMemberships[0],
++    });
++    mocks.children.mockResolvedValueOnce([row]);
++    expect(await invoke(findAttachableChildrenForUser)).toEqual({
++      outcome: "FETCH_FAILED",
++    });
++  });
 +
-+// 新規所属、WITHDRAWNの再有効化だけを許可し、停止・招待中を自己解除しない。
-+export function evaluateChildMembershipAddition(input: {
-+  status: unknown;
-+}): ChildMembershipAdditionEvaluation {
-+  if (input.status === null) {
-+    return {
-+      allowed: true,
-+      operation: "CREATE",
-+    };
-+  }
-+  if (!isMembershipStatus(input.status)) {
-+    return {
-+      allowed: false,
-+      reason: "INVALID_STATUS",
-+    };
-+  }
-+  if (input.status === "WITHDRAWN") {
-+    return {
-+      allowed: true,
-+      operation: "REACTIVATE",
-+    };
-+  }
-+
-+  return {
-+    allowed: false,
-+    reason: input.status === "ACTIVE" ? "ALREADY_ACTIVE" : "STATUS_CHANGE_NOT_ALLOWED",
-+  };
-+}
-+
-+// 現在のACTIVE所属だけを外す。Child本体や他クラブ所属の削除は表現しない。
-+export function evaluateChildMembershipWithdrawal(input: {
-+  status: unknown;
-+}): ChildMembershipWithdrawalEvaluation {
-+  if (input.status === null) {
-+    return {
-+      allowed: false,
-+      reason: "MEMBERSHIP_NOT_FOUND",
-+    };
-+  }
-+  if (!isMembershipStatus(input.status)) {
-+    return {
-+      allowed: false,
-+      reason: "INVALID_STATUS",
-+    };
-+  }
-+  if (input.status === "ACTIVE") {
-+    return {
-+      allowed: true,
-+      operation: "WITHDRAW",
-+    };
-+  }
-+
-+  return {
-+    allowed: false,
-+    reason: input.status === "WITHDRAWN" ? "ALREADY_WITHDRAWN" : "STATUS_CHANGE_NOT_ALLOWED",
-+  };
-+}
++  it("未取得のAuth emailやクラブ切替を完成済みの表示型として扱わない", () => {
++    type View = Extract<ClubAccountForUserResult, {
++      outcome: "FOUND";
++    }>["view"];
++    expectTypeOf<Extract<
++      keyof View,
++      "authEmail" | "canSwitchClub" | "userId" | "parentId"
++    >>().toEqualTypeOf<never>();
++  });
++});

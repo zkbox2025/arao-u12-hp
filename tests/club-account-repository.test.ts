@@ -1,0 +1,729 @@
+// tests/club-account-repository.test.ts
+// 実DB・dotenv・Authを使わず、本人向け読取の条件とDTOの非開示境界を確認する。
+
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  expectTypeOf,
+  it,
+  vi,
+} from "vitest";
+
+import type {
+  ClubMemberRole,
+  ClubMembershipStatus,
+  Grade,
+  PlanType,
+} from "@/types/prisma";
+import {
+  findAttachableChildrenForUser,
+  findClubAccountForUser,
+  type ClubAccountForUserResult,
+  type ClubAccountReadScope,
+} from "@/src/infrastructure/prisma/repositories/club-account-repository";
+
+const mocks = vi.hoisted(() => ({
+  membership: vi.fn(),
+  children: vi.fn(),
+  admin: vi.fn(),
+  write: vi.fn(),
+}));
+
+// 共有clientを評価せずに置換し、dotenvや本物の接続を起動しない。
+vi.mock("@/src/infrastructure/prisma/client", () => ({
+  prisma: {
+    clubMembership: {
+      findFirst: mocks.membership,
+      update: mocks.write,
+    },
+    child: {
+      findMany: mocks.children,
+      create: mocks.write,
+      update: mocks.write,
+      delete: mocks.write,
+    },
+    appUser: {
+      upsert: mocks.write,
+      update: mocks.write,
+    },
+    childClubMembership: {
+      upsert: mocks.write,
+      update: mocks.write,
+    },
+    platformAdmin: {
+      findFirst: mocks.admin,
+    },
+    $transaction: mocks.write,
+  },
+}));
+
+const SCOPE: ClubAccountReadScope = {
+  clubId: "club-a",
+  actorMembershipId: "membership-a",
+  userId: "parent-a",
+};
+const PRIVATE_DETAIL = "private@example.test secret-token database-connection-secret";
+
+type ParentMembership = {
+  id: string;
+  clubId: string;
+  userId: string;
+  status: ClubMembershipStatus;
+  role: ClubMemberRole;
+  club: {
+    id: string;
+    name: string;
+    slug: string;
+    planType: PlanType;
+    websiteUrl: string | null;
+    instagramUrl: string | null;
+  } | null;
+  user: {
+    id: string;
+    name: string | null;
+    email: string | null;
+  } | null;
+};
+type ChildMembership = {
+  childId: string;
+  clubId: string;
+  parentUserId: string;
+  status: ClubMembershipStatus;
+};
+type StoredChild = {
+  id: string;
+  parentId: string;
+  name: string;
+  grade: Grade | null;
+  clubMemberships: ChildMembership[];
+  privateDetail: string;
+};
+type ActorWhere = {
+  id: string;
+  clubId: string;
+  userId: string;
+  status: "ACTIVE";
+};
+type ChildQuery = {
+  where: {
+    parentId: string;
+    parent: {
+      is: {
+        id: string;
+        memberships: {
+          some: ActorWhere;
+        };
+      };
+    };
+    clubMemberships?: unknown;
+    OR?: unknown;
+  };
+  select: unknown;
+  orderBy: unknown;
+};
+
+let memberships: ParentMembership[];
+let children: StoredChild[];
+let admins: {
+  id: string;
+  isActive: boolean;
+}[];
+
+// 所有者Aの子どもを作り、必要なら現在クラブの状態を指定する。
+function child(
+  id: string,
+  status: ClubMembershipStatus | null,
+): StoredChild {
+  return {
+    id,
+    parentId: SCOPE.userId,
+    name: `子ども-${id}`,
+    grade: null,
+    clubMemberships: status === null ? [] : [
+      {
+        childId: id,
+        clubId: SCOPE.clubId,
+        parentUserId: SCOPE.userId,
+        status,
+      },
+    ],
+    privateDetail: PRIVATE_DETAIL,
+  };
+}
+
+// 読取前後でstoreを比較し、状態更新や修復が発生しないことを確認する。
+async function invoke<T>(
+  reader: (input: ClubAccountReadScope) => Promise<T>,
+  input: ClubAccountReadScope = SCOPE,
+): Promise<T> {
+  const before = structuredClone({
+    memberships,
+    children,
+    admins,
+  });
+  const result = await reader(input);
+  expect({
+    memberships,
+    children,
+    admins,
+  }).toEqual(before);
+  return result;
+}
+
+beforeEach(() => {
+  vi.resetAllMocks();
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  memberships = [
+    {
+      id: SCOPE.actorMembershipId,
+      clubId: SCOPE.clubId,
+      userId: SCOPE.userId,
+      status: "ACTIVE",
+      role: "MEMBER",
+      club: {
+        id: SCOPE.clubId,
+        name: "現在クラブ",
+        slug: "club-a",
+        planType: "STANDARD",
+        websiteUrl: "https://club.example.test",
+        instagramUrl: null,
+      },
+      user: {
+        id: SCOPE.userId,
+        name: "本人氏名",
+        email: "parent@example.test",
+      },
+    },
+  ];
+  children = [
+    child("active", "ACTIVE"),
+    child("withdrawn", "WITHDRAWN"),
+    child("invited", "INVITED"),
+    child("suspended", "SUSPENDED"),
+    child("none", null),
+  ];
+  admins = [];
+
+  // actor・クラブ・本人・ACTIVEの全条件が一致した行だけを返す。
+  mocks.membership.mockImplementation(async ({ where }: {
+    where: ActorWhere;
+  }) => memberships.find((row) =>
+    row.id === where.id &&
+    row.clubId === where.clubId &&
+    row.userId === where.userId &&
+    row.status === where.status) ?? null);
+
+  // SQL実行の代替ではなく、検索条件の契約とテスト用storeの分離を検査する。
+  mocks.children.mockImplementation(async (query: ChildQuery) => {
+    const candidate = query.where.OR !== undefined;
+    const scope = {
+      parentId: SCOPE.userId,
+      parent: {
+        is: {
+          id: SCOPE.userId,
+          memberships: {
+            some: {
+              id: SCOPE.actorMembershipId,
+              clubId: SCOPE.clubId,
+              userId: SCOPE.userId,
+              status: "ACTIVE",
+            },
+          },
+        },
+      },
+    };
+    expect(query.where).toEqual(candidate ? {
+      ...scope,
+      OR: [
+        {
+          clubMemberships: {
+            none: {
+              clubId: SCOPE.clubId,
+            },
+          },
+        },
+        {
+          clubMemberships: {
+            some: {
+              clubId: SCOPE.clubId,
+              parentUserId: SCOPE.userId,
+              status: "WITHDRAWN",
+            },
+          },
+        },
+      ],
+    } : {
+      ...scope,
+      clubMemberships: {
+        some: {
+          clubId: SCOPE.clubId,
+          parentUserId: SCOPE.userId,
+          status: "ACTIVE",
+        },
+      },
+    });
+    const actor = memberships.find((row) =>
+      row.id === SCOPE.actorMembershipId &&
+      row.clubId === SCOPE.clubId &&
+      row.userId === SCOPE.userId &&
+      row.status === "ACTIVE");
+    if (!actor) {
+      return [];
+    }
+    return children.filter((row) => {
+      if (row.parentId !== SCOPE.userId) {
+        return false;
+      }
+      const current = row.clubMemberships.filter((item) => item.clubId === SCOPE.clubId);
+      return candidate
+        ? current.length === 0 || current.some((item) =>
+            item.parentUserId === SCOPE.userId &&
+            item.status === "WITHDRAWN")
+        : current.some((item) =>
+            item.parentUserId === SCOPE.userId &&
+            item.status === "ACTIVE");
+    }).map((row) => ({
+      ...row,
+      clubMemberships: row.clubMemberships.filter((item) => item.clubId === SCOPE.clubId),
+    }));
+  });
+  mocks.admin.mockImplementation(async ({ where }: {
+    where: {
+      id: string;
+      isActive: boolean;
+    };
+  }) => admins.find((row) =>
+    row.id === where.id &&
+    row.isActive === where.isActive) ?? null);
+});
+
+afterEach(() => {
+  expect(mocks.write).not.toHaveBeenCalled();
+  expect(console.error).not.toHaveBeenCalled();
+  expect(console.warn).not.toHaveBeenCalled();
+  expect(console.log).not.toHaveBeenCalled();
+  vi.restoreAllMocks();
+});
+
+describe("現在クラブの本人向け表示", () => {
+  it("ACTIVEな本人Childだけを投影し、内部の親・所属・秘密を返さない", async () => {
+    const result = await invoke(findClubAccountForUser);
+    expect(result).toEqual({
+      outcome: "FOUND",
+      view: {
+        name: "本人氏名",
+        appUserEmail: "parent@example.test",
+        club: {
+          name: "現在クラブ",
+          slug: "club-a",
+          websiteUrl: "https://club.example.test",
+          instagramUrl: null,
+        },
+        role: "MEMBER",
+        children: [
+          {
+            id: "active",
+            name: "子ども-active",
+            grade: null,
+          },
+        ],
+        isPlatformAdmin: false,
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
+    expect(result).not.toHaveProperty("view.authEmail");
+    expect(result).not.toHaveProperty("view.canSwitchClub");
+    expect(result).not.toHaveProperty("view.userId");
+  });
+
+  it("複数ChildとGradeを返し、他親・別クラブだけの子どもを混ぜない", async () => {
+    const second = child("active-2", "ACTIVE");
+    second.grade = "ELEMENTARY_3";
+    const foreign = child("foreign", "ACTIVE");
+    foreign.parentId = "parent-b";
+    const otherClub = child("other-club", "ACTIVE");
+    otherClub.clubMemberships[0].clubId = "club-b";
+    children.push(second, foreign, otherClub);
+    const result = await invoke(findClubAccountForUser);
+    expect(result.outcome).toBe("FOUND");
+    if (result.outcome === "FOUND") {
+      expect(result.view.children.map((row) => row.id)).toEqual(["active", "active-2"]);
+      expect(result.view.children[1].grade).toBe("ELEMENTARY_3");
+    }
+  });
+
+  it("0件やnullableな本人情報を修復せず返す", async () => {
+    children = [];
+    memberships[0].user!.name = null;
+    memberships[0].user!.email = null;
+    const result = await invoke(findClubAccountForUser);
+    expect(result).toMatchObject({
+      outcome: "FOUND",
+      view: {
+        name: null,
+        appUserEmail: null,
+        children: [],
+      },
+    });
+  });
+
+  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)("%s本人も取得できる", async (role) => {
+    memberships[0].role = role;
+    const result = await invoke(findClubAccountForUser);
+    expect(result).toMatchObject({
+      outcome: "FOUND",
+      view: {
+        role,
+      },
+    });
+  });
+
+  it.each([true, false])("PlatformAdmin isActive=%sを本人idと併用する", async (isActive) => {
+    admins = [
+      {
+        id: SCOPE.userId,
+        isActive,
+      },
+      {
+        id: "parent-b",
+        isActive: true,
+      },
+    ];
+    const result = await invoke(findClubAccountForUser);
+    expect(result).toMatchObject({
+      outcome: "FOUND",
+      view: {
+        isPlatformAdmin: isActive,
+      },
+    });
+    expect(mocks.admin).toHaveBeenCalledExactlyOnceWith({
+      where: {
+        id: SCOPE.userId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+      },
+    });
+  });
+
+  it("他人だけがPlatformAdminでも本人には付与しない", async () => {
+    admins = [
+      {
+        id: "parent-b",
+        isActive: true,
+      },
+    ];
+    expect(await invoke(findClubAccountForUser)).toMatchObject({
+      outcome: "FOUND",
+      view: {
+        isPlatformAdmin: false,
+      },
+    });
+  });
+
+  it("照合用の最小selectと安定した並び順を使う", async () => {
+    await invoke(findClubAccountForUser);
+    expect(mocks.membership).toHaveBeenCalledExactlyOnceWith({
+      where: {
+        id: SCOPE.actorMembershipId,
+        clubId: SCOPE.clubId,
+        userId: SCOPE.userId,
+        status: "ACTIVE",
+      },
+      select: {
+        id: true,
+        clubId: true,
+        userId: true,
+        status: true,
+        role: true,
+        club: {
+          select: {
+            id: true,
+            name: true,
+            slug: true,
+            planType: true,
+            websiteUrl: true,
+            instagramUrl: true,
+          },
+        },
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+    });
+    expect(mocks.children.mock.calls[0][0].select).toEqual({
+      id: true,
+      parentId: true,
+      name: true,
+      grade: true,
+      clubMemberships: {
+        where: {
+          clubId: SCOPE.clubId,
+        },
+        select: {
+          childId: true,
+          clubId: true,
+          parentUserId: true,
+          status: true,
+        },
+      },
+    });
+    expect(mocks.children.mock.calls[0][0].orderBy).toEqual({
+      id: "asc",
+    });
+  });
+});
+
+describe("既存Childの追加候補", () => {
+  it("未所属・WITHDRAWNだけを別取得し、他クラブ名を返さない", async () => {
+    const otherClub = child("other-club", "ACTIVE");
+    otherClub.clubMemberships[0].clubId = "club-b";
+    const foreign = child("foreign", null);
+    foreign.parentId = "parent-b";
+    children.push(otherClub, foreign);
+    const result = await invoke(findAttachableChildrenForUser);
+    expect(result).toEqual({
+      outcome: "FOUND",
+      children: [
+        {
+          id: "withdrawn",
+          name: "子ども-withdrawn",
+          grade: null,
+        },
+        {
+          id: "none",
+          name: "子ども-none",
+          grade: null,
+        },
+        {
+          id: "other-club",
+          name: "子ども-other-club",
+          grade: null,
+        },
+      ],
+    });
+    expect(mocks.admin).not.toHaveBeenCalled();
+    expect(JSON.stringify(result)).not.toContain("club-b");
+    expect(JSON.stringify(result)).not.toContain("parent-b");
+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
+  });
+
+  it("候補取得の認可確認では本人氏名やemail・外部URLをselectしない", async () => {
+    await invoke(findAttachableChildrenForUser);
+    expect(mocks.membership).toHaveBeenCalledExactlyOnceWith({
+      where: {
+        id: SCOPE.actorMembershipId,
+        clubId: SCOPE.clubId,
+        userId: SCOPE.userId,
+        status: "ACTIVE",
+      },
+      select: {
+        id: true,
+        clubId: true,
+        userId: true,
+        status: true,
+        user: {
+          select: {
+            id: true,
+          },
+        },
+        club: {
+          select: {
+            id: true,
+            planType: true,
+          },
+        },
+      },
+    });
+  });
+
+  it.each(["ACTIVE", "INVITED", "SUSPENDED"] as const)("%sは候補にしない", async (status) => {
+    children = [child("target", status)];
+    expect(await invoke(findAttachableChildrenForUser)).toEqual({
+      outcome: "FOUND",
+      children: [],
+    });
+  });
+});
+
+describe.each([
+  ["通常表示", findClubAccountForUser],
+  ["追加候補", findAttachableChildrenForUser],
+] as const)("%sの読取境界", (_name, reader) => {
+  it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
+    "親Membershipが%sなら関連情報を取得しない",
+    async (status) => {
+      memberships[0].status = status;
+      expect(await invoke(async (scope) => reader(scope))).toEqual({
+        outcome: "UNAVAILABLE",
+      });
+      expect(mocks.children).not.toHaveBeenCalled();
+      expect(mocks.admin).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { clubId: "club-b" },
+    { userId: "parent-b" },
+    { actorMembershipId: "membership-b" },
+  ])("別のクラブ・親・actorを混在させない %#", async (change) => {
+    expect(await invoke(async (scope) => reader(scope), {
+      ...SCOPE,
+      ...change,
+    })).toEqual({
+      outcome: "UNAVAILABLE",
+    });
+    expect(mocks.children).not.toHaveBeenCalled();
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+
+  it.each(["clubId", "actorMembershipId", "userId"] as const)(
+    "%sが欠損・不正ならwhereへ渡さない",
+    async (key) => {
+      for (const value of [undefined, null, "", " ", [], 123]) {
+        expect(await invoke(async (scope) => reader(scope), {
+          ...SCOPE,
+          [key]: value,
+        } as ClubAccountReadScope)).toEqual({
+          outcome: "UNAVAILABLE",
+        });
+      }
+      expect(mocks.membership).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["STARTER", "PRO"] as const)("%sの現在クラブでは取得しない", async (planType) => {
+    memberships[0].club!.planType = planType;
+    expect(await invoke(async (scope) => reader(scope))).toEqual({
+      outcome: "UNAVAILABLE",
+    });
+    expect(mocks.children).not.toHaveBeenCalled();
+    expect(mocks.admin).not.toHaveBeenCalled();
+  });
+
+  it("AppUser欠損をupsertせず固定の取得失敗にする", async () => {
+    memberships[0].user = null;
+    expect(await invoke(async (scope) => reader(scope))).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+
+  it("返却されたChildの親が異なれば部分的なDTOも返さない", async () => {
+    const row = child("foreign", "WITHDRAWN");
+    row.parentId = "parent-b";
+    mocks.children.mockResolvedValueOnce([row]);
+    expect(await invoke(async (scope) => reader(scope))).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+
+  it.each(["childId", "clubId", "parentUserId"] as const)(
+    "ChildClubMembershipの%sが不一致なら返さない",
+    async (key) => {
+      const row = child("mismatch", "ACTIVE");
+      row.clubMemberships[0][key] = "foreign-value";
+      mocks.children.mockResolvedValueOnce([row]);
+      expect(await invoke(async (scope) => reader(scope))).toEqual({
+        outcome: "FETCH_FAILED",
+      });
+    },
+  );
+
+  it("Membership・AppUser・Clubの返却対応も確認する", async () => {
+    mocks.membership.mockResolvedValueOnce({
+      ...memberships[0],
+      user: {
+        id: "parent-b",
+        name: PRIVATE_DETAIL,
+        email: PRIVATE_DETAIL,
+      },
+    });
+    expect(await invoke(async (scope) => reader(scope))).toEqual({
+      outcome: "UNAVAILABLE",
+    });
+    expect(mocks.children).not.toHaveBeenCalled();
+  });
+
+  it("任意の公開メッセージを持つ例外オブジェクトも反射しない", async () => {
+    mocks.children.mockRejectedValueOnce({
+      publicMessage: PRIVATE_DETAIL,
+      cause: PRIVATE_DETAIL,
+    });
+    expect(await invoke(async (scope) => reader(scope))).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+
+  it.each(["membership", "children"] as const)("%sの原文エラーを返さない", async (stage) => {
+    mocks[stage].mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
+    expect(await invoke(async (scope) => reader(scope))).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+});
+
+describe("異常な取得結果と型境界", () => {
+  it.each(["WITHDRAWN", "INVITED", "SUSPENDED"] as const)(
+    "通常一覧へ混入した%sを返さない",
+    async (status) => {
+      mocks.children.mockResolvedValueOnce([child("unexpected", status)]);
+      expect(await invoke(findClubAccountForUser)).toEqual({
+        outcome: "FETCH_FAILED",
+      });
+    },
+  );
+
+  it.each(["ACTIVE", "INVITED", "SUSPENDED"] as const)(
+    "追加候補へ混入した%sを返さない",
+    async (status) => {
+      mocks.children.mockResolvedValueOnce([child("unexpected", status)]);
+      expect(await invoke(findAttachableChildrenForUser)).toEqual({
+        outcome: "FETCH_FAILED",
+      });
+    },
+  );
+
+  it("通常一覧へ混入した未所属Childを返さない", async () => {
+    mocks.children.mockResolvedValueOnce([child("unexpected", null)]);
+    expect(await invoke(findClubAccountForUser)).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+
+  it("PlatformAdmin取得エラーでも氏名等を部分的に返さない", async () => {
+    mocks.admin.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
+    expect(await invoke(findClubAccountForUser)).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+
+  it("同一クラブの重複所属という不整合を修復しない", async () => {
+    const row = child("duplicate", "WITHDRAWN");
+    row.clubMemberships.push({
+      ...row.clubMemberships[0],
+    });
+    mocks.children.mockResolvedValueOnce([row]);
+    expect(await invoke(findAttachableChildrenForUser)).toEqual({
+      outcome: "FETCH_FAILED",
+    });
+  });
+
+  it("未取得のAuth emailやクラブ切替を完成済みの表示型として扱わない", () => {
+    type View = Extract<ClubAccountForUserResult, {
+      outcome: "FOUND";
+    }>["view"];
+    expectTypeOf<Extract<
+      keyof View,
+      "authEmail" | "canSwitchClub" | "userId" | "parentId"
+    >>().toEqualTypeOf<never>();
+  });
+});
