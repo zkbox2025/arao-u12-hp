@@ -1,450 +1,287 @@
-diff --git a/src/infrastructure/prisma/repositories/club-account-repository.ts b/src/infrastructure/prisma/repositories/club-account-repository.ts
-index 0afe982..f1f9f89 100644
---- a/src/infrastructure/prisma/repositories/club-account-repository.ts
-+++ b/src/infrastructure/prisma/repositories/club-account-repository.ts
-@@ -6,16 +6,22 @@
- 
- import "server-only";
- 
--import type {
-+// 【追加：F07粒度3】トランザクション分離レベルと既知エラーを利用する。
-+import {
-   Prisma,
- } from "@prisma/client";
- 
- import type {
-   ClubAccountChildCandidatesResult,//クラブアカウントに紐づけられている子供アカウントの検索結果の型
-+  ClubAccountMutationResult, // 【追加：F07粒度3】固定の更新結果。
-   ClubAccountChildView,// 子供のアカウントの表示情報
-   ClubAccountReadResult,//クラブアカウントの表示用データを取得した結果の型
-   ClubAccountView,// クラブアカウントの表示情報
- } from "@/domain/club/account/account-types";
-+// 【追加：F07粒度3】氏名の既存入力契約を再利用する。
-+import {
-+  validateAccountNameInput,
-+} from "@/domain/club/account/account-form";
- import {
-   evaluateChildMembershipAddition,// 子どものメンバーシップを追加する際の許可判定関数
- } from "@/domain/club/account/child-membership-policy";
-@@ -385,3 +391,177 @@ export async function findAttachableChildrenForUser(
-     };
-   }
- }
+diff --git a/src/infrastructure/prisma/repositories/club-child-repository.ts b/src/infrastructure/prisma/repositories/club-child-repository.ts
+new file mode 100644
+index 0000000..c2e182b
+--- /dev/null
++++ b/src/infrastructure/prisma/repositories/club-child-repository.ts
+@@ -0,0 +1,295 @@
++// src/infrastructure/prisma/repositories/club-child-repository.ts
++// 本人Childの新規作成と、現在クラブに所属中のChildのグローバル編集を行う。
 +
-+// 【追加：F07粒度3】初回実行後、P2034だけを最大3回再試行する。
-+const ACCOUNT_NAME_MAX_RETRIES = 3;
++import "server-only";
 +
-+// IDは認証・認可済みのサーバー側コンテキストから渡す。
-+export type UpdateAccountNameForUserInput = ClubAccountReadScope & {
++import {
++  Prisma,
++} from "@prisma/client";
++
++import type {
++  ClubAccountMutationResult,
++} from "@/domain/club/account/account-types";
++import {
++  validateChildIdInput,
++  validateChildInput,
++} from "@/domain/club/account/child-form";
++import {
++  hasClubFeature,
++} from "@/domain/club/plan-features";
++import {
++  prisma,
++} from "@/src/infrastructure/prisma/client";
++import type {
++  ClubAccountReadScope,
++} from "@/src/infrastructure/prisma/repositories/club-account-repository";
++import type {
++  Grade,
++} from "@/types/prisma";
++
++// 初回実行後、Serializable競合のP2034だけを最大3回再試行する。
++const CHILD_TRANSACTION_MAX_RETRIES = 3;
++
++// IDはサーバーで認証・認可した値。作成時のchildIdは同じフォームの再送間で固定する。
++export type ChildForUserInput = ClubAccountReadScope & {
++  childId: string;
 +  name: string;
++  grade: Grade | null;
 +};
 +
-+// Prisma既知エラーだけを判定し、任意オブジェクトのcodeを信用しない。
-+function isAccountNamePrismaError(
-+  error: unknown,
-+  code: string,
-+): boolean {
-+  return error instanceof Prisma.PrismaClientKnownRequestError &&
-+    error.code === code;
++// 欠損したIDがPrismaのwhereから省略され、操作範囲が広がることを防ぐ。
++function hasChildScope(input: ChildForUserInput): boolean {
++  return input !== null &&
++    typeof input === "object" &&
++    typeof input.clubId === "string" &&
++    input.clubId.trim().length > 0 &&
++    typeof input.actorMembershipId === "string" &&
++    input.actorMembershipId.trim().length > 0 &&
++    typeof input.userId === "string" &&
++    input.userId.trim().length > 0;
 +}
 +
-+// 本人のACTIVE所属と利用プランを再照合し、氏名だけを条件付きで更新する。
-+export async function updateAccountNameForUser(
-+  input: UpdateAccountNameForUserInput,
++// 氏名更新と同じ分離レベル・再試行上限で、2操作の例外を固定結果へ閉じる。
++async function runChildTransaction(
++  operation: (transaction: Prisma.TransactionClient) => Promise<ClubAccountMutationResult>,
 +): Promise<ClubAccountMutationResult> {
-+  if (!hasReadScope(input)) {
-+    return {
-+      outcome: "FORBIDDEN",
-+    };
-+  }
-+
-+  const validation = validateAccountNameInput({
-+    name: input.name,
-+  });
-+  if (!validation.success) {
-+    return {
-+      outcome: "UPDATE_FAILED",
-+    };
-+  }
-+
 +  let retryCount = 0;
 +  while (true) {
 +    try {
-+      return await prisma.$transaction(
-+        async (transaction): Promise<ClubAccountMutationResult> => {
-+          const actor = await transaction.clubMembership.findFirst({
-+            where: {
-+              id: input.actorMembershipId,
-+              clubId: input.clubId,
-+              userId: input.userId,
-+              status: "ACTIVE",
-+            },
-+            select: {
-+              id: true,
-+              clubId: true,
-+              userId: true,
-+              status: true,
-+              club: {
-+                select: {
-+                  id: true,
-+                  planType: true,
-+                },
-+              },
-+            },
-+          });
-+          if (
-+            !actor ||
-+            actor.id !== input.actorMembershipId ||
-+            actor.clubId !== input.clubId ||
-+            actor.userId !== input.userId ||
-+            actor.status !== "ACTIVE" ||
-+            !actor.club ||
-+            actor.club.id !== input.clubId ||
-+            !hasClubFeature(actor.club.planType, "CLUB_APP")
-+          ) {
-+            return {
-+              outcome: "FORBIDDEN",
-+            };
-+          }
-+
-+          const user = await transaction.appUser.findUnique({
-+            where: {
-+              id: input.userId,
-+            },
-+            select: {
-+              id: true,
-+            },
-+          });
-+          if (!user || user.id !== input.userId) {
-+            return {
-+              outcome: "NOT_FOUND",
-+            };
-+          }
-+
-+          const updated = await transaction.appUser.updateMany({
-+            where: {
-+              id: input.userId,
-+              memberships: {
-+                some: {
-+                  id: input.actorMembershipId,
-+                  clubId: input.clubId,
-+                  userId: input.userId,
-+                  status: "ACTIVE",
-+                  club: {
-+                    is: {
-+                      id: input.clubId,
-+                      planType: actor.club.planType,
-+                    },
-+                  },
-+                },
-+              },
-+            },
-+            data: {
-+              name: validation.data.name,
-+            },
-+          });
-+          if (updated.count === 0) {
-+            return {
-+              outcome: "NOT_FOUND",
-+            };
-+          }
-+          if (updated.count !== 1) {
-+            throw new Error("本人氏名の更新件数を確認できません。");
-+          }
-+
-+          // 非ACTIVE所属の会員一覧にもAppUser.nameが表示されるため、状態で絞らない。
-+          const memberships = await transaction.clubMembership.findMany({
-+            where: {
-+              userId: input.userId,
-+            },
-+            select: {
-+              club: {
-+                select: {
-+                  slug: true,
-+                },
-+              },
-+            },
-+          });
-+          return {
-+            outcome: "UPDATED",
-+            affectedClubSlugs: [
-+              ...new Set(memberships.map((membership) => membership.club.slug)),
-+            ].sort(),
-+          };
-+        },
-+        {
-+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-+        },
-+      );
++      return await prisma.$transaction(operation, {
++        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
++      });
 +    } catch (error) {
-+      if (isAccountNamePrismaError(error, "P2034")) {
-+        if (retryCount < ACCOUNT_NAME_MAX_RETRIES) {
-+          retryCount += 1;
-+          continue;
++      if (error instanceof Prisma.PrismaClientKnownRequestError) {
++        if (error.code === "P2034") {
++          if (retryCount < CHILD_TRANSACTION_MAX_RETRIES) {
++            retryCount += 1;
++            continue;
++          }
++          return {
++            outcome: "CONFLICT",
++          };
 +        }
-+        return {
-+          outcome: "CONFLICT",
-+        };
-+      }
-+      if (isAccountNamePrismaError(error, "P2002")) {
-+        return {
-+          outcome: "CONFLICT",
-+        };
-+      }
-+      if (isAccountNamePrismaError(error, "P2025")) {
-+        return {
-+          outcome: "NOT_FOUND",
-+        };
++        if (error.code === "P2002") {
++          // 既存Childへの切替・再有効化はせず、他人の存在も区別しない。
++          return {
++            outcome: "CONFLICT",
++          };
++        }
++        if (error.code === "P2025") {
++          return {
++            outcome: "NOT_FOUND",
++          };
++        }
 +      }
 +
-+      // DomainErrorを含め、原文・cause・個人情報は結果やログへ反射しない。
++      // DomainErrorも含め、任意のmessage・meta・causeは結果やログへ反射しない。
 +      return {
 +        outcome: "UPDATE_FAILED",
 +      };
 +    }
 +  }
 +}
-diff --git a/tests/club-account-repository.test.ts b/tests/club-account-repository.test.ts
-index 31cfab9..814b3fc 100644
---- a/tests/club-account-repository.test.ts
-+++ b/tests/club-account-repository.test.ts
-@@ -11,6 +11,14 @@ import {
-   vi,
- } from "vitest";
- 
-+// 【追加：F07粒度3】実DBを起動せず、既知Prismaエラーを生成する。
-+import {
-+  Prisma,
-+} from "@prisma/client";
-+import {
-+  DomainError,
-+} from "@/domain/shared/domain-error";
 +
- import type {
-   ClubMemberRole,
-   ClubMembershipStatus,
-@@ -20,6 +28,7 @@ import type {
- import {
-   findAttachableChildrenForUser,
-   findClubAccountForUser,
-+  updateAccountNameForUser, // 【追加：F07粒度3】本人氏名更新。
-   type ClubAccountForUserResult,
-   type ClubAccountReadScope,
- } from "@/src/infrastructure/prisma/repositories/club-account-repository";
-@@ -29,6 +38,12 @@ const mocks = vi.hoisted(() => ({
-   children: vi.fn(),
-   admin: vi.fn(),
-   write: vi.fn(),
-+  // 【追加：F07粒度3】transaction内の許可された更新だけを独立して検証する。
-+  transaction: vi.fn(),
-+  nameActor: vi.fn(),
-+  nameUser: vi.fn(),
-+  nameUpdate: vi.fn(),
-+  nameMemberships: vi.fn(),
- }));
- 
- // 共有clientを評価せずに置換し、dotenvや本物の接続を起動しない。
-@@ -55,7 +70,7 @@ vi.mock("@/src/infrastructure/prisma/client", () => ({
-     platformAdmin: {
-       findFirst: mocks.admin,
-     },
--    $transaction: mocks.write,
-+    $transaction: mocks.transaction, // 【変更：F07粒度3】読取からの呼出しは引き続き禁止。
-   },
- }));
- 
-@@ -164,6 +179,8 @@ async function invoke<T>(
-     admins,
-   });
-   const result = await reader(input);
-+  // 【追加：F07粒度3】読取から氏名更新transactionへ接続しない。
-+  expect(mocks.transaction).not.toHaveBeenCalled();
-   expect({
-     memberships,
-     children,
-@@ -727,3 +744,464 @@ describe("異常な取得結果と型境界", () => {
-     >>().toEqualTypeOf<never>();
-   });
- });
-+
-+// 【追加：F07粒度3】以下は本人氏名更新専用。SQL・実DBの競合動作は代替しない。
-+describe("本人氏名更新", () => {
-+  let storedUser: {
-+    id: string;
-+    name: string | null;
-+    email: string | null;
-+  } | null;
-+
-+  // 個人情報入りの既知エラーでも、結果に原文やmetaを含めないことを試す。
-+  function prismaError(code: string) {
-+    return new Prisma.PrismaClientKnownRequestError(PRIVATE_DETAIL, {
-+      code,
-+      clientVersion: "test",
-+      meta: {
-+        detail: PRIVATE_DETAIL,
++// 現在の親Membership・本人AppUser・クラブの利用プランをtransaction内で再照合する。
++async function findChildActor(
++  transaction: Prisma.TransactionClient,
++  input: ChildForUserInput,
++) {
++  const actor = await transaction.clubMembership.findFirst({
++    where: {
++      id: input.actorMembershipId,
++      clubId: input.clubId,
++      userId: input.userId,
++      status: "ACTIVE",
++    },
++    select: {
++      id: true,
++      clubId: true,
++      userId: true,
++      status: true,
++      user: {
++        select: {
++          id: true,
++        },
 +      },
-+    });
++      club: {
++        select: {
++          id: true,
++          slug: true,
++          planType: true,
++        },
++      },
++    },
++  });
++  if (
++    !actor ||
++    actor.id !== input.actorMembershipId ||
++    actor.clubId !== input.clubId ||
++    actor.userId !== input.userId ||
++    actor.status !== "ACTIVE" ||
++    !actor.user ||
++    actor.user.id !== input.userId ||
++    !actor.club ||
++    actor.club.id !== input.clubId ||
++    !hasClubFeature(actor.club.planType, "CLUB_APP")
++  ) {
++    return null;
++  }
++  return actor;
++}
++
++// Childと現在クラブの初回ACTIVE所属を一体作成し、再送時も既存Childを更新しない。
++export async function createChildForUser(
++  input: ChildForUserInput,
++): Promise<ClubAccountMutationResult> {
++  if (!hasChildScope(input)) {
++    return {
++      outcome: "FORBIDDEN",
++    };
++  }
++  const validation = validateChildInput(input);
++  if (
++    !validation.success ||
++    !validateChildIdInput(input.childId).success
++  ) {
++    return {
++      outcome: "UPDATE_FAILED",
++    };
 +  }
 +
-+  // 本人の全所属を用意し、非ACTIVEや利用不可プランの影響先も残す。
-+  beforeEach(() => {
-+    storedUser = {
-+      id: SCOPE.userId,
-+      name: "変更前",
-+      email: "unchanged@example.test",
-+    };
-+    const actor = structuredClone(memberships[0]);
-+    for (const status of ["INVITED", "SUSPENDED", "WITHDRAWN"] as const) {
-+      const other = structuredClone(actor);
-+      other.id = `membership-${status}`;
-+      other.clubId = `club-${status}`;
-+      other.status = status;
-+      other.club = {
-+        ...actor.club!,
-+        id: other.clubId,
-+        slug: `club-${status.toLowerCase()}`,
-+        planType: "STARTER",
-+      };
-+      memberships.push(other);
-+    }
-+    const anotherUser = structuredClone(actor);
-+    anotherUser.id = "other-user-membership";
-+    anotherUser.userId = "other-user";
-+    anotherUser.club = {
-+      ...actor.club!,
-+      slug: "other-user-private-club",
-+    };
-+    memberships.push(anotherUser);
-+
-+    mocks.nameActor.mockImplementation(async ({ where }) =>
-+      memberships.find((row) =>
-+        row.id === where.id &&
-+        row.clubId === where.clubId &&
-+        row.userId === where.userId &&
-+        row.status === where.status) ?? null);
-+    mocks.nameUser.mockImplementation(async ({ where }) =>
-+      storedUser && storedUser.id === where.id ? {
-+        id: storedUser.id,
-+      } : null);
-+    mocks.nameUpdate.mockImplementation(async ({ where, data }) => {
-+      // SQLの代替ではなく、本人・所属・プランの条件が省略されないことを確認する。
-+      expect(where).toEqual({
-+        id: SCOPE.userId,
-+        memberships: {
-+          some: {
-+            id: SCOPE.actorMembershipId,
-+            clubId: SCOPE.clubId,
-+            userId: SCOPE.userId,
-+            status: "ACTIVE",
-+            club: {
-+              is: {
-+                id: SCOPE.clubId,
-+                planType: "STANDARD",
-+              },
-+            },
-+          },
-+        },
-+      });
-+      expect(Object.keys(data)).toEqual(["name"]);
-+      const actor = memberships.find((row) =>
-+        row.id === SCOPE.actorMembershipId &&
-+        row.clubId === SCOPE.clubId &&
-+        row.userId === SCOPE.userId &&
-+        row.status === "ACTIVE" &&
-+        row.club?.planType === "STANDARD");
-+      if (!storedUser || storedUser.id !== where.id || !actor) {
-+        return {
-+          count: 0,
-+        };
-+      }
-+      storedUser.name = data.name;
++  return runChildTransaction(async (transaction) => {
++    const actor = await findChildActor(transaction, input);
++    if (!actor) {
 +      return {
-+        count: 1,
++        outcome: "FORBIDDEN",
 +      };
++    }
++    await transaction.child.create({
++      data: {
++        id: input.childId,
++        parentId: input.userId,
++        name: validation.data.name,
++        grade: validation.data.grade,
++      },
++      select: {
++        id: true,
++      },
 +    });
-+    mocks.nameMemberships.mockImplementation(async ({ where }) =>
-+      memberships.filter((row) => row.userId === where.userId).map((row) => ({
-+        club: {
-+          slug: row.club!.slug,
-+        },
-+      })));
-+    mocks.transaction.mockImplementation(async (callback, options) => {
-+      expect(options).toEqual({
-+        isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-+      });
-+      const before = structuredClone(storedUser);
-+      try {
-+        return await callback({
-+          clubMembership: {
-+            findFirst: mocks.nameActor,
-+            findMany: mocks.nameMemberships,
-+          },
-+          appUser: {
-+            findUnique: mocks.nameUser,
-+            updateMany: mocks.nameUpdate,
-+          },
-+        });
-+      } catch (error) {
-+        storedUser = before;
-+        throw error;
-+      }
-+    });
-+  });
-+
-+  it("本人氏名だけを更新し、全状態の本人所属slugだけを返す", async () => {
-+    const input = {
-+      ...SCOPE,
-+      name: "  新しい氏名  ",
-+      email: "attack@example.test",
-+      role: "OWNER",
-+      status: "WITHDRAWN",
-+      children: [PRIVATE_DETAIL],
-+    };
-+    expect(await updateAccountNameForUser(input)).toEqual({
-+      outcome: "UPDATED",
-+      affectedClubSlugs: [
-+        "club-a",
-+        "club-invited",
-+        "club-suspended",
-+        "club-withdrawn",
-+      ],
-+    });
-+    expect(storedUser).toEqual({
-+      id: SCOPE.userId,
-+      name: "新しい氏名",
-+      email: "unchanged@example.test",
-+    });
-+    expect(mocks.nameActor).toHaveBeenCalledWith({
-+      where: {
-+        id: SCOPE.actorMembershipId,
-+        clubId: SCOPE.clubId,
-+        userId: SCOPE.userId,
++    await transaction.childClubMembership.create({
++      data: {
++        clubId: input.clubId,
++        childId: input.childId,
++        parentUserId: input.userId,
 +        status: "ACTIVE",
 +      },
 +      select: {
 +        id: true,
-+        clubId: true,
-+        userId: true,
-+        status: true,
-+        club: {
-+          select: {
-+            id: true,
-+            planType: true,
++      },
++    });
++    return {
++      outcome: "UPDATED",
++      affectedClubSlugs: [actor.club.slug],
++    };
++  });
++}
++
++// 本人所有かつ現在クラブでACTIVEなChildだけを編集し、全所属クラブの表示へ反映する。
++export async function updateChildForUser(
++  input: ChildForUserInput,
++): Promise<ClubAccountMutationResult> {
++  if (!hasChildScope(input)) {
++    return {
++      outcome: "FORBIDDEN",
++    };
++  }
++  const validation = validateChildInput(input);
++  if (
++    !validation.success ||
++    !validateChildIdInput(input.childId).success
++  ) {
++    return {
++      outcome: "UPDATE_FAILED",
++    };
++  }
++
++  return runChildTransaction(async (transaction) => {
++    const actor = await findChildActor(transaction, input);
++    if (!actor) {
++      return {
++        outcome: "FORBIDDEN",
++      };
++    }
++    const updated = await transaction.child.updateMany({
++      where: {
++        id: input.childId,
++        parentId: input.userId,
++        parent: {
++          is: {
++            id: input.userId,
++            memberships: {
++              some: {
++                id: input.actorMembershipId,
++                clubId: input.clubId,
++                userId: input.userId,
++                status: "ACTIVE",
++                club: {
++                  is: {
++                    id: input.clubId,
++                    planType: actor.club.planType,
++                  },
++                },
++              },
++            },
++          },
++        },
++        clubMemberships: {
++          some: {
++            clubId: input.clubId,
++            parentUserId: input.userId,
++            status: "ACTIVE",
 +          },
 +        },
 +      },
-+    });
-+    expect(mocks.nameUser).toHaveBeenCalledWith({
-+      where: {
-+        id: SCOPE.userId,
-+      },
-+      select: {
-+        id: true,
++      data: {
++        name: validation.data.name,
++        grade: validation.data.grade,
 +      },
 +    });
-+    expect(mocks.nameMemberships).toHaveBeenCalledWith({
++    if (updated.count === 0) {
++      return {
++        outcome: "NOT_FOUND",
++      };
++    }
++    if (updated.count !== 1) {
++      throw new Error("子どもの更新件数を確認できません。");
++    }
++
++    // 非ACTIVE所属の表示も含め、同じChildを使う全クラブを再検証対象として返す。
++    const memberships = await transaction.childClubMembership.findMany({
 +      where: {
-+        userId: SCOPE.userId,
++        childId: input.childId,
++        parentUserId: input.userId,
++        child: {
++          is: {
++            id: input.childId,
++            parentId: input.userId,
++          },
++        },
 +      },
 +      select: {
 +        club: {
@@ -454,226 +291,772 @@ index 31cfab9..814b3fc 100644
 +        },
 +      },
 +    });
-+    expect(mocks.nameUpdate).toHaveBeenCalledTimes(1);
-+    expect(mocks.membership).not.toHaveBeenCalled();
-+    expect(mocks.children).not.toHaveBeenCalled();
-+    expect(mocks.admin).not.toHaveBeenCalled();
++    return {
++      outcome: "UPDATED",
++      affectedClubSlugs: [
++        ...new Set(memberships.map((membership) => membership.club.slug)),
++      ].sort(),
++    };
 +  });
++}
+diff --git a/tests/club-child-repository.test.ts b/tests/club-child-repository.test.ts
+new file mode 100644
+index 0000000..472b62d
+--- /dev/null
++++ b/tests/club-child-repository.test.ts
+@@ -0,0 +1,813 @@
++// tests/club-child-repository.test.ts
++// 実DBを使わず、Child作成・編集の認可条件、許可フィールド、rollback境界を検証する。
 +
-+  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)(
-+    "%sでも本人のnullable氏名を更新できる",
-+    async (role) => {
-+      memberships[0].role = role;
-+      storedUser!.name = null;
-+      expect(await updateAccountNameForUser({
-+        ...SCOPE,
-+        name: "あ".repeat(100),
-+      })).toMatchObject({
-+        outcome: "UPDATED",
-+      });
-+      expect(storedUser!.name).toHaveLength(100);
++import {
++  afterEach,
++  beforeEach,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
++import {
++  Prisma,
++} from "@prisma/client";
++
++import {
++  DomainError,
++} from "@/domain/shared/domain-error";
++import {
++  createChildForUser,
++  updateChildForUser,
++  type ChildForUserInput,
++} from "@/src/infrastructure/prisma/repositories/club-child-repository";
++import type {
++  ClubMembershipStatus,
++  Grade,
++  PlanType,
++} from "@/types/prisma";
++
++const mocks = vi.hoisted(() => ({
++  transaction: vi.fn(),
++  actor: vi.fn(),
++  createChild: vi.fn(),
++  createMembership: vi.fn(),
++  updateChild: vi.fn(),
++  affected: vi.fn(),
++  forbidden: vi.fn(),
++}));
++
++// dotenv・本物のclientを評価せず、transaction外のDB操作も禁止する。
++vi.mock("@/src/infrastructure/prisma/client", () => ({
++  prisma: {
++    $transaction: mocks.transaction,
++    child: {
++      create: mocks.forbidden,
++      updateMany: mocks.forbidden,
 +    },
-+  );
++  },
++}));
 +
-+  it.each(["clubId", "actorMembershipId", "userId"] as const)(
-+    "%sが他人・別クラブなら更新しない",
-+    async (field) => {
-+      expect(await updateAccountNameForUser({
-+        ...SCOPE,
-+        [field]: "other",
-+        name: "新氏名",
-+      })).toEqual({
-+        outcome: "FORBIDDEN",
-+      });
-+      expect(mocks.nameUpdate).not.toHaveBeenCalled();
-+      expect(storedUser!.name).toBe("変更前");
++const CHILD_ID = "550e8400-e29b-41d4-a716-446655440000";
++const NEW_CHILD_ID = "550e8400-e29b-41d4-a716-446655440001";
++const OTHER_CHILD_ID = "550e8400-e29b-41d4-a716-446655440002";
++const PRIVATE_DETAIL = "private@example.test token database-secret";
++const INPUT: ChildForUserInput = {
++  clubId: "club-a",
++  actorMembershipId: "membership-a",
++  userId: "parent-a",
++  childId: CHILD_ID,
++  name: "  新しい氏名  ",
++  grade: null,
++};
++
++type StoredChild = {
++  id: string;
++  parentId: string;
++  name: string;
++  grade: Grade | null;
++};
++type StoredMembership = {
++  id: string;
++  clubId: string;
++  childId: string;
++  parentUserId: string;
++  status: ClubMembershipStatus;
++};
++type Actor = {
++  id: string;
++  clubId: string;
++  userId: string;
++  status: ClubMembershipStatus;
++  user: {
++    id: string;
++  } | null;
++  club: {
++    id: string;
++    slug: string;
++    planType: PlanType;
++  } | null;
++};
++
++let actor: Actor | null;
++let children: StoredChild[];
++let memberships: StoredMembership[];
++let transactionTail: Promise<void>;
++
++// 秘密を含む実際の既知エラー型で、固定結果への変換を確認する。
++function prismaError(code: string) {
++  return new Prisma.PrismaClientKnownRequestError(PRIVATE_DETAIL, {
++    code,
++    clientVersion: "test",
++    meta: {
++      detail: PRIVATE_DETAIL,
 +    },
-+  );
++  });
++}
 +
-+  it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
-+    "親Membershipが%sなら更新しない",
-+    async (status) => {
-+      memberships[0].status = status;
-+      expect(await updateAccountNameForUser({
-+        ...SCOPE,
-+        name: "新氏名",
-+      })).toEqual({
-+        outcome: "FORBIDDEN",
-+      });
-+      expect(mocks.nameUpdate).not.toHaveBeenCalled();
++// 認可クエリと更新クエリで使用する本人のACTIVE所属条件。
++function actorWhere() {
++  return {
++    id: INPUT.actorMembershipId,
++    clubId: INPUT.clubId,
++    userId: INPUT.userId,
++    status: "ACTIVE",
++  };
++}
++
++// クエリの条件漏れを別途assertし、ここではfixtureの状態だけを照合する。
++function canUseCurrentClub(): boolean {
++  return actor !== null &&
++    actor.id === INPUT.actorMembershipId &&
++    actor.clubId === INPUT.clubId &&
++    actor.userId === INPUT.userId &&
++    actor.status === "ACTIVE" &&
++    actor.user?.id === INPUT.userId &&
++    actor.club?.id === INPUT.clubId &&
++    actor.club.planType === "STANDARD";
++}
++
++// DBのSQLを再現せず、許可されたdelegateとrollback用のstoreを準備する。
++beforeEach(() => {
++  vi.resetAllMocks();
++  vi.spyOn(console, "error").mockImplementation(() => undefined);
++  vi.spyOn(console, "warn").mockImplementation(() => undefined);
++  vi.spyOn(console, "log").mockImplementation(() => undefined);
++  transactionTail = Promise.resolve();
++  actor = {
++    ...actorWhere(),
++    status: "ACTIVE",
++    user: {
++      id: INPUT.userId,
 +    },
-+  );
-+
-+  it.each(["STARTER", "PRO"] as const)(
-+    "%sプランは更新しない",
-+    async (planType) => {
-+      memberships[0].club!.planType = planType;
-+      expect(await updateAccountNameForUser({
-+        ...SCOPE,
-+        name: "新氏名",
-+      })).toEqual({
-+        outcome: "FORBIDDEN",
-+      });
-+      expect(mocks.nameUpdate).not.toHaveBeenCalled();
++    club: {
++      id: INPUT.clubId,
++      slug: "club-a",
++      planType: "STANDARD",
 +    },
-+  );
-+
-+  it.each(["", "  ", "あ".repeat(101), null, undefined, 123])(
-+    "不正な氏名%jではtransactionを開始しない",
-+    async (name) => {
-+      expect(await updateAccountNameForUser({
-+        ...SCOPE,
-+        name: name as string,
-+      })).toEqual({
-+        outcome: "UPDATE_FAILED",
-+      });
-+      expect(mocks.transaction).not.toHaveBeenCalled();
++  };
++  children = [
++    {
++      id: CHILD_ID,
++      parentId: INPUT.userId,
++      name: "編集前",
++      grade: "YOUJI",
 +    },
-+  );
-+
-+  it.each(["clubId", "actorMembershipId", "userId"] as const)(
-+    "%sの欠損ではwhere条件を広げない",
-+    async (field) => {
-+      expect(await updateAccountNameForUser({
-+        ...SCOPE,
-+        [field]: undefined,
-+        name: "新氏名",
-+      })).toEqual({
-+        outcome: "FORBIDDEN",
-+      });
-+      expect(mocks.transaction).not.toHaveBeenCalled();
++    {
++      id: OTHER_CHILD_ID,
++      parentId: "other-parent",
++      name: "他人の子ども",
++      grade: null,
 +    },
-+  );
-+
-+  it("AppUser欠損をupsertで修復しない", async () => {
-+    storedUser = null;
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
-+    })).toEqual({
-+      outcome: "NOT_FOUND",
++  ];
++  memberships = [
++    {
++      id: "child-membership-a",
++      clubId: INPUT.clubId,
++      childId: CHILD_ID,
++      parentUserId: INPUT.userId,
++      status: "ACTIVE",
++    },
++    {
++      id: "child-membership-b",
++      clubId: "club-b",
++      childId: CHILD_ID,
++      parentUserId: INPUT.userId,
++      status: "WITHDRAWN",
++    },
++  ];
++  mocks.actor.mockImplementation(async ({ where }) => {
++    expect(Object.keys(where).sort()).toEqual(["clubId", "id", "status", "userId"]);
++    expect(where.status).toBe("ACTIVE");
++    return actor &&
++      actor.id === where.id &&
++      actor.clubId === where.clubId &&
++      actor.userId === where.userId &&
++      actor.status === where.status
++      ? structuredClone(actor)
++      : null;
++  });
++  mocks.createChild.mockImplementation(async ({ data }) => {
++    if (children.some((row) => row.id === data.id)) {
++      throw prismaError("P2002");
++    }
++    children.push(structuredClone(data));
++    return {
++      id: data.id,
++    };
++  });
++  mocks.createMembership.mockImplementation(async ({ data }) => {
++    memberships.push({
++      id: "new-child-membership",
++      ...structuredClone(data),
 +    });
-+    expect(mocks.nameUpdate).not.toHaveBeenCalled();
++    return {
++      id: "new-child-membership",
++    };
 +  });
-+
-+  it("現在Membershipが欠損した場合は更新しない", async () => {
-+    memberships = memberships.filter((row) => row.id !== SCOPE.actorMembershipId);
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
-+    })).toEqual({
-+      outcome: "FORBIDDEN",
-+    });
-+    expect(mocks.nameUpdate).not.toHaveBeenCalled();
-+  });
-+
-+  it("重複した影響slugを1件にまとめる", async () => {
-+    mocks.nameMemberships.mockResolvedValueOnce([
-+      {
-+        club: {
-+          slug: "club-a",
++  mocks.updateChild.mockImplementation(async ({ where, data }) => {
++    // 本人・現在クラブ・親と子のACTIVE所属・プラン条件を省略させない。
++    expect(where).toEqual({
++      id: where.id,
++      parentId: INPUT.userId,
++      parent: {
++        is: {
++          id: INPUT.userId,
++          memberships: {
++            some: {
++              ...actorWhere(),
++              club: {
++                is: {
++                  id: INPUT.clubId,
++                  planType: "STANDARD",
++                },
++              },
++            },
++          },
 +        },
 +      },
-+      {
-+        club: {
-+          slug: "club-a",
++      clubMemberships: {
++        some: {
++          clubId: INPUT.clubId,
++          parentUserId: INPUT.userId,
++          status: "ACTIVE",
 +        },
 +      },
-+    ]);
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
++    });
++    expect(Object.keys(data).sort()).toEqual(["grade", "name"]);
++    const child = children.find((row) =>
++      row.id === where.id && row.parentId === INPUT.userId);
++    const membership = memberships.find((row) =>
++      row.childId === where.id &&
++      row.clubId === INPUT.clubId &&
++      row.parentUserId === INPUT.userId &&
++      row.status === "ACTIVE");
++    if (!canUseCurrentClub() || !child || !membership) {
++      return {
++        count: 0,
++      };
++    }
++    Object.assign(child, data);
++    return {
++      count: 1,
++    };
++  });
++  mocks.affected.mockImplementation(async ({ where }) => {
++    expect(where).toEqual({
++      childId: INPUT.childId,
++      parentUserId: INPUT.userId,
++      child: {
++        is: {
++          id: INPUT.childId,
++          parentId: INPUT.userId,
++        },
++      },
++    });
++    return memberships.filter((row) =>
++      row.childId === where.childId &&
++      row.parentUserId === where.parentUserId).map((row) => ({
++        club: {
++          slug: row.clubId,
++        },
++      }));
++  });
++  mocks.transaction.mockImplementation(async (callback, options) => {
++    expect(options).toEqual({
++      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
++    });
++    // storeをtransaction単位で分離するための待合せ。実DBの並行性の証明ではない。
++    const previous = transactionTail;
++    let release = () => {};
++    transactionTail = new Promise<void>((resolve) => {
++      release = resolve;
++    });
++    await previous;
++    const snapshot = structuredClone({
++      children,
++      memberships,
++    });
++    try {
++      return await callback({
++        clubMembership: {
++          findFirst: mocks.actor,
++          update: mocks.forbidden,
++        },
++        child: {
++          create: mocks.createChild,
++          updateMany: mocks.updateChild,
++          upsert: mocks.forbidden,
++          delete: mocks.forbidden,
++        },
++        childClubMembership: {
++          create: mocks.createMembership,
++          findMany: mocks.affected,
++          update: mocks.forbidden,
++          updateMany: mocks.forbidden,
++          upsert: mocks.forbidden,
++          delete: mocks.forbidden,
++        },
++        appUser: {
++          update: mocks.forbidden,
++          upsert: mocks.forbidden,
++        },
++      });
++    } catch (error) {
++      children = snapshot.children;
++      memberships = snapshot.memberships;
++      throw error;
++    } finally {
++      release();
++    }
++  });
++});
++
++// 更新対象外delegateやログへ個人情報を流す呼出しを全ケースで禁止する。
++afterEach(() => {
++  expect(mocks.forbidden).not.toHaveBeenCalled();
++  expect(console.error).not.toHaveBeenCalled();
++  expect(console.warn).not.toHaveBeenCalled();
++  expect(console.log).not.toHaveBeenCalled();
++  vi.restoreAllMocks();
++});
++
++describe("Child新規作成", () => {
++  it("複数Childを保持し、本人Childと現在クラブのACTIVE所属だけを作成する", async () => {
++    const beforeChildren = structuredClone(children);
++    const beforeMemberships = structuredClone(memberships);
++    expect(await createChildForUser({
++      ...INPUT,
++      childId: NEW_CHILD_ID,
++      grade: null,
 +    })).toEqual({
 +      outcome: "UPDATED",
 +      affectedClubSlugs: ["club-a"],
 +    });
++    expect(children).toEqual([
++      ...beforeChildren,
++      {
++        id: NEW_CHILD_ID,
++        parentId: INPUT.userId,
++        name: "新しい氏名",
++        grade: null,
++      },
++    ]);
++    expect(memberships).toEqual([
++      ...beforeMemberships,
++      {
++        id: "new-child-membership",
++        clubId: INPUT.clubId,
++        childId: NEW_CHILD_ID,
++        parentUserId: INPUT.userId,
++        status: "ACTIVE",
++      },
++    ]);
++    expect(mocks.createChild).toHaveBeenCalledWith({
++      data: children.at(-1),
++      select: {
++        id: true,
++      },
++    });
++    expect(mocks.createMembership).toHaveBeenCalledWith({
++      data: {
++        clubId: INPUT.clubId,
++        childId: NEW_CHILD_ID,
++        parentUserId: INPUT.userId,
++        status: "ACTIVE",
++      },
++      select: {
++        id: true,
++      },
++    });
++    expect(mocks.updateChild).not.toHaveBeenCalled();
++    expect(mocks.affected).not.toHaveBeenCalled();
 +  });
 +
-+  it("更新件数の不整合はrollbackし、成功を返さない", async () => {
-+    mocks.nameUpdate.mockImplementationOnce(async () => {
-+      storedUser!.name = "不正な部分更新";
-+      return {
-+        count: 2,
-+      };
-+    });
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
-+    })).toEqual({
-+      outcome: "UPDATE_FAILED",
-+    });
-+    expect(storedUser!.name).toBe("変更前");
-+    expect(mocks.nameMemberships).not.toHaveBeenCalled();
++  it("同じ作成識別子を2送信してもChildと初回所属は1件だけ", async () => {
++    const input = {
++      ...INPUT,
++      childId: NEW_CHILD_ID,
++    };
++    const results = await Promise.all([
++      createChildForUser(input),
++      createChildForUser(input),
++    ]);
++    expect(results.map((result) => result.outcome)).toEqual(["UPDATED", "CONFLICT"]);
++    expect(children.filter((row) => row.id === NEW_CHILD_ID)).toHaveLength(1);
++    expect(memberships.filter((row) => row.childId === NEW_CHILD_ID)).toHaveLength(1);
++    expect(mocks.createMembership).toHaveBeenCalledTimes(1);
 +  });
 +
-+  it("更新直前に所属が失効した場合は条件付き更新が0件になる", async () => {
-+    mocks.nameUser.mockImplementationOnce(async () => {
-+      memberships[0].status = "SUSPENDED";
-+      return {
-+        id: SCOPE.userId,
-+      };
++  it.each([CHILD_ID, OTHER_CHILD_ID])("既存ID %sでも更新や所属追加へ切り替えない", async (childId) => {
++    const before = structuredClone({
++      children,
++      memberships,
 +    });
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
-+    })).toEqual({
-+      outcome: "NOT_FOUND",
-+    });
-+    expect(storedUser!.name).toBe("変更前");
-+    expect(mocks.nameMemberships).not.toHaveBeenCalled();
-+  });
-+
-+  it("影響slug取得失敗は更新もrollbackし、部分成功を返さない", async () => {
-+    mocks.nameMemberships.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
-+    })).toEqual({
-+      outcome: "UPDATE_FAILED",
-+    });
-+    expect(mocks.nameUpdate).toHaveBeenCalledTimes(1);
-+    expect(storedUser!.name).toBe("変更前");
-+  });
-+
-+  it("更新後のP2034はrollback後に認可確認から再試行する", async () => {
-+    mocks.nameMemberships.mockRejectedValueOnce(prismaError("P2034"));
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
-+    })).toMatchObject({
-+      outcome: "UPDATED",
-+    });
-+    expect(mocks.transaction).toHaveBeenCalledTimes(2);
-+    expect(mocks.nameActor).toHaveBeenCalledTimes(2);
-+    expect(storedUser!.name).toBe("新氏名");
-+  });
-+
-+  it("P2034の再試行上限は初回に加えて3回だけ", async () => {
-+    mocks.nameMemberships.mockRejectedValue(prismaError("P2034"));
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
++    expect(await createChildForUser({
++      ...INPUT,
++      childId,
 +    })).toEqual({
 +      outcome: "CONFLICT",
 +    });
-+    expect(mocks.transaction).toHaveBeenCalledTimes(4);
-+    expect(storedUser!.name).toBe("変更前");
++    expect({
++      children,
++      memberships,
++    }).toEqual(before);
++    expect(mocks.createMembership).not.toHaveBeenCalled();
++    expect(mocks.updateChild).not.toHaveBeenCalled();
++    expect(mocks.transaction).toHaveBeenCalledTimes(1);
 +  });
 +
-+  it("再試行時に認可が失効していれば更新しない", async () => {
-+    mocks.nameMemberships.mockImplementationOnce(async () => {
-+      memberships[0].status = "WITHDRAWN";
-+      throw prismaError("P2034");
++  it("初回所属作成のP2034ではChildをrollbackしてから再試行する", async () => {
++    mocks.createMembership.mockRejectedValueOnce(prismaError("P2034"));
++    expect(await createChildForUser({
++      ...INPUT,
++      childId: NEW_CHILD_ID,
++    })).toEqual({
++      outcome: "UPDATED",
++      affectedClubSlugs: ["club-a"],
 +    });
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
++    expect(mocks.actor).toHaveBeenCalledTimes(2);
++    expect(children.filter((row) => row.id === NEW_CHILD_ID)).toHaveLength(1);
++    expect(memberships.filter((row) => row.childId === NEW_CHILD_ID)).toHaveLength(1);
++  });
++
++  it("初回所属の一意衝突でもChildを残さず再試行しない", async () => {
++    mocks.createMembership.mockRejectedValueOnce(prismaError("P2002"));
++    expect(await createChildForUser({
++      ...INPUT,
++      childId: NEW_CHILD_ID,
++    })).toEqual({
++      outcome: "CONFLICT",
++    });
++    expect(children.some((row) => row.id === NEW_CHILD_ID)).toBe(false);
++    expect(mocks.transaction).toHaveBeenCalledTimes(1);
++  });
++
++  it("初回所属作成に失敗したらChildも残さない", async () => {
++    mocks.createMembership.mockRejectedValueOnce(prismaError("P2003"));
++    expect(await createChildForUser({
++      ...INPUT,
++      childId: NEW_CHILD_ID,
++    })).toEqual({
++      outcome: "UPDATE_FAILED",
++    });
++    expect(children.some((row) => row.id === NEW_CHILD_ID)).toBe(false);
++    expect(memberships.some((row) => row.childId === NEW_CHILD_ID)).toBe(false);
++    expect(mocks.transaction).toHaveBeenCalledTimes(1);
++  });
++});
++
++describe("Childグローバル編集", () => {
++  it("name・gradeだけを更新し、非ACTIVEも含む同じChildの全影響slugを返す", async () => {
++    const beforeMemberships = structuredClone(memberships);
++    const other = structuredClone(children[1]);
++    expect(await updateChildForUser({
++      ...INPUT,
++      grade: "ELEMENTARY_6",
++      parentId: "other-parent",
++      status: "WITHDRAWN",
++    } as ChildForUserInput)).toEqual({
++      outcome: "UPDATED",
++      affectedClubSlugs: ["club-a", "club-b"],
++    });
++    expect(children[0]).toEqual({
++      id: CHILD_ID,
++      parentId: INPUT.userId,
++      name: "新しい氏名",
++      grade: "ELEMENTARY_6",
++    });
++    expect(children[1]).toEqual(other);
++    expect(memberships).toEqual(beforeMemberships);
++    expect(mocks.createChild).not.toHaveBeenCalled();
++    expect(mocks.createMembership).not.toHaveBeenCalled();
++    expect(mocks.affected).toHaveBeenCalledWith({
++      where: {
++        childId: INPUT.childId,
++        parentUserId: INPUT.userId,
++        child: {
++          is: {
++            id: INPUT.childId,
++            parentId: INPUT.userId,
++          },
++        },
++      },
++      select: {
++        club: {
++          select: {
++            slug: true,
++          },
++        },
++      },
++    });
++  });
++
++  it.each([null, "YOUJI", "ELEMENTARY_1", "ELEMENTARY_6"] as const)(
++    "学年%jを保存できる",
++    async (grade) => {
++      expect(await updateChildForUser({
++        ...INPUT,
++        grade,
++      })).toMatchObject({
++        outcome: "UPDATED",
++      });
++      expect(children[0].grade).toBe(grade);
++    },
++  );
++
++  it.each([OTHER_CHILD_ID, NEW_CHILD_ID])("他人・存在しないChild %sを編集しない", async (childId) => {
++    const before = structuredClone(children);
++    expect(await updateChildForUser({
++      ...INPUT,
++      childId,
++    })).toEqual({
++      outcome: "NOT_FOUND",
++    });
++    expect(children).toEqual(before);
++    expect(mocks.affected).not.toHaveBeenCalled();
++  });
++
++  it.each([null, "INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
++    "現在Child所属が%jなら編集しない。他クラブ所属では代用できない",
++    async (status) => {
++      if (status === null) {
++        memberships = memberships.filter((row) => row.clubId !== INPUT.clubId);
++      } else {
++        memberships[0].status = status;
++      }
++      const before = structuredClone(children);
++      expect(await updateChildForUser(INPUT)).toEqual({
++        outcome: "NOT_FOUND",
++      });
++      expect(children).toEqual(before);
++    },
++  );
++
++  it("Child所属の親が違うと編集しない", async () => {
++    memberships[0].parentUserId = "other-parent";
++    expect(await updateChildForUser(INPUT)).toEqual({
++      outcome: "NOT_FOUND",
++    });
++  });
++
++  it.each(["status", "planType"] as const)(
++    "認可確認後に親の%sが失効した場合も条件付き更新で拒否する",
++    async (field) => {
++      const update = mocks.updateChild.getMockImplementation()!;
++      mocks.updateChild.mockImplementationOnce(async (query) => {
++        if (field === "status") {
++          actor!.status = "SUSPENDED";
++        } else {
++          actor!.club!.planType = "STARTER";
++        }
++        return update(query);
++      });
++      const before = structuredClone(children);
++      expect(await updateChildForUser(INPUT)).toEqual({
++        outcome: "NOT_FOUND",
++      });
++      expect(children).toEqual(before);
++    },
++  );
++
++  it("影響slug取得失敗ならChild更新もrollbackする", async () => {
++    const before = structuredClone(children);
++    mocks.affected.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
++    expect(await updateChildForUser(INPUT)).toEqual({
++      outcome: "UPDATE_FAILED",
++    });
++    expect(children).toEqual(before);
++  });
++
++  it("更新件数が不整合なら成功にせずrollbackする", async () => {
++    mocks.updateChild.mockResolvedValueOnce({
++      count: 2,
++    });
++    expect(await updateChildForUser(INPUT)).toEqual({
++      outcome: "UPDATE_FAILED",
++    });
++    expect(mocks.affected).not.toHaveBeenCalled();
++  });
++});
++
++// 作成と編集の共通境界を、両方の公開関数から確認する。
++describe.each([
++  ["作成", createChildForUser, NEW_CHILD_ID],
++  ["編集", updateChildForUser, CHILD_ID],
++] as const)("%sの認可・例外境界", (_label, operation, childId) => {
++  it.each(["clubId", "actorMembershipId", "userId"] as const)(
++    "%sが別人・別クラブなら変更しない",
++    async (field) => {
++      actor![field === "actorMembershipId" ? "id" : field] = "other";
++      const before = structuredClone({
++        children,
++        memberships,
++      });
++      expect(await operation({
++        ...INPUT,
++        childId,
++      })).toEqual({
++        outcome: "FORBIDDEN",
++      });
++      expect({
++        children,
++        memberships,
++      }).toEqual(before);
++      expect(mocks.createChild).not.toHaveBeenCalled();
++      expect(mocks.updateChild).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each(["clubId", "actorMembershipId", "userId"] as const)(
++    "入力の%sが現在の認可スコープと違えば変更しない",
++    async (field) => {
++      expect(await operation({
++        ...INPUT,
++        childId,
++        [field]: "other",
++      })).toEqual({
++        outcome: "FORBIDDEN",
++      });
++      expect(mocks.createChild).not.toHaveBeenCalled();
++      expect(mocks.updateChild).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each([null, undefined])("スコープ%jをDBへ渡さない", async (input) => {
++    expect(await operation(input as unknown as ChildForUserInput)).toEqual({
++      outcome: "FORBIDDEN",
++    });
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++
++  it("本人照合のselectは氏名・emailを含めない", async () => {
++    await operation({
++      ...INPUT,
++      childId,
++    });
++    expect(mocks.actor).toHaveBeenCalledWith({
++      where: actorWhere(),
++      select: {
++        id: true,
++        clubId: true,
++        userId: true,
++        status: true,
++        user: {
++          select: {
++            id: true,
++          },
++        },
++        club: {
++          select: {
++            id: true,
++            slug: true,
++            planType: true,
++          },
++        },
++      },
++    });
++  });
++
++  it.each([null, "INVITED", "SUSPENDED", "WITHDRAWN"] as const)(
++    "親Membershipが%jなら変更しない",
++    async (status) => {
++      if (status === null) {
++        actor = null;
++      } else {
++        actor!.status = status;
++      }
++      expect(await operation({
++        ...INPUT,
++        childId,
++      })).toEqual({
++        outcome: "FORBIDDEN",
++      });
++      expect(mocks.createChild).not.toHaveBeenCalled();
++      expect(mocks.updateChild).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each(["STARTER", "PRO"] as const)("%sプランでは変更しない", async (planType) => {
++    actor!.club!.planType = planType;
++    expect(await operation({
++      ...INPUT,
++      childId,
 +    })).toEqual({
 +      outcome: "FORBIDDEN",
 +    });
-+    expect(mocks.transaction).toHaveBeenCalledTimes(2);
-+    expect(mocks.nameUpdate).toHaveBeenCalledTimes(1);
-+    expect(storedUser!.name).toBe("変更前");
++  });
++
++  it("返された本人とクラブの対応が違う場合も変更しない", async () => {
++    mocks.actor.mockResolvedValueOnce({
++      ...actor,
++      user: {
++        id: "other-user",
++      },
++    });
++    expect(await operation({
++      ...INPUT,
++      childId,
++    })).toEqual({
++      outcome: "FORBIDDEN",
++    });
++  });
++
++  it.each(["clubId", "actorMembershipId", "userId"] as const)(
++    "%sの欠損ではwhereを広げない",
++    async (field) => {
++      expect(await operation({
++        ...INPUT,
++        childId,
++        [field]: undefined,
++      })).toEqual({
++        outcome: "FORBIDDEN",
++      });
++      expect(mocks.transaction).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each([
++    {
++      childId: "invalid-id",
++    },
++    {
++      name: "   ",
++    },
++    {
++      name: "あ".repeat(101),
++    },
++    {
++      grade: "ELEMENTARY_7",
++    },
++    {
++      grade: undefined,
++    },
++  ])("不正入力%jはDBへ渡さない", async (invalid) => {
++    expect(await operation({
++      ...INPUT,
++      childId,
++      ...invalid,
++    } as ChildForUserInput)).toEqual({
++      outcome: "UPDATE_FAILED",
++    });
++    expect(mocks.transaction).not.toHaveBeenCalled();
 +  });
 +
 +  it.each([
@@ -681,16 +1064,37 @@ index 31cfab9..814b3fc 100644
 +    ["P2025", "NOT_FOUND"],
 +    ["P2003", "UPDATE_FAILED"],
 +    ["P9999", "UPDATE_FAILED"],
-+  ])("%sは再試行せず固定結果%sを返す", async (code, outcome) => {
-+    mocks.nameUpdate.mockRejectedValueOnce(prismaError(code));
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
++  ])("%sは再試行せず%sを返す", async (code, outcome) => {
++    mocks.actor.mockRejectedValueOnce(prismaError(code));
++    expect(await operation({
++      ...INPUT,
++      childId,
 +    })).toEqual({
 +      outcome,
 +    });
 +    expect(mocks.transaction).toHaveBeenCalledTimes(1);
-+    expect(storedUser!.name).toBe("変更前");
++  });
++
++  it("P2034だけ初回に加えて3回再試行する", async () => {
++    mocks.actor.mockRejectedValue(prismaError("P2034"));
++    expect(await operation({
++      ...INPUT,
++      childId,
++    })).toEqual({
++      outcome: "CONFLICT",
++    });
++    expect(mocks.transaction).toHaveBeenCalledTimes(4);
++  });
++
++  it("P2034再試行は認可確認からやり直す", async () => {
++    mocks.actor.mockRejectedValueOnce(prismaError("P2034"));
++    expect(await operation({
++      ...INPUT,
++      childId,
++    })).toMatchObject({
++      outcome: "UPDATED",
++    });
++    expect(mocks.actor).toHaveBeenCalledTimes(2);
 +  });
 +
 +  it.each([
@@ -703,27 +1107,14 @@ index 31cfab9..814b3fc 100644
 +      message: PRIVATE_DETAIL,
 +      cause: PRIVATE_DETAIL,
 +    },
-+  ])("任意の例外を反射・再試行しない: %#", async (error) => {
-+    mocks.nameActor.mockRejectedValueOnce(error);
-+    expect(await updateAccountNameForUser({
-+      ...SCOPE,
-+      name: "新氏名",
++  ])("任意の例外を結果やログへ反射しない: %#", async (error) => {
++    mocks.actor.mockRejectedValueOnce(error);
++    expect(await operation({
++      ...INPUT,
++      childId,
 +    })).toEqual({
 +      outcome: "UPDATE_FAILED",
 +    });
 +    expect(mocks.transaction).toHaveBeenCalledTimes(1);
-+    expect(mocks.nameUpdate).not.toHaveBeenCalled();
-+  });
-+});
-+
-+// 【追加：F07粒度3】想定外のDB応答も安全な失敗へ閉じる。
-+describe("本人氏名更新の不整合境界", () => {
-+  it.each([null, undefined])("スコープ%jではtransactionを開始しない", async (input) => {
-+    expect(await updateAccountNameForUser(
-+      input as unknown as Parameters<typeof updateAccountNameForUser>[0],
-+    )).toEqual({
-+      outcome: "FORBIDDEN",
-+    });
-+    expect(mocks.transaction).not.toHaveBeenCalled();
 +  });
 +});
