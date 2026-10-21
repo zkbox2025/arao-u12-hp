@@ -1,1174 +1,765 @@
-diff --git a/docs/runbooks/club-account.md b/docs/runbooks/club-account.md
+diff --git a/docs/implementation/phases/F08.md b/docs/implementation/phases/F08.md
+index 9e14e2d..5deeebe 100644
+--- a/docs/implementation/phases/F08.md
++++ b/docs/implementation/phases/F08.md
+@@ -22,4 +22,33 @@ F08. 不具合・サポート報告送信
+ 理解する重要箇所
+ - DB保存を正式受付、メールを補助通知とする理由
+ - 報告者snapshotを残す理由
+-- client入力とserver取得データの境界
+\ No newline at end of file
++- client入力とserver取得データの境界
++
++<!-- 【追加：F08粒度1】ユーザー回答と入力・metadata・結果の責務境界を明文化する。 -->
++粒度1の仕様・入力・結果契約
++- 全ACTIVE会員は、CLUB_APPを利用できるプラン内のOWNER・COACH・OFFICER・MEMBER全員を指す。
++  現在はSTANDARDが対象であり、STARTER・PROへ利用範囲を広げない。
++- categoryはBUG・QUESTION・REQUEST・OTHERの4種。初期値はBUG、messageは空文字とする。
++  FormDataのcategory・messageは各1個の文字列を要求し、欠損・File・重複・不正値を拒否する。
++- messageはtrim後の空欄を拒否し、JavaScriptのlengthで2000文字以内とする。
++  表示用valuesを2000文字へ制限しても、保存前の検証は切り詰め前の入力に対して行う。
++- 入力の成功値とActionStateのvaluesはcategory・messageだけを持つ。
++  clubId・membershipId・reporter情報・status・通知結果・任意の戻り先を入力からコピーしない。
++- pageUrlは送信時のマイページを示す相対パスとする。直前ページの履歴管理は追加しない。
++  後続Actionが認可済みslugから `/club/{encodedSlug}/account` を構築してallowlistを確認する。
++  クライアントのpageUrl・Referer・Hostを保存先の根拠にせず、query・fragmentは保存しない。
++  別クラブ・認証・招待・外部URL等は許可せず、許可できないmetadataはnullとする。
++- userAgentは後続Actionがawait headers()から取得し、制御文字除去・trim後に512文字へ制限する。
++  欠損・空はnullとする。UAは偽装可能な補助情報であり、認証・認可には利用しない。
++- reporterName・reporterEmailは保存時のAppUser、reporterRoleは最新Membershipからsnapshot保存する。
++  name・emailのnullを許可し、AuthとAppUserのemailを同期・修復しない。
++- 新規SupportReportはOPENで作成する。既存status enumや管理用列は変更しない。
++- DB受付内部はCREATED・ALREADY_ACCEPTED・拒否・失敗を区別する。
++  検証済みrequestIdを既存SupportReport.idへ使用する重複対策と、本人・内容の照合は後続Repositoryが行う。
++  requestIdの形式一致だけでは認証・認可や一回限り保存を保証しない。
++- 通知は固定結果と固定notifyErrorコードだけを扱い、SDK/DB例外の原文・本文・snapshotをログへ渡さない。
++  通知の設定不足・失敗・結果不明や通知結果保存の失敗でも、保存済みの受付成功を維持する。
++- 成功はActionStateで返し、新requestIdのkeyで報告フォーム内側だけをresetして固定トーストを表示する。
++  ページ全体のredirectで既存の氏名・Childフォームの未保存入力を消さない。
++- 粒度1の純粋関数と型は、認可・snapshot取得・DB保存・通知・画面resetを実行しない。
++  Repository、通知adapter、Service、Action、Pageへの接続は後続粒度で実装する。
+diff --git a/domain/club/support/support-report-form.test.ts b/domain/club/support/support-report-form.test.ts
 new file mode 100644
-index 0000000..d20137b
+index 0000000..6e285d7
 --- /dev/null
-+++ b/docs/runbooks/club-account.md
-@@ -0,0 +1,176 @@
-+<!-- docs/runbooks/club-account.md -->
-+
-+# F07 マイページ・本人氏名・複数Childの受入手順
-+
-+F07粒度10の専用試験と手動受入の手順です。実装済み、mock試験済み、実DB試験済み、
-+ブラウザー確認済みを分けて記録します。patch作成・適用や通常テストの成功だけで
-+F07受入完了にはしません。この手順書は実DB操作、migration、実Auth変更、メール送信を代行しません。
-+
-+## 対象と変更しないもの
-+
-+- 本人氏名、複数Childの新規作成・編集、現在クラブへの所属追加・所属解除が対象です。
-+- emailはAuthとAppUserそれぞれの値を表示するだけです。Auth email・PWの更新は対象外です。
-+- Child本体は親のグローバルデータです。氏名・学年の編集は他クラブにも反映されます。
-+- 学年は未設定を許可し、DBではnullです。所属解除は現在クラブの所属をWITHDRAWNにします。
-+- 既存Childの再利用では複製しません。再有効化はWITHDRAWNだけです。
-+- SUSPENDED・INVITEDの本人による再有効化、Child本体の物理削除は提供しません。
-+- schema・migration・既存test:db・依存パッケージ・Auth設定は変更しません。
-+
-+## 操作からDBまでの追跡箇所
-+
-+画面・Actionの基点は `app/(club-app)/club/[clubSlug]/account/` です。
-+
-+| 段階 | ファイル・関数、入力と出力 | DB変更 |
-+| --- | --- | --- |
-+| 表示 | `page.tsx / ClubAccountPage` がslugで認可し、`getClubAccount(context)` の表示DTOをフォームへ渡す | 読取のみ |
-+| 確認 | `AccountNameForm`・`ChildForm`・`ChildMembershipOperations` → `AccountConfirmDialog.tsx / useConfirmedAccountForm` がFormDataを保持し、確定後にActionへ渡す | なし |
-+| Action | `actions.ts` の各Actionがslugで再認可し、requestId・入力・束縛したChild IDを再確認する | Service経由 |
-+| 本人氏名 | `updateAccountNameAction` → `update-club-account.ts / updateClubAccountName` → `club-account-repository.ts / updateAccountNameForUser` | 本人AppUser.nameだけを更新 |
-+| 新規Child | `createChildAction` → `createClubChild` → `club-child-repository.ts / createChildForUser` | requestIdをChild IDとして、Childと初回ACTIVE所属を同一transactionで作成 |
-+| グローバル編集 | `updateChildAction` → `updateClubChild` → `updateChildForUser` | 本人Childのname・gradeだけを更新 |
-+| 所属の追加・再開 | `addChildToClubAction` → `addClubChild` → `addChildToClubForUser` | 現在クラブの所属作成、またはWITHDRAWNからACTIVEへ変更 |
-+| 所属解除 | `withdrawChildFromClubAction` → `withdrawClubChild` → `withdrawChildFromClubForUser` | 現在クラブのACTIVE所属だけをWITHDRAWNへ変更 |
-+| 候補 | `getAttachableChildrenAction` → `get-club-account.ts / getAttachableClubChildren` → `findAttachableChildrenForUser` | 本人が追加UIを開いた時だけ読取 |
-+| 再検証・完了 | `actions.ts / finishSavedAccount` がRepository由来slugを `revalidateClubAccountNamePaths` または `revalidateClubAccountPaths` へ渡し、固定account URLへredirect | 再保存なし |
-+| ログアウト | `AccountLogoutButton` が確認後に `app/(club-app)/club/actions.ts / logoutAction` を呼ぶ | Authセッションを終了、アプリDB更新なし |
-+
-+Serviceは `src/application/club/account/`、Repositoryは
-+`src/infrastructure/prisma/repositories/`、再検証は
-+`app/(club-app)/club/revalidate-club-paths.ts` です。
-+氏名更新は影響クラブの会員管理とaccount、Child編集は影響クラブのaccountを再検証します。
-+作成・所属追加・解除の影響先は現在クラブです。保存済みで再検証が失敗した場合は
-+`saved-reload` の案内に従って再読込し、保存操作を無条件に再送しません。
-+今回のフローに後続粒度待ちの接続はありません。公開先の未提供は後述の受入保留事項です。
-+
-+## DBなしの自動回帰
-+
-+実接続用flagを設定しない環境で実行します。共有Prisma clientはdotenv初期化を持つため、
-+この専用試験ではトップレベルimportせず、専用clientをガード後に注入します。
-+`.env` の内容や接続文字列を表示・報告しません。
-+
-+```sh
-+npm test -- \
-+  domain/club/account \
-+  src/application/club/account \
-+  tests/club-account-repository.test.ts \
-+  tests/club-child-repository.test.ts \
-+  tests/club-account-actions.test.ts \
-+  tests/club-account-revalidation.test.ts \
-+  tests/club-account-navigation.test.ts \
-+  tests/club-account-pages.test.ts \
-+  tests/club-account-forms.test.ts \
-+  tests/club-account.flow.integration.test.ts \
-+  tests/club-membership-authorization.test.ts \
-+  tests/club-members-actions.test.ts \
-+  domain/club/club-login-destination.test.ts \
-+  domain/club/club-revalidation-paths.test.ts
-+```
-+
-+`tests/club-account.flow.integration.test.ts` の接続ガード15件はDBなしで実行でき、
-+実DBの16件は両flagが揃わなければskipします。
-+既存DB試験には共有clientをトップレベルimportするものがあります。
-+通常実行へ `RUN_DB_INTEGRATION_TESTS=1` を持ち越さず、この手順で既存test:dbを起動しません。
-+
-+## 使い捨てローカルDBの事前確認と実行
-+
-+1. 日常の開発データ・本番データを含まない、破棄できる専用ローカルDBを用意します。
-+2. 既存migrationが適用済みであることを担当者が確認します。専用試験はmigration・seed・reset・
-+   schema変更を実行しません。fixtureに必要なAppUserはDBだけに作成し、実Authは変更しません。
-+3. 接続設定は承認された方法でプロセス環境へ渡します。URL・PWをコマンド引数、
-+   チャット、結果ファイルへ貼り付けません。専用scriptはdotenvを自動読込しません。
-+4. loopbackがリモートDBへのトンネル・proxyではないことを担当者が確認します。
-+   URLの検査だけでは転送先やDBが空であることまでは証明できません。
-+5. 使い捨てであることを確認した担当者だけが `CLUB_ACCOUNT_DISPOSABLE=1` を設定します。
-+
-+| 環境設定 | 許可・用途 |
-+| --- | --- |
-+| `DATABASE_URL` | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、認証あり。query・fragmentなし |
-+| `CLUB_ACCOUNT_DISPOSABLE` | 担当者が使い捨て確認後に設定する1 |
-+| `NODE_ENV` | productionを拒否 |
-+| `RUN_CLUB_ACCOUNT_TESTS` | F07専用flag。専用scriptが1に設定 |
-+| `RUN_DB_INTEGRATION_TESTS` | DB用flag。専用scriptが1に設定 |
-+
-+事前条件を満たした環境で、次の専用コマンドだけを実行します。
-+
-+```sh
-+npm run test:club-account:local
-+```
-+
-+両flagがあっても接続条件が不正なら、接続前に固定メッセージで失敗します。
-+失敗報告に設定値・Prisma原文・個人情報を含めません。ケース名・基準コミット・
-+PostgreSQLとPrismaの版・migration適用状況・pass/fail/skipと理由を記録します。
-+接続先を広げるためにガードを外しません。
-+
-+fixtureは各ケースのUUIDで分離し、作成したクラブ・AppUserのUUIDだけをcleanupします。
-+全件削除・truncateは行いません。クラブ・親の削除による既存Cascadeで関連fixtureを片付けます。
-+途中失敗・強制終了時は専用環境に残る可能性があるため、他データと共用せず担当者が残存を確認します。
-+
-+## 実DB試験が確認することと限界
-+
-+- Child所有者とparentUserId、親MembershipのclubIdとuserIdの複合FK、存在しないクラブの拒否。
-+- 同一Child・同一クラブのunique、同じ作成識別子の競合・再送でも保存は1回だけ。
-+- Childと初回所属の実transaction rollback。FK失敗と、Repositoryの初回所属createへの障害注入を区別。
-+- 自分と他人、クラブA/B、現在所属と候補、親所属の失効、対象ID・requestIdの改ざん。
-+- WITHDRAWNだけの再有効化、SUSPENDED・INVITED拒否、解除時のChild・他クラブ所属の保持。
-+- 別クラブから編集したChildの再読取、複製しないこと、氏名更新でemail・Child・所属を変えないこと。
-+- 作成・編集・解除・再有効化・親の失効を同時開始した結果と永続化の整合性。
-+- DBから導出した影響先だけを再検証へ渡すことと、固定URLへのredirect。
-+
-+Auth本人取得・Actionの入口認可・Nextのredirect・revalidatePathは試験用境界へ置換します。
-+Service・Repository・DB制約は実物です。失効済みcontextも渡し、Repository側の再確認を検証します。
-+この試験は実Auth、Nextの実キャッシュ、HTTP経由のOrigin検査、ブラウザーを検証しません。
-+`Promise.all` による競合試験は同時開始の結果を確認しますが、特定SQLの順序やP2034発生を
-+強制しません。再試行上限・特定エラー注入は既存Repository単体試験と分けて記録します。
-+
-+## 実ブラウザーの受入
-+
-+担当者が用意した使い捨てアカウントとクラブA/Bだけで確認します。
-+自動DB試験のfixtureにはAuthユーザーを作らないため、これをそのままログイン用途へ流用しません。
-+
-+| 観点 | 操作と期待結果 |
-+| --- | --- |
-+| ロール | OWNERはLINE設定・会員管理、OWNER/COACH/OFFICERは管理用イベント・お知らせ、MEMBERは一般導線。非表示のURLへ直接アクセスしても既存認可で拒否される |
-+| PlatformAdmin | 有効なPlatformAdmin本人にだけ専用リンクが表示される。表示と遷移先の完成度は別判定 |
-+| クラブ切替 | 利用可能なACTIVE所属が0/1件なら非表示、2件以上なら表示。現時点のSTANDARDだけを件数へ含め、STARTER・PROを足さない |
-+| 複数Child | 2人以上を並べ、ラベル・入力ID・エラー・pendingが混線しない。学年未設定の保存と再読込も確認 |
-+| 確認と入力保持 | 氏名・Childの編集内容を変えて確認を開く。キャンセルで入力が残り、送信されない。確定後だけ保存する |
-+| アクセシビリティ | ダイアログの見出し、初期フォーカス、Tab/Shift+Tabの閉じ込め、Escと閉じる操作、復帰先を確認。pending中は閉じない |
-+| 所属操作 | 他クラブの既存Childを再利用。現在クラブから外しても他クラブ表示が残り、再追加で同じChild・所属を再利用する |
-+| 連打と再読込 | 確定連打・通信遅延・戻る・再読込を確認。同じ作成識別子を再送しても重複せず、次の新規登録は新しい識別子になる |
-+| エラー | 入力エラーが正しい欄に出てフォーカス移動する。別Childのエラーへ混ざらず、例外原文を画面へ出さない |
-+| 横断更新とキャッシュ | Aで氏名・Childを編集しBでも再読取。氏名は会員管理にも反映する。再検証失敗時は保存済み案内となる |
-+| email | AuthとAppUserの値を表示するだけで、編集欄がない。フォーム改ざんでもemailを更新しない |
-+| 外部リンク | 正式HP・Instagramの承認済みhttps先、別タブ、relを確認。不正URLは表示されない |
-+| ログアウト | マイページの確認をキャンセルして入力保持、確定してログイン画面へ。Headerの既存ログアウトとは別に記録 |
-+
-+フォームのnode試験はhook境界を模しており、DOM・native dialog・実際の入力保持・
-+ブラウザー履歴・beforeunloadを保証しません。上記の結果を別途残します。
-+
-+## HTTP経由の直接呼び出し
-+
-+関数直接試験をHTTPの保護の証明にしません。使い捨てローカルアプリで次を確認します。
-+
-+1. 正常な保存リクエストを開発者ツールで識別し、変更前のfixture件数・値を記録します。
-+2. ローカル検証用のHTTPクライアントで、そのリクエストのOriginを別Originへ変更します。
-+   現在のAction識別子やCookieを公開資料・ログへ保存せず、実アカウントの認証情報を流用しません。
-+3. Nextがforeign Originを拒否し、DBに変化がないことを確認します。拒否応答・固定された挙動と
-+   アプリログの機密値非出力を記録します。Action識別子を文書へ固定しません。
-+4. 正常Originで対象childId、requestId、clubId、親ID、returnTo・影響slugをそれぞれ改ざんし、
-+   他人・他クラブの更新や外部redirectが起きないことを確認します。
-+5. 表示後に親Membershipを失効させたリクエストでも保存できないことを確認します。
-+
-+## 保留事項と結果記録
-+
-+| 項目 | patch作成時点の状態 |
-+| --- | --- |
-+| DBなしガード | 15件成功。実DBへ接続せずに確認 |
-+| 実DB統合 | 16件。実DB変更を行わない条件のため未実行・skip。実制約・rollback・競合の成功は未確認 |
-+| 既存単体・回帰 | 上記の対象18ファイルで、ガードを含む812件成功・実DB16件skip。一時環境で実行 |
-+| 実Auth・ブラウザー・HTTP | 未実施。別の受入結果が必要 |
-+| 規約・プライバシー | `domain/club/account/account-links.ts / ACCOUNT_LEGAL_URLS` はnull。公開URL・文面未確定。仮ページで代替しない |
-+| Platform遷移先 | `AccountNavigation` の `/platform/support` はF07外の依存。表示確認だけで到達済みにしない |
-+| F07受入完了 | 上記の未確認・未提供事項が残る間は未達 |
-+
-+実施時は各項目に担当者・日付・基準コミット・実行環境・結果と根拠を追記します。
-+未実行をpassへ読み替えず、失敗した場合もこの粒度で本体を勝手に改修しません。
-+該当ファイル・関数・条件を特定し、修正すべき粒度と計画変更案を報告します。
-diff --git a/package.json b/package.json
-index 268edea..05e6bb6 100644
---- a/package.json
-+++ b/package.json
-@@ -25,7 +25,8 @@
-     "club:invitation:recover": "node --conditions=react-server --import tsx scripts/recover-club-invitation.ts",
-     "test:club-invitation:recovery": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-invitation-recovery.integration.test.ts",
-     "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts",
--    "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts"
-+    "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts",
-+    "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts"
-   },
-   "dependencies": {
-     "@axiomhq/js": "^1.8.0",
-diff --git a/tests/club-account.flow.integration.test.ts b/tests/club-account.flow.integration.test.ts
-new file mode 100644
-index 0000000..63aed3a
---- /dev/null
-+++ b/tests/club-account.flow.integration.test.ts
-@@ -0,0 +1,972 @@
-+// tests/club-account.flow.integration.test.ts
-+// F07の接続ガードと実DBフロー。Auth・Nextの境界だけを置換し、DB接続は明示設定後に行う。
++++ b/domain/club/support/support-report-form.test.ts
+@@ -0,0 +1,296 @@
++// domain/club/support/support-report-form.test.ts
++// 報告入力の境界、FormData改ざん、表示用valuesと内部・公開結果の分離を確認する。
 +
 +import {
-+  AsyncLocalStorage,
-+} from "node:async_hooks";
-+import {
-+  randomUUID,
-+} from "node:crypto";
-+
-+import type {
-+  PrismaClient,
-+} from "@prisma/client";
-+import {
-+  afterAll,
-+  afterEach,
-+  beforeAll,
-+  beforeEach,
 +  describe,
 +  expect,
++  expectTypeOf,
 +  it,
-+  vi,
 +} from "vitest";
 +
-+import type {
-+  ClubAccessContext,
-+} from "@/app/(club-app)/club/club-membership-authorization";
 +import {
 +  createInitialActionState,
 +} from "@/domain/shared/action-state";
++import {
++  isRequestId,
++} from "@/domain/shared/request-id";
 +import type {
-+  ClubMembershipStatus,
++  SupportReport,
++  SupportReportCategory,
 +} from "@/types/prisma";
 +
-+type Environment = Record<string, string | undefined>;
-+type Fixture = {
-+  clubs: string[];
-+  users: string[];
-+  a: ClubAccessContext;
-+  b: ClubAccessContext;
-+  shared: string;
-+  sibling: string;
-+  foreign: string;
-+  available: string;
-+  withdrawn: string;
-+  suspended: string;
-+  invited: string;
++import {
++  buildSupportReportFormValues,
++  parseSupportReportFormData,
++  SUPPORT_REPORT_CATEGORY_OPTIONS,
++  SUPPORT_REPORT_INITIAL_VALUES,
++  SUPPORT_REPORT_MESSAGE_MAX_LENGTH,
++  validateSupportReportInput,
++  type SupportReportActionState,
++  type SupportReportFormValues,
++} from "./support-report-form";
++import type {
++  SupportReportAcceptanceResult,
++  SupportReportCreationResult,
++  SupportReportMetadata,
++  SupportReportNotificationErrorCode,
++  SupportReportNotificationResult,
++  SupportReportReceipt,
++} from "./support-report-types";
++
++// 特別な値を含まない単一項目のFormDataを毎回用意する。
++function form(): FormData {
++  const data = new FormData();
++  data.set("category", "BUG");
++  data.set("message", "報告本文");
++  return data;
++}
++
++describe("報告の許可入力", () => {
++  it.each(["BUG", "QUESTION", "REQUEST", "OTHER"])("%sとtrim後の本文を許可する", (category) => {
++    const input = {
++      category,
++      message: "　 Ａ画面で\n  エラーになりました。　 ",
++      clubId: "foreign-club",
++      membershipId: "foreign-membership",
++      reporterEmail: "private@example.test",
++      reporterRole: "OWNER",
++      status: "RESOLVED",
++      notifyError: "raw-secret",
++    };
++    expect(validateSupportReportInput(input)).toEqual({
++      success: true,
++      data: {
++        category,
++        message: "Ａ画面で\n  エラーになりました。",
++      },
++    });
++    expect(input.message).toBe("　 Ａ画面で\n  エラーになりました。　 ");
++  });
++
++  it.each([
++    undefined,
++    null,
++    [],
++    "報告",
++    123,
++    {},
++  ])("不正な入力全体で両方の項目エラーを返す %#", (input) => {
++    expect(validateSupportReportInput(input)).toEqual({
++      success: false,
++      fieldErrors: {
++        category: ["種別を選択してください。"],
++        message: ["内容を入力してください。"],
++      },
++    });
++  });
++
++  it.each([
++    undefined,
++    null,
++    123,
++    "",
++    "BUG ",
++    "bug",
++    "OPEN",
++    "__proto__",
++    "constructor",
++    new File(["BUG"], "category.txt"),
++  ])("不正categoryをBUGへ丸めて保存しない %#", (category) => {
++    expect(validateSupportReportInput({
++      category,
++      message: "本文",
++    })).toEqual({
++      success: false,
++      fieldErrors: {
++        category: ["種別を選択してください。"],
++      },
++    });
++  });
++
++  it.each([
++    undefined,
++    null,
++    123,
++    [],
++    {},
++    "",
++    "　 \t\r\n ",
++    new File(["秘密を含む本文"], "message.txt"),
++  ])("空欄・非文字列の本文を拒否する %#", (message) => {
++    expect(validateSupportReportInput({
++      category: "BUG",
++      message,
++    })).toEqual({
++      success: false,
++      fieldErrors: {
++        message: ["内容を入力してください。"],
++      },
++    });
++  });
++
++  it("trim後の2000文字を許可し、2001文字は成功値へ含めない", () => {
++    expect(validateSupportReportInput({
++      category: "OTHER",
++      message: ` ${"あ".repeat(SUPPORT_REPORT_MESSAGE_MAX_LENGTH)} `,
++    }).success).toBe(true);
++    expect(validateSupportReportInput({
++      category: "OTHER",
++      message: "あ".repeat(SUPPORT_REPORT_MESSAGE_MAX_LENGTH + 1),
++    })).toEqual({
++      success: false,
++      fieldErrors: {
++        message: ["内容は2000文字以内で入力してください。"],
++      },
++    });
++  });
++
++  it("既存フォームと同じUTF-16のlengthで上限を判定する", () => {
++    expect(validateSupportReportInput({
++      category: "BUG",
++      message: "😀".repeat(1000),
++    }).success).toBe(true);
++    expect(validateSupportReportInput({
++      category: "BUG",
++      message: `${"😀".repeat(1000)}あ`,
++    }).success).toBe(false);
++  });
++});
++
++describe("FormDataと表示用values", () => {
++  it("成功値と表示用valuesへ報告者・metadata・通知状態をコピーしない", () => {
++    const data = form();
++    for (const key of [
++      "clubId",
++      "membershipId",
++      "reporterName",
++      "reporterEmail",
++      "reporterRole",
++      "pageUrl",
++      "userAgent",
++      "status",
++      "notifiedAt",
++      "notifyError",
++      "returnTo",
++      "requestId",
++    ]) {
++      data.set(key, "private-token@example.test");
++    }
++    const values = {
++      category: "BUG",
++      message: "報告本文",
++    };
++    expect(parseSupportReportFormData(data)).toEqual({
++      success: true,
++      data: values,
++    });
++    expect(buildSupportReportFormValues(data)).toEqual(values);
++  });
++
++  describe.each(["category", "message"] as const)("%sの単一文字列制約", (field) => {
++    it.each(["missing", "file", "duplicate", "same-duplicate"])(
++      "%sでも表示値の復元を保存前の検証と混同しない",
++      (kind) => {
++        const data = form();
++        if (kind === "missing") {
++          data.delete(field);
++        } else if (kind === "file") {
++          data.set(field, new File(["private"], "input.txt"));
++        } else {
++          data.append(field, kind === "same-duplicate" ? String(data.get(field)) : "OTHER");
++        }
++        const result = parseSupportReportFormData(data);
++        expect(result.success).toBe(false);
++        if (!result.success) {
++          expect(Object.keys(result.fieldErrors)).toEqual([field]);
++        }
++        expect(buildSupportReportFormValues(data)[field])
++          .toBe(SUPPORT_REPORT_INITIAL_VALUES[field]);
++      },
++    );
++  });
++
++  it("表示用本文の切り詰めが2001文字の不正入力を成功に変えない", () => {
++    const data = form();
++    data.set("category", "invalid-private-category");
++    data.set("message", "あ".repeat(2001));
++    const values = buildSupportReportFormValues(data);
++    expect(values.category).toBe("BUG");
++    expect(values.message).toHaveLength(2000);
++    const result = parseSupportReportFormData(data);
++    expect(result.success).toBe(false);
++    if (!result.success) {
++      expect(Object.keys(result.fieldErrors).sort()).toEqual(["category", "message"]);
++    }
++    expect(data.get("message")).toHaveLength(2001);
++  });
++
++  it("表示時の未保存空白を保持し、新しいオブジェクトを返す", () => {
++    const data = form();
++    data.set("message", " 未保存の本文 \n ");
++    const first = buildSupportReportFormValues(data);
++    const second = buildSupportReportFormValues(data);
++    expect(first.message).toBe(" 未保存の本文 \n ");
++    expect(first).not.toBe(second);
++  });
++
++  it("FormData以外を渡されても固定の初期表示値と項目エラーに限定する", () => {
++    const invalid = null as unknown as FormData;
++    expect(buildSupportReportFormValues(invalid)).toEqual(SUPPORT_REPORT_INITIAL_VALUES);
++    expect(parseSupportReportFormData(invalid).success).toBe(false);
++  });
++});
++
++describe("初期stateと内部・公開の型契約", () => {
++  it("共通の初期stateを利用し、報告フォームごとに別requestIdを持つ", () => {
++    const first: SupportReportActionState = createInitialActionState({
++      ...SUPPORT_REPORT_INITIAL_VALUES,
++    });
++    const second = createInitialActionState({
++      ...SUPPORT_REPORT_INITIAL_VALUES,
++    });
++    expect(first.values).toEqual({
++      category: "BUG",
++      message: "",
++    });
++    expect(first.status).toBe("idle");
++    expect(first.fieldErrors).toEqual({});
++    expect(first.formError).toBeNull();
++    expect(first.data).toBeUndefined();
++    expect(isRequestId(first.requestId)).toBe(true);
++    expect(first.requestId).not.toBe(second.requestId);
++  });
++
++  it("DB由来enum・nullableと合わせ、入力・公開結果へsnapshotを漏らさない", () => {
++    expectTypeOf<typeof SUPPORT_REPORT_CATEGORY_OPTIONS[number]["value"]>()
++      .toEqualTypeOf<SupportReportCategory>();
++    expectTypeOf<keyof SupportReportFormValues>().toEqualTypeOf<"category" | "message">();
++    expectTypeOf<SupportReportActionState["data"]>().toEqualTypeOf<undefined>();
++    expectTypeOf<SupportReportMetadata>()
++      .toEqualTypeOf<Pick<SupportReport, "pageUrl" | "userAgent">>();
++    expectTypeOf<SupportReportReceipt["reporterName"]>()
++      .toEqualTypeOf<SupportReport["reporterName"]>();
++    expectTypeOf<SupportReportReceipt["reporterEmail"]>()
++      .toEqualTypeOf<SupportReport["reporterEmail"]>();
++    expectTypeOf<SupportReportReceipt["reporterRole"]>()
++      .toEqualTypeOf<SupportReport["reporterRole"]>();
++    expectTypeOf<SupportReportReceipt["membershipId"]>()
++      .toEqualTypeOf<SupportReport["membershipId"]>();
++    expectTypeOf<keyof SupportReportAcceptanceResult>().toEqualTypeOf<"outcome">();
++    expectTypeOf<Extract<
++      SupportReportCreationResult,
++      { outcome: "CREATED" }
++    >["report"]>().toEqualTypeOf<SupportReportReceipt>();
++    expectTypeOf<Extract<
++      keyof SupportReportReceipt,
++      "internalNote" | "handledByPlatformAdminId" | "notifyError" | "status"
++    >>().toEqualTypeOf<never>();
++    expectTypeOf<SupportReportNotificationErrorCode>().toEqualTypeOf<
++      "EMAIL_CONFIGURATION_MISSING" | "EMAIL_SEND_FAILED" | "EMAIL_SEND_RESULT_UNKNOWN"
++    >();
++    expectTypeOf<Extract<
++      SupportReportNotificationResult,
++      { outcome: "UNKNOWN" }
++    >["errorCode"]>().toEqualTypeOf<"EMAIL_SEND_RESULT_UNKNOWN">();
++  });
++});
+diff --git a/domain/club/support/support-report-form.ts b/domain/club/support/support-report-form.ts
+new file mode 100644
+index 0000000..6e08e09
+--- /dev/null
++++ b/domain/club/support/support-report-form.ts
+@@ -0,0 +1,145 @@
++// domain/club/support/support-report-form.ts
++// サポート報告の許可入力、表示用values、検証結果を定義する。
++
++import type {
++  ActionState,
++  FieldErrors,
++} from "@/domain/shared/action-state";
++import type {
++  SupportReportCategory,
++} from "@/types/prisma";
++
++export const SUPPORT_REPORT_MESSAGE_MAX_LENGTH = 2000;
++
++export const SUPPORT_REPORT_CATEGORY_OPTIONS = [
++  {
++    value: "BUG",
++    label: "不具合",
++  },
++  {
++    value: "QUESTION",
++    label: "質問",
++  },
++  {
++    value: "REQUEST",
++    label: "改善要望",
++  },
++  {
++    value: "OTHER",
++    label: "その他",
++  },
++] as const satisfies readonly {
++  value: SupportReportCategory;
++  label: string;
++}[];
++
++export type SupportReportFormValues = {
++  category: SupportReportCategory;
++  message: string;
 +};
 +
-+const requests = new AsyncLocalStorage<ClubAccessContext>();
-+const paths = new Set<string>();
-+let client: PrismaClient | undefined;
++export type SupportReportFormField = keyof SupportReportFormValues;
 +
-+// 実行用flagが両方揃うまで接続設定を評価しない。
-+function enabled(environment: Environment): boolean {
-+  return environment.RUN_CLUB_ACCOUNT_TESTS === "1" &&
-+    environment.RUN_DB_INTEGRATION_TESTS === "1";
-+}
++export type SupportReportActionState = ActionState<
++  SupportReportFormValues,
++  SupportReportFormField
++>;
 +
-+// queryで接続先を上書きできない専用loopback URLだけを受け付け、原文は出力しない。
-+function localConfiguration(environment: Environment): string {
-+  try {
-+    const url = new URL(environment.DATABASE_URL ?? "invalid");
-+    if (
-+      !enabled(environment) ||
-+      environment.CLUB_ACCOUNT_DISPOSABLE !== "1" ||
-+      environment.NODE_ENV === "production" ||
-+      !["postgres:", "postgresql:"].includes(url.protocol) ||
-+      !["localhost", "127.0.0.1"].includes(url.hostname) ||
-+      url.port !== "54322" ||
-+      url.pathname !== "/postgres" ||
-+      url.search !== "" ||
-+      url.hash !== "" ||
-+      !url.username ||
-+      !url.password
-+    ) {
-+      throw new Error("Invalid configuration");
++export const SUPPORT_REPORT_INITIAL_VALUES: Readonly<SupportReportFormValues> = {
++  category: "BUG",
++  message: "",
++};
++
++export const SUPPORT_REPORT_ACCEPTED_MESSAGE =
++  "不具合報告を受け付けました。開発チームにて確認し、サービスの改善に役立てさせていただきます。ご協力ありがとうございます。";
++
++export const SUPPORT_REPORT_FAILED_MESSAGE =
++  "送信できませんでした。時間をおいてもう一度お試しください。";
++
++export type SupportReportValidationResult =
++  | {
++      success: true;
++      data: SupportReportFormValues;
 +    }
-+    return url.toString();
-+  } catch {
-+    throw new Error("F07専用の使い捨てローカルDB設定と明示flagを確認してください。");
-+  }
++  | {
++      success: false;
++      fieldErrors: FieldErrors<SupportReportFormField>;
++    };
++
++// DBに定義済みの4種だけを許可し、不正値を既定値へ丸めて保存しない。
++function isSupportReportCategory(value: unknown): value is SupportReportCategory {
++  return SUPPORT_REPORT_CATEGORY_OPTIONS.some((option) => option.value === value);
 +}
 +
-+// fixture・SQL・接続文字列をVitestの失敗出力へ展開しない。
-+async function safeCheck(operation: () => Promise<void>): Promise<void> {
-+  try {
-+    await operation();
-+  } catch {
-+    throw new Error("F07統合確認に失敗しました。対象ケースと運用手順を確認してください。");
-+  }
++// 単一の文字列だけを取り出し、File・欠損・重複を入力として採用しない。
++function singleFormString(
++  formData: FormData,
++  field: SupportReportFormField,
++): string | undefined {
++  const entries = formData instanceof FormData ? formData.getAll(field) : [];
++  return (
++    entries.length === 1 &&
++    typeof entries[0] === "string"
++  ) ? entries[0] : undefined;
 +}
 +
-+// ガード試験は実環境を参照せず、架空の設定だけで行う。
-+function sampleEnvironment(): Environment {
++// エラー表示用の値だけを復元する。切り詰めた本文を保存前の検証へ渡してはいけない。
++export function buildSupportReportFormValues(
++  formData: FormData,
++): SupportReportFormValues {
++  const category = singleFormString(formData, "category");
++  const message = singleFormString(formData, "message");
 +  return {
-+    RUN_CLUB_ACCOUNT_TESTS: "1",
-+    RUN_DB_INTEGRATION_TESTS: "1",
-+    CLUB_ACCOUNT_DISPOSABLE: "1",
-+    NODE_ENV: "test",
-+    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
++    category: isSupportReportCategory(category) ? category : "BUG",
++    message: (message ?? "").slice(0, SUPPORT_REPORT_MESSAGE_MAX_LENGTH),
 +  };
 +}
 +
-+// アプリ共有clientのdotenv初期化を避け、ガード後に作った専用clientだけを注入する。
-+vi.mock("@/src/infrastructure/prisma/client", () => ({
-+  prisma: new Proxy({} as PrismaClient, {
-+    get(_target, property) {
-+      if (!client) {
-+        throw new Error("F07専用clientは未初期化です。");
-+      }
-+      const value = Reflect.get(client, property);
-+      return typeof value === "function" ? value.bind(client) : value;
-+    },
-+  }),
-+}));
++// 許可項目だけを検証・正規化する。本人・クラブ・報告者snapshotは後続層で再確認する。
++export function validateSupportReportInput(
++  input: unknown,
++): SupportReportValidationResult {
++  const record = (
++    typeof input === "object" &&
++    input !== null &&
++    !Array.isArray(input)
++  ) ? input as Record<string, unknown> : undefined;
++  const category = isSupportReportCategory(record?.category) ? record.category : null;
++  const message = typeof record?.message === "string" ? record.message.trim() : "";
++  const fieldErrors: FieldErrors<SupportReportFormField> = {};
 +
-+// 実Authは利用せず、リクエストごとの本人を設定する。実際の認可は既存回帰試験で別確認する。
-+vi.mock("@/app/(club-app)/club/club-app-authorization", () => ({
-+  requireClubAppAccess: async (slug: string) => {
-+    const context = requests.getStore();
-+    if (!context || context.club.slug !== slug) {
-+      throw new Error("F07試験リクエストの認可に失敗しました。");
-+    }
-+    return context;
-+  },
-+}));
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: async () => ({
-+    auth: {
-+      getUser: async () => {
-+        const context = requests.getStore();
-+        return {
-+          data: {
-+            user: context ? {
-+              id: context.userId,
-+              email: `${context.userId}@auth.example.test`,
-+            } : null,
-+          },
-+          error: null,
-+        };
-+      },
-+    },
-+  }),
-+}));
-+
-+// Nextの制御例外を識別し、予期しない失敗を成功扱いしない。
-+class RedirectControl extends Error {
-+  constructor(readonly path: string) {
-+    super("F07 test redirect");
++  if (category === null) {
++    fieldErrors.category = ["種別を選択してください。"];
 +  }
++  if (!message) {
++    fieldErrors.message = ["内容を入力してください。"];
++  } else if (message.length > SUPPORT_REPORT_MESSAGE_MAX_LENGTH) {
++    fieldErrors.message = ["内容は2000文字以内で入力してください。"];
++  }
++  if (
++    category === null ||
++    fieldErrors.message !== undefined
++  ) {
++    return {
++      success: false,
++      fieldErrors,
++    };
++  }
++  return {
++    success: true,
++    data: {
++      category,
++      message,
++    },
++  };
 +}
-+vi.mock("next/navigation", () => ({
-+  redirect: (path: string) => {
-+    throw new RedirectControl(path);
-+  },
-+  unstable_rethrow: (error: unknown) => {
-+    if (error instanceof RedirectControl) {
-+      throw error;
-+    }
-+  },
-+}));
-+vi.mock("next/cache", () => ({
-+  revalidatePath: (path: string) => paths.add(path),
-+}));
 +
-+describe("F07統合試験の接続ガード（DBなし）", () => {
++// 表示用valuesを経由せず、元のFormDataを厳密に検証する。
++export function parseSupportReportFormData(
++  formData: FormData,
++): SupportReportValidationResult {
++  return validateSupportReportInput({
++    category: singleFormString(formData, "category"),
++    message: singleFormString(formData, "message"),
++  });
++}
+diff --git a/domain/club/support/support-report-metadata.test.ts b/domain/club/support/support-report-metadata.test.ts
+new file mode 100644
+index 0000000..b8a9799
+--- /dev/null
++++ b/domain/club/support/support-report-metadata.test.ts
+@@ -0,0 +1,129 @@
++// domain/club/support/support-report-metadata.test.ts
++// 許可した現在accountのパスだけを保存し、UAの型・制御文字・長さを制限する。
++
++import {
++  describe,
++  expect,
++  it,
++} from "vitest";
++
++import {
++  sanitizeSupportPageUrl,
++  sanitizeSupportUserAgent,
++  SUPPORT_REPORT_USER_AGENT_MAX_LENGTH,
++} from "./support-report-metadata";
++
++const SLUG = "club-a";
++const ACCOUNT_PATH = "/club/club-a/account";
++
++describe("現在マイページのURL allowlist", () => {
 +  it.each([
-+    "RUN_CLUB_ACCOUNT_TESTS",
-+    "RUN_DB_INTEGRATION_TESTS",
-+  ])("%sがなければ実DB試験を起動しない", (flag) => {
-+    const environment = sampleEnvironment();
-+    delete environment[flag];
-+    expect(enabled(environment)).toBe(false);
-+    expect(() => localConfiguration(environment)).toThrow("F07専用");
++    ACCOUNT_PATH,
++    `${ACCOUNT_PATH}?token=private-token&email=private%40example.test`,
++    `${ACCOUNT_PATH}#access_token=private-token`,
++    `${ACCOUNT_PATH}?code=private-code#refresh_token=private-token`,
++    `${ACCOUNT_PATH}#private-fragment?token=private-token`,
++  ])("query・fragmentを含まないcanonicalパスだけを返す %#", (value) => {
++    expect(sanitizeSupportPageUrl(value, SLUG)).toBe(ACCOUNT_PATH);
 +  });
 +
 +  it.each([
-+    ["CLUB_ACCOUNT_DISPOSABLE", "0"],
-+    ["NODE_ENV", "production"],
-+    ["DATABASE_URL", "invalid"],
-+    ["DATABASE_URL", "https://fixture:fixture@127.0.0.1:54322/postgres"],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@remote.test:54322/postgres"],
-+    [
-+      "DATABASE_URL",
-+      "postgresql://fixture:fixture@localhost.remote.test:54322/postgres"
-+    ],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
-+    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
-+    [
-+      "DATABASE_URL",
-+      "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.test"
-+    ],
-+    [
-+      "DATABASE_URL",
-+      "postgresql://fixture:fixture@127.0.0.1:54322/postgres#fragment"
-+    ],
-+    ["DATABASE_URL", "postgresql://127.0.0.1:54322/postgres"],
-+  ])("不許可の設定を拒否し秘密値を例外へ含めない：%s（%#）", (key, value) => {
-+    const environment = sampleEnvironment();
-+    environment[key] = value;
-+    expect(() => localConfiguration(environment)).toThrow(
-+      "F07専用の使い捨てローカルDB設定と明示flagを確認してください。",
-+    );
++    undefined,
++    null,
++    123,
++    {},
++    "",
++    "https://app.example.test/club/club-a/account?token=private",
++    "https://user:password@app.example.test/club/club-a/account",
++    "https://remote.test/club/club-a/account",
++    "//remote.test/club/club-a/account",
++    "javascript:alert(1)",
++    "data:text/plain,private",
++    "/club/club-b/account",
++    "/club/club-a/events",
++    "/club/club-a/invitation?token=private",
++    "/club/club-a/account/private-token",
++    "/welcome?token=private",
++    "/auth/confirm?token_hash=private",
++    "/club-login/reset-password#access_token=private",
++    "/club/club-a/account/",
++    "/club/club-a/../club-a/account",
++    "/club/club-a/%2e%2e/club-a/account",
++    "/club/club-a%2faccount",
++    "/club/club-a%252faccount",
++    "/club/club-a\\account",
++    " /club/club-a/account",
++    "/club/club-a/account ",
++    "/club/club-a/account\n",
++    "/club/club-a/account?token=private\r\n",
++    new File([ACCOUNT_PATH], "page-url.txt"),
++  ])("許可外の値をパーサーで補正したり生のまま返したりしない %#", (value) => {
++    expect(sanitizeSupportPageUrl(value, SLUG)).toBeNull();
 +  });
 +
-+  it.each(["localhost", "127.0.0.1"])("明示設定された%sだけを許可する", (host) => {
-+    const environment = sampleEnvironment();
-+    environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
-+    expect(localConfiguration(environment)).toBe(environment.DATABASE_URL);
++  it.each([
++    "",
++    " club-a",
++    "club-a ",
++    ".",
++    "..",
++    "club/a",
++    "club\\a",
++    "club?token=private",
++    "club#private",
++    "club%2fa",
++    "club\u0000a",
++    "\ud800",
++  ])("安全な単一segmentにできないslugで例外や別パスを返さない %#", (slug) => {
++    expect(sanitizeSupportPageUrl(ACCOUNT_PATH, slug)).toBeNull();
++  });
++
++  it("日本語slugもencodeURIComponentによるパスだけを許可する", () => {
++    const slug = "荒尾クラブ";
++    const path = `/club/${encodeURIComponent(slug)}/account`;
++    expect(sanitizeSupportPageUrl(`${path}?token=private`, slug)).toBe(path);
++    expect(sanitizeSupportPageUrl(`/club/${slug}/account`, slug)).toBeNull();
++  });
++
++  it("繰り返し呼んでもquery・fragmentを再利用しない", () => {
++    const value = `${ACCOUNT_PATH}?token=private#secret`;
++    expect(sanitizeSupportPageUrl(value, SLUG)).toBe(ACCOUNT_PATH);
++    expect(sanitizeSupportPageUrl(value, SLUG)).toBe(ACCOUNT_PATH);
++    expect(sanitizeSupportPageUrl(ACCOUNT_PATH, null as unknown as string)).toBeNull();
 +  });
 +});
 +
-+const describeDatabase = enabled(process.env) ? describe : describe.skip;
-+
-+describeDatabase("F07 Action・Service・Repositoryと実DB", () => {
-+  let db: PrismaClient;
-+  let fixture: Fixture | undefined;
-+  let actions: typeof import("@/app/(club-app)/club/[clubSlug]/account/actions");
-+  let reads: typeof import("@/src/application/club/account/get-club-account");
-+  let mutations: typeof import("@/src/application/club/account/update-club-account");
-+
-+  // すべての接続条件を検証した後だけSDKを読み込み、アプリ共有clientは読み込まない。
-+  beforeAll(async () => {
-+    await safeCheck(async () => {
-+      const connectionString = localConfiguration(process.env);
-+      const { PrismaClient: Client } = await import("@prisma/client");
-+      const { PrismaPg } = await import("@prisma/adapter-pg");
-+      db = new Client({
-+        adapter: new PrismaPg({ connectionString }),
-+        log: [],
-+      });
-+      client = db;
-+      await db.$connect();
-+      actions = await import("@/app/(club-app)/club/[clubSlug]/account/actions");
-+      reads = await import("@/src/application/club/account/get-club-account");
-+      mutations = await import("@/src/application/club/account/update-club-account");
-+    });
++describe("サーバーから渡すuserAgentの正規化", () => {
++  it.each([
++    undefined,
++    null,
++    123,
++    {},
++    [],
++    "",
++    " \t\r\n ",
++    "\u0000\u007f\u009f",
++    new File(["private"], "user-agent.txt"),
++  ])("空欄・非文字列をnullへ限定する %#", (value) => {
++    expect(sanitizeSupportUserAgent(value)).toBeNull();
 +  });
 +
-+  // 作成前にUUIDを登録し、途中失敗したfixtureも限定cleanupできるようにする。
-+  beforeEach(async () => {
-+    fixture = undefined;
-+    await safeCheck(async () => {
-+      const clubs = [randomUUID(), randomUUID(), randomUUID()];
-+      const users = [randomUUID(), randomUUID()];
-+      const [clubA, clubB] = clubs;
-+      const userId = users[0];
-+      const membershipA = randomUUID();
-+      const membershipB = randomUUID();
-+      // 本人IDと現在クラブを固定したリクエストcontextを作る。
-+      const context = (
-+        id: string,
-+        membershipId: string,
-+      ): ClubAccessContext => ({
-+        userId,
-+        club: {
-+          id,
-+          name: "F07 fixture",
-+          slug: `f07-${id}`,
-+          timezone: "Asia/Tokyo",
-+          planType: "STANDARD",
-+        },
-+        membership: {
-+          id: membershipId,
-+          role: "MEMBER",
-+        },
-+      });
-+      fixture = {
-+        clubs,
-+        users,
-+        a: context(clubA, membershipA),
-+        b: context(clubB, membershipB),
-+        shared: randomUUID(),
-+        sibling: randomUUID(),
-+        foreign: randomUUID(),
-+        available: randomUUID(),
-+        withdrawn: randomUUID(),
-+        suspended: randomUUID(),
-+        invited: randomUUID(),
-+      };
-+      await db.appUser.createMany({
-+        data: users.map((id) => ({
-+          id,
-+          name: "初期氏名",
-+          email: `${id}@database.example.test`,
-+        })),
-+      });
-+      await db.club.createMany({
-+        data: clubs.map((id) => ({
-+          id,
-+          name: "F07 fixture",
-+          slug: `f07-${id}`,
-+          planType: "STANDARD",
-+        })),
-+      });
-+      await db.clubMembership.createMany({
-+        data: [
-+          {
-+            id: membershipA,
-+            clubId: clubA,
-+            userId,
-+          },
-+          {
-+            id: membershipB,
-+            clubId: clubB,
-+            userId,
-+          },
-+          {
-+            id: randomUUID(),
-+            clubId: clubA,
-+            userId: users[1],
-+          },
-+        ],
-+      });
-+      const f = fixture;
-+      await db.child.createMany({
-+        data: [f.shared, f.sibling, f.available, f.withdrawn, f.suspended, f.invited]
-+          .map((id) => ({
-+            id,
-+            parentId: userId,
-+            name: "子ども",
-+            grade: null,
-+          })).concat([{
-+            id: f.foreign,
-+            parentId: users[1],
-+            name: "他人の子ども",
-+            grade: null,
-+          }]),
-+      });
-+      // 親とクラブが一致する初期所属を明示的に作る。
-+      const membership = (
-+        childId: string,
-+        clubId: string,
-+        status: ClubMembershipStatus = "ACTIVE",
-+        parentUserId = userId,
-+      ) => ({
-+        id: randomUUID(),
-+        clubId,
-+        childId,
-+        parentUserId,
-+        status,
-+      });
-+      await db.childClubMembership.createMany({
-+        data: [
-+          membership(f.shared, clubA),
-+          membership(f.shared, clubB),
-+          membership(f.sibling, clubA),
-+          membership(f.foreign, clubA, "ACTIVE", users[1]),
-+          membership(f.available, clubB),
-+          membership(f.withdrawn, clubA, "WITHDRAWN"),
-+          membership(f.suspended, clubA, "SUSPENDED"),
-+          membership(f.invited, clubA, "INVITED"),
-+        ],
-+      });
-+      paths.clear();
-+    });
++  it("表示文字を保持して制御文字を除き、前後だけtrimする", () => {
++    expect(sanitizeSupportUserAgent(" \tMozilla/5.0\r\n (iPhone)\u007f Safari\u009f "))
++      .toBe("Mozilla/5.0 (iPhone) Safari");
++    expect(sanitizeSupportUserAgent("ブラウザー  端末情報"))
++      .toBe("ブラウザー  端末情報");
 +  });
 +
-+  // 各ケースで登録したUUIDのクラブと親だけを削除し、全件削除・truncateは行わない。
-+  afterEach(async () => {
-+    client = db;
-+    const f = fixture;
-+    if (!f) {
-+      return;
-+    }
-+    await safeCheck(async () => {
-+      try {
-+        await db.club.deleteMany({
-+          where: {
-+            id: { in: f.clubs },
-+          },
-+        });
-+      } finally {
-+        await db.appUser.deleteMany({
-+          where: {
-+            id: { in: f.users },
-+          },
-+        });
-+      }
-+    });
-+    fixture = undefined;
++  it("512文字は保持し、制御文字除去・trim後の513文字目以降は保存しない", () => {
++    const boundary = "a".repeat(SUPPORT_REPORT_USER_AGENT_MAX_LENGTH);
++    expect(sanitizeSupportUserAgent(boundary)).toBe(boundary);
++    expect(sanitizeSupportUserAgent(` \r\n${boundary}private-suffix \t`)).toBe(boundary);
 +  });
 +
-+  // 接続失敗時も含め、専用clientだけを解放する。
-+  afterAll(async () => {
-+    await safeCheck(async () => {
-+      await db?.$disconnect();
-+      client = undefined;
-+    });
-+  });
-+
-+  // DB試験の例外・実値を固定メッセージに変換する。
-+  function databaseCase(
-+    label: string,
-+    operation: (f: Fixture) => Promise<void>,
-+  ) {
-+    it(label, async () => {
-+      await safeCheck(async () => {
-+        if (!fixture) {
-+          throw new Error("Fixture is unavailable");
-+        }
-+        await operation(fixture);
-+      });
-+    });
-+  }
-+
-+  // UIを介さずActionを呼び、redirectだけを成功の制御結果として捕捉する。
-+  async function invoke<T>(
-+    context: ClubAccessContext,
-+    operation: () => Promise<T>,
-+  ) {
-+    try {
-+      return {
-+        kind: "returned" as const,
-+        value: await requests.run(context, operation),
-+      };
-+    } catch (error) {
-+      if (error instanceof RedirectControl) {
-+        return {
-+          kind: "redirect" as const,
-+          path: error.path,
-+        };
-+      }
-+      throw error;
-+    }
-+  }
-+
-+  // Actionへ渡す項目を明示し、未信頼の値を追加する試験もこのFormDataを使う。
-+  function form(
-+    requestId: string,
-+    values: Record<string, string>,
-+  ): FormData {
-+    const data = new FormData();
-+    data.set("requestId", requestId);
-+    for (const [key, value] of Object.entries(values)) {
-+      data.set(key, value);
-+    }
-+    return data;
-+  }
-+
-+  // 自分と他人のfixture全体を比較し、拒否時に別レコードが更新されていないことを調べる。
-+  async function snapshot(f: Fixture) {
-+    return Promise.all([
-+      db.appUser.findMany({
-+        where: { id: { in: f.users } },
-+        orderBy: { id: "asc" },
-+      }),
-+      db.child.findMany({
-+        where: { parentId: { in: f.users } },
-+        orderBy: { id: "asc" },
-+      }),
-+      db.childClubMembership.findMany({
-+        where: { clubId: { in: f.clubs } },
-+        orderBy: { id: "asc" },
-+      }),
-+      db.clubMembership.findMany({
-+        where: { clubId: { in: f.clubs } },
-+        orderBy: { id: "asc" },
-+      }),
-+    ]);
-+  }
-+
-+  // ローカルDBで複合FKとuniqueの拒否を実際に確認する。
-+  databaseCase("Child所有者・親のクラブ・存在しないクラブのFKと二重所属を拒否する", async (f) => {
-+    const data = {
-+      clubId: f.a.club.id,
-+      childId: f.shared,
-+      parentUserId: f.a.userId,
-+    };
-+    for (const invalid of [
-+      {
-+        ...data,
-+        childId: f.available,
-+        parentUserId: f.users[1]
-+      },
-+      {
-+        ...data,
-+        clubId: f.clubs[2]
-+      },
-+      {
-+        ...data,
-+        clubId: randomUUID()
-+      },
-+    ]) {
-+      await expect(db.childClubMembership.create({ data: invalid }))
-+        .rejects.toMatchObject({ code: "P2003" });
-+    }
-+    await expect(db.childClubMembership.create({ data }))
-+      .rejects.toMatchObject({ code: "P2002" });
-+  });
-+
-+  databaseCase("複数Child・現在所属・追加候補を本人と現在クラブへ限定する", async (f) => {
-+    const account = await requests.run(f.a, () => reads.getClubAccount(f.a));
-+    expect(account.outcome).toBe("FOUND");
-+    if (account.outcome !== "FOUND") {
-+      throw new Error("Account is unavailable");
-+    }
-+    expect(account.view.children.map((child) => child.id).sort())
-+      .toEqual([f.shared, f.sibling].sort());
-+    expect(account.view.canSwitchClub).toBe(true);
-+    expect(account.view.authEmail).toBe(`${f.a.userId}@auth.example.test`);
-+    expect(account.view.appUserEmail).toBe(`${f.a.userId}@database.example.test`);
-+    const candidates = await requests.run(
-+      f.a,
-+      () => actions.getAttachableChildrenAction(f.a.club.slug),
-+    );
-+    expect(candidates.outcome).toBe("FOUND");
-+    if (candidates.outcome === "FOUND") {
-+      expect(candidates.children.map((child) => child.id).sort())
-+        .toEqual([f.available, f.withdrawn].sort());
-+    }
-+  });
-+
-+  databaseCase("同じ作成識別子の直接Action競合は1回だけ保存し、新しい識別子では追加できる", async (f) => {
-+    const state = createInitialActionState({
-+      name: "",
-+      grade: ""
-+    });
-+    const create = () => invoke(f.a, () => actions.createChildAction(
-+      f.a.club.slug,
-+      state,
-+      form(state.requestId, {
-+        name: " 新規の子ども ",
-+        grade: "",
-+        clubId: f.b.club.id,
-+        parentId: f.users[1],
-+        email: "ignored@example.test",
-+        returnTo: "https://remote.test",
-+      }),
-+    ));
-+    const results = await Promise.all([create(), create()]);
-+    expect(results.filter((result) => result.kind === "redirect")).toHaveLength(1);
-+    for (const result of results) {
-+      if (result.kind === "returned") {
-+        expect(result.value.status).toBe("error");
-+      } else {
-+        expect(result.path).toBe(
-+          `/club/${f.a.club.slug}/account?toast=child-created&toastId=${state.requestId}`,
-+        );
-+      }
-+    }
-+    expect(await db.child.findUnique({ where: { id: state.requestId } }))
-+      .toMatchObject({
-+        parentId: f.a.userId,
-+        name: "新規の子ども",
-+        grade: null
-+      });
-+    expect(
-+      await db.childClubMembership.findMany({ where: { childId: state.requestId } })
-+    )
-+      .toMatchObject([{
-+        clubId: f.a.club.id,
-+        status: "ACTIVE"
-+      }]);
-+    const replay = await create();
-+    expect(replay.kind).toBe("returned");
-+    const next = createInitialActionState({
-+      name: "",
-+      grade: ""
-+    });
-+    expect((await invoke(f.a, () => actions.createChildAction(
-+      f.a.club.slug,
-+      next,
-+      form(next.requestId, {
-+        name: "もう一人",
-+        grade: "YOUJI"
-+      }),
-+    ))).kind).toBe("redirect");
-+    expect(
-+      await db.child.count({ where: { id: { in: [state.requestId, next.requestId] } } })
-+    )
-+      .toBe(2);
-+    expect([...paths]).toEqual([`/club/${f.a.club.slug}/account`]);
-+  });
-+
-+  databaseCase("初回所属のFK失敗は同じ実transactionのChild作成もrollbackする", async (f) => {
-+    const childId = randomUUID();
-+    await expect(db.$transaction(async (transaction) => {
-+      await transaction.child.create({
-+        data: {
-+          id: childId,
-+          parentId: f.a.userId,
-+          name: "rollback"
-+        },
-+      });
-+      await transaction.childClubMembership.create({
-+        data: {
-+          clubId: f.clubs[2],
-+          childId,
-+          parentUserId: f.a.userId,
-+        },
-+      });
-+    })).rejects.toMatchObject({ code: "P2003" });
-+    expect(await db.child.count({ where: { id: childId } })).toBe(0);
-+    expect(await db.childClubMembership.count({ where: { childId } })).toBe(0);
-+  });
-+
-+  databaseCase("Repositoryの初回所属処理へ障害を注入しても実transactionのChildを残さない", async (f) => {
-+    const childId = randomUUID();
-+    // SQL自体をmockせず、初回所属のcreateだけを失敗させてrollbackを確認する。
-+    const faulted = db.$extends({
-+      query: {
-+        childClubMembership: {
-+          async create() {
-+            throw new Error("F07 injected initial membership failure");
-+          },
-+        },
-+      },
-+    });
-+    client = faulted as unknown as PrismaClient;
-+    try {
-+      expect(await mutations.createClubChild(f.a, {
-+        childId,
-+        name: "rollback",
-+        grade: null,
-+      })).toEqual({ outcome: "UPDATE_FAILED" });
-+    } finally {
-+      client = db;
-+    }
-+    expect(await db.child.count({ where: { id: childId } })).toBe(0);
-+    expect(await db.childClubMembership.count({ where: { childId } })).toBe(0);
-+  });
-+
-+  databaseCase("他人・現在未所属のChildへの直接Actionと対象ID改ざんでDBを変更しない", async (f) => {
-+    const before = await snapshot(f);
-+    for (const childId of [f.foreign, f.available]) {
-+      const state = createInitialActionState({
-+        name: "",
-+        grade: ""
-+      });
-+      const result = await invoke(f.a, () => actions.updateChildAction(
-+        f.a.club.slug,
-+        childId,
-+        state,
-+        form(state.requestId, {
-+          childId,
-+          name: "拒否される編集",
-+          grade: "YOUJI"
-+        }),
-+      ));
-+      expect(result.kind).toBe("returned");
-+      if (result.kind === "returned") {
-+        expect(result.value.status).toBe("error");
-+      }
-+    }
-+    const state = createInitialActionState({ childId: f.foreign });
-+    for (const action of [actions.addChildToClubAction, actions.withdrawChildFromClubAction]) {
-+      const result = await invoke(f.a, () => action(
-+        f.a.club.slug,
-+        f.foreign,
-+        state,
-+        form(state.requestId, { childId: f.foreign }),
-+      ));
-+      expect(result.kind).toBe("returned");
-+      if (result.kind === "returned") {
-+        expect(result.value.status).toBe("error");
-+      }
-+    }
-+    const edit = createInitialActionState({
-+      name: "",
-+      grade: ""
-+    });
-+    const mismatch = await invoke(f.a, () => actions.updateChildAction(
-+      f.a.club.slug,
-+      f.shared,
-+      edit,
-+      form(edit.requestId, {
-+        childId: f.sibling,
-+        name: "改ざん",
-+        grade: ""
-+      }),
-+    ));
-+    expect(mismatch.kind).toBe("returned");
-+    const expired = await invoke(f.a, () => actions.createChildAction(
-+      f.a.club.slug,
-+      edit,
-+      form(randomUUID(), {
-+        name: "期限切れ",
-+        grade: ""
-+      }),
-+    ));
-+    expect(expired.kind).toBe("returned");
-+    if (expired.kind === "returned") {
-+      expect(expired.value.status).toBe("error");
-+    }
-+    expect(await snapshot(f)).toEqual(before);
-+  });
-+
-+  databaseCase("所属追加はChildを複製せず、解除は現在所属だけを変更して同じ行を再有効化する", async (f) => {
-+    const beforeChild = await db.child.findUniqueOrThrow({ where: { id: f.available } });
-+    const state = createInitialActionState({ childId: f.available });
-+    const result = await invoke(f.a, () => actions.addChildToClubAction(
-+      f.a.club.slug,
-+      f.available,
-+      state,
-+      form(state.requestId, { childId: f.available }),
-+    ));
-+    expect(result.kind).toBe("redirect");
-+    const where = {
-+      clubId_childId: {
-+        clubId: f.a.club.id,
-+        childId: f.available
-+      }
-+    };
-+    const membership = await db.childClubMembership.findUniqueOrThrow({ where });
-+    expect(membership.status).toBe("ACTIVE");
-+    expect(await mutations.withdrawClubChild(f.a, { childId: f.available }))
-+      .toMatchObject({
-+        outcome: "UPDATED",
-+        affectedClubSlugs: [f.a.club.slug]
-+      });
-+    expect(await db.childClubMembership.findUniqueOrThrow({ where }))
-+      .toMatchObject({
-+        id: membership.id,
-+        status: "WITHDRAWN"
-+      });
-+    expect(await db.child.findUniqueOrThrow({ where: { id: f.available } })).toEqual(
-+      beforeChild
-+    );
-+    expect(await db.childClubMembership.findUniqueOrThrow({
-+      where: {
-+        clubId_childId: {
-+          clubId: f.b.club.id,
-+          childId: f.available
-+        }
-+      },
-+    })).toMatchObject({ status: "ACTIVE" });
-+    expect(await mutations.addClubChild(f.a, { childId: f.available }))
-+      .toMatchObject({ outcome: "UPDATED" });
-+    expect(await db.childClubMembership.findUniqueOrThrow({ where }))
-+      .toMatchObject({
-+        id: membership.id,
-+        status: "ACTIVE"
-+      });
-+  });
-+
-+  for (const status of ["SUSPENDED", "INVITED"] as const) {
-+    databaseCase(`${status}を本人操作で再有効化せず、WITHDRAWNだけ許可する`, async (f) => {
-+      const before = await snapshot(f);
-+      const childId = status === "SUSPENDED" ? f.suspended : f.invited;
-+      expect(await mutations.addClubChild(f.a, { childId })).toEqual({
-+        outcome: "RULE_VIOLATION",
-+        reason: "STATUS_CHANGE_NOT_ALLOWED",
-+      });
-+      expect(await snapshot(f)).toEqual(before);
-+      expect(await mutations.addClubChild(f.a, { childId: f.withdrawn }))
-+        .toMatchObject({ outcome: "UPDATED" });
-+    });
-+  }
-+
-+  databaseCase("Bからの編集がAの再読取にも反映され、DB由来の両クラブだけを再検証する", async (f) => {
-+    const count = await db.child.count({ where: { parentId: f.a.userId } });
-+    const state = createInitialActionState({
-+      name: "",
-+      grade: ""
-+    });
-+    expect((await invoke(f.b, () => actions.updateChildAction(
-+      f.b.club.slug,
-+      f.shared,
-+      state,
-+      form(state.requestId, {
-+        childId: f.shared,
-+        name: "横断編集",
-+        grade: "ELEMENTARY_3",
-+        affectedClubSlugs: "untrusted-club",
-+      }),
-+    ))).kind).toBe("redirect");
-+    for (const context of [f.a, f.b]) {
-+      const result = await requests.run(context, () => reads.getClubAccount(context));
-+      expect(result.outcome).toBe("FOUND");
-+      if (result.outcome === "FOUND") {
-+        expect(result.view.children.find((child) => child.id === f.shared))
-+          .toEqual({
-+            id: f.shared,
-+            name: "横断編集",
-+            grade: "ELEMENTARY_3"
-+          });
-+      }
-+    }
-+    expect([...paths].sort()).toEqual([
-+      `/club/${f.a.club.slug}/account`,
-+      `/club/${f.b.club.slug}/account`,
-+    ].sort());
-+    expect(await db.child.count({ where: { parentId: f.a.userId } })).toBe(count);
-+  });
-+
-+  databaseCase("氏名だけの直接Actionはemail・Child・所属を変えず、他クラブからも再読取できる", async (f) => {
-+    const before = await snapshot(f);
-+    const state = createInitialActionState({ name: "" });
-+    expect((await invoke(f.a, () => actions.updateAccountNameAction(
-+      f.a.club.slug,
-+      state,
-+      form(state.requestId, {
-+        name: " 新しい氏名 ",
-+        email: "ignored@example.test",
-+        userId: f.users[1],
-+        returnTo: "https://remote.test",
-+      }),
-+    ))).kind).toBe("redirect");
-+    const after = await snapshot(f);
-+    expect(after.slice(1)).toEqual(before.slice(1));
-+    const user = await db.appUser.findUniqueOrThrow({ where: { id: f.a.userId } });
-+    expect(user.name).toBe("新しい氏名");
-+    expect(user.email).toBe(`${f.a.userId}@database.example.test`);
-+    expect(after[0].find((row) => row.id === f.users[1]))
-+      .toEqual(before[0].find((row) => row.id === f.users[1]));
-+    const reread = await requests.run(f.b, () => reads.getClubAccount(f.b));
-+    expect(reread).toMatchObject({
-+      outcome: "FOUND",
-+      view: { name: "新しい氏名" }
-+    });
-+    expect([...paths].sort()).toEqual([f.a, f.b].flatMap((context) => [
-+      `/club/${context.club.slug}/account`,
-+      `/club/${context.club.slug}/admin/members`,
-+    ]).sort());
-+  });
-+
-+  for (const status of ["WITHDRAWN", "SUSPENDED", "INVITED"] as const) {
-+    databaseCase(`表示後に親Membershipが${status}となった直接ActionをDBで拒否する`, async (f) => {
-+      await db.clubMembership.update({
-+        where: { id: f.a.membership.id },
-+        data: { status },
-+      });
-+      const before = await snapshot(f);
-+      const edit = createInitialActionState({
-+        name: "",
-+        grade: ""
-+      });
-+      const name = createInitialActionState({ name: "" });
-+      const member = createInitialActionState({ childId: f.shared });
-+      const operations = [
-+        () => actions.createChildAction(
-+          f.a.club.slug,
-+          edit,
-+          form(edit.requestId, {
-+            name: "拒否",
-+            grade: "",
-+          }),
-+        ),
-+        () => actions.updateChildAction(
-+          f.a.club.slug,
-+          f.shared,
-+          edit,
-+          form(edit.requestId, {
-+            childId: f.shared,
-+            name: "拒否",
-+            grade: "",
-+          }),
-+        ),
-+        () => actions.updateAccountNameAction(
-+          f.a.club.slug,
-+          name,
-+          form(name.requestId, { name: "拒否" }),
-+        ),
-+        () => actions.addChildToClubAction(
-+          f.a.club.slug,
-+          f.withdrawn,
-+          member,
-+          form(member.requestId, { childId: f.withdrawn }),
-+        ),
-+        () => actions.withdrawChildFromClubAction(
-+          f.a.club.slug,
-+          f.shared,
-+          member,
-+          form(member.requestId, { childId: f.shared }),
-+        ),
-+      ];
-+      for (const operation of operations) {
-+        const result = await invoke<{ status: string }>(f.a, operation);
-+        expect(result.kind).toBe("returned");
-+        if (result.kind === "returned") {
-+          expect(result.value.status).toBe("error");
-+        }
-+      }
-+      const read = await requests.run(f.a, () => reads.getClubAccount(f.a));
-+      expect(read).toEqual({ outcome: "UNAVAILABLE" });
-+      expect(await snapshot(f)).toEqual(before);
-+      expect(paths.size).toBe(0);
-+    });
-+  }
-+
-+  // 同時開始の結果と永続化を検査する。特定SQL順序やP2034発生そのものは保証しない。
-+  databaseCase("編集競合は項目を混在させず、解除・再有効化の競合も1行だけを遷移させる", async (f) => {
-+    const edits = [
-+      {
-+        childId: f.shared,
-+        name: "編集A",
-+        grade: "YOUJI" as const
-+      },
-+      {
-+        childId: f.shared,
-+        name: "編集B",
-+        grade: "ELEMENTARY_6" as const
-+      },
-+    ];
-+    const results = await Promise.all(edits.map((input) => mutations.updateClubChild(f.a, input)));
-+    expect(results.every((result) => ["UPDATED", "CONFLICT"].includes(result.outcome))).toBe(
-+      true
-+    );
-+    expect(results.some((result) => result.outcome === "UPDATED")).toBe(true);
-+    const saved = await db.child.findUniqueOrThrow({ where: { id: f.shared } });
-+    expect(
-+      edits.some((input) => input.name === saved.name && input.grade === saved.grade)
-+    ).toBe(
-+      true
-+    );
-+    for (const operation of [mutations.withdrawClubChild, mutations.addClubChild]) {
-+      const results = await Promise.all([
-+        operation(f.a, { childId: f.shared }),
-+        operation(f.a, { childId: f.shared }),
-+      ]);
-+      expect(results.filter((result) => result.outcome === "UPDATED")).toHaveLength(1);
-+      expect(results.every((result) => ["UPDATED", "CONFLICT", "RULE_VIOLATION"]
-+        .includes(result.outcome))).toBe(true);
-+      expect(await db.childClubMembership.count({
-+        where: {
-+          childId: f.shared,
-+          clubId: f.a.club.id
-+        },
-+      })).toBe(1);
-+    }
-+    expect(await db.childClubMembership.findMany({ where: { childId: f.shared } }))
-+      .toMatchObject([
-+        { status: "ACTIVE" },
-+        { status: "ACTIVE" },
-+      ]);
-+  });
-+
-+  databaseCase("編集と解除・親の失効が競合しても他クラブ所属とChild本体を失わない", async (f) => {
-+    const results = await Promise.all([
-+      mutations.updateClubChild(f.a, {
-+        childId: f.shared,
-+        name: "競合編集",
-+        grade: null
-+      }),
-+      mutations.withdrawClubChild(f.a, { childId: f.shared }),
-+      db.clubMembership.update({
-+        where: { id: f.a.membership.id },
-+        data: { status: "WITHDRAWN" },
-+      }),
-+    ]);
-+    for (const result of results.slice(0, 2)) {
-+      expect("outcome" in result).toBe(true);
-+      if ("outcome" in result) {
-+        expect(["UPDATED", "CONFLICT", "FORBIDDEN", "NOT_FOUND"].includes(result.outcome)).toBe(
-+          true
-+        );
-+      }
-+    }
-+    expect(await db.child.count({
-+      where: {
-+        id: f.shared,
-+        parentId: f.a.userId
-+      }
-+    })).toBe(
-+      1
-+    );
-+    expect(await db.childClubMembership.findUniqueOrThrow({
-+      where: {
-+        clubId_childId: {
-+          clubId: f.b.club.id,
-+          childId: f.shared
-+        }
-+      },
-+    })).toMatchObject({ status: "ACTIVE" });
-+    const before = await snapshot(f);
-+    expect(await mutations.addClubChild(f.a, { childId: f.shared }))
-+      .toEqual({ outcome: "FORBIDDEN" });
-+    expect(await snapshot(f)).toEqual(before);
++  it("複数回の呼出しでもすべての制御文字を除去する", () => {
++    const value = "Chrome\u0000\n Safari\u009f";
++    expect(sanitizeSupportUserAgent(value)).toBe("Chrome Safari");
++    expect(sanitizeSupportUserAgent(value)).toBe("Chrome Safari");
 +  });
 +});
+diff --git a/domain/club/support/support-report-metadata.ts b/domain/club/support/support-report-metadata.ts
+new file mode 100644
+index 0000000..a20b709
+--- /dev/null
++++ b/domain/club/support/support-report-metadata.ts
+@@ -0,0 +1,52 @@
++// domain/club/support/support-report-metadata.ts
++// サーバーが導出・取得した報告metadataを保存可能な値へ限定する。
++
++export const SUPPORT_REPORT_USER_AGENT_MAX_LENGTH = 512;
++
++const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/u;
++const USER_AGENT_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/gu;
++const UNSAFE_SLUG_CHARACTER_PATTERN = /[/\\?#%]/u;
++
++// 現在クラブのaccountパスだけを返す。呼出元は認可済みslugから候補パスを構築する。
++export function sanitizeSupportPageUrl(
++  value: unknown,
++  clubSlug: string,
++): string | null {
++  if (
++    typeof value !== "string" ||
++    typeof clubSlug !== "string" ||
++    !clubSlug ||
++    clubSlug !== clubSlug.trim() ||
++    clubSlug === "." ||
++    clubSlug === ".." ||
++    UNSAFE_SLUG_CHARACTER_PATTERN.test(clubSlug) ||
++    CONTROL_CHARACTER_PATTERN.test(clubSlug) ||
++    CONTROL_CHARACTER_PATTERN.test(value)
++  ) {
++    return null;
++  }
++
++  // URI変換不能な不正サロゲートでも報告metadataのために例外を漏らさない。
++  let accountPath: string;
++  try {
++    accountPath = `/club/${encodeURIComponent(clubSlug)}/account`;
++  } catch {
++    return null;
++  }
++
++  // URLパーサーでdot segment等を正規化せず、許可パスとの厳密一致で判定する。
++  const path = value.split(/[?#]/u, 1)[0];
++  return path === accountPath ? accountPath : null;
++}
++
++// UAはサーバー側のheadersから渡す。偽装可能な補助情報として長さと制御文字だけを制限する。
++export function sanitizeSupportUserAgent(value: unknown): string | null {
++  if (typeof value !== "string") {
++    return null;
++  }
++  const sanitized = value
++    .replace(USER_AGENT_CONTROL_CHARACTERS, "")
++    .trim()
++    .slice(0, SUPPORT_REPORT_USER_AGENT_MAX_LENGTH);
++  return sanitized || null;
++}
+diff --git a/domain/club/support/support-report-types.ts b/domain/club/support/support-report-types.ts
+new file mode 100644
+index 0000000..119387e
+--- /dev/null
++++ b/domain/club/support/support-report-types.ts
+@@ -0,0 +1,73 @@
++// domain/club/support/support-report-types.ts
++// DB受付、内部通知、利用者へ返す結果を分離する。型だけで認可や保存済み状態は保証しない。
++
++import type {
++  ClubMemberRole,
++  SupportReportCategory,
++} from "@/types/prisma";
++
++// サーバー側で正規化するmetadata。FormDataの値をそのまま格納してはいけない。
++export type SupportReportMetadata = {
++  pageUrl: string | null;
++  userAgent: string | null;
++};
++
++// 保存済みの内部通知用DTO。報告者snapshotをClientのprops・ActionState・ログへ渡さない。
++export type SupportReportReceipt = SupportReportMetadata & {
++  id: string;
++  clubId: string;
++  membershipId: string | null;
++  clubName: string;
++  category: SupportReportCategory;
++  message: string;
++  reporterName: string | null;
++  reporterEmail: string | null;
++  reporterRole: ClubMemberRole | null;
++  createdAt: Date;
++};
++
++// 新規受付だけが通知を開始する。同一受付の再送判定と一回限り保存は後続Repositoryの責務。
++export type SupportReportCreationResult =
++  | {
++      outcome: "CREATED";
++      report: SupportReportReceipt;
++    }
++  | {
++      outcome: "ALREADY_ACCEPTED";
++    }
++  | {
++      outcome: "FORBIDDEN" | "CONFLICT" | "CREATE_FAILED";
++    };
++
++// メール原文やSDKレスポンスを保存せず、この固定コードだけをnotifyErrorへ記録する。
++export type SupportReportNotificationErrorCode =
++  | "EMAIL_CONFIGURATION_MISSING"
++  | "EMAIL_SEND_FAILED"
++  | "EMAIL_SEND_RESULT_UNKNOWN";
++
++// provider受付と配送完了を区別し、不明結果を明確な送信失敗へ丸めない。
++export type SupportReportNotificationResult =
++  | {
++      outcome: "ACCEPTED";
++    }
++  | {
++      outcome: "FAILED";
++      errorCode: Exclude<
++        SupportReportNotificationErrorCode,
++        "EMAIL_SEND_RESULT_UNKNOWN"
++      >;
++    }
++  | {
++      outcome: "UNKNOWN";
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN";
++    };
++
++// 通知結果の記録失敗は、既に保存した報告の受付結果を取り消さない。
++export type SupportReportNotificationRecordResult = {
++  outcome: "RECORDED" | "NOT_FOUND" | "UPDATE_FAILED";
++};
++
++// 公開結果へ報告者情報・報告DTO・通知状態・任意のエラー原文を含めない。
++export type SupportReportAcceptanceResult = {
++  outcome: "ACCEPTED" | "FORBIDDEN" | "CONFLICT" | "CREATE_FAILED";
++};
