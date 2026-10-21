@@ -1,16 +1,17 @@
 // app/(club-app)/club/[clubSlug]/account/AccountNavigation.tsx
 //ログインしているユーザーの「権限（役割）」や「所属クラブ」の状態に合わせて、マイページのメニュー画面を動的に切り替えて表示するナビゲーションコンポーネント
-//オーナーなら「LINE通知グループ管理」「会員管理」、管理者（オーナー、指導者、役員）なら「イベント・お知らせ管理」、複数クラブ所属なら「クラブを切り替える」、開発者なら「Platform管理」
+//オーナーなら「LINE通知グループ管理」「会員管理」、管理者（オーナー、指導者、役員）なら「イベント・お知らせ管理」、複数クラブ所属なら「クラブを切り替える」、開発者なら「Platform管理」、全ての人「外部URLリンク」「ログアウトボタン」
 
 import "server-only";
 
 import Link from "next/link";
 
+
 import {
-  logoutAction,//ログアウトのアクション関数
-} from "@/app/(club-app)/club/actions";
+  AccountLogoutButton,// マイページにあるログアウトボタン（モーダル付き）
+} from "./AccountLogoutButton";
 import {
-  getAccountExternalLinks,
+  getAccountExternalLinks,//アカウントページの外部リンク一覧を生成する関数（HPURL,インスタURL,プライバシーポリシーURL,利用規約URL）
 } from "@/domain/club/account/account-links";
 import type {
   ClubAccountView,// クラブアカウントの表示情報
@@ -32,7 +33,7 @@ export function AccountNavigation({
   isPlatformAdmin,
 }: Props) {
   const basePath = `/club/${encodeURIComponent(club.slug)}`;
-  const externalLinks = getAccountExternalLinks(club);
+  const externalLinks = getAccountExternalLinks(club);//アカウントページの外部リンク一覧を生成する関数（HPURL,インスタURL,プライバシーポリシーURL,利用規約URL）
 
   return (
     <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
@@ -80,14 +81,7 @@ export function AccountNavigation({
           </a>
         ),)}
       </nav>
-      <form action={logoutAction}>
-        <button
-          type="submit"
-          className="rounded-lg border border-slate-300 px-4 py-3 font-medium text-slate-700"
-        >
-          ログアウト
-        </button>
-      </form>
+      <AccountLogoutButton />
     </section>
   );
 }

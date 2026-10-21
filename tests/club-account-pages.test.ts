@@ -33,6 +33,16 @@ const mocks = vi.hoisted(() => ({
   settings: vi.fn(),
   notFound: vi.fn(),
   logout: vi.fn(),
+  // 【追加：F07粒度9】Clientのprops接続をPage試験で確認する。
+  nameForm: vi.fn(),
+  childForm: vi.fn(),
+  operations: vi.fn(),
+  nameAction: vi.fn(),
+  createAction: vi.fn(),
+  updateAction: vi.fn(),
+  withdrawAction: vi.fn(),
+  addAction: vi.fn(),
+  candidatesAction: vi.fn(),
 }),
 );
 
@@ -81,6 +91,28 @@ vi.mock("@/app/(club-app)/club/[clubSlug]/admin/settings/line/actions", () => ({
   updateClubLineTargetAction: vi.fn(),
 }),
 );
+
+// 【追加：F07粒度9】フォーム内部は専用試験へ分け、Pageでは必要最小propsだけを確認する。
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/AccountNameForm", () => ({
+  AccountNameForm: mocks.nameForm,
+}));
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/ChildForm", () => ({
+  ChildForm: mocks.childForm,
+}));
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations", () => ({
+  ChildMembershipOperations: mocks.operations,
+}));
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton", () => ({
+  AccountLogoutButton: () => createElement("button", { type: "button" }, "ログアウト"),
+}));
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/actions", () => ({
+  updateAccountNameAction: mocks.nameAction,
+  createChildAction: mocks.createAction,
+  updateChildAction: mocks.updateAction,
+  withdrawChildFromClubAction: mocks.withdrawAction,
+  addChildToClubAction: mocks.addAction,
+  getAttachableChildrenAction: mocks.candidatesAction,
+}));
 
 const PRIVATE_DETAIL = "private-auth-id raw-error secret-token";
 const CONTEXT: ClubAccessContext = {
@@ -142,6 +174,10 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
+  // 【追加：F07粒度9】DOMなし試験ではフォーム本体を展開しない。
+  mocks.nameForm.mockReturnValue(null);
+  mocks.childForm.mockReturnValue(null);
+  mocks.operations.mockReturnValue(null);
   mocks.access.mockResolvedValue(CONTEXT);
   mocks.owner.mockResolvedValue(CONTEXT);
   mocks.read.mockResolvedValue({
@@ -180,7 +216,8 @@ describe("マイページ", () => {
     expect(output).toContain("登録メールアドレス");
     expect(output).toContain("database@example.test");
     expect(output).toContain("表示専用");
-    expect(output).not.toContain("<input");
+    // 【変更：F07粒度9】emailは引き続き表示専用。フォームの内部は専用試験で確認する。
+    expect(output).not.toContain('type="email"');
     expect(output).not.toContain("編集する");
     expect(output).not.toContain("追加する");
   },
@@ -335,3 +372,66 @@ it("LINE設定の認可・取得は維持し、戻り先とラベルだけをマ
   expect(output).not.toContain("管理者用イベント一覧へ戻る");
 },
 );
+
+// 【追加：F07粒度9】認可済みslug・対象ID・独立requestIdが正しいActionへ接続される。
+it("Pageはフォームごとにstateを作り、IDを認可済みslugへbindする", async () => {
+  await page();
+  const name = mocks.nameForm.mock.calls[0][0];
+  expect(Object.keys(name).sort()).toEqual(["action", "initialState"]);
+  expect(name.initialState.values).toEqual({ name: VIEW.name });
+  const childProps = mocks.childForm.mock.calls.map((call) => call[0]);
+  expect(childProps).toHaveLength(3);
+  const [first, second, creation] = childProps;
+  const identifiers = [
+    name.initialState.requestId,
+    first.initialState.requestId,
+    second.initialState.requestId,
+    first.withdrawal.initialState.requestId,
+    second.withdrawal.initialState.requestId,
+    creation.initialState.requestId,
+  ];
+  expect(new Set(identifiers).size).toBe(6);
+  expect(first.initialState.values.grade).toBe("");
+  expect(second.initialState.values.grade).toBe("ELEMENTARY_2");
+  expect(creation.initialState.values).toEqual({
+    name: "",
+    grade: "",
+  });
+  const data = new FormData();
+  await name.action(name.initialState, data);
+  await first.action(first.initialState, data);
+  await first.withdrawal.action(first.withdrawal.initialState, data);
+  await creation.action(creation.initialState, data);
+  expect(mocks.nameAction).toHaveBeenCalledWith(VIEW.club.slug, name.initialState, data);
+  expect(mocks.updateAction).toHaveBeenCalledWith(
+    VIEW.club.slug,
+    VIEW.children[0].id,
+    first.initialState,
+    data,
+  );
+  expect(mocks.withdrawAction).toHaveBeenCalledWith(
+    VIEW.club.slug,
+    VIEW.children[0].id,
+    first.withdrawal.initialState,
+    data,
+  );
+  expect(mocks.createAction).toHaveBeenCalledWith(VIEW.club.slug, creation.initialState, data);
+  const candidates = mocks.operations.mock.calls[0][0];
+  expect(mocks.candidatesAction).not.toHaveBeenCalled();
+  await candidates.loadAction();
+  expect(mocks.candidatesAction).toHaveBeenCalledWith(VIEW.club.slug);
+  await candidates.action("child-c", first.withdrawal.initialState, data);
+  expect(mocks.addAction).toHaveBeenCalledWith(
+    VIEW.club.slug,
+    "child-c",
+    first.withdrawal.initialState,
+    data,
+  );
+  const oldCreationId = creation.initialState.requestId;
+  mocks.childForm.mockClear();
+  await page({
+    toast: "child-created",
+    toastId: oldCreationId,
+  });
+  expect(mocks.childForm.mock.calls[2][0].initialState.requestId).not.toBe(oldCreationId);
+});

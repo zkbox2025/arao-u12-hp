@@ -1,5 +1,5 @@
 // app/(club-app)/club/[clubSlug]/account/page.tsx
-// //クラブアカウントのマイページ（役割ごとに表示が変わるボタン付き）
+//クラブアカウントのマイページ（役割ごとに表示が変わるボタン付き、子どものアカウント追加退会編集エリアあり）
 
 import Link from "next/link";
 import {
@@ -9,6 +9,33 @@ import {
 import {
   requireClubAppAccess,//クラブのアプリが使えるか確認する関数
 } from "@/app/(club-app)/club/club-app-authorization";
+// 【追加：F07粒度9】独立した初期stateとフォームを接続する。
+import {
+  ToastMessage,// 管理画面用のトースト通知（3秒表示して消す）
+} from "@/components/admin/ToastMessage";
+import {
+  createInitialActionState,//初期値を作成する
+} from "@/domain/shared/action-state";
+import {
+  isRequestId,//値がUUID v4形式のrequestIdか検証する。
+} from "@/domain/shared/request-id";
+import {
+  AccountNameForm,//アカウント名編集フォーム
+} from "./AccountNameForm";
+import {
+  ChildForm,//子どもの情報を編集できるフォーム（確認モーダルつき）
+} from "./ChildForm";
+import {
+  ChildMembershipOperations,//props.mode === "add"であれば、メンバーシップに追加する子どもの候補を表示して、追加を実行するためのエリア全体を表示し、違うなら子どものメンバーシップの退会処理のためのフォームを表示する関数
+} from "./ChildMembershipOperations";
+import {
+  addChildToClubAction,
+  createChildAction,
+  getAttachableChildrenAction,
+  updateAccountNameAction,
+  updateChildAction,
+  withdrawChildFromClubAction,
+} from "./actions";
 import {
   getAccountFeedbackMessage,// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
 } from "@/domain/club/account/account-form";
@@ -65,13 +92,20 @@ export default async function ClubAccountPage({
   const query = await searchParams;
   const feedback = getAccountFeedbackMessage(query.toast);// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
 
+
+  const newChildState = createInitialActionState({//初期値を作成する
+    name: "",
+    grade: "",
+  });
+  const toastKey = isRequestId(query.toastId) ? query.toastId : feedback ?? "account";//toastIdがUUID v4形式である場合はtoastId。違う場合はfeedback。feedbackに値がない場合はaccount
+
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold text-slate-900">マイページ</h1>
       {feedback ? (
-        <p role="status" className="rounded-lg border border-green-200 bg-green-50 p-4">
-          {feedback}
-        </p>
+        <div role="status">
+          <ToastMessage key={toastKey} message={feedback} />
+        </div>
       ) : null}
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="text-lg font-bold text-slate-900">登録情報</h2>
@@ -98,6 +132,11 @@ export default async function ClubAccountPage({
           </div>
         </dl>
         <p className="text-sm text-slate-600">メールアドレスは表示専用です。</p>
+        <AccountNameForm
+          key={view.club.slug}
+          initialState={createInitialActionState({ name: view.name ?? "" })}
+          action={updateAccountNameAction.bind(null, view.club.slug)}
+        />
       </section>
       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
         <h2 className="text-lg font-bold text-slate-900">子ども</h2>
@@ -108,12 +147,28 @@ export default async function ClubAccountPage({
         ) : (
           <ul className="space-y-3">
             {view.children.map((child) => (
-              <li key={child.id} className="rounded-lg border border-slate-200 p-4">
+              <li
+                key={`${view.club.slug}:${child.id}`}
+                className="rounded-lg border border-slate-200 p-4"
+              >
                 <p className="wrap-break-word font-bold text-slate-900">{child.name}</p>
                 <p className="mt-1 text-sm text-slate-600">
                   学年：{CHILD_GRADE_OPTIONS.find((option) => option.value === child.grade)//子どもの学年のバリューとラベル一覧からバリューを抜き出しその中に含まれてるかをチェックする
                     ?.label ?? "未設定"}
                 </p>
+                <ChildForm
+                  key={`${view.club.slug}:${child.id}`}
+                  childId={child.id}
+                  initialState={createInitialActionState({
+                    name: child.name,
+                    grade: child.grade ?? "",
+                  })}
+                  action={updateChildAction.bind(null, view.club.slug, child.id)}
+                  withdrawal={{
+                    initialState: createInitialActionState({ childId: child.id }),
+                    action: withdrawChildFromClubAction.bind(null, view.club.slug, child.id),
+                  }}
+                />
               </li>
             ),)}
           </ul>
@@ -121,6 +176,17 @@ export default async function ClubAccountPage({
         <p className="text-sm text-slate-600">
           子どもの氏名・学年は、ほかの所属クラブでも共通です。
         </p>
+        <ChildForm
+          key={newChildState.requestId}
+          initialState={newChildState}
+          action={createChildAction.bind(null, view.club.slug)}
+        />
+        <ChildMembershipOperations
+          key={`candidates:${newChildState.requestId}`}
+          mode="add"
+          loadAction={getAttachableChildrenAction.bind(null, view.club.slug)}
+          action={addChildToClubAction.bind(null, view.club.slug)}
+        />
       </section>
       <AccountNavigation
         club={view.club}

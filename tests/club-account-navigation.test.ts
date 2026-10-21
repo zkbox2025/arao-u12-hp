@@ -26,6 +26,7 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   logout: vi.fn(),
+  logoutButton: vi.fn(), // 【追加：F07粒度9】確認UIへの接続。
 }),
 );
 
@@ -42,6 +43,14 @@ vi.mock("@/app/(club-app)/club/actions", () => ({
   logoutAction: mocks.logout,
 }),
 );
+
+// 【追加：F07粒度9】確認とAction実行は専用試験へ分ける。
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton", () => ({
+  AccountLogoutButton: () => {
+    mocks.logoutButton();
+    return createElement("button", { type: "button" }, "ログアウト");
+  },
+}));
 
 type Props = Parameters<typeof AccountNavigation>[0];
 const CLUB: ClubAccountView["club"] = {
@@ -143,14 +152,14 @@ describe("外部リンクとログアウト", () => {
   },
   );
 
-  it("logoutActionを作り直さず、既存Actionをsubmitで呼ぶformへ接続する", () => {
-    const nodes = forms(AccountNavigation(props()));
-    expect(nodes).toHaveLength(1);
-    expect(nodes[0].action).toBe(mocks.logout);
-    expect(html()).toContain('type="submit"');
-    expect(html()).toContain("ログアウト");
+  // 【変更：F07粒度9】即時送信formからaccount専用の確認ボタンへ接続を変える。
+  it("ログアウトは確認UIへ接続し、直接送信formを置かない", () => {
+    expect(forms(AccountNavigation(props()))).toHaveLength(0);
+    const output = html();
+    expect(output).toContain('type="button"');
+    expect(output).toContain("ログアウト");
+    expect(mocks.logoutButton).toHaveBeenCalled();
     expect(mocks.logout).not.toHaveBeenCalled();
-  },
-  );
+  });
 },
 );
