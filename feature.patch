@@ -1,1699 +1,1174 @@
-diff --git a/app/(club-app)/club/[clubSlug]/account/AccountConfirmDialog.tsx b/app/(club-app)/club/[clubSlug]/account/AccountConfirmDialog.tsx
+diff --git a/docs/runbooks/club-account.md b/docs/runbooks/club-account.md
 new file mode 100644
-index 0000000..046561d
+index 0000000..d20137b
 --- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/AccountConfirmDialog.tsx
-@@ -0,0 +1,178 @@
-+// app/(club-app)/club/[clubSlug]/account/AccountConfirmDialog.tsx
-+// account内の確認ダイアログと、入力を保持した単一送信の共通処理。
++++ b/docs/runbooks/club-account.md
+@@ -0,0 +1,176 @@
++<!-- docs/runbooks/club-account.md -->
 +
-+"use client";
++# F07 マイページ・本人氏名・複数Childの受入手順
++
++F07粒度10の専用試験と手動受入の手順です。実装済み、mock試験済み、実DB試験済み、
++ブラウザー確認済みを分けて記録します。patch作成・適用や通常テストの成功だけで
++F07受入完了にはしません。この手順書は実DB操作、migration、実Auth変更、メール送信を代行しません。
++
++## 対象と変更しないもの
++
++- 本人氏名、複数Childの新規作成・編集、現在クラブへの所属追加・所属解除が対象です。
++- emailはAuthとAppUserそれぞれの値を表示するだけです。Auth email・PWの更新は対象外です。
++- Child本体は親のグローバルデータです。氏名・学年の編集は他クラブにも反映されます。
++- 学年は未設定を許可し、DBではnullです。所属解除は現在クラブの所属をWITHDRAWNにします。
++- 既存Childの再利用では複製しません。再有効化はWITHDRAWNだけです。
++- SUSPENDED・INVITEDの本人による再有効化、Child本体の物理削除は提供しません。
++- schema・migration・既存test:db・依存パッケージ・Auth設定は変更しません。
++
++## 操作からDBまでの追跡箇所
++
++画面・Actionの基点は `app/(club-app)/club/[clubSlug]/account/` です。
++
++| 段階 | ファイル・関数、入力と出力 | DB変更 |
++| --- | --- | --- |
++| 表示 | `page.tsx / ClubAccountPage` がslugで認可し、`getClubAccount(context)` の表示DTOをフォームへ渡す | 読取のみ |
++| 確認 | `AccountNameForm`・`ChildForm`・`ChildMembershipOperations` → `AccountConfirmDialog.tsx / useConfirmedAccountForm` がFormDataを保持し、確定後にActionへ渡す | なし |
++| Action | `actions.ts` の各Actionがslugで再認可し、requestId・入力・束縛したChild IDを再確認する | Service経由 |
++| 本人氏名 | `updateAccountNameAction` → `update-club-account.ts / updateClubAccountName` → `club-account-repository.ts / updateAccountNameForUser` | 本人AppUser.nameだけを更新 |
++| 新規Child | `createChildAction` → `createClubChild` → `club-child-repository.ts / createChildForUser` | requestIdをChild IDとして、Childと初回ACTIVE所属を同一transactionで作成 |
++| グローバル編集 | `updateChildAction` → `updateClubChild` → `updateChildForUser` | 本人Childのname・gradeだけを更新 |
++| 所属の追加・再開 | `addChildToClubAction` → `addClubChild` → `addChildToClubForUser` | 現在クラブの所属作成、またはWITHDRAWNからACTIVEへ変更 |
++| 所属解除 | `withdrawChildFromClubAction` → `withdrawClubChild` → `withdrawChildFromClubForUser` | 現在クラブのACTIVE所属だけをWITHDRAWNへ変更 |
++| 候補 | `getAttachableChildrenAction` → `get-club-account.ts / getAttachableClubChildren` → `findAttachableChildrenForUser` | 本人が追加UIを開いた時だけ読取 |
++| 再検証・完了 | `actions.ts / finishSavedAccount` がRepository由来slugを `revalidateClubAccountNamePaths` または `revalidateClubAccountPaths` へ渡し、固定account URLへredirect | 再保存なし |
++| ログアウト | `AccountLogoutButton` が確認後に `app/(club-app)/club/actions.ts / logoutAction` を呼ぶ | Authセッションを終了、アプリDB更新なし |
++
++Serviceは `src/application/club/account/`、Repositoryは
++`src/infrastructure/prisma/repositories/`、再検証は
++`app/(club-app)/club/revalidate-club-paths.ts` です。
++氏名更新は影響クラブの会員管理とaccount、Child編集は影響クラブのaccountを再検証します。
++作成・所属追加・解除の影響先は現在クラブです。保存済みで再検証が失敗した場合は
++`saved-reload` の案内に従って再読込し、保存操作を無条件に再送しません。
++今回のフローに後続粒度待ちの接続はありません。公開先の未提供は後述の受入保留事項です。
++
++## DBなしの自動回帰
++
++実接続用flagを設定しない環境で実行します。共有Prisma clientはdotenv初期化を持つため、
++この専用試験ではトップレベルimportせず、専用clientをガード後に注入します。
++`.env` の内容や接続文字列を表示・報告しません。
++
++```sh
++npm test -- \
++  domain/club/account \
++  src/application/club/account \
++  tests/club-account-repository.test.ts \
++  tests/club-child-repository.test.ts \
++  tests/club-account-actions.test.ts \
++  tests/club-account-revalidation.test.ts \
++  tests/club-account-navigation.test.ts \
++  tests/club-account-pages.test.ts \
++  tests/club-account-forms.test.ts \
++  tests/club-account.flow.integration.test.ts \
++  tests/club-membership-authorization.test.ts \
++  tests/club-members-actions.test.ts \
++  domain/club/club-login-destination.test.ts \
++  domain/club/club-revalidation-paths.test.ts
++```
++
++`tests/club-account.flow.integration.test.ts` の接続ガード15件はDBなしで実行でき、
++実DBの16件は両flagが揃わなければskipします。
++既存DB試験には共有clientをトップレベルimportするものがあります。
++通常実行へ `RUN_DB_INTEGRATION_TESTS=1` を持ち越さず、この手順で既存test:dbを起動しません。
++
++## 使い捨てローカルDBの事前確認と実行
++
++1. 日常の開発データ・本番データを含まない、破棄できる専用ローカルDBを用意します。
++2. 既存migrationが適用済みであることを担当者が確認します。専用試験はmigration・seed・reset・
++   schema変更を実行しません。fixtureに必要なAppUserはDBだけに作成し、実Authは変更しません。
++3. 接続設定は承認された方法でプロセス環境へ渡します。URL・PWをコマンド引数、
++   チャット、結果ファイルへ貼り付けません。専用scriptはdotenvを自動読込しません。
++4. loopbackがリモートDBへのトンネル・proxyではないことを担当者が確認します。
++   URLの検査だけでは転送先やDBが空であることまでは証明できません。
++5. 使い捨てであることを確認した担当者だけが `CLUB_ACCOUNT_DISPOSABLE=1` を設定します。
++
++| 環境設定 | 許可・用途 |
++| --- | --- |
++| `DATABASE_URL` | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、認証あり。query・fragmentなし |
++| `CLUB_ACCOUNT_DISPOSABLE` | 担当者が使い捨て確認後に設定する1 |
++| `NODE_ENV` | productionを拒否 |
++| `RUN_CLUB_ACCOUNT_TESTS` | F07専用flag。専用scriptが1に設定 |
++| `RUN_DB_INTEGRATION_TESTS` | DB用flag。専用scriptが1に設定 |
++
++事前条件を満たした環境で、次の専用コマンドだけを実行します。
++
++```sh
++npm run test:club-account:local
++```
++
++両flagがあっても接続条件が不正なら、接続前に固定メッセージで失敗します。
++失敗報告に設定値・Prisma原文・個人情報を含めません。ケース名・基準コミット・
++PostgreSQLとPrismaの版・migration適用状況・pass/fail/skipと理由を記録します。
++接続先を広げるためにガードを外しません。
++
++fixtureは各ケースのUUIDで分離し、作成したクラブ・AppUserのUUIDだけをcleanupします。
++全件削除・truncateは行いません。クラブ・親の削除による既存Cascadeで関連fixtureを片付けます。
++途中失敗・強制終了時は専用環境に残る可能性があるため、他データと共用せず担当者が残存を確認します。
++
++## 実DB試験が確認することと限界
++
++- Child所有者とparentUserId、親MembershipのclubIdとuserIdの複合FK、存在しないクラブの拒否。
++- 同一Child・同一クラブのunique、同じ作成識別子の競合・再送でも保存は1回だけ。
++- Childと初回所属の実transaction rollback。FK失敗と、Repositoryの初回所属createへの障害注入を区別。
++- 自分と他人、クラブA/B、現在所属と候補、親所属の失効、対象ID・requestIdの改ざん。
++- WITHDRAWNだけの再有効化、SUSPENDED・INVITED拒否、解除時のChild・他クラブ所属の保持。
++- 別クラブから編集したChildの再読取、複製しないこと、氏名更新でemail・Child・所属を変えないこと。
++- 作成・編集・解除・再有効化・親の失効を同時開始した結果と永続化の整合性。
++- DBから導出した影響先だけを再検証へ渡すことと、固定URLへのredirect。
++
++Auth本人取得・Actionの入口認可・Nextのredirect・revalidatePathは試験用境界へ置換します。
++Service・Repository・DB制約は実物です。失効済みcontextも渡し、Repository側の再確認を検証します。
++この試験は実Auth、Nextの実キャッシュ、HTTP経由のOrigin検査、ブラウザーを検証しません。
++`Promise.all` による競合試験は同時開始の結果を確認しますが、特定SQLの順序やP2034発生を
++強制しません。再試行上限・特定エラー注入は既存Repository単体試験と分けて記録します。
++
++## 実ブラウザーの受入
++
++担当者が用意した使い捨てアカウントとクラブA/Bだけで確認します。
++自動DB試験のfixtureにはAuthユーザーを作らないため、これをそのままログイン用途へ流用しません。
++
++| 観点 | 操作と期待結果 |
++| --- | --- |
++| ロール | OWNERはLINE設定・会員管理、OWNER/COACH/OFFICERは管理用イベント・お知らせ、MEMBERは一般導線。非表示のURLへ直接アクセスしても既存認可で拒否される |
++| PlatformAdmin | 有効なPlatformAdmin本人にだけ専用リンクが表示される。表示と遷移先の完成度は別判定 |
++| クラブ切替 | 利用可能なACTIVE所属が0/1件なら非表示、2件以上なら表示。現時点のSTANDARDだけを件数へ含め、STARTER・PROを足さない |
++| 複数Child | 2人以上を並べ、ラベル・入力ID・エラー・pendingが混線しない。学年未設定の保存と再読込も確認 |
++| 確認と入力保持 | 氏名・Childの編集内容を変えて確認を開く。キャンセルで入力が残り、送信されない。確定後だけ保存する |
++| アクセシビリティ | ダイアログの見出し、初期フォーカス、Tab/Shift+Tabの閉じ込め、Escと閉じる操作、復帰先を確認。pending中は閉じない |
++| 所属操作 | 他クラブの既存Childを再利用。現在クラブから外しても他クラブ表示が残り、再追加で同じChild・所属を再利用する |
++| 連打と再読込 | 確定連打・通信遅延・戻る・再読込を確認。同じ作成識別子を再送しても重複せず、次の新規登録は新しい識別子になる |
++| エラー | 入力エラーが正しい欄に出てフォーカス移動する。別Childのエラーへ混ざらず、例外原文を画面へ出さない |
++| 横断更新とキャッシュ | Aで氏名・Childを編集しBでも再読取。氏名は会員管理にも反映する。再検証失敗時は保存済み案内となる |
++| email | AuthとAppUserの値を表示するだけで、編集欄がない。フォーム改ざんでもemailを更新しない |
++| 外部リンク | 正式HP・Instagramの承認済みhttps先、別タブ、relを確認。不正URLは表示されない |
++| ログアウト | マイページの確認をキャンセルして入力保持、確定してログイン画面へ。Headerの既存ログアウトとは別に記録 |
++
++フォームのnode試験はhook境界を模しており、DOM・native dialog・実際の入力保持・
++ブラウザー履歴・beforeunloadを保証しません。上記の結果を別途残します。
++
++## HTTP経由の直接呼び出し
++
++関数直接試験をHTTPの保護の証明にしません。使い捨てローカルアプリで次を確認します。
++
++1. 正常な保存リクエストを開発者ツールで識別し、変更前のfixture件数・値を記録します。
++2. ローカル検証用のHTTPクライアントで、そのリクエストのOriginを別Originへ変更します。
++   現在のAction識別子やCookieを公開資料・ログへ保存せず、実アカウントの認証情報を流用しません。
++3. Nextがforeign Originを拒否し、DBに変化がないことを確認します。拒否応答・固定された挙動と
++   アプリログの機密値非出力を記録します。Action識別子を文書へ固定しません。
++4. 正常Originで対象childId、requestId、clubId、親ID、returnTo・影響slugをそれぞれ改ざんし、
++   他人・他クラブの更新や外部redirectが起きないことを確認します。
++5. 表示後に親Membershipを失効させたリクエストでも保存できないことを確認します。
++
++## 保留事項と結果記録
++
++| 項目 | patch作成時点の状態 |
++| --- | --- |
++| DBなしガード | 15件成功。実DBへ接続せずに確認 |
++| 実DB統合 | 16件。実DB変更を行わない条件のため未実行・skip。実制約・rollback・競合の成功は未確認 |
++| 既存単体・回帰 | 上記の対象18ファイルで、ガードを含む812件成功・実DB16件skip。一時環境で実行 |
++| 実Auth・ブラウザー・HTTP | 未実施。別の受入結果が必要 |
++| 規約・プライバシー | `domain/club/account/account-links.ts / ACCOUNT_LEGAL_URLS` はnull。公開URL・文面未確定。仮ページで代替しない |
++| Platform遷移先 | `AccountNavigation` の `/platform/support` はF07外の依存。表示確認だけで到達済みにしない |
++| F07受入完了 | 上記の未確認・未提供事項が残る間は未達 |
++
++実施時は各項目に担当者・日付・基準コミット・実行環境・結果と根拠を追記します。
++未実行をpassへ読み替えず、失敗した場合もこの粒度で本体を勝手に改修しません。
++該当ファイル・関数・条件を特定し、修正すべき粒度と計画変更案を報告します。
+diff --git a/package.json b/package.json
+index 268edea..05e6bb6 100644
+--- a/package.json
++++ b/package.json
+@@ -25,7 +25,8 @@
+     "club:invitation:recover": "node --conditions=react-server --import tsx scripts/recover-club-invitation.ts",
+     "test:club-invitation:recovery": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-invitation-recovery.integration.test.ts",
+     "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts",
+-    "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts"
++    "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts",
++    "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts"
+   },
+   "dependencies": {
+     "@axiomhq/js": "^1.8.0",
+diff --git a/tests/club-account.flow.integration.test.ts b/tests/club-account.flow.integration.test.ts
+new file mode 100644
+index 0000000..63aed3a
+--- /dev/null
++++ b/tests/club-account.flow.integration.test.ts
+@@ -0,0 +1,972 @@
++// tests/club-account.flow.integration.test.ts
++// F07の接続ガードと実DBフロー。Auth・Nextの境界だけを置換し、DB接続は明示設定後に行う。
 +
 +import {
-+  startTransition,
-+  useActionState,
-+  useEffect,
-+  useId,
-+  useRef,
-+  useState,
-+  type FormEvent,
-+  type ReactNode,
-+  type RefObject,
-+} from "react";
++  AsyncLocalStorage,
++} from "node:async_hooks";
++import {
++  randomUUID,
++} from "node:crypto";
 +
 +import type {
-+  ActionState,
-+} from "@/domain/shared/action-state";
-+
-+// 確認時のFormDataを保持し、確定まではActionへ渡さない。氏名等をDOMやログへ展開しない。
-+export function useConfirmedAccountForm<
-+  TValues,
-+  TField extends string = Extract<keyof TValues, string>,
-+>(
-+  action: (
-+    previous: ActionState<TValues, TField>,
-+    data: FormData,
-+  ) => Promise<ActionState<TValues, TField>>,
-+  initialState: ActionState<TValues, TField>,
-+) {
-+  type State = ActionState<TValues, TField>;
-+  const [snapshot, setSnapshot] = useState<FormData | null>(null);
-+  const sending = useRef(false);
-+  const returnFocusRef = useRef<Element | null>(null);
-+  const [state, dispatch, pending] = useActionState<State, FormData>(async (previous, data) => {
-+    try {
-+      return await action(previous, data);
-+    } finally {
-+      sending.current = false;
-+      setSnapshot(null);
-+    }
-+  }, initialState);
-+
-+  // nativeのPOSTも止め、確認を開くだけにする。
-+  function onSubmit(event: FormEvent<HTMLFormElement>) {
-+    event.preventDefault();
-+    if (
-+      pending
-+      || sending.current
-+      || snapshot
-+    ) {
-+      return;
-+    }
-+    // fieldsetが無効になる前に復帰先を記録する。
-+    returnFocusRef.current = event.currentTarget.ownerDocument?.activeElement ?? null;
-+    setSnapshot(new FormData(event.currentTarget));
-+  }
-+
-+  // 送信開始直後の再描画前もrefで連打・閉じる操作を拒否する。
-+  function confirm(onSubmitting?: () => void) {
-+    if (
-+      !snapshot
-+      || pending
-+      || sending.current
-+    ) {
-+      return;
-+    }
-+    sending.current = true;
-+    onSubmitting?.();
-+    startTransition(() => dispatch(snapshot));
-+  }
-+
-+  // キャンセルしても元のフォームは再マウントせず、入力内容を残す。
-+  function close() {
-+    if (!pending && !sending.current) {
-+      setSnapshot(null);
-+    }
-+  }
-+
-+  return {
-+    state,
-+    pending,
-+    isOpen: snapshot !== null,
-+    onSubmit,
-+    confirm,
-+    close,
-+    returnFocusRef,
-+  };
-+}
-+
-+type Props = {
-+  isOpen: boolean;
-+  pending: boolean;
-+  title: string;
-+  children: ReactNode;
-+  confirmLabel: string;
-+  onConfirm: () => void;
-+  onClose: () => void;
-+  returnFocusRef?: RefObject<Element | null>;
-+};
-+
-+// native modalで背景へのfocus移動を抑止し、Esc・閉じる・focus復帰をaccount内で扱う。
-+export function AccountConfirmDialog({
-+  isOpen,
-+  pending,
-+  title,
-+  children,
-+  confirmLabel,
-+  onConfirm,
-+  onClose,
-+  returnFocusRef,
-+}: Props) {
-+  const dialogRef = useRef<HTMLDialogElement>(null);
-+  const cancelRef = useRef<HTMLButtonElement>(null);
-+  const titleId = useId();
-+
-+  useEffect(() => {
-+    if (!isOpen) {
-+      return;
-+    }
-+    const previousFocus = returnFocusRef?.current ?? document.activeElement;
-+    const dialog = dialogRef.current;
-+    dialog?.showModal();
-+    cancelRef.current?.focus();
-+    return () => {
-+      dialog?.close();
-+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) {
-+        previousFocus.focus();
-+      }
-+    };
-+  }, [isOpen, returnFocusRef]);
-+
-+  if (!isOpen) {
-+    return null;
-+  }
-+  return (
-+    <dialog
-+      ref={dialogRef}
-+      aria-modal="true"
-+      aria-labelledby={titleId}
-+      tabIndex={-1}
-+      onCancel={(event) => {
-+        event.preventDefault();
-+        event.stopPropagation();
-+        if (!pending) {
-+          onClose();
-+        }
-+      }}
-+      className="m-auto w-[calc(100%-2rem)] max-w-lg rounded-xl p-5 backdrop:bg-black/50"
-+    >
-+      <h2
-+        id={titleId}
-+        className="text-lg font-bold"
-+      >{title}</h2>
-+      <div className="mt-4 text-sm leading-7">{children}</div>
-+      <div className="mt-5 flex justify-end gap-3">
-+        <button
-+          ref={cancelRef}
-+          type="button"
-+          disabled={pending}
-+          onClick={onClose}
-+        >
-+          キャンセル
-+        </button>
-+        <button
-+          type="button"
-+          disabled={pending}
-+          onClick={onConfirm}
-+          className="rounded-lg bg-blue-700 px-4 py-2 font-bold text-white disabled:opacity-50"
-+        >
-+          {pending ? "処理中…" : confirmLabel}
-+        </button>
-+      </div>
-+    </dialog>
-+  );
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton.tsx b/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton.tsx
-new file mode 100644
-index 0000000..02f178b
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton.tsx
-@@ -0,0 +1,71 @@
-+// app/(club-app)/club/[clubSlug]/account/AccountLogoutButton.tsx
-+// マイページのログアウトだけに確認を付け、既存logoutActionへ接続する。
-+
-+"use client";
-+
++  PrismaClient,
++} from "@prisma/client";
 +import {
-+  useRef,
-+  useState,
-+  useTransition,
-+} from "react";
-+
-+import {
-+  logoutAction,
-+} from "@/app/(club-app)/club/actions";
-+
-+import {
-+  AccountConfirmDialog,
-+} from "./AccountConfirmDialog";
-+
-+// キャンセル時は入力を残し、確定後だけ現在セッションをログアウトする。
-+export function AccountLogoutButton() {
-+  const [isOpen, setIsOpen] = useState(false);
-+  const [pending, startLogout] = useTransition();
-+  const sending = useRef(false);
-+
-+  // refでも連打を抑止し、Nextのredirectをcatchで固定エラーへ変換しない。
-+  function confirm() {
-+    if (pending || sending.current) {
-+      return;
-+    }
-+    sending.current = true;
-+    startLogout(async () => {
-+      try {
-+        await logoutAction();
-+      } finally {
-+        sending.current = false;
-+        setIsOpen(false);
-+      }
-+    });
-+  }
-+
-+  // 送信開始から描画までの短い間も閉じる操作を拒否する。
-+  function close() {
-+    if (!pending && !sending.current) {
-+      setIsOpen(false);
-+    }
-+  }
-+
-+  return (
-+    <>
-+      <button
-+        type="button"
-+        disabled={pending}
-+        onClick={() => setIsOpen(true)}
-+        className="rounded-lg border border-slate-300 px-4 py-3 font-medium text-slate-700"
-+      >
-+        ログアウト
-+      </button>
-+      <AccountConfirmDialog
-+        isOpen={isOpen}
-+        pending={pending}
-+        title="ログアウトしますか？"
-+        confirmLabel="ログアウトする"
-+        onClose={close}
-+        onConfirm={confirm}
-+      >
-+        未保存の入力内容は失われます。ログアウトしてよいですか？
-+      </AccountConfirmDialog>
-+    </>
-+  );
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/account/AccountNameForm.tsx b/app/(club-app)/club/[clubSlug]/account/AccountNameForm.tsx
-new file mode 100644
-index 0000000..46197c9
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/AccountNameForm.tsx
-@@ -0,0 +1,106 @@
-+// app/(club-app)/club/[clubSlug]/account/AccountNameForm.tsx
-+// 氏名だけを編集し、クラブ横断の影響を確認してから保存する。
-+
-+"use client";
-+
-+import {
-+  useId,
-+} from "react";
-+
-+import {
-+  FieldErrorList,
-+} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
-+import {
-+  FormErrorAlert,
-+} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
-+import {
-+  useScrollToFormError,
-+} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
-+import {
-+  useUnsavedChangesGuard,
-+} from "@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard";
-+import {
-+  ACCOUNT_NAME_MAX_LENGTH,
-+  type AccountNameActionState,
-+} from "@/domain/club/account/account-form";
-+
-+import {
-+  AccountConfirmDialog,
-+  useConfirmedAccountForm,
-+} from "./AccountConfirmDialog";
-+
-+type Props = {
-+  initialState: AccountNameActionState;
-+  action: (state: AccountNameActionState, data: FormData) => Promise<AccountNameActionState>;
-+};
-+
-+// 他のChildフォームとstate・入力ID・requestIdを共有しない。
-+export function AccountNameForm({ initialState, action }: Props) {
-+  const form = useConfirmedAccountForm(action, initialState);
-+  const formRef = useScrollToFormError(form.state);
-+  const guard = useUnsavedChangesGuard(form.pending);
-+  const nameId = useId();
-+  const errorId = `${nameId}-error`;
-+
-+  return (
-+    <>
-+      {/* 確認前の送信を止め、未hydrate時も個人情報をGET URLへ載せない。 */}
-+      <form
-+        ref={formRef}
-+        method="post"
-+        onSubmit={form.onSubmit}
-+        onChange={guard.markDirty}
-+      >
-+        <fieldset
-+          disabled={form.pending || form.isOpen}
-+          className="mt-4 space-y-3"
-+        >
-+          <legend className="font-bold">氏名を変更</legend>
-+          <input
-+            type="hidden"
-+            name="requestId"
-+            value={form.state.requestId}
-+          />
-+          <FormErrorAlert message={form.state.formError} />
-+          <label
-+            htmlFor={nameId}
-+            className="block text-sm font-bold"
-+          >氏名</label>
-+          <input
-+            id={nameId}
-+            name="name"
-+            defaultValue={form.state.values.name}
-+            maxLength={ACCOUNT_NAME_MAX_LENGTH}
-+            required
-+            autoComplete="name"
-+            aria-invalid={Boolean(form.state.fieldErrors.name?.length)}
-+            aria-describedby={form.state.fieldErrors.name?.length ? errorId : undefined}
-+            className="w-full rounded-lg border border-slate-300 px-3 py-2"
-+          />
-+          <FieldErrorList
-+            id={errorId}
-+            errors={form.state.fieldErrors.name}
-+          />
-+          <p className="text-sm text-slate-600">氏名の変更は、ほかの所属クラブにも反映されます。</p>
-+          <button
-+            type="submit"
-+            className="rounded-lg bg-blue-700 px-4 py-2 text-white"
-+          >
-+            {form.pending ? "保存中…" : "確認して保存"}
-+          </button>
-+        </fieldset>
-+      </form>
-+      <AccountConfirmDialog
-+        isOpen={form.isOpen}
-+        pending={form.pending}
-+        returnFocusRef={form.returnFocusRef}
-+        title="氏名を保存しますか？"
-+        confirmLabel="保存する"
-+        onClose={form.close}
-+        onConfirm={() => form.confirm(guard.markSubmitting)}
-+      >
-+        氏名の変更は、ほかの所属クラブにも反映されます。
-+      </AccountConfirmDialog>
-+    </>
-+  );
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/account/AccountNavigation.tsx b/app/(club-app)/club/[clubSlug]/account/AccountNavigation.tsx
-index 5b5646e..d557711 100644
---- a/app/(club-app)/club/[clubSlug]/account/AccountNavigation.tsx
-+++ b/app/(club-app)/club/[clubSlug]/account/AccountNavigation.tsx
-@@ -6,9 +6,10 @@ import "server-only";
- 
- import Link from "next/link";
- 
-+// 【変更：F07粒度9】既存logoutActionへ確認付きのaccount専用ボタンから接続する。
- import {
--  logoutAction,//ログアウトのアクション関数
--} from "@/app/(club-app)/club/actions";
-+  AccountLogoutButton,
-+} from "./AccountLogoutButton";
- import {
-   getAccountExternalLinks,
- } from "@/domain/club/account/account-links";
-@@ -80,14 +81,8 @@ export function AccountNavigation({
-           </a>
-         ),)}
-       </nav>
--      <form action={logoutAction}>
--        <button
--          type="submit"
--          className="rounded-lg border border-slate-300 px-4 py-3 font-medium text-slate-700"
--        >
--          ログアウト
--        </button>
--      </form>
-+      {/* 【変更：F07粒度9】HeaderのログアウトやAction本体は変更しない。 */}
-+      <AccountLogoutButton />
-     </section>
-   );
- }
-diff --git a/app/(club-app)/club/[clubSlug]/account/ChildForm.tsx b/app/(club-app)/club/[clubSlug]/account/ChildForm.tsx
-new file mode 100644
-index 0000000..bda474a
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/ChildForm.tsx
-@@ -0,0 +1,168 @@
-+// app/(club-app)/club/[clubSlug]/account/ChildForm.tsx
-+// 新規・編集の項目を共有し、各Childのstateと所属解除のpendingを独立させる。
-+
-+"use client";
-+
-+import {
-+  useId,
-+  useState,
-+} from "react";
-+
-+import {
-+  FieldErrorList,
-+} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
-+import {
-+  FormErrorAlert,
-+} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
-+import {
-+  useScrollToFormError,
-+} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
-+import {
-+  useUnsavedChangesGuard,
-+} from "@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard";
-+import {
-+  ACCOUNT_NAME_MAX_LENGTH,
-+} from "@/domain/club/account/account-form";
-+import {
-+  CHILD_GRADE_OPTIONS,
-+  type ChildActionState,
-+  type ChildMembershipActionState,
-+} from "@/domain/club/account/child-form";
-+
-+import {
-+  AccountConfirmDialog,
-+  useConfirmedAccountForm,
-+} from "./AccountConfirmDialog";
-+import {
-+  ChildMembershipOperations,
-+} from "./ChildMembershipOperations";
-+
-+type Props = {
-+  initialState: ChildActionState;
-+  action: (state: ChildActionState, data: FormData) => Promise<ChildActionState>;
-+  childId?: string;
-+  withdrawal?: {
-+    initialState: ChildMembershipActionState;
-+    action: (
-+      state: ChildMembershipActionState,
-+      data: FormData,
-+    ) => Promise<ChildMembershipActionState>;
-+  };
-+};
-+
-+// 同じChildの編集と所属解除を同時に進めない。別Childのstateは混ぜない。
-+export function ChildForm({ initialState, action, childId, withdrawal }: Props) {
-+  const form = useConfirmedAccountForm(action, initialState);
-+  const [membershipBusy, setMembershipBusy] = useState(false);
-+  const formRef = useScrollToFormError(form.state);
-+  const guard = useUnsavedChangesGuard(form.pending);
-+  const nameId = useId();
-+  const gradeId = useId();
-+  const nameErrorId = `${nameId}-error`;
-+  const gradeErrorId = `${gradeId}-error`;
-+
-+  return (
-+    <>
-+      <form
-+        ref={formRef}
-+        method="post"
-+        onSubmit={form.onSubmit}
-+        onChange={guard.markDirty}
-+      >
-+        <fieldset
-+          disabled={form.pending || form.isOpen || membershipBusy}
-+          className="space-y-3"
-+        >
-+          <legend className="font-bold">{childId ? "子どもの情報を編集" : "子どもを新しく登録"}</legend>
-+          <input
-+            type="hidden"
-+            name="requestId"
-+            value={form.state.requestId}
-+          />
-+          {childId ? <input
-+            type="hidden"
-+            name="childId"
-+            value={childId}
-+          /> : null}
-+          <FormErrorAlert message={form.state.formError} />
-+          <label
-+            htmlFor={nameId}
-+            className="block text-sm font-bold"
-+          >子どもの氏名</label>
-+          <input
-+            id={nameId}
-+            name="name"
-+            defaultValue={form.state.values.name}
-+            maxLength={ACCOUNT_NAME_MAX_LENGTH}
-+            required
-+            aria-invalid={Boolean(form.state.fieldErrors.name?.length)}
-+            aria-describedby={form.state.fieldErrors.name?.length ? nameErrorId : undefined}
-+            className="w-full rounded-lg border border-slate-300 px-3 py-2"
-+          />
-+          <FieldErrorList
-+            id={nameErrorId}
-+            errors={form.state.fieldErrors.name}
-+          />
-+          <label
-+            htmlFor={gradeId}
-+            className="block text-sm font-bold"
-+          >学年</label>
-+          <select
-+            id={gradeId}
-+            name="grade"
-+            defaultValue={form.state.values.grade}
-+            aria-invalid={Boolean(form.state.fieldErrors.grade?.length)}
-+            aria-describedby={form.state.fieldErrors.grade?.length ? gradeErrorId : undefined}
-+            className="w-full rounded-lg border border-slate-300 px-3 py-2"
-+          >
-+            <option value="">未設定</option>
-+            {CHILD_GRADE_OPTIONS.map((option) => (
-+              <option
-+                key={option.value}
-+                value={option.value}
-+              >{option.label}</option>
-+            ))}
-+          </select>
-+          <FieldErrorList
-+            id={gradeErrorId}
-+            errors={form.state.fieldErrors.grade}
-+          />
-+          {childId ? (
-+            <p className="text-sm text-slate-600">
-+              氏名・学年の変更は、ほかの所属クラブにも反映されます。
-+            </p>
-+          ) : null}
-+          <button
-+            type="submit"
-+            className="rounded-lg bg-blue-700 px-4 py-2 text-white"
-+          >
-+            {form.pending ? "保存中…" : "確認して保存"}
-+          </button>
-+        </fieldset>
-+      </form>
-+      <AccountConfirmDialog
-+        isOpen={form.isOpen}
-+        pending={form.pending}
-+        returnFocusRef={form.returnFocusRef}
-+        title={childId ? "子どもの情報を保存しますか？" : "子どもを登録しますか？"}
-+        confirmLabel="保存する"
-+        onClose={form.close}
-+        onConfirm={() => form.confirm(guard.markSubmitting)}
-+      >
-+        {childId
-+          ? "氏名・学年の変更は、ほかの所属クラブにも反映されます。"
-+          : "新しい子どもを登録し、現在クラブへ追加します。"}
-+      </AccountConfirmDialog>
-+      {childId && withdrawal ? (
-+        <ChildMembershipOperations
-+          mode="withdraw"
-+          childId={childId}
-+          initialState={withdrawal.initialState}
-+          action={withdrawal.action}
-+          disabled={form.pending || form.isOpen}
-+          onBusyChange={setMembershipBusy}
-+        />
-+      ) : null}
-+    </>
-+  );
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations.tsx b/app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations.tsx
-new file mode 100644
-index 0000000..09bf847
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations.tsx
-@@ -0,0 +1,230 @@
-+// app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations.tsx
-+// 所属解除と、利用者が開いた時だけ取得する既存Child候補・所属追加を扱う。
-+
-+"use client";
-+
-+import {
-+  useEffect,
-+  useId,
-+  useRef,
-+  useState,
-+  useTransition,
-+} from "react";
-+
-+import {
-+  FieldErrorList,
-+} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
-+import {
-+  FormErrorAlert,
-+} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
-+import {
-+  useScrollToFormError,
-+} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
-+import type {
-+  ClubAccountChildCandidatesResult,
-+  ClubAccountChildView,
-+} from "@/domain/club/account/account-types";
-+import {
-+  CHILD_GRADE_OPTIONS,
-+  type ChildMembershipActionState,
-+} from "@/domain/club/account/child-form";
-+import {
-+  createInitialActionState,
-+} from "@/domain/shared/action-state";
-+
-+import {
-+  AccountConfirmDialog,
-+  useConfirmedAccountForm,
-+} from "./AccountConfirmDialog";
-+
-+type MembershipAction = (
-+  state: ChildMembershipActionState,
-+  data: FormData,
-+) => Promise<ChildMembershipActionState>;
-+
-+type MembershipProps = {
-+  mode: "add" | "withdraw";
-+  childId: string;
-+  initialState: ChildMembershipActionState;
-+  action: MembershipAction;
-+  disabled?: boolean;
-+  onBusyChange?: (busy: boolean) => void;
-+};
-+
-+type AddProps = {
-+  mode: "add";
-+  loadAction: () => Promise<ClubAccountChildCandidatesResult>;
-+  action: (childId: string, state: ChildMembershipActionState, data: FormData) =>
-+    Promise<ChildMembershipActionState>;
-+};
-+
-+type Props = (MembershipProps & { mode: "withdraw" }) | AddProps;
-+
-+// Childごとに独立したstate・確認・hidden値を持つ。所属先・所有者はActionで再照合する。
-+function MembershipForm({
-+  mode,
-+  childId,
-+  initialState,
-+  action,
-+  disabled = false,
-+  onBusyChange,
-+}: MembershipProps) {
-+  const form = useConfirmedAccountForm(action, initialState);
-+  const formRef = useScrollToFormError(form.state);
-+  const errorId = useId();
-+  const withdrawing = mode === "withdraw";
-+  const label = withdrawing ? "現在クラブから外す" : "現在クラブへ追加する";
-+
-+  useEffect(() => {
-+    onBusyChange?.(form.pending || form.isOpen);
-+    return () => onBusyChange?.(false);
-+  }, [form.pending, form.isOpen, onBusyChange]);
-+
-+  return (
-+    <>
-+      <form
-+        ref={formRef}
-+        method="post"
-+        onSubmit={form.onSubmit}
-+        className="mt-4 space-y-2"
-+      >
-+        <fieldset disabled={disabled || form.pending || form.isOpen}>
-+          <input
-+            type="hidden"
-+            name="requestId"
-+            value={form.state.requestId}
-+          />
-+          <input
-+            type="hidden"
-+            name="childId"
-+            value={childId}
-+          />
-+          <FormErrorAlert message={form.state.formError} />
-+          <FieldErrorList
-+            id={errorId}
-+            errors={form.state.fieldErrors.childId}
-+          />
-+          <button
-+            type="submit"
-+            className="rounded-lg border border-slate-300 px-4 py-2"
-+          >
-+            {form.pending ? "処理中…" : label}
-+          </button>
-+        </fieldset>
-+      </form>
-+      <AccountConfirmDialog
-+        isOpen={form.isOpen}
-+        pending={form.pending}
-+        returnFocusRef={form.returnFocusRef}
-+        title={withdrawing ? "現在クラブから外しますか？" : "現在クラブへ追加しますか？"}
-+        confirmLabel={label}
-+        onClose={form.close}
-+        onConfirm={() => form.confirm()}
-+      >
-+        {withdrawing
-+          ? "子ども本体と他クラブの所属は残ります。入力中の編集は保存されません。"
-+          : "既存の子どもを再利用して現在クラブへ追加します。"}
-+      </AccountConfirmDialog>
-+    </>
-+  );
-+}
-+
-+// 候補ごとに初期stateを一度だけ作り、他の候補の入力・エラーを共有しない。
-+function CandidateRow({ child, action, disabled, onBusyChange }: {
-+  child: ClubAccountChildView;
-+  action: AddProps["action"];
-+  disabled: boolean;
-+  onBusyChange: (busy: boolean) => void;
-+}) {
-+  const [initialState] = useState(() => createInitialActionState({ childId: child.id }));
-+  return (
-+    <li className="rounded-lg border border-slate-200 p-4">
-+      <p className="font-bold">{child.name}</p>
-+      <p className="text-sm text-slate-600">
-+        学年：{CHILD_GRADE_OPTIONS.find((option) => option.value === child.grade)?.label ?? "未設定"}
-+      </p>
-+      <MembershipForm
-+        mode="add"
-+        childId={child.id}
-+        initialState={initialState}
-+        action={action.bind(null, child.id)}
-+        disabled={disabled}
-+        onBusyChange={onBusyChange}
-+      />
-+    </li>
-+  );
-+}
-+
-+// mount時には候補を取得しない。開き直すたびに古い候補とstateを破棄して取得する。
-+function AddOperations({ loadAction, action }: AddProps) {
-+  const [isOpen, setIsOpen] = useState(false);
-+  const [result, setResult] = useState<ClubAccountChildCandidatesResult | null>(null);
-+  const [busy, setBusy] = useState(false);
-+  const [loading, startLoading] = useTransition();
-+  const loadingRef = useRef(false);
-+
-+  // 認可失効によるNext制御例外はcatchで握りつぶさず、Nextへ委ねる。
-+  function open() {
-+    if (loading || loadingRef.current || busy) {
-+      return;
-+    }
-+    loadingRef.current = true;
-+    setIsOpen(true);
-+    setResult(null);
-+    startLoading(async () => {
-+      try {
-+        setResult(await loadAction());
-+      } finally {
-+        loadingRef.current = false;
-+      }
-+    });
-+  }
-+
-+  return (
-+    <section className="mt-5 space-y-3">
-+      <button
-+        type="button"
-+        disabled={loading || busy}
-+        onClick={open}
-+      >
-+        {loading ? "候補を取得中…" : "登録済みの子どもを現在クラブへ追加"}
-+      </button>
-+      {isOpen ? (
-+        <div className="space-y-3 rounded-lg border border-slate-200 p-4">
-+          <h3 className="font-bold">追加できる子ども</h3>
-+          {result?.outcome === "FOUND" ? (
-+            result.children.length === 0 ? (
-+              <p>追加できる子どもはいません。</p>
-+            ) : (
-+              <ul className="space-y-3">
-+                {result.children.map((child) => (
-+                  <CandidateRow
-+                    key={child.id}
-+                    child={child}
-+                    action={action}
-+                    disabled={busy}
-+                    onBusyChange={setBusy}
-+                  />
-+                ))}
-+              </ul>
-+            )
-+          ) : result ? (
-+            <FormErrorAlert message="候補を取得できませんでした。ページを開き直してください。" />
-+          ) : null}
-+          <button
-+            type="button"
-+            disabled={loading || busy}
-+            onClick={() => setIsOpen(false)}
-+          >
-+            閉じる
-+          </button>
-+        </div>
-+      ) : null}
-+    </section>
-+  );
-+}
-+
-+// 所属解除と候補取得の入口を分け、現在の用途に必要な状態だけを持つ。
-+export function ChildMembershipOperations(props: Props) {
-+  return props.mode === "add" ? <AddOperations {...props} /> : <MembershipForm {...props} />;
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/account/page.tsx b/app/(club-app)/club/[clubSlug]/account/page.tsx
-index 9bd5829..2acf4b7 100644
---- a/app/(club-app)/club/[clubSlug]/account/page.tsx
-+++ b/app/(club-app)/club/[clubSlug]/account/page.tsx
-@@ -9,6 +9,33 @@ import {
- import {
-   requireClubAppAccess,//クラブのアプリが使えるか確認する関数
- } from "@/app/(club-app)/club/club-app-authorization";
-+// 【追加：F07粒度9】独立した初期stateとフォームを接続する。
-+import {
-+  ToastMessage,
-+} from "@/components/admin/ToastMessage";
-+import {
-+  createInitialActionState,
-+} from "@/domain/shared/action-state";
-+import {
-+  isRequestId,
-+} from "@/domain/shared/request-id";
-+import {
-+  AccountNameForm,
-+} from "./AccountNameForm";
-+import {
-+  ChildForm,
-+} from "./ChildForm";
-+import {
-+  ChildMembershipOperations,
-+} from "./ChildMembershipOperations";
-+import {
-+  addChildToClubAction,
-+  createChildAction,
-+  getAttachableChildrenAction,
-+  updateAccountNameAction,
-+  updateChildAction,
-+  withdrawChildFromClubAction,
-+} from "./actions";
- import {
-   getAccountFeedbackMessage,// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
- } from "@/domain/club/account/account-form";
-@@ -65,13 +92,21 @@ export default async function ClubAccountPage({
-   const query = await searchParams;
-   const feedback = getAccountFeedbackMessage(query.toast);// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
- 
-+  // 【追加：F07粒度9】作成フォームは保存後の再描画で新しい作成識別子へ切り替える。
-+  const newChildState = createInitialActionState({
-+    name: "",
-+    grade: "",
-+  });
-+  const toastKey = isRequestId(query.toastId) ? query.toastId : feedback ?? "account";
-+
-   return (
-     <div className="space-y-6">
-       <h1 className="text-2xl font-bold text-slate-900">マイページ</h1>
-       {feedback ? (
--        <p role="status" className="rounded-lg border border-green-200 bg-green-50 p-4">
--          {feedback}
--        </p>
-+        // 【変更：F07粒度9】固定文言だけを渡し、保存ごとにトーストを再マウントする。
-+        <div role="status">
-+          <ToastMessage key={toastKey} message={feedback} />
-+        </div>
-       ) : null}
-       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
-         <h2 className="text-lg font-bold text-slate-900">登録情報</h2>
-@@ -98,6 +133,12 @@ export default async function ClubAccountPage({
-           </div>
-         </dl>
-         <p className="text-sm text-slate-600">メールアドレスは表示専用です。</p>
-+        {/* 【追加：F07粒度9】emailをフォームのpropsや入力に含めない。 */}
-+        <AccountNameForm
-+          key={view.club.slug}
-+          initialState={createInitialActionState({ name: view.name ?? "" })}
-+          action={updateAccountNameAction.bind(null, view.club.slug)}
-+        />
-       </section>
-       <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
-         <h2 className="text-lg font-bold text-slate-900">子ども</h2>
-@@ -108,12 +149,29 @@ export default async function ClubAccountPage({
-         ) : (
-           <ul className="space-y-3">
-             {view.children.map((child) => (
--              <li key={child.id} className="rounded-lg border border-slate-200 p-4">
-+              <li
-+                key={`${view.club.slug}:${child.id}`}
-+                className="rounded-lg border border-slate-200 p-4"
-+              >
-                 <p className="wrap-break-word font-bold text-slate-900">{child.name}</p>
-                 <p className="mt-1 text-sm text-slate-600">
-                   学年：{CHILD_GRADE_OPTIONS.find((option) => option.value === child.grade)//子どもの学年のバリューとラベル一覧からバリューを抜き出しその中に含まれてるかをチェックする
-                     ?.label ?? "未設定"}
-                 </p>
-+                {/* 【追加：F07粒度9】Childごとに編集と解除のstate・Actionを分離する。 */}
-+                <ChildForm
-+                  key={`${view.club.slug}:${child.id}`}
-+                  childId={child.id}
-+                  initialState={createInitialActionState({
-+                    name: child.name,
-+                    grade: child.grade ?? "",
-+                  })}
-+                  action={updateChildAction.bind(null, view.club.slug, child.id)}
-+                  withdrawal={{
-+                    initialState: createInitialActionState({ childId: child.id }),
-+                    action: withdrawChildFromClubAction.bind(null, view.club.slug, child.id),
-+                  }}
-+                />
-               </li>
-             ),)}
-           </ul>
-@@ -121,6 +179,18 @@ export default async function ClubAccountPage({
-         <p className="text-sm text-slate-600">
-           子どもの氏名・学年は、ほかの所属クラブでも共通です。
-         </p>
-+        {/* 【追加：F07粒度9】新規作成と既存Childの再利用を別操作にする。 */}
-+        <ChildForm
-+          key={newChildState.requestId}
-+          initialState={newChildState}
-+          action={createChildAction.bind(null, view.club.slug)}
-+        />
-+        <ChildMembershipOperations
-+          key={`candidates:${newChildState.requestId}`}
-+          mode="add"
-+          loadAction={getAttachableChildrenAction.bind(null, view.club.slug)}
-+          action={addChildToClubAction.bind(null, view.club.slug)}
-+        />
-       </section>
-       <AccountNavigation
-         club={view.club}
-diff --git a/tests/club-account-forms.test.ts b/tests/club-account-forms.test.ts
-new file mode 100644
-index 0000000..885a6bb
---- /dev/null
-+++ b/tests/club-account-forms.test.ts
-@@ -0,0 +1,562 @@
-+// tests/club-account-forms.test.ts
-+// hook境界を模したnode試験。DOM・native dialog・実ブラウザのfocus動作は再現しない。
-+
-+import {
-+  cloneElement,
-+  isValidElement,
-+  type ReactNode,
-+} from "react";
-+import { renderToStaticMarkup } from "react-dom/server";
-+import {
++  afterAll,
 +  afterEach,
++  beforeAll,
 +  beforeEach,
++  describe,
 +  expect,
 +  it,
 +  vi,
 +} from "vitest";
 +
-+import {
-+  AccountNameForm,
-+} from "@/app/(club-app)/club/[clubSlug]/account/AccountNameForm";
-+import {
-+  ChildForm,
-+} from "@/app/(club-app)/club/[clubSlug]/account/ChildForm";
-+import {
-+  ChildMembershipOperations,
-+} from "@/app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations";
-+import {
-+  AccountConfirmDialog,
-+} from "@/app/(club-app)/club/[clubSlug]/account/AccountConfirmDialog";
-+import {
-+  AccountLogoutButton,
-+} from "@/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton";
 +import type {
-+  AccountNameActionState,
-+} from "@/domain/club/account/account-form";
++  ClubAccessContext,
++} from "@/app/(club-app)/club/club-membership-authorization";
++import {
++  createInitialActionState,
++} from "@/domain/shared/action-state";
 +import type {
-+  ChildActionState,
-+  ChildMembershipActionState,
-+} from "@/domain/club/account/child-form";
++  ClubMembershipStatus,
++} from "@/types/prisma";
 +
-+const mocks = vi.hoisted(() => ({
-+  state: vi.fn(),
-+  ref: vi.fn(),
-+  actionState: vi.fn(),
-+  id: vi.fn(),
-+  effect: vi.fn(),
-+  transition: vi.fn(),
-+  logout: vi.fn(),
-+  dirty: vi.fn(),
-+  submitting: vi.fn(),
-+}));
++type Environment = Record<string, string | undefined>;
++type Fixture = {
++  clubs: string[];
++  users: string[];
++  a: ClubAccessContext;
++  b: ClubAccessContext;
++  shared: string;
++  sibling: string;
++  foreign: string;
++  available: string;
++  withdrawn: string;
++  suspended: string;
++  invited: string;
++};
 +
-+// Reactの再描画・非同期Action境界だけを最小限模し、DOM試験とは分ける。
-+vi.mock("react", async (original) => ({
-+  ...await original<typeof import("react")>(),
-+  useState: mocks.state,
-+  useRef: mocks.ref,
-+  useId: mocks.id,
-+  useEffect: mocks.effect,
-+  useActionState: mocks.actionState,
-+  useTransition: mocks.transition,
-+  startTransition: (callback: () => void) => callback(),
-+}));
-+vi.mock("@/app/(club-app)/club/admin/_hooks/useScrollToFormError", () => ({
-+  useScrollToFormError: () => ({ current: null }),
-+}));
-+vi.mock("@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard", () => ({
-+  useUnsavedChangesGuard: () => ({
-+    markDirty: mocks.dirty,
-+    markSubmitting: mocks.submitting,
++const requests = new AsyncLocalStorage<ClubAccessContext>();
++const paths = new Set<string>();
++let client: PrismaClient | undefined;
++
++// 実行用flagが両方揃うまで接続設定を評価しない。
++function enabled(environment: Environment): boolean {
++  return environment.RUN_CLUB_ACCOUNT_TESTS === "1" &&
++    environment.RUN_DB_INTEGRATION_TESTS === "1";
++}
++
++// queryで接続先を上書きできない専用loopback URLだけを受け付け、原文は出力しない。
++function localConfiguration(environment: Environment): string {
++  try {
++    const url = new URL(environment.DATABASE_URL ?? "invalid");
++    if (
++      !enabled(environment) ||
++      environment.CLUB_ACCOUNT_DISPOSABLE !== "1" ||
++      environment.NODE_ENV === "production" ||
++      !["postgres:", "postgresql:"].includes(url.protocol) ||
++      !["localhost", "127.0.0.1"].includes(url.hostname) ||
++      url.port !== "54322" ||
++      url.pathname !== "/postgres" ||
++      url.search !== "" ||
++      url.hash !== "" ||
++      !url.username ||
++      !url.password
++    ) {
++      throw new Error("Invalid configuration");
++    }
++    return url.toString();
++  } catch {
++    throw new Error("F07専用の使い捨てローカルDB設定と明示flagを確認してください。");
++  }
++}
++
++// fixture・SQL・接続文字列をVitestの失敗出力へ展開しない。
++async function safeCheck(operation: () => Promise<void>): Promise<void> {
++  try {
++    await operation();
++  } catch {
++    throw new Error("F07統合確認に失敗しました。対象ケースと運用手順を確認してください。");
++  }
++}
++
++// ガード試験は実環境を参照せず、架空の設定だけで行う。
++function sampleEnvironment(): Environment {
++  return {
++    RUN_CLUB_ACCOUNT_TESTS: "1",
++    RUN_DB_INTEGRATION_TESTS: "1",
++    CLUB_ACCOUNT_DISPOSABLE: "1",
++    NODE_ENV: "test",
++    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
++  };
++}
++
++// アプリ共有clientのdotenv初期化を避け、ガード後に作った専用clientだけを注入する。
++vi.mock("@/src/infrastructure/prisma/client", () => ({
++  prisma: new Proxy({} as PrismaClient, {
++    get(_target, property) {
++      if (!client) {
++        throw new Error("F07専用clientは未初期化です。");
++      }
++      const value = Reflect.get(client, property);
++      return typeof value === "function" ? value.bind(client) : value;
++    },
 +  }),
 +}));
-+vi.mock("@/app/(club-app)/club/actions", () => ({
-+  logoutAction: mocks.logout,
-+}));
 +
-+type Frame = {
-+  values: unknown[];
-+  cursor: number;
-+};
-+type Cell = {
-+  value: unknown;
-+  pending: boolean;
-+};
-+const frames = new Map<string, Frame>();
-+let frame: Frame;
-+let tasks: Promise<unknown>[];
-+let idNumber: number;
-+const NativeFormData = globalThis.FormData;
-+const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
-+const OTHER_REQUEST_ID = "22222222-2222-4222-8222-222222222222";
-+const CHILD_ID = "33333333-3333-4333-8333-333333333333";
-+
-+// Componentごとのhook領域を保持する。ReactのschedulerやDOM状態を検証する実装ではない。
-+function run<T>(
-+  key: string,
-+  callback: () => T
-+): T {
-+  frame = frames.get(key) ?? {
-+    values: [],
-+    cursor: 0
-+  };
-+  frame.cursor = 0;
-+  frames.set(key, frame);
-+  return callback();
-+}
-+
-+// hook呼出し順に値を保存する。
-+function slot(initial: () => unknown): unknown {
-+  const index = frame.cursor++;
-+  if (!(index in frame.values)) {
-+    frame.values[index] = initial();
-+  }
-+  return frame.values[index];
-+}
-+
-+// Component境界を展開し、静的な要素とイベントhandlerだけを取り出す。
-+function expand(
-+  node: ReactNode,
-+  path: string
-+): ReactNode {
-+  if (Array.isArray(node)) {
-+    return node.map((child, index) => expand(child, `${path}/${index}`));
-+  }
-+  if (!isValidElement<Record<string, unknown>>(node)) {
-+    return node;
-+  }
-+  if (typeof node.type === "function") {
-+    const component = node.type as (props: Record<string, unknown>) => ReactNode;
-+    const key = `${path}/${component.name}:${node.key ?? ""}`;
-+    return expand(run(key, () => component(node.props)), key);
-+  }
-+  return cloneElement(node, {
-+    key: node.key ?? path,
-+    children: expand(node.props.children as ReactNode, `${path}/child`),
-+  });
-+}
-+
-+// 再描画を明示し、Component間のhook領域を混ぜない。
-+function view(
-+  component: () => ReactNode,
-+  key = "root"
-+): ReactNode {
-+  return expand(run(key, component), key);
-+}
-+
-+// 静的要素から対象のタグだけを収集する。
-+function nodes(
-+  node: ReactNode,
-+  type: string
-+): Record<string, unknown>[] {
-+  if (Array.isArray(node)) {
-+    return node.flatMap((child) => nodes(child, type));
-+  }
-+  if (!isValidElement<Record<string, unknown>>(node)) {
-+    return [];
-+  }
-+  return [
-+    ...(node.type === type ? [node.props] : []),
-+    ...nodes(node.props.children as ReactNode, type),
-+  ];
-+}
-+
-+// イベントを発火せず、静的文面だけを取得する。
-+function text(node: ReactNode): string {
-+  return renderToStaticMarkup(node);
-+}
-+
-+// 文面で確認・キャンセルbuttonを選ぶ。
-+function button(
-+  tree: ReactNode,
-+  label: string
-+): Record<string, unknown> {
-+  const result = nodes(tree, "button").find((item) =>
-+    text(item.children as ReactNode) === label && typeof item.onClick === "function");
-+  expect(result).toBeDefined();
-+  return result!;
-+}
-+
-+// クリックhandlerだけを直接呼ぶ。ブラウザイベントの伝播は検証しない。
-+function click(item: Record<string, unknown>) {
-+  (item.onClick as () => void)();
-+}
-+
-+// FormData(form)はDOMの代わりに渡したfixtureを複写する。
-+function submit(
-+  form: Record<string, unknown>,
-+  data: FormData
-+) {
-+  const preventDefault = vi.fn();
-+  (form.onSubmit as (event: unknown) => void)({
-+    preventDefault,
-+    currentTarget: data,
-+  });
-+  expect(preventDefault).toHaveBeenCalledOnce();
-+}
-+
-+// 非同期Actionの完了を明示的に待つ。
-+async function flush() {
-+  while (tasks.length) {
-+    await Promise.all(tasks.splice(0));
-+  }
-+}
-+
-+// 名前の初期state。
-+function nameState(): AccountNameActionState {
-+  return {
-+    status: "idle",
-+    values: { name: "本人" },
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: REQUEST_ID,
-+  };
-+}
-+
-+// Childごとの初期state。
-+function childState(requestId = REQUEST_ID): ChildActionState {
-+  return {
-+    ...nameState(),
-+    values: {
-+      name: "子ども",
-+      grade: ""
-+    },
-+    requestId,
-+  };
-+}
-+
-+// 所属操作ごとの初期state。
-+function membershipState(): ChildMembershipActionState {
-+  return {
-+    ...nameState(),
-+    values: { childId: CHILD_ID },
-+    fieldErrors: {},
-+  };
-+}
-+
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  frames.clear();
-+  tasks = [];
-+  idNumber = 0;
-+  vi.spyOn(console, "error").mockImplementation(() => undefined);
-+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
-+  vi.spyOn(console, "log").mockImplementation(() => undefined);
-+  vi.stubGlobal("FormData", class extends NativeFormData {
-+    constructor(source?: FormData) {
-+      super();
-+      if (source) {
-+        for (const [key, value] of source.entries()) {
-+          this.append(key, value);
-+        }
-+      }
++// 実Authは利用せず、リクエストごとの本人を設定する。実際の認可は既存回帰試験で別確認する。
++vi.mock("@/app/(club-app)/club/club-app-authorization", () => ({
++  requireClubAppAccess: async (slug: string) => {
++    const context = requests.getStore();
++    if (!context || context.club.slug !== slug) {
++      throw new Error("F07試験リクエストの認可に失敗しました。");
 +    }
-+  });
-+  mocks.state.mockImplementation((initial) => {
-+    const cell = slot(() => ({
-+      value: typeof initial === "function" ? initial() : initial,
-+    })) as Cell;
-+    return [cell.value, (value: unknown) => {
-+      cell.value = typeof value === "function" ? value(cell.value) : value;
-+    }];
-+  });
-+  mocks.ref.mockImplementation((initial) => slot(() => ({ current: initial })));
-+  mocks.id.mockImplementation(() => slot(() => `field-${++idNumber}`));
-+  mocks.actionState.mockImplementation((action, initial) => {
-+    const cell = slot(() => ({
-+      value: initial,
-+      pending: false
-+    })) as Cell;
-+    return [cell.value, (data: FormData) => {
-+      cell.pending = true;
-+      tasks.push(Promise.resolve().then(() => action(cell.value, data)).then((value) => {
-+        cell.value = value;
-+      }).finally(() => {
-+        cell.pending = false;
-+      }));
-+    }, cell.pending];
-+  });
-+  mocks.transition.mockImplementation(() => {
-+    const cell = slot(() => ({ pending: false })) as Cell;
-+    return [cell.pending, (callback: () => Promise<unknown>) => {
-+      cell.pending = true;
-+      tasks.push(Promise.resolve().then(callback).finally(() => {
-+        cell.pending = false;
-+      }));
-+    }];
-+  });
-+  mocks.logout.mockResolvedValue(undefined);
-+});
-+
-+afterEach(() => {
-+  expect(console.error).not.toHaveBeenCalled();
-+  expect(console.warn).not.toHaveBeenCalled();
-+  expect(console.log).not.toHaveBeenCalled();
-+  vi.unstubAllGlobals();
-+  vi.restoreAllMocks();
-+});
-+
-+it("氏名は確認前に送信せず、確認後に保持したFormDataを一度だけ渡す", async () => {
-+  const action = vi.fn().mockResolvedValue({
-+    ...nameState(),
-+    status: "error"
-+  });
-+  const render = () => view(() => AccountNameForm({
-+    initialState: nameState(),
-+    action
-+  }));
-+  const tree = render();
-+  const form = nodes(tree, "form")[0];
-+  expect(form.method).toBe("post");
-+  expect(form.action).toBeUndefined();
-+  const data = new FormData();
-+  data.set("name", "確認した氏名");
-+  data.set("requestId", REQUEST_ID);
-+  submit(form, data);
-+  expect(action).not.toHaveBeenCalled();
-+  expect(mocks.submitting).not.toHaveBeenCalled();
-+  data.set("name", "確認後の別入力");
-+  const confirming = render();
-+  expect(text(nodes(confirming, "dialog")[0].children as ReactNode))
-+    .toContain("ほかの所属クラブにも反映");
-+  const confirm = button(confirming, "保存する");
-+  click(confirm);
-+  click(confirm);
-+  const pending = render();
-+  expect(nodes(pending, "fieldset")[0].disabled).toBe(true);
-+  expect(button(pending, "キャンセル").disabled).toBe(true);
-+  await flush();
-+  expect(action).toHaveBeenCalledTimes(1);
-+  expect(action.mock.calls[0][0]).toEqual(nameState());
-+  expect(action.mock.calls[0][1].get("name")).toBe("確認した氏名");
-+  expect(action.mock.calls[0][1].get("requestId")).toBe(REQUEST_ID);
-+  expect(mocks.submitting).toHaveBeenCalledOnce();
-+  expect(nodes(render(), "dialog")).toHaveLength(0);
-+});
-+
-+it("キャンセルでは送信せず、元のformと入力を再マウントしない", () => {
-+  const action = vi.fn();
-+  const render = () => view(() => AccountNameForm({
-+    initialState: nameState(),
-+    action
-+  }));
-+  const data = new FormData();
-+  data.set("name", "入力を保持");
-+  submit(nodes(render(), "form")[0], data);
-+  click(button(render(), "キャンセル"));
-+  const result = render();
-+  expect(action).not.toHaveBeenCalled();
-+  expect(nodes(result, "dialog")).toHaveLength(0);
-+  expect(nodes(result, "input").find((input) => input.name === "name")?.defaultValue).toBe(
-+    "本人"
-+  );
-+  expect(nodes(result, "input").find((input) => input.name === "requestId")?.value).toBe(
-+    REQUEST_ID
-+  );
-+});
-+
-+it("複数Childは一意のfield ID・requestIdを持ち、null学年の保存値は空文字になる", () => {
-+  const action = vi.fn();
-+  const first = view(() => ChildForm({
-+    initialState: childState(),
-+    action,
-+    childId: CHILD_ID
-+  }), "a");
-+  const second = view(() => ChildForm({
-+    initialState: childState(OTHER_REQUEST_ID), action, childId: "other-child",
-+  }), "b");
-+  const ids = [...nodes(first, "input"), ...nodes(second, "input")]
-+    .filter((input) => input.id).map((input) => input.id);
-+  expect(new Set(ids).size).toBe(2);
-+  expect(nodes(first, "select")[0].defaultValue).toBe("");
-+  expect(text(first)).toContain("未設定");
-+  expect(nodes(first, "input").find((input) => input.name === "requestId")?.value).toBe(
-+    REQUEST_ID
-+  );
-+  expect(nodes(second, "input").find((input) => input.name === "requestId")?.value)
-+    .toBe(OTHER_REQUEST_ID);
-+  const names = nodes(first, "input").map((input) => input.name);
-+  expect(names).toEqual(["requestId", "childId", "name"]);
-+  expect(text(first)).toContain("ほかの所属クラブにも反映");
-+  expect(text(first)).not.toContain('type="email"');
-+});
-+
-+it("Childの編集と解除は別formで、解除前に保持範囲を確認する", async () => {
-+  const edit = vi.fn();
-+  const withdraw = vi.fn().mockResolvedValue(membershipState());
-+  const render = () => view(() => ChildForm({
-+    childId: CHILD_ID,
-+    initialState: childState(),
-+    action: edit,
-+    withdrawal: {
-+      initialState: membershipState(),
-+      action: withdraw
-+    },
-+  }));
-+  const tree = render();
-+  const forms = nodes(tree, "form");
-+  expect(forms).toHaveLength(2);
-+  expect(nodes(forms[0].children as ReactNode, "form")).toHaveLength(0);
-+  const data = new FormData();
-+  data.set("requestId", REQUEST_ID);
-+  data.set("childId", CHILD_ID);
-+  submit(forms[1], data);
-+  expect(withdraw).not.toHaveBeenCalled();
-+  const confirming = render();
-+  expect(text(confirming)).toContain("子ども本体と他クラブの所属は残ります。");
-+  click(button(confirming, "現在クラブから外す"));
-+  await flush();
-+  expect(withdraw).toHaveBeenCalledOnce();
-+  expect(edit).not.toHaveBeenCalled();
-+});
-+
-+it("候補は開いた時だけ取得し、閉じて開き直せば古い候補を破棄する", async () => {
-+  const load = vi.fn().mockResolvedValue({
-+    outcome: "FOUND", children: [{
-+      id: CHILD_ID,
-+      name: "既存Child",
-+      grade: null
-+    }],
-+  });
-+  const add = vi.fn().mockResolvedValue(membershipState());
-+  const render = () => view(() => ChildMembershipOperations({
-+    mode: "add", loadAction: load, action: add,
-+  }));
-+  const initial = render();
-+  expect(load).not.toHaveBeenCalled();
-+  const open = button(initial, "登録済みの子どもを現在クラブへ追加");
-+  click(open);
-+  click(open);
-+  await flush();
-+  expect(load).toHaveBeenCalledOnce();
-+  const candidates = render();
-+  expect(text(candidates)).toContain("既存Child");
-+  const data = new FormData();
-+  const inputs = nodes(candidates, "input");
-+  for (const input of inputs) {
-+    data.set(input.name as string, input.value as string);
-+  }
-+  submit(nodes(candidates, "form")[0], data);
-+  expect(add).not.toHaveBeenCalled();
-+  click(button(render(), "現在クラブへ追加する"));
-+  await flush();
-+  expect(add).toHaveBeenCalledWith(CHILD_ID, expect.any(Object), expect.any(FormData));
-+  click(button(render(), "閉じる"));
-+  load.mockResolvedValueOnce({
-+    outcome: "FOUND",
-+    children: []
-+  });
-+  click(button(render(), "登録済みの子どもを現在クラブへ追加"));
-+  await flush();
-+  expect(load).toHaveBeenCalledTimes(2);
-+  expect(text(render())).not.toContain("既存Child");
-+  expect(text(render())).toContain("追加できる子どもはいません。");
-+});
-+
-+it.each(["UNAVAILABLE", "FETCH_FAILED"])("候補の%sで固定エラーを表示する", async (outcome) => {
-+  const load = vi.fn().mockResolvedValue({
-+    outcome,
-+    message: "raw-secret"
-+  });
-+  const render = () => view(
-+    () => ChildMembershipOperations({
-+      mode: "add",
-+      loadAction: load,
-+      action: vi.fn()
-+    })
-+  );
-+  click(button(render(), "登録済みの子どもを現在クラブへ追加"));
-+  await flush();
-+  const output = text(render());
-+  expect(output).toContain("候補を取得できませんでした。");
-+  expect(output).not.toContain("raw-secret");
-+});
-+
-+it("項目エラーとformエラーを表示し、labelとaria-describedbyを接続する", () => {
-+  const initial: AccountNameActionState = {
-+    ...nameState(), status: "error", fieldErrors: { name: ["氏名を入力してください。"] },
-+    formError: "処理に失敗しました。",
-+  };
-+  const tree = view(() => AccountNameForm({
-+    initialState: initial,
-+    action: vi.fn()
-+  }));
-+  const input = nodes(tree, "input").find((item) => item.name === "name")!;
-+  expect(input["aria-invalid"]).toBe(true);
-+  expect(nodes(tree, "label")[0].htmlFor).toBe(input.id);
-+  expect(nodes(tree, "ul")[0].id).toBe(input["aria-describedby"]);
-+  expect(text(tree)).toContain("氏名を入力してください。");
-+  expect(text(tree)).toContain("処理に失敗しました。");
-+});
-+
-+it("確認ダイアログはpending中のEscとキャンセルを抑止する", () => {
-+  const close = vi.fn();
-+  const tree = view(() => AccountConfirmDialog({
-+    isOpen: true, pending: true, title: "確認", confirmLabel: "確定する",
-+    children: "確認内容", onClose: close, onConfirm: vi.fn(),
-+  }));
-+  const event = {
-+    preventDefault: vi.fn(),
-+    stopPropagation: vi.fn()
-+  };
-+  (nodes(tree, "dialog")[0].onCancel as (value: unknown) => void)(event);
-+  expect(event.preventDefault).toHaveBeenCalled();
-+  expect(close).not.toHaveBeenCalled();
-+  expect(button(tree, "キャンセル").disabled).toBe(true);
-+  expect(button(tree, "処理中…").disabled).toBe(true);
-+});
-+
-+it("ログアウトは確認後だけ既存Actionを1回実行する", async () => {
-+  const render = () => view(() => AccountLogoutButton());
-+  click(button(render(), "ログアウト"));
-+  expect(mocks.logout).not.toHaveBeenCalled();
-+  const confirm = button(render(), "ログアウトする");
-+  click(confirm);
-+  click(confirm);
-+  expect(button(render(), "キャンセル").disabled).toBe(true);
-+  await flush();
-+  expect(mocks.logout).toHaveBeenCalledOnce();
-+});
-+
-+
-+it("一方のChildの保存エラーを別Childのフォームへ混ぜない", async () => {
-+  const failing = vi.fn().mockResolvedValue({
-+    ...childState(),
-+    status: "error",
-+    fieldErrors: { grade: ["この子の学年エラー"] },
-+  });
-+  const other = vi.fn();
-+  const first = () => view(() => ChildForm({
-+    initialState: childState(), action: failing, childId: CHILD_ID,
-+  }), "child-a");
-+  const second = () => view(() => ChildForm({
-+    initialState: childState(OTHER_REQUEST_ID), action: other, childId: "other-child",
-+  }), "child-b");
-+  second();
-+  const data = new FormData();
-+  data.set("requestId", REQUEST_ID);
-+  data.set("childId", CHILD_ID);
-+  data.set("name", "子どもA");
-+  data.set("grade", "");
-+  submit(nodes(first(), "form")[0], data);
-+  click(button(first(), "保存する"));
-+  await flush();
-+  expect(text(first())).toContain("この子の学年エラー");
-+  expect(text(second())).not.toContain("この子の学年エラー");
-+  expect(nodes(second(), "select")[0]["aria-invalid"]).toBe(false);
-+  expect(other).not.toHaveBeenCalled();
-+});
-+
-+it("pendingでない確認画面のEscは閉じる要求だけを出し、送信しない", () => {
-+  const close = vi.fn();
-+  const confirm = vi.fn();
-+  const tree = view(() => AccountConfirmDialog({
-+    isOpen: true, pending: false, title: "確認", confirmLabel: "確定する",
-+    children: "内容", onClose: close, onConfirm: confirm,
-+  }));
-+  (nodes(tree, "dialog")[0].onCancel as (value: unknown) => void)({
-+    preventDefault: vi.fn(), stopPropagation: vi.fn(),
-+  });
-+  expect(close).toHaveBeenCalledOnce();
-+  expect(confirm).not.toHaveBeenCalled();
-+});
-diff --git a/tests/club-account-navigation.test.ts b/tests/club-account-navigation.test.ts
-index 7a07173..007fe86 100644
---- a/tests/club-account-navigation.test.ts
-+++ b/tests/club-account-navigation.test.ts
-@@ -26,6 +26,7 @@ import type {
- 
- const mocks = vi.hoisted(() => ({
-   logout: vi.fn(),
-+  logoutButton: vi.fn(), // 【追加：F07粒度9】確認UIへの接続。
- }),
- );
- 
-@@ -43,6 +44,14 @@ vi.mock("@/app/(club-app)/club/actions", () => ({
- }),
- );
- 
-+// 【追加：F07粒度9】確認とAction実行は専用試験へ分ける。
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton", () => ({
-+  AccountLogoutButton: () => {
-+    mocks.logoutButton();
-+    return createElement("button", { type: "button" }, "ログアウト");
++    return context;
 +  },
 +}));
-+
- type Props = Parameters<typeof AccountNavigation>[0];
- const CLUB: ClubAccountView["club"] = {
-   name: "クラブA",
-@@ -143,14 +152,14 @@ describe("外部リンクとログアウト", () => {
-   },
-   );
- 
--  it("logoutActionを作り直さず、既存Actionをsubmitで呼ぶformへ接続する", () => {
--    const nodes = forms(AccountNavigation(props()));
--    expect(nodes).toHaveLength(1);
--    expect(nodes[0].action).toBe(mocks.logout);
--    expect(html()).toContain('type="submit"');
--    expect(html()).toContain("ログアウト");
-+  // 【変更：F07粒度9】即時送信formからaccount専用の確認ボタンへ接続を変える。
-+  it("ログアウトは確認UIへ接続し、直接送信formを置かない", () => {
-+    expect(forms(AccountNavigation(props()))).toHaveLength(0);
-+    const output = html();
-+    expect(output).toContain('type="button"');
-+    expect(output).toContain("ログアウト");
-+    expect(mocks.logoutButton).toHaveBeenCalled();
-     expect(mocks.logout).not.toHaveBeenCalled();
--  },
--  );
-+  });
- },
- );
-diff --git a/tests/club-account-pages.test.ts b/tests/club-account-pages.test.ts
-index dae1c73..2355c7a 100644
---- a/tests/club-account-pages.test.ts
-+++ b/tests/club-account-pages.test.ts
-@@ -33,6 +33,16 @@ const mocks = vi.hoisted(() => ({
-   settings: vi.fn(),
-   notFound: vi.fn(),
-   logout: vi.fn(),
-+  // 【追加：F07粒度9】Clientのprops接続をPage試験で確認する。
-+  nameForm: vi.fn(),
-+  childForm: vi.fn(),
-+  operations: vi.fn(),
-+  nameAction: vi.fn(),
-+  createAction: vi.fn(),
-+  updateAction: vi.fn(),
-+  withdrawAction: vi.fn(),
-+  addAction: vi.fn(),
-+  candidatesAction: vi.fn(),
- }),
- );
- 
-@@ -82,6 +92,28 @@ vi.mock("@/app/(club-app)/club/[clubSlug]/admin/settings/line/actions", () => ({
- }),
- );
- 
-+// 【追加：F07粒度9】フォーム内部は専用試験へ分け、Pageでは必要最小propsだけを確認する。
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/AccountNameForm", () => ({
-+  AccountNameForm: mocks.nameForm,
-+}));
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/ChildForm", () => ({
-+  ChildForm: mocks.childForm,
-+}));
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/ChildMembershipOperations", () => ({
-+  ChildMembershipOperations: mocks.operations,
-+}));
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/AccountLogoutButton", () => ({
-+  AccountLogoutButton: () => createElement("button", { type: "button" }, "ログアウト"),
-+}));
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/actions", () => ({
-+  updateAccountNameAction: mocks.nameAction,
-+  createChildAction: mocks.createAction,
-+  updateChildAction: mocks.updateAction,
-+  withdrawChildFromClubAction: mocks.withdrawAction,
-+  addChildToClubAction: mocks.addAction,
-+  getAttachableChildrenAction: mocks.candidatesAction,
++vi.mock("@/src/infrastructure/supabase/server", () => ({
++  createClient: async () => ({
++    auth: {
++      getUser: async () => {
++        const context = requests.getStore();
++        return {
++          data: {
++            user: context ? {
++              id: context.userId,
++              email: `${context.userId}@auth.example.test`,
++            } : null,
++          },
++          error: null,
++        };
++      },
++    },
++  }),
 +}));
 +
- const PRIVATE_DETAIL = "private-auth-id raw-error secret-token";
- const CONTEXT: ClubAccessContext = {
-   userId: "user-a",
-@@ -142,6 +174,10 @@ beforeEach(() => {
-   vi.spyOn(console, "error").mockImplementation(() => undefined);
-   vi.spyOn(console, "warn").mockImplementation(() => undefined);
-   vi.spyOn(console, "log").mockImplementation(() => undefined);
-+  // 【追加：F07粒度9】DOMなし試験ではフォーム本体を展開しない。
-+  mocks.nameForm.mockReturnValue(null);
-+  mocks.childForm.mockReturnValue(null);
-+  mocks.operations.mockReturnValue(null);
-   mocks.access.mockResolvedValue(CONTEXT);
-   mocks.owner.mockResolvedValue(CONTEXT);
-   mocks.read.mockResolvedValue({
-@@ -180,7 +216,8 @@ describe("マイページ", () => {
-     expect(output).toContain("登録メールアドレス");
-     expect(output).toContain("database@example.test");
-     expect(output).toContain("表示専用");
--    expect(output).not.toContain("<input");
-+    // 【変更：F07粒度9】emailは引き続き表示専用。フォームの内部は専用試験で確認する。
-+    expect(output).not.toContain('type="email"');
-     expect(output).not.toContain("編集する");
-     expect(output).not.toContain("追加する");
-   },
-@@ -335,3 +372,66 @@ it("LINE設定の認可・取得は維持し、戻り先とラベルだけをマ
-   expect(output).not.toContain("管理者用イベント一覧へ戻る");
- },
- );
++// Nextの制御例外を識別し、予期しない失敗を成功扱いしない。
++class RedirectControl extends Error {
++  constructor(readonly path: string) {
++    super("F07 test redirect");
++  }
++}
++vi.mock("next/navigation", () => ({
++  redirect: (path: string) => {
++    throw new RedirectControl(path);
++  },
++  unstable_rethrow: (error: unknown) => {
++    if (error instanceof RedirectControl) {
++      throw error;
++    }
++  },
++}));
++vi.mock("next/cache", () => ({
++  revalidatePath: (path: string) => paths.add(path),
++}));
 +
-+// 【追加：F07粒度9】認可済みslug・対象ID・独立requestIdが正しいActionへ接続される。
-+it("Pageはフォームごとにstateを作り、IDを認可済みslugへbindする", async () => {
-+  await page();
-+  const name = mocks.nameForm.mock.calls[0][0];
-+  expect(Object.keys(name).sort()).toEqual(["action", "initialState"]);
-+  expect(name.initialState.values).toEqual({ name: VIEW.name });
-+  const childProps = mocks.childForm.mock.calls.map((call) => call[0]);
-+  expect(childProps).toHaveLength(3);
-+  const [first, second, creation] = childProps;
-+  const identifiers = [
-+    name.initialState.requestId,
-+    first.initialState.requestId,
-+    second.initialState.requestId,
-+    first.withdrawal.initialState.requestId,
-+    second.withdrawal.initialState.requestId,
-+    creation.initialState.requestId,
-+  ];
-+  expect(new Set(identifiers).size).toBe(6);
-+  expect(first.initialState.values.grade).toBe("");
-+  expect(second.initialState.values.grade).toBe("ELEMENTARY_2");
-+  expect(creation.initialState.values).toEqual({
-+    name: "",
-+    grade: "",
++describe("F07統合試験の接続ガード（DBなし）", () => {
++  it.each([
++    "RUN_CLUB_ACCOUNT_TESTS",
++    "RUN_DB_INTEGRATION_TESTS",
++  ])("%sがなければ実DB試験を起動しない", (flag) => {
++    const environment = sampleEnvironment();
++    delete environment[flag];
++    expect(enabled(environment)).toBe(false);
++    expect(() => localConfiguration(environment)).toThrow("F07専用");
 +  });
-+  const data = new FormData();
-+  await name.action(name.initialState, data);
-+  await first.action(first.initialState, data);
-+  await first.withdrawal.action(first.withdrawal.initialState, data);
-+  await creation.action(creation.initialState, data);
-+  expect(mocks.nameAction).toHaveBeenCalledWith(VIEW.club.slug, name.initialState, data);
-+  expect(mocks.updateAction).toHaveBeenCalledWith(
-+    VIEW.club.slug,
-+    VIEW.children[0].id,
-+    first.initialState,
-+    data,
-+  );
-+  expect(mocks.withdrawAction).toHaveBeenCalledWith(
-+    VIEW.club.slug,
-+    VIEW.children[0].id,
-+    first.withdrawal.initialState,
-+    data,
-+  );
-+  expect(mocks.createAction).toHaveBeenCalledWith(VIEW.club.slug, creation.initialState, data);
-+  const candidates = mocks.operations.mock.calls[0][0];
-+  expect(mocks.candidatesAction).not.toHaveBeenCalled();
-+  await candidates.loadAction();
-+  expect(mocks.candidatesAction).toHaveBeenCalledWith(VIEW.club.slug);
-+  await candidates.action("child-c", first.withdrawal.initialState, data);
-+  expect(mocks.addAction).toHaveBeenCalledWith(
-+    VIEW.club.slug,
-+    "child-c",
-+    first.withdrawal.initialState,
-+    data,
-+  );
-+  const oldCreationId = creation.initialState.requestId;
-+  mocks.childForm.mockClear();
-+  await page({
-+    toast: "child-created",
-+    toastId: oldCreationId,
++
++  it.each([
++    ["CLUB_ACCOUNT_DISPOSABLE", "0"],
++    ["NODE_ENV", "production"],
++    ["DATABASE_URL", "invalid"],
++    ["DATABASE_URL", "https://fixture:fixture@127.0.0.1:54322/postgres"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@remote.test:54322/postgres"],
++    [
++      "DATABASE_URL",
++      "postgresql://fixture:fixture@localhost.remote.test:54322/postgres"
++    ],
++    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
++    [
++      "DATABASE_URL",
++      "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.test"
++    ],
++    [
++      "DATABASE_URL",
++      "postgresql://fixture:fixture@127.0.0.1:54322/postgres#fragment"
++    ],
++    ["DATABASE_URL", "postgresql://127.0.0.1:54322/postgres"],
++  ])("不許可の設定を拒否し秘密値を例外へ含めない：%s（%#）", (key, value) => {
++    const environment = sampleEnvironment();
++    environment[key] = value;
++    expect(() => localConfiguration(environment)).toThrow(
++      "F07専用の使い捨てローカルDB設定と明示flagを確認してください。",
++    );
 +  });
-+  expect(mocks.childForm.mock.calls[2][0].initialState.requestId).not.toBe(oldCreationId);
++
++  it.each(["localhost", "127.0.0.1"])("明示設定された%sだけを許可する", (host) => {
++    const environment = sampleEnvironment();
++    environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
++    expect(localConfiguration(environment)).toBe(environment.DATABASE_URL);
++  });
++});
++
++const describeDatabase = enabled(process.env) ? describe : describe.skip;
++
++describeDatabase("F07 Action・Service・Repositoryと実DB", () => {
++  let db: PrismaClient;
++  let fixture: Fixture | undefined;
++  let actions: typeof import("@/app/(club-app)/club/[clubSlug]/account/actions");
++  let reads: typeof import("@/src/application/club/account/get-club-account");
++  let mutations: typeof import("@/src/application/club/account/update-club-account");
++
++  // すべての接続条件を検証した後だけSDKを読み込み、アプリ共有clientは読み込まない。
++  beforeAll(async () => {
++    await safeCheck(async () => {
++      const connectionString = localConfiguration(process.env);
++      const { PrismaClient: Client } = await import("@prisma/client");
++      const { PrismaPg } = await import("@prisma/adapter-pg");
++      db = new Client({
++        adapter: new PrismaPg({ connectionString }),
++        log: [],
++      });
++      client = db;
++      await db.$connect();
++      actions = await import("@/app/(club-app)/club/[clubSlug]/account/actions");
++      reads = await import("@/src/application/club/account/get-club-account");
++      mutations = await import("@/src/application/club/account/update-club-account");
++    });
++  });
++
++  // 作成前にUUIDを登録し、途中失敗したfixtureも限定cleanupできるようにする。
++  beforeEach(async () => {
++    fixture = undefined;
++    await safeCheck(async () => {
++      const clubs = [randomUUID(), randomUUID(), randomUUID()];
++      const users = [randomUUID(), randomUUID()];
++      const [clubA, clubB] = clubs;
++      const userId = users[0];
++      const membershipA = randomUUID();
++      const membershipB = randomUUID();
++      // 本人IDと現在クラブを固定したリクエストcontextを作る。
++      const context = (
++        id: string,
++        membershipId: string,
++      ): ClubAccessContext => ({
++        userId,
++        club: {
++          id,
++          name: "F07 fixture",
++          slug: `f07-${id}`,
++          timezone: "Asia/Tokyo",
++          planType: "STANDARD",
++        },
++        membership: {
++          id: membershipId,
++          role: "MEMBER",
++        },
++      });
++      fixture = {
++        clubs,
++        users,
++        a: context(clubA, membershipA),
++        b: context(clubB, membershipB),
++        shared: randomUUID(),
++        sibling: randomUUID(),
++        foreign: randomUUID(),
++        available: randomUUID(),
++        withdrawn: randomUUID(),
++        suspended: randomUUID(),
++        invited: randomUUID(),
++      };
++      await db.appUser.createMany({
++        data: users.map((id) => ({
++          id,
++          name: "初期氏名",
++          email: `${id}@database.example.test`,
++        })),
++      });
++      await db.club.createMany({
++        data: clubs.map((id) => ({
++          id,
++          name: "F07 fixture",
++          slug: `f07-${id}`,
++          planType: "STANDARD",
++        })),
++      });
++      await db.clubMembership.createMany({
++        data: [
++          {
++            id: membershipA,
++            clubId: clubA,
++            userId,
++          },
++          {
++            id: membershipB,
++            clubId: clubB,
++            userId,
++          },
++          {
++            id: randomUUID(),
++            clubId: clubA,
++            userId: users[1],
++          },
++        ],
++      });
++      const f = fixture;
++      await db.child.createMany({
++        data: [f.shared, f.sibling, f.available, f.withdrawn, f.suspended, f.invited]
++          .map((id) => ({
++            id,
++            parentId: userId,
++            name: "子ども",
++            grade: null,
++          })).concat([{
++            id: f.foreign,
++            parentId: users[1],
++            name: "他人の子ども",
++            grade: null,
++          }]),
++      });
++      // 親とクラブが一致する初期所属を明示的に作る。
++      const membership = (
++        childId: string,
++        clubId: string,
++        status: ClubMembershipStatus = "ACTIVE",
++        parentUserId = userId,
++      ) => ({
++        id: randomUUID(),
++        clubId,
++        childId,
++        parentUserId,
++        status,
++      });
++      await db.childClubMembership.createMany({
++        data: [
++          membership(f.shared, clubA),
++          membership(f.shared, clubB),
++          membership(f.sibling, clubA),
++          membership(f.foreign, clubA, "ACTIVE", users[1]),
++          membership(f.available, clubB),
++          membership(f.withdrawn, clubA, "WITHDRAWN"),
++          membership(f.suspended, clubA, "SUSPENDED"),
++          membership(f.invited, clubA, "INVITED"),
++        ],
++      });
++      paths.clear();
++    });
++  });
++
++  // 各ケースで登録したUUIDのクラブと親だけを削除し、全件削除・truncateは行わない。
++  afterEach(async () => {
++    client = db;
++    const f = fixture;
++    if (!f) {
++      return;
++    }
++    await safeCheck(async () => {
++      try {
++        await db.club.deleteMany({
++          where: {
++            id: { in: f.clubs },
++          },
++        });
++      } finally {
++        await db.appUser.deleteMany({
++          where: {
++            id: { in: f.users },
++          },
++        });
++      }
++    });
++    fixture = undefined;
++  });
++
++  // 接続失敗時も含め、専用clientだけを解放する。
++  afterAll(async () => {
++    await safeCheck(async () => {
++      await db?.$disconnect();
++      client = undefined;
++    });
++  });
++
++  // DB試験の例外・実値を固定メッセージに変換する。
++  function databaseCase(
++    label: string,
++    operation: (f: Fixture) => Promise<void>,
++  ) {
++    it(label, async () => {
++      await safeCheck(async () => {
++        if (!fixture) {
++          throw new Error("Fixture is unavailable");
++        }
++        await operation(fixture);
++      });
++    });
++  }
++
++  // UIを介さずActionを呼び、redirectだけを成功の制御結果として捕捉する。
++  async function invoke<T>(
++    context: ClubAccessContext,
++    operation: () => Promise<T>,
++  ) {
++    try {
++      return {
++        kind: "returned" as const,
++        value: await requests.run(context, operation),
++      };
++    } catch (error) {
++      if (error instanceof RedirectControl) {
++        return {
++          kind: "redirect" as const,
++          path: error.path,
++        };
++      }
++      throw error;
++    }
++  }
++
++  // Actionへ渡す項目を明示し、未信頼の値を追加する試験もこのFormDataを使う。
++  function form(
++    requestId: string,
++    values: Record<string, string>,
++  ): FormData {
++    const data = new FormData();
++    data.set("requestId", requestId);
++    for (const [key, value] of Object.entries(values)) {
++      data.set(key, value);
++    }
++    return data;
++  }
++
++  // 自分と他人のfixture全体を比較し、拒否時に別レコードが更新されていないことを調べる。
++  async function snapshot(f: Fixture) {
++    return Promise.all([
++      db.appUser.findMany({
++        where: { id: { in: f.users } },
++        orderBy: { id: "asc" },
++      }),
++      db.child.findMany({
++        where: { parentId: { in: f.users } },
++        orderBy: { id: "asc" },
++      }),
++      db.childClubMembership.findMany({
++        where: { clubId: { in: f.clubs } },
++        orderBy: { id: "asc" },
++      }),
++      db.clubMembership.findMany({
++        where: { clubId: { in: f.clubs } },
++        orderBy: { id: "asc" },
++      }),
++    ]);
++  }
++
++  // ローカルDBで複合FKとuniqueの拒否を実際に確認する。
++  databaseCase("Child所有者・親のクラブ・存在しないクラブのFKと二重所属を拒否する", async (f) => {
++    const data = {
++      clubId: f.a.club.id,
++      childId: f.shared,
++      parentUserId: f.a.userId,
++    };
++    for (const invalid of [
++      {
++        ...data,
++        childId: f.available,
++        parentUserId: f.users[1]
++      },
++      {
++        ...data,
++        clubId: f.clubs[2]
++      },
++      {
++        ...data,
++        clubId: randomUUID()
++      },
++    ]) {
++      await expect(db.childClubMembership.create({ data: invalid }))
++        .rejects.toMatchObject({ code: "P2003" });
++    }
++    await expect(db.childClubMembership.create({ data }))
++      .rejects.toMatchObject({ code: "P2002" });
++  });
++
++  databaseCase("複数Child・現在所属・追加候補を本人と現在クラブへ限定する", async (f) => {
++    const account = await requests.run(f.a, () => reads.getClubAccount(f.a));
++    expect(account.outcome).toBe("FOUND");
++    if (account.outcome !== "FOUND") {
++      throw new Error("Account is unavailable");
++    }
++    expect(account.view.children.map((child) => child.id).sort())
++      .toEqual([f.shared, f.sibling].sort());
++    expect(account.view.canSwitchClub).toBe(true);
++    expect(account.view.authEmail).toBe(`${f.a.userId}@auth.example.test`);
++    expect(account.view.appUserEmail).toBe(`${f.a.userId}@database.example.test`);
++    const candidates = await requests.run(
++      f.a,
++      () => actions.getAttachableChildrenAction(f.a.club.slug),
++    );
++    expect(candidates.outcome).toBe("FOUND");
++    if (candidates.outcome === "FOUND") {
++      expect(candidates.children.map((child) => child.id).sort())
++        .toEqual([f.available, f.withdrawn].sort());
++    }
++  });
++
++  databaseCase("同じ作成識別子の直接Action競合は1回だけ保存し、新しい識別子では追加できる", async (f) => {
++    const state = createInitialActionState({
++      name: "",
++      grade: ""
++    });
++    const create = () => invoke(f.a, () => actions.createChildAction(
++      f.a.club.slug,
++      state,
++      form(state.requestId, {
++        name: " 新規の子ども ",
++        grade: "",
++        clubId: f.b.club.id,
++        parentId: f.users[1],
++        email: "ignored@example.test",
++        returnTo: "https://remote.test",
++      }),
++    ));
++    const results = await Promise.all([create(), create()]);
++    expect(results.filter((result) => result.kind === "redirect")).toHaveLength(1);
++    for (const result of results) {
++      if (result.kind === "returned") {
++        expect(result.value.status).toBe("error");
++      } else {
++        expect(result.path).toBe(
++          `/club/${f.a.club.slug}/account?toast=child-created&toastId=${state.requestId}`,
++        );
++      }
++    }
++    expect(await db.child.findUnique({ where: { id: state.requestId } }))
++      .toMatchObject({
++        parentId: f.a.userId,
++        name: "新規の子ども",
++        grade: null
++      });
++    expect(
++      await db.childClubMembership.findMany({ where: { childId: state.requestId } })
++    )
++      .toMatchObject([{
++        clubId: f.a.club.id,
++        status: "ACTIVE"
++      }]);
++    const replay = await create();
++    expect(replay.kind).toBe("returned");
++    const next = createInitialActionState({
++      name: "",
++      grade: ""
++    });
++    expect((await invoke(f.a, () => actions.createChildAction(
++      f.a.club.slug,
++      next,
++      form(next.requestId, {
++        name: "もう一人",
++        grade: "YOUJI"
++      }),
++    ))).kind).toBe("redirect");
++    expect(
++      await db.child.count({ where: { id: { in: [state.requestId, next.requestId] } } })
++    )
++      .toBe(2);
++    expect([...paths]).toEqual([`/club/${f.a.club.slug}/account`]);
++  });
++
++  databaseCase("初回所属のFK失敗は同じ実transactionのChild作成もrollbackする", async (f) => {
++    const childId = randomUUID();
++    await expect(db.$transaction(async (transaction) => {
++      await transaction.child.create({
++        data: {
++          id: childId,
++          parentId: f.a.userId,
++          name: "rollback"
++        },
++      });
++      await transaction.childClubMembership.create({
++        data: {
++          clubId: f.clubs[2],
++          childId,
++          parentUserId: f.a.userId,
++        },
++      });
++    })).rejects.toMatchObject({ code: "P2003" });
++    expect(await db.child.count({ where: { id: childId } })).toBe(0);
++    expect(await db.childClubMembership.count({ where: { childId } })).toBe(0);
++  });
++
++  databaseCase("Repositoryの初回所属処理へ障害を注入しても実transactionのChildを残さない", async (f) => {
++    const childId = randomUUID();
++    // SQL自体をmockせず、初回所属のcreateだけを失敗させてrollbackを確認する。
++    const faulted = db.$extends({
++      query: {
++        childClubMembership: {
++          async create() {
++            throw new Error("F07 injected initial membership failure");
++          },
++        },
++      },
++    });
++    client = faulted as unknown as PrismaClient;
++    try {
++      expect(await mutations.createClubChild(f.a, {
++        childId,
++        name: "rollback",
++        grade: null,
++      })).toEqual({ outcome: "UPDATE_FAILED" });
++    } finally {
++      client = db;
++    }
++    expect(await db.child.count({ where: { id: childId } })).toBe(0);
++    expect(await db.childClubMembership.count({ where: { childId } })).toBe(0);
++  });
++
++  databaseCase("他人・現在未所属のChildへの直接Actionと対象ID改ざんでDBを変更しない", async (f) => {
++    const before = await snapshot(f);
++    for (const childId of [f.foreign, f.available]) {
++      const state = createInitialActionState({
++        name: "",
++        grade: ""
++      });
++      const result = await invoke(f.a, () => actions.updateChildAction(
++        f.a.club.slug,
++        childId,
++        state,
++        form(state.requestId, {
++          childId,
++          name: "拒否される編集",
++          grade: "YOUJI"
++        }),
++      ));
++      expect(result.kind).toBe("returned");
++      if (result.kind === "returned") {
++        expect(result.value.status).toBe("error");
++      }
++    }
++    const state = createInitialActionState({ childId: f.foreign });
++    for (const action of [actions.addChildToClubAction, actions.withdrawChildFromClubAction]) {
++      const result = await invoke(f.a, () => action(
++        f.a.club.slug,
++        f.foreign,
++        state,
++        form(state.requestId, { childId: f.foreign }),
++      ));
++      expect(result.kind).toBe("returned");
++      if (result.kind === "returned") {
++        expect(result.value.status).toBe("error");
++      }
++    }
++    const edit = createInitialActionState({
++      name: "",
++      grade: ""
++    });
++    const mismatch = await invoke(f.a, () => actions.updateChildAction(
++      f.a.club.slug,
++      f.shared,
++      edit,
++      form(edit.requestId, {
++        childId: f.sibling,
++        name: "改ざん",
++        grade: ""
++      }),
++    ));
++    expect(mismatch.kind).toBe("returned");
++    const expired = await invoke(f.a, () => actions.createChildAction(
++      f.a.club.slug,
++      edit,
++      form(randomUUID(), {
++        name: "期限切れ",
++        grade: ""
++      }),
++    ));
++    expect(expired.kind).toBe("returned");
++    if (expired.kind === "returned") {
++      expect(expired.value.status).toBe("error");
++    }
++    expect(await snapshot(f)).toEqual(before);
++  });
++
++  databaseCase("所属追加はChildを複製せず、解除は現在所属だけを変更して同じ行を再有効化する", async (f) => {
++    const beforeChild = await db.child.findUniqueOrThrow({ where: { id: f.available } });
++    const state = createInitialActionState({ childId: f.available });
++    const result = await invoke(f.a, () => actions.addChildToClubAction(
++      f.a.club.slug,
++      f.available,
++      state,
++      form(state.requestId, { childId: f.available }),
++    ));
++    expect(result.kind).toBe("redirect");
++    const where = {
++      clubId_childId: {
++        clubId: f.a.club.id,
++        childId: f.available
++      }
++    };
++    const membership = await db.childClubMembership.findUniqueOrThrow({ where });
++    expect(membership.status).toBe("ACTIVE");
++    expect(await mutations.withdrawClubChild(f.a, { childId: f.available }))
++      .toMatchObject({
++        outcome: "UPDATED",
++        affectedClubSlugs: [f.a.club.slug]
++      });
++    expect(await db.childClubMembership.findUniqueOrThrow({ where }))
++      .toMatchObject({
++        id: membership.id,
++        status: "WITHDRAWN"
++      });
++    expect(await db.child.findUniqueOrThrow({ where: { id: f.available } })).toEqual(
++      beforeChild
++    );
++    expect(await db.childClubMembership.findUniqueOrThrow({
++      where: {
++        clubId_childId: {
++          clubId: f.b.club.id,
++          childId: f.available
++        }
++      },
++    })).toMatchObject({ status: "ACTIVE" });
++    expect(await mutations.addClubChild(f.a, { childId: f.available }))
++      .toMatchObject({ outcome: "UPDATED" });
++    expect(await db.childClubMembership.findUniqueOrThrow({ where }))
++      .toMatchObject({
++        id: membership.id,
++        status: "ACTIVE"
++      });
++  });
++
++  for (const status of ["SUSPENDED", "INVITED"] as const) {
++    databaseCase(`${status}を本人操作で再有効化せず、WITHDRAWNだけ許可する`, async (f) => {
++      const before = await snapshot(f);
++      const childId = status === "SUSPENDED" ? f.suspended : f.invited;
++      expect(await mutations.addClubChild(f.a, { childId })).toEqual({
++        outcome: "RULE_VIOLATION",
++        reason: "STATUS_CHANGE_NOT_ALLOWED",
++      });
++      expect(await snapshot(f)).toEqual(before);
++      expect(await mutations.addClubChild(f.a, { childId: f.withdrawn }))
++        .toMatchObject({ outcome: "UPDATED" });
++    });
++  }
++
++  databaseCase("Bからの編集がAの再読取にも反映され、DB由来の両クラブだけを再検証する", async (f) => {
++    const count = await db.child.count({ where: { parentId: f.a.userId } });
++    const state = createInitialActionState({
++      name: "",
++      grade: ""
++    });
++    expect((await invoke(f.b, () => actions.updateChildAction(
++      f.b.club.slug,
++      f.shared,
++      state,
++      form(state.requestId, {
++        childId: f.shared,
++        name: "横断編集",
++        grade: "ELEMENTARY_3",
++        affectedClubSlugs: "untrusted-club",
++      }),
++    ))).kind).toBe("redirect");
++    for (const context of [f.a, f.b]) {
++      const result = await requests.run(context, () => reads.getClubAccount(context));
++      expect(result.outcome).toBe("FOUND");
++      if (result.outcome === "FOUND") {
++        expect(result.view.children.find((child) => child.id === f.shared))
++          .toEqual({
++            id: f.shared,
++            name: "横断編集",
++            grade: "ELEMENTARY_3"
++          });
++      }
++    }
++    expect([...paths].sort()).toEqual([
++      `/club/${f.a.club.slug}/account`,
++      `/club/${f.b.club.slug}/account`,
++    ].sort());
++    expect(await db.child.count({ where: { parentId: f.a.userId } })).toBe(count);
++  });
++
++  databaseCase("氏名だけの直接Actionはemail・Child・所属を変えず、他クラブからも再読取できる", async (f) => {
++    const before = await snapshot(f);
++    const state = createInitialActionState({ name: "" });
++    expect((await invoke(f.a, () => actions.updateAccountNameAction(
++      f.a.club.slug,
++      state,
++      form(state.requestId, {
++        name: " 新しい氏名 ",
++        email: "ignored@example.test",
++        userId: f.users[1],
++        returnTo: "https://remote.test",
++      }),
++    ))).kind).toBe("redirect");
++    const after = await snapshot(f);
++    expect(after.slice(1)).toEqual(before.slice(1));
++    const user = await db.appUser.findUniqueOrThrow({ where: { id: f.a.userId } });
++    expect(user.name).toBe("新しい氏名");
++    expect(user.email).toBe(`${f.a.userId}@database.example.test`);
++    expect(after[0].find((row) => row.id === f.users[1]))
++      .toEqual(before[0].find((row) => row.id === f.users[1]));
++    const reread = await requests.run(f.b, () => reads.getClubAccount(f.b));
++    expect(reread).toMatchObject({
++      outcome: "FOUND",
++      view: { name: "新しい氏名" }
++    });
++    expect([...paths].sort()).toEqual([f.a, f.b].flatMap((context) => [
++      `/club/${context.club.slug}/account`,
++      `/club/${context.club.slug}/admin/members`,
++    ]).sort());
++  });
++
++  for (const status of ["WITHDRAWN", "SUSPENDED", "INVITED"] as const) {
++    databaseCase(`表示後に親Membershipが${status}となった直接ActionをDBで拒否する`, async (f) => {
++      await db.clubMembership.update({
++        where: { id: f.a.membership.id },
++        data: { status },
++      });
++      const before = await snapshot(f);
++      const edit = createInitialActionState({
++        name: "",
++        grade: ""
++      });
++      const name = createInitialActionState({ name: "" });
++      const member = createInitialActionState({ childId: f.shared });
++      const operations = [
++        () => actions.createChildAction(
++          f.a.club.slug,
++          edit,
++          form(edit.requestId, {
++            name: "拒否",
++            grade: "",
++          }),
++        ),
++        () => actions.updateChildAction(
++          f.a.club.slug,
++          f.shared,
++          edit,
++          form(edit.requestId, {
++            childId: f.shared,
++            name: "拒否",
++            grade: "",
++          }),
++        ),
++        () => actions.updateAccountNameAction(
++          f.a.club.slug,
++          name,
++          form(name.requestId, { name: "拒否" }),
++        ),
++        () => actions.addChildToClubAction(
++          f.a.club.slug,
++          f.withdrawn,
++          member,
++          form(member.requestId, { childId: f.withdrawn }),
++        ),
++        () => actions.withdrawChildFromClubAction(
++          f.a.club.slug,
++          f.shared,
++          member,
++          form(member.requestId, { childId: f.shared }),
++        ),
++      ];
++      for (const operation of operations) {
++        const result = await invoke<{ status: string }>(f.a, operation);
++        expect(result.kind).toBe("returned");
++        if (result.kind === "returned") {
++          expect(result.value.status).toBe("error");
++        }
++      }
++      const read = await requests.run(f.a, () => reads.getClubAccount(f.a));
++      expect(read).toEqual({ outcome: "UNAVAILABLE" });
++      expect(await snapshot(f)).toEqual(before);
++      expect(paths.size).toBe(0);
++    });
++  }
++
++  // 同時開始の結果と永続化を検査する。特定SQL順序やP2034発生そのものは保証しない。
++  databaseCase("編集競合は項目を混在させず、解除・再有効化の競合も1行だけを遷移させる", async (f) => {
++    const edits = [
++      {
++        childId: f.shared,
++        name: "編集A",
++        grade: "YOUJI" as const
++      },
++      {
++        childId: f.shared,
++        name: "編集B",
++        grade: "ELEMENTARY_6" as const
++      },
++    ];
++    const results = await Promise.all(edits.map((input) => mutations.updateClubChild(f.a, input)));
++    expect(results.every((result) => ["UPDATED", "CONFLICT"].includes(result.outcome))).toBe(
++      true
++    );
++    expect(results.some((result) => result.outcome === "UPDATED")).toBe(true);
++    const saved = await db.child.findUniqueOrThrow({ where: { id: f.shared } });
++    expect(
++      edits.some((input) => input.name === saved.name && input.grade === saved.grade)
++    ).toBe(
++      true
++    );
++    for (const operation of [mutations.withdrawClubChild, mutations.addClubChild]) {
++      const results = await Promise.all([
++        operation(f.a, { childId: f.shared }),
++        operation(f.a, { childId: f.shared }),
++      ]);
++      expect(results.filter((result) => result.outcome === "UPDATED")).toHaveLength(1);
++      expect(results.every((result) => ["UPDATED", "CONFLICT", "RULE_VIOLATION"]
++        .includes(result.outcome))).toBe(true);
++      expect(await db.childClubMembership.count({
++        where: {
++          childId: f.shared,
++          clubId: f.a.club.id
++        },
++      })).toBe(1);
++    }
++    expect(await db.childClubMembership.findMany({ where: { childId: f.shared } }))
++      .toMatchObject([
++        { status: "ACTIVE" },
++        { status: "ACTIVE" },
++      ]);
++  });
++
++  databaseCase("編集と解除・親の失効が競合しても他クラブ所属とChild本体を失わない", async (f) => {
++    const results = await Promise.all([
++      mutations.updateClubChild(f.a, {
++        childId: f.shared,
++        name: "競合編集",
++        grade: null
++      }),
++      mutations.withdrawClubChild(f.a, { childId: f.shared }),
++      db.clubMembership.update({
++        where: { id: f.a.membership.id },
++        data: { status: "WITHDRAWN" },
++      }),
++    ]);
++    for (const result of results.slice(0, 2)) {
++      expect("outcome" in result).toBe(true);
++      if ("outcome" in result) {
++        expect(["UPDATED", "CONFLICT", "FORBIDDEN", "NOT_FOUND"].includes(result.outcome)).toBe(
++          true
++        );
++      }
++    }
++    expect(await db.child.count({
++      where: {
++        id: f.shared,
++        parentId: f.a.userId
++      }
++    })).toBe(
++      1
++    );
++    expect(await db.childClubMembership.findUniqueOrThrow({
++      where: {
++        clubId_childId: {
++          clubId: f.b.club.id,
++          childId: f.shared
++        }
++      },
++    })).toMatchObject({ status: "ACTIVE" });
++    const before = await snapshot(f);
++    expect(await mutations.addClubChild(f.a, { childId: f.shared }))
++      .toEqual({ outcome: "FORBIDDEN" });
++    expect(await snapshot(f)).toEqual(before);
++  });
 +});
