@@ -135,16 +135,13 @@ export default async function ClubLineSettingsPage({
     encodeURIComponent(
       access.club.slug,
     );
-
+//マイページへの導線用
   const basePath =
     `/club/${encodedClubSlug}`;
 
-  /*
-   * /account実装後は、この1か所だけ
-   * `${basePath}/account`へ差し替える。
-   */
+//マイページへの導線
   const backHref =
-    `${basePath}/admin/events`;
+    `${basePath}/account`;
 
     //ライン通知先アクションステイト
   const registrationInitialState:
@@ -188,7 +185,7 @@ export default async function ClubLineSettingsPage({
             href={backHref}
             className="rounded-md border border-neutral-300 bg-white px-4 py-2 text-sm font-bold text-neutral-700 transition hover:bg-neutral-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
           >
-            管理者用イベント一覧へ戻る
+            マイページへ戻る
           </Link>
         </div>
 
