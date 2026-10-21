@@ -1,560 +1,350 @@
-diff --git a/app/(club-app)/club/revalidate-club-paths.ts b/app/(club-app)/club/revalidate-club-paths.ts
-index df85e86..c8a474b 100644
---- a/app/(club-app)/club/revalidate-club-paths.ts
-+++ b/app/(club-app)/club/revalidate-club-paths.ts
-@@ -13,6 +13,7 @@ import {
- } from "next/cache";
- 
- import {
-+  getClubAccountRevalidationPaths, // 【追加：F07粒度6】account専用パス。
-   getClubEventRevalidationPaths,
-   getClubMemberRevalidationPaths,
-   getClubNoticeRevalidationPaths,
-@@ -75,4 +76,22 @@ export function revalidateClubSettingsPaths(
-       clubSlug,
-     ),
-   );
--}
-\ No newline at end of file
-+}
-+
-+// 【追加：F07粒度6】Repositoryが返した影響先だけを受け取り、全パス検証後に再検証する。
-+export function revalidateClubAccountNamePaths(
-+  affectedClubSlugs: readonly string[],
-+): void {
-+  const paths = [...new Set(affectedClubSlugs.flatMap((slug) =>
-+    getClubMemberRevalidationPaths(slug)))];
-+  revalidatePaths(paths);
-+}
-+
-+// 【追加：F07粒度6】Child編集は関連クラブ、作成・所属操作は現在accountを再検証する。
-+export function revalidateClubAccountPaths(
-+  affectedClubSlugs: readonly string[],
-+): void {
-+  const paths = [...new Set(affectedClubSlugs.flatMap((slug) =>
-+    getClubAccountRevalidationPaths(slug)))];
-+  revalidatePaths(paths);
-+}
-diff --git a/domain/club/club-revalidation-paths.test.ts b/domain/club/club-revalidation-paths.test.ts
-index 54a1f20..7086723 100644
---- a/domain/club/club-revalidation-paths.test.ts
-+++ b/domain/club/club-revalidation-paths.test.ts
-@@ -10,6 +10,7 @@ import {
- } from "vitest";
- 
- import {
-+  getClubAccountRevalidationPaths, // 【追加：F07粒度6】account専用パス。
-   getClubEventRevalidationPaths,
-   getClubMemberRevalidationPaths,
-   getClubNoticeRevalidationPaths,
-@@ -126,4 +127,20 @@ describe("不正なパスパラメータ", () => {
-       ),
-     ).toThrow(RangeError);
-   });
--});
-\ No newline at end of file
-+});
-+
-+// 【追加：F07粒度6】Childの変更で会員管理やイベントへ対象を広げない。
-+describe("getClubAccountRevalidationPaths", () => {
-+  it("指定クラブのaccountだけを返す", () => {
-+    expect(getClubAccountRevalidationPaths("arao-u12")).toEqual([
-+      "/club/arao-u12/account",
-+    ]);
-+  });
-+
-+  it.each(["", "../other-club", "club/other", "club?query", "Club-A"])(
-+    "不正slug %jを拒否する",
-+    (slug) => {
-+      expect(() => getClubAccountRevalidationPaths(slug)).toThrow(RangeError);
-+    },
-+  );
-+});
-diff --git a/domain/club/club-revalidation-paths.ts b/domain/club/club-revalidation-paths.ts
-index 94d3aa6..f2da5e3 100644
---- a/domain/club/club-revalidation-paths.ts
-+++ b/domain/club/club-revalidation-paths.ts
-@@ -143,4 +143,14 @@ export function getClubSettingsRevalidationPaths(
-   return [
-     `${basePath}/admin/settings/line`,
-   ];
--}
-\ No newline at end of file
-+}
-+
-+// 【追加：F07粒度6】Child変更後は会員管理へ広げず、accountだけを対象にする。
-+export function getClubAccountRevalidationPaths(
-+  clubSlug: string,
-+): string[] {
-+  const basePath = getClubBasePath(clubSlug);
-+  return [
-+    `${basePath}/account`,
-+  ];
-+}
-diff --git a/src/application/club/account/get-club-account.test.ts b/src/application/club/account/get-club-account.test.ts
+diff --git a/app/(club-app)/club/[clubSlug]/account/actions.ts b/app/(club-app)/club/[clubSlug]/account/actions.ts
 new file mode 100644
-index 0000000..19ba4f8
+index 0000000..55e2614
 --- /dev/null
-+++ b/src/application/club/account/get-club-account.test.ts
-@@ -0,0 +1,337 @@
-+// src/application/club/account/get-club-account.test.ts
-+// Auth本人照合、表示DTOの許可項目、通常表示と候補取得の分離を確認する。
++++ b/app/(club-app)/club/[clubSlug]/account/actions.ts
+@@ -0,0 +1,361 @@
++// app/(club-app)/club/[clubSlug]/account/actions.ts
++// 本人の氏名・Child・現在クラブ所属の操作と、明示要求時の追加候補取得を行う。
++
++"use server";
 +
 +import {
-+  afterEach,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
++  redirect,
++  unstable_rethrow,
++} from "next/navigation";
 +
-+import type {
-+  ClubAccessContext,
-+} from "@/app/(club-app)/club/club-membership-authorization";
-+import type {
-+  PlanType,
-+} from "@/types/prisma";
 +import {
-+  getAttachableClubChildren,
-+  getClubAccount,
-+} from "./get-club-account";
-+
-+const mocks = vi.hoisted(() => ({
-+  client: vi.fn(),
-+  auth: vi.fn(),
-+  account: vi.fn(),
-+  candidates: vi.fn(),
-+  memberships: vi.fn(),
-+}));
-+
-+// 実Auth・Prisma・dotenvを評価せず、Service境界を置換する。
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: mocks.client,
-+}));
-+vi.mock("@/src/infrastructure/prisma/repositories/club-account-repository", () => ({
-+  findClubAccountForUser: mocks.account,
-+  findAttachableChildrenForUser: mocks.candidates,
-+}));
-+vi.mock("@/app/(club-app)/club/find-active-club-memberships", () => ({
-+  findActiveClubMemberships: mocks.memberships,
-+}));
-+
-+const CONTEXT: ClubAccessContext = {
-+  userId: "user-a",
-+  club: {
-+    id: "club-a",
-+    name: "クラブA",
-+    slug: "club-a",
-+    timezone: "Asia/Tokyo",
-+    planType: "STANDARD",
-+  },
-+  membership: {
-+    id: "membership-a",
-+    role: "MEMBER",
-+  },
-+};
-+const PRIVATE_DETAIL = "private-token raw-database-error";
-+const CHILD = {
-+  id: "child-a",
-+  name: "子ども",
-+  grade: null,
-+};
-+const VIEW = {
-+  name: null,
-+  appUserEmail: "database@example.test",
-+  club: {
-+    name: "クラブA",
-+    slug: "club-a",
-+    websiteUrl: null,
-+    instagramUrl: null,
-+    privateDetail: PRIVATE_DETAIL,
-+  },
-+  role: "MEMBER",
-+  children: [{
-+    ...CHILD,
-+    parentId: PRIVATE_DETAIL,
-+  }],
-+  isPlatformAdmin: false,
-+  privateDetail: PRIVATE_DETAIL,
-+  authEmail: "untrusted@example.test",
-+  canSwitchClub: true,
-+};
-+
-+// クラブ切替の判定は既存のプラン関数を実際に使って検証する。
-+function membership(id: string, planType: PlanType) {
-+  return {
-+    membershipId: `membership-${id}`,
-+    role: "MEMBER",
-+    club: {
-+      id,
-+      name: id,
-+      slug: id,
-+      planType,
-+    },
-+  };
-+}
-+
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  vi.spyOn(console, "error").mockImplementation(() => undefined);
-+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
-+  vi.spyOn(console, "log").mockImplementation(() => undefined);
-+  mocks.client.mockResolvedValue({
-+    auth: {
-+      getUser: mocks.auth,
-+    },
-+  });
-+  mocks.auth.mockResolvedValue({
-+    data: {
-+      user: {
-+        id: CONTEXT.userId,
-+        email: "auth@example.test",
-+        user_metadata: PRIVATE_DETAIL,
-+      },
-+    },
-+    error: null,
-+  });
-+  mocks.account.mockResolvedValue({
-+    outcome: "FOUND",
-+    view: structuredClone(VIEW),
-+    privateDetail: PRIVATE_DETAIL,
-+  });
-+  mocks.candidates.mockResolvedValue({
-+    outcome: "FOUND",
-+    children: [{
-+      ...CHILD,
-+      parentId: PRIVATE_DETAIL,
-+      memberships: PRIVATE_DETAIL,
-+    }],
-+    privateDetail: PRIVATE_DETAIL,
-+  });
-+  mocks.memberships.mockResolvedValue([membership("club-a", "STANDARD")]);
-+});
-+
-+// Serviceは個人情報・生の例外をログへ流さない。
-+afterEach(() => {
-+  expect(console.error).not.toHaveBeenCalled();
-+  expect(console.warn).not.toHaveBeenCalled();
-+  expect(console.log).not.toHaveBeenCalled();
-+  vi.restoreAllMocks();
-+});
-+
-+describe("getClubAccount", () => {
-+  it("Auth emailとDB emailを分け、必要な表示項目だけを返す", async () => {
-+    expect(await getClubAccount(CONTEXT)).toEqual({
-+      outcome: "FOUND",
-+      view: {
-+        name: null,
-+        authEmail: "auth@example.test",
-+        appUserEmail: "database@example.test",
-+        club: {
-+          name: "クラブA",
-+          slug: "club-a",
-+          websiteUrl: null,
-+          instagramUrl: null,
-+        },
-+        role: "MEMBER",
-+        children: [CHILD],
-+        canSwitchClub: false,
-+        isPlatformAdmin: false,
-+      },
-+    });
-+    expect(mocks.account).toHaveBeenCalledWith({
-+      clubId: "club-a",
-+      actorMembershipId: "membership-a",
-+      userId: "user-a",
-+    });
-+    expect(mocks.memberships).toHaveBeenCalledWith("user-a");
-+    expect(mocks.candidates).not.toHaveBeenCalled();
-+  });
-+
-+  it.each([
-+    [[], false],
-+    [["STANDARD"], false],
-+    [["STANDARD", "STARTER", "PRO"], false],
-+    [["STANDARD", "STANDARD"], true],
-+  ] as const)("利用可能ACTIVE所属%jの切替判定は%s", async (plans, expected) => {
-+    mocks.memberships.mockResolvedValue(plans.map((plan, index) =>
-+      membership(`club-${index}`, plan)));
-+    expect(await getClubAccount(CONTEXT)).toMatchObject({
-+      view: {
-+        canSwitchClub: expected,
-+      },
-+    });
-+  });
-+
-+  it("Auth email未設定をDB emailで埋めず、管理者boolはRepositoryから取得する", async () => {
-+    mocks.auth.mockResolvedValue({
-+      data: {
-+        user: {
-+          id: CONTEXT.userId,
-+        },
-+      },
-+      error: null,
-+    });
-+    mocks.account.mockResolvedValue({
-+      outcome: "FOUND",
-+      view: {
-+        ...VIEW,
-+        isPlatformAdmin: true,
-+      },
-+    });
-+    expect(await getClubAccount(CONTEXT)).toMatchObject({
-+      view: {
-+        authEmail: null,
-+        appUserEmail: "database@example.test",
-+        isPlatformAdmin: true,
-+      },
-+    });
-+  });
-+
-+  it.each(["UNAVAILABLE", "FETCH_FAILED"] as const)(
-+    "AppUser欠損等のRepository結果%sから部分DTOを返さない",
-+    async (outcome) => {
-+      mocks.account.mockResolvedValue({
-+        outcome,
-+        message: PRIVATE_DETAIL,
-+        view: VIEW,
-+      });
-+      expect(await getClubAccount(CONTEXT)).toEqual({
-+        outcome,
-+      });
-+    },
-+  );
-+
-+  it("クラブ切替情報の取得失敗でも部分成功にしない", async () => {
-+    mocks.memberships.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
-+    expect(await getClubAccount(CONTEXT)).toEqual({
-+      outcome: "FETCH_FAILED",
-+    });
-+  });
-+
-+  it("Auth確認前にはDBを読まず、確認後の独立取得を並列に開始する", async () => {
-+    let releaseAuth!: (value: unknown) => void;
-+    mocks.auth.mockReturnValueOnce(new Promise((resolve) => {
-+      releaseAuth = resolve;
-+    }));
-+    let releaseAccount!: (value: unknown) => void;
-+    mocks.account.mockReturnValueOnce(new Promise((resolve) => {
-+      releaseAccount = resolve;
-+    }));
-+    const result = getClubAccount(CONTEXT);
-+    await vi.waitFor(() => expect(mocks.auth).toHaveBeenCalledTimes(1));
-+    expect(mocks.account).not.toHaveBeenCalled();
-+    expect(mocks.memberships).not.toHaveBeenCalled();
-+    releaseAuth({
-+      data: {
-+        user: {
-+          id: CONTEXT.userId,
-+        },
-+      },
-+      error: null,
-+    });
-+    await vi.waitFor(() => expect(mocks.memberships).toHaveBeenCalledTimes(1));
-+    expect(mocks.account).toHaveBeenCalledTimes(1);
-+    releaseAccount({
-+      outcome: "FOUND",
-+      view: VIEW,
-+    });
-+    expect(await result).toMatchObject({
-+      outcome: "FOUND",
-+    });
-+  });
-+});
-+
-+describe("getAttachableClubChildren", () => {
-+  it("候補DTOだけを返し、通常表示・クラブ一覧を取得しない", async () => {
-+    expect(await getAttachableClubChildren(CONTEXT)).toEqual({
-+      outcome: "FOUND",
-+      children: [CHILD],
-+    });
-+    expect(mocks.candidates).toHaveBeenCalledWith({
-+      clubId: CONTEXT.club.id,
-+      actorMembershipId: CONTEXT.membership.id,
-+      userId: CONTEXT.userId,
-+    });
-+    expect(mocks.account).not.toHaveBeenCalled();
-+    expect(mocks.memberships).not.toHaveBeenCalled();
-+  });
-+
-+  it.each(["UNAVAILABLE", "FETCH_FAILED"] as const)("%sは固定結果だけを返す", async (outcome) => {
-+    mocks.candidates.mockResolvedValue({
-+      outcome,
-+      cause: PRIVATE_DETAIL,
-+    });
-+    expect(await getAttachableClubChildren(CONTEXT)).toEqual({
-+      outcome,
-+    });
-+  });
-+});
-+
-+// 認可後にAuth本人が変わった場合も、両方の読取入口でDB取得を止める。
-+describe.each([
-+  ["通常表示", getClubAccount, mocks.account],
-+  ["候補", getAttachableClubChildren, mocks.candidates],
-+] as const)("%sのAuth境界", (_label, operation, repository) => {
-+  it.each([null, { id: "other-user" }])("本人が%jなら取得しない", async (user) => {
-+    mocks.auth.mockResolvedValue({
-+      data: {
-+        user,
-+      },
-+      error: null,
-+    });
-+    expect(await operation(CONTEXT)).toEqual({
-+      outcome: "UNAVAILABLE",
-+    });
-+    expect(repository).not.toHaveBeenCalled();
-+    expect(mocks.memberships).not.toHaveBeenCalled();
-+  });
-+
-+  it("Authエラーと本人が同時にあっても取得しない", async () => {
-+    mocks.auth.mockResolvedValue({
-+      data: {
-+        user: {
-+          id: CONTEXT.userId,
-+        },
-+      },
-+      error: new Error(PRIVATE_DETAIL),
-+    });
-+    expect(await operation(CONTEXT)).toEqual({
-+      outcome: "UNAVAILABLE",
-+    });
-+    expect(repository).not.toHaveBeenCalled();
-+  });
-+
-+  it.each(["client", "auth", "repository"] as const)("%s例外を固定結果へ変換する", async (source) => {
-+    const target = source === "client" ? mocks.client : source === "auth" ? mocks.auth : repository;
-+    target.mockRejectedValueOnce({
-+      message: PRIVATE_DETAIL,
-+      cause: PRIVATE_DETAIL,
-+    });
-+    expect(await operation(CONTEXT)).toEqual({
-+      outcome: "FETCH_FAILED",
-+    });
-+  });
-+});
-diff --git a/src/application/club/account/get-club-account.ts b/src/application/club/account/get-club-account.ts
-new file mode 100644
-index 0000000..9fd3b91
---- /dev/null
-+++ b/src/application/club/account/get-club-account.ts
-@@ -0,0 +1,134 @@
-+// src/application/club/account/get-club-account.ts
-+// 認可済みcontextと現在Auth本人を照合し、本人向け表示と追加候補を別々に取得する。
-+
-+import "server-only";
-+
++  requireClubAppAccess,
++} from "@/app/(club-app)/club/club-app-authorization";
 +import type {
 +  ClubAccessContext,
 +} from "@/app/(club-app)/club/club-membership-authorization";
 +import {
-+  findActiveClubMemberships,
-+} from "@/app/(club-app)/club/find-active-club-memberships";
++  revalidateClubAccountNamePaths,
++  revalidateClubAccountPaths,
++} from "@/app/(club-app)/club/revalidate-club-paths";
++import {
++  ACCOUNT_NAME_MAX_LENGTH,
++  parseAccountNameFormData,
++  type AccountNameActionState,
++} from "@/domain/club/account/account-form";
 +import type {
 +  ClubAccountChildCandidatesResult,
-+  ClubAccountReadResult,
++  ClubAccountMutationResult,
 +} from "@/domain/club/account/account-types";
 +import {
-+  getAppEnabledMemberships,
-+} from "@/domain/club/club-login-destination";
++  CHILD_GRADE_OPTIONS,
++  parseChildFormData,
++  parseChildIdFormData,
++  validateChildIdInput,
++  type ChildActionState,
++  type ChildMembershipActionState,
++} from "@/domain/club/account/child-form";
++import type {
++  ActionState,
++  FieldErrors,
++} from "@/domain/shared/action-state";
 +import {
-+  findAttachableChildrenForUser,
-+  findClubAccountForUser,
-+} from "@/src/infrastructure/prisma/repositories/club-account-repository";
++  createRequestId,
++  isRequestId,
++} from "@/domain/shared/request-id";
 +import {
-+  createClient,
-+} from "@/src/infrastructure/supabase/server";
++  getAttachableClubChildren,
++} from "@/src/application/club/account/get-club-account";
++import {
++  addClubChild,
++  createClubChild,
++  updateClubAccountName,
++  updateClubChild,
++  withdrawClubChild,
++} from "@/src/application/club/account/update-club-account";
 +
-+// Auth User全体を保持せず、表示に必要な本人IDと現在emailだけに絞る。
-+async function getAccountAuth(context: ClubAccessContext) {
-+  const supabase = await createClient();
-+  const { data, error } = await supabase.auth.getUser();
-+  if (
-+    error ||
-+    !data.user ||
-+    !context.userId ||
-+    data.user.id !== context.userId
-+  ) {
-+    return null;
-+  }
++const EXPIRED_FORM_MESSAGE = "フォームの有効期限が切れました。ページを開き直してください。";
++const TARGET_MESSAGE = "対象の子どもを選び直してください。";
++const FAILED_MESSAGE = "処理に失敗しました。ページを開き直して確認してください。";
++
++// File・欠損・重複fieldを文字列へ丸めず、単一の文字列だけを取得する。
++function singleString(formData: FormData, name: string): string | null {
++  const entries = formData instanceof FormData ? formData.getAll(name) : [];
++  return entries.length === 1 && typeof entries[0] === "string" ? entries[0] : null;
++}
++
++// 前stateではrequestIdだけを確認する。一致は認証・所有権・CSRF保護の代わりにならない。
++function checkRequest(previousState: unknown, formData: FormData) {
++  const previousId = typeof previousState === "object" &&
++    previousState !== null &&
++    !Array.isArray(previousState) &&
++    "requestId" in previousState
++    ? previousState.requestId
++    : null;
++  const submittedId = singleString(formData, "requestId");
 +  return {
-+    id: data.user.id,
-+    email: data.user.email ?? null,
++    requestId: isRequestId(previousId) ? previousId : createRequestId(),
++    valid: isRequestId(submittedId) &&
++      isRequestId(previousId) &&
++      submittedId === previousId,
 +  };
 +}
 +
-+// 通常表示を取得し、Auth email・DB email・利用可能な所属数を別項目へ整理する。
-+export async function getClubAccount(
-+  context: ClubAccessContext,
-+): Promise<ClubAccountReadResult> {
++// previousStateを展開せず、許可した入力・固定エラー・安全な識別子だけを返す。
++function errorState<TValues>(
++  values: TValues,
++  requestId: string,
++  formError: string | null,
++  fieldErrors: FieldErrors<Extract<keyof TValues, string>> = {},
++): ActionState<TValues> {
++  return {
++    status: "error",
++    values,
++    fieldErrors,
++    formError,
++    requestId,
++  };
++}
++
++// bindした対象と単一のhidden childIdを照合し、別Childのフォームとの混同を防ぐ。
++function matchesChildTarget(targetChildId: string, formData: FormData): boolean {
++  const submitted = parseChildIdFormData(formData);
++  return validateChildIdInput(targetChildId).success &&
++    submitted.success &&
++    submitted.data.childId === targetChildId;
++}
++
++// Serviceの例外から原文を返さず、Next.jsの制御例外だけは最初に再送出する。
++async function callMutation(
++  operation: () => Promise<ClubAccountMutationResult>,
++): Promise<ClubAccountMutationResult> {
 +  try {
-+    const auth = await getAccountAuth(context);
-+    if (!auth) {
-+      return {
-+        outcome: "UNAVAILABLE",
-+      };
-+    }
-+    const [account, memberships] = await Promise.all([
-+      findClubAccountForUser({
-+        clubId: context.club.id,
-+        actorMembershipId: context.membership.id,
-+        userId: auth.id,
-+      }),
-+      findActiveClubMemberships(auth.id),
-+    ]);
-+    if (account.outcome !== "FOUND") {
-+      return {
-+        outcome: account.outcome,
-+      };
-+    }
-+    const view = account.view;
++    return await operation();
++  } catch (error) {
++    unstable_rethrow(error);
 +    return {
-+      outcome: "FOUND",
-+      view: {
-+        name: view.name,
-+        authEmail: auth.email,
-+        appUserEmail: view.appUserEmail,
-+        club: {
-+          name: view.club.name,
-+          slug: view.club.slug,
-+          websiteUrl: view.club.websiteUrl,
-+          instagramUrl: view.club.instagramUrl,
-+        },
-+        role: view.role,
-+        children: view.children.map((child) => ({
-+          id: child.id,
-+          name: child.name,
-+          grade: child.grade,
-+        })),
-+        canSwitchClub: getAppEnabledMemberships(memberships).length > 1,
-+        isPlatformAdmin: view.isPlatformAdmin,
-+      },
-+    };
-+  } catch {
-+    // 例外原文・Auth User・部分取得した個人情報は結果やログへ渡さない。
-+    return {
-+      outcome: "FETCH_FAILED",
++      outcome: "UPDATE_FAILED",
 +    };
 +  }
 +}
 +
-+// 候補は明示的に必要になった時だけ取得し、通常表示や他クラブ詳細を混ぜない。
-+export async function getAttachableClubChildren(
-+  context: ClubAccessContext,
-+): Promise<ClubAccountChildCandidatesResult> {
++// 存在・権限の違いを区別せず、既知の結果だけを固定メッセージへ変換する。
++function mutationMessage(result: ClubAccountMutationResult): string {
++  switch (result.outcome) {
++    case "NOT_FOUND":
++    case "FORBIDDEN":
++      return "対象の情報を更新できません。ページを開き直してください。";
++    case "CONFLICT":
++      return "同時更新が発生しました。ページを開き直して確認してください。";
++    case "RULE_VIOLATION":
++      switch (result.reason) {
++        case "ALREADY_ACTIVE":
++          return "すでに現在クラブへ追加されています。ページを開き直してください。";
++        case "ALREADY_WITHDRAWN":
++          return "すでに現在クラブから外されています。ページを開き直してください。";
++        case "MEMBERSHIP_NOT_FOUND":
++          return "現在クラブの所属を確認できません。ページを開き直してください。";
++        case "STATUS_CHANGE_NOT_ALLOWED":
++          return "現在の所属状態では変更できません。クラブ管理者へ確認してください。";
++      }
++  }
++  return FAILED_MESSAGE;
++}
++
++// 保存後の失敗を再保存へ誘導せず、認可結果の固定accountへ保存済み案内で戻す。
++function finishSavedAccount(
++  access: ClubAccessContext,
++  requestId: string,
++  affectedClubSlugs: readonly string[],
++  feedback: string,
++  revalidate: typeof revalidateClubAccountPaths,
++): never {
++  let toast = feedback;
 +  try {
-+    const auth = await getAccountAuth(context);
-+    if (!auth) {
-+      return {
-+        outcome: "UNAVAILABLE",
-+      };
-+    }
-+    const result = await findAttachableChildrenForUser({
-+      clubId: context.club.id,
-+      actorMembershipId: context.membership.id,
-+      userId: auth.id,
-+    });
++    revalidate(affectedClubSlugs);
++  } catch (error) {
++    unstable_rethrow(error);
++    toast = "saved-reload";
++  }
++  const query = new URLSearchParams({
++    toast,
++    toastId: requestId,
++  });
++  redirect(`/club/${encodeURIComponent(access.club.slug)}/account?${query.toString()}`);
++}
++
++// ページを経由しない直接呼出しでも、本人認証・現在クラブ認可後に氏名だけを保存する。
++export async function updateAccountNameAction(
++  clubSlug: string,
++  previousState: AccountNameActionState,
++  formData: FormData,
++): Promise<AccountNameActionState> {
++  const access = await requireClubAppAccess(clubSlug);
++  const values = {
++    name: (singleString(formData, "name") ?? "").slice(0, ACCOUNT_NAME_MAX_LENGTH),
++  };
++  const request = checkRequest(previousState, formData);
++  if (!request.valid) {
++    return errorState(values, request.requestId, EXPIRED_FORM_MESSAGE);
++  }
++  const validation = parseAccountNameFormData(formData);
++  if (!validation.success) {
++    return errorState(values, request.requestId, null, validation.fieldErrors);
++  }
++  const result = await callMutation(() => updateClubAccountName(access, validation.data));
++  if (result.outcome !== "UPDATED") {
++    return errorState(values, request.requestId, mutationMessage(result));
++  }
++  finishSavedAccount(
++    access,
++    request.requestId,
++    result.affectedClubSlugs,
++    "name-saved",
++    revalidateClubAccountNamePaths,
++  );
++}
++
++// 作成はrequestIdをChild.idにし、編集はbind対象とhidden値を再照合する。
++async function saveChildAction(
++  access: ClubAccessContext,
++  targetChildId: string | null,
++  previousState: ChildActionState,
++  formData: FormData,
++  operation: "CREATE" | "UPDATE",
++): Promise<ChildActionState> {
++  const grade = singleString(formData, "grade");
++  const selectedGrade = CHILD_GRADE_OPTIONS.find((option) => option.value === grade);
++  const values = {
++    name: (singleString(formData, "name") ?? "").slice(0, ACCOUNT_NAME_MAX_LENGTH),
++    grade: selectedGrade?.value ?? "",
++  };
++  const request = checkRequest(previousState, formData);
++  if (!request.valid) {
++    return errorState(values, request.requestId, EXPIRED_FORM_MESSAGE);
++  }
++  const id = validateChildIdInput(
++    operation === "CREATE" ? request.requestId : targetChildId,
++  );
++  if (
++    !id.success || (
++      operation === "UPDATE" &&
++      !matchesChildTarget(id.data.childId, formData)
++    )
++  ) {
++    return errorState(values, request.requestId, TARGET_MESSAGE);
++  }
++  const validation = parseChildFormData(formData);
++  if (!validation.success) {
++    return errorState(values, request.requestId, null, validation.fieldErrors);
++  }
++  const input = {
++    childId: id.data.childId,
++    name: validation.data.name,
++    grade: validation.data.grade,
++  };
++  const result = await callMutation(() => operation === "CREATE"
++    ? createClubChild(access, input)
++    : updateClubChild(access, input),);
++  if (result.outcome !== "UPDATED") {
++    return errorState(values, request.requestId, mutationMessage(result));
++  }
++  finishSavedAccount(
++    access,
++    request.requestId,
++    result.affectedClubSlugs,
++    operation === "CREATE" ? "child-created" : "child-updated",
++    revalidateClubAccountPaths,
++  );
++}
++
++// 同じ作成フォームの再送でも同じChild.idを使用し、所有権はRepositoryで再確認する。
++export async function createChildAction(
++  clubSlug: string,
++  previousState: ChildActionState,
++  formData: FormData,
++): Promise<ChildActionState> {
++  const access = await requireClubAppAccess(clubSlug);
++  return saveChildAction(access, null, previousState, formData, "CREATE");
++}
++
++// Childごとのbind対象・requestIdを照合してから、グローバルな氏名・学年を編集する。
++export async function updateChildAction(
++  clubSlug: string,
++  targetChildId: string,
++  previousState: ChildActionState,
++  formData: FormData,
++): Promise<ChildActionState> {
++  const access = await requireClubAppAccess(clubSlug);
++  return saveChildAction(access, targetChildId, previousState, formData, "UPDATE");
++}
++
++// 所属操作では対象IDだけを扱い、氏名・学年・親ID・所属状態を受け取らない。
++async function changeChildMembershipAction(
++  access: ClubAccessContext,
++  targetChildId: string,
++  previousState: ChildMembershipActionState,
++  formData: FormData,
++  operation: "ADD" | "WITHDRAW",
++): Promise<ChildMembershipActionState> {
++  const values = {
++    childId: validateChildIdInput(targetChildId).success ? targetChildId : "",
++  };
++  const request = checkRequest(previousState, formData);
++  if (!request.valid) {
++    return errorState(values, request.requestId, EXPIRED_FORM_MESSAGE);
++  }
++  if (!matchesChildTarget(targetChildId, formData)) {
++    return errorState(values, request.requestId, null, {
++      childId: [TARGET_MESSAGE],
++    },);
++  }
++  const result = await callMutation(() => operation === "ADD"
++    ? addClubChild(access, values)
++    : withdrawClubChild(access, values),);
++  if (result.outcome !== "UPDATED") {
++    return errorState(values, request.requestId, mutationMessage(result));
++  }
++  finishSavedAccount(
++    access,
++    request.requestId,
++    result.affectedClubSlugs,
++    operation === "ADD" ? "child-added" : "child-withdrawn",
++    revalidateClubAccountPaths,
++  );
++}
++
++// 本人の既存Childを現在クラブへ追加し、状態の可否はRepositoryで再照合する。
++export async function addChildToClubAction(
++  clubSlug: string,
++  targetChildId: string,
++  previousState: ChildMembershipActionState,
++  formData: FormData,
++): Promise<ChildMembershipActionState> {
++  const access = await requireClubAppAccess(clubSlug);
++  return changeChildMembershipAction(access, targetChildId, previousState, formData, "ADD");
++}
++
++// 現在クラブの所属だけを解除し、Child本体や他クラブ所属には変更を広げない。
++export async function withdrawChildFromClubAction(
++  clubSlug: string,
++  targetChildId: string,
++  previousState: ChildMembershipActionState,
++  formData: FormData,
++): Promise<ChildMembershipActionState> {
++  const access = await requireClubAppAccess(clubSlug);
++  return changeChildMembershipAction(
++    access,
++    targetChildId,
++    previousState,
++    formData,
++    "WITHDRAW",
++  );
++}
++
++// 追加UIを開いた時だけ候補を読む。書込・再検証・任意の戻り先は扱わない。
++export async function getAttachableChildrenAction(
++  clubSlug: string,
++): Promise<ClubAccountChildCandidatesResult> {
++  const access = await requireClubAppAccess(clubSlug);
++  try {
++    const result = await getAttachableClubChildren(access);
 +    if (result.outcome !== "FOUND") {
 +      return {
 +        outcome: result.outcome,
@@ -566,22 +356,23 @@ index 0000000..9fd3b91
 +        id: child.id,
 +        name: child.name,
 +        grade: child.grade,
-+      })),
++      }),),
 +    };
-+  } catch {
++  } catch (error) {
++    unstable_rethrow(error);
 +    return {
 +      outcome: "FETCH_FAILED",
 +    };
 +  }
 +}
-diff --git a/src/application/club/account/update-club-account.test.ts b/src/application/club/account/update-club-account.test.ts
+diff --git a/tests/club-account-actions.test.ts b/tests/club-account-actions.test.ts
 new file mode 100644
-index 0000000..e068b5c
+index 0000000..8276308
 --- /dev/null
-+++ b/src/application/club/account/update-club-account.test.ts
-@@ -0,0 +1,258 @@
-+// src/application/club/account/update-club-account.test.ts
-+// 認可済みcontextからのID組立てと、各操作の入力・結果の許可項目を確認する。
++++ b/tests/club-account-actions.test.ts
+@@ -0,0 +1,611 @@
++// tests/club-account-actions.test.ts
++// 直接呼出し時の認可・入力・状態・保存後処理を検証する。HTTP Origin保護の試験ではない。
 +
 +import {
 +  afterEach,
@@ -596,41 +387,74 @@ index 0000000..e068b5c
 +  ClubAccessContext,
 +} from "@/app/(club-app)/club/club-membership-authorization";
 +import {
++  addChildToClubAction,
++  createChildAction,
++  getAttachableChildrenAction,
++  updateAccountNameAction,
++  updateChildAction,
++  withdrawChildFromClubAction,
++} from "@/app/(club-app)/club/[clubSlug]/account/actions";
++import type {
++  AccountNameActionState,
++} from "@/domain/club/account/account-form";
++import type {
++  ChildActionState,
++  ChildMembershipActionState,
++} from "@/domain/club/account/child-form";
++import {
 +  DomainError,
 +} from "@/domain/shared/domain-error";
 +import {
-+  addClubChild,
-+  createClubChild,
-+  updateClubAccountName,
-+  updateClubChild,
-+  withdrawClubChild,
-+} from "./update-club-account";
++  isRequestId,
++} from "@/domain/shared/request-id";
 +
 +const mocks = vi.hoisted(() => ({
++  access: vi.fn(),
 +  name: vi.fn(),
 +  create: vi.fn(),
 +  update: vi.fn(),
 +  add: vi.fn(),
 +  withdraw: vi.fn(),
-+}));
++  candidates: vi.fn(),
++  namePaths: vi.fn(),
++  accountPaths: vi.fn(),
++  redirect: vi.fn(),
++  rethrow: vi.fn(),
++}),);
 +
-+// 実DB・Auth・dotenvの評価を避け、操作ごとのRepository呼出しを確認する。
-+vi.mock("@/src/infrastructure/prisma/repositories/club-account-repository", () => ({
-+  updateAccountNameForUser: mocks.name,
-+}));
-+vi.mock("@/src/infrastructure/prisma/repositories/club-child-repository", () => ({
-+  createChildForUser: mocks.create,
-+  updateChildForUser: mocks.update,
-+  addChildToClubForUser: mocks.add,
-+  withdrawChildFromClubForUser: mocks.withdraw,
-+}));
++// Auth・DB・Next実行環境を評価せず、Actionが呼ぶ境界だけを置換する。
++vi.mock("@/app/(club-app)/club/club-app-authorization", () => ({
++  requireClubAppAccess: mocks.access,
++}),);
++vi.mock("@/src/application/club/account/update-club-account", () => ({
++  updateClubAccountName: mocks.name,
++  createClubChild: mocks.create,
++  updateClubChild: mocks.update,
++  addClubChild: mocks.add,
++  withdrawClubChild: mocks.withdraw,
++}),);
++vi.mock("@/src/application/club/account/get-club-account", () => ({
++  getAttachableClubChildren: mocks.candidates,
++}),);
++vi.mock("@/app/(club-app)/club/revalidate-club-paths", () => ({
++  revalidateClubAccountNamePaths: mocks.namePaths,
++  revalidateClubAccountPaths: mocks.accountPaths,
++}),);
++vi.mock("next/navigation", () => ({
++  redirect: mocks.redirect,
++  unstable_rethrow: mocks.rethrow,
++}),);
 +
++const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
++const CHILD_ID = "550e8400-e29b-41d4-a716-446655440001";
++const OTHER_ID = "550e8400-e29b-41d4-a716-446655440002";
++const PRIVATE_DETAIL = "private@example.test token raw-database-error";
 +const CONTEXT: ClubAccessContext = {
 +  userId: "user-a",
 +  club: {
 +    id: "club-a",
 +    name: "クラブA",
-+    slug: "club-a",
++    slug: "canonical-club",
 +    timezone: "Asia/Tokyo",
 +    planType: "STANDARD",
 +  },
@@ -639,473 +463,522 @@ index 0000000..e068b5c
 +    role: "MEMBER",
 +  },
 +};
-+const CHILD_ID = "550e8400-e29b-41d4-a716-446655440000";
-+const PRIVATE_DETAIL = "private-token raw-database-error";
-+const SCOPE = {
-+  clubId: "club-a",
-+  actorMembershipId: "membership-a",
-+  userId: "user-a",
-+};
-+const CHILD_VALUES = {
-+  childId: CHILD_ID,
-+  name: "  子ども  ",
-+  grade: null,
-+};
-+const EXTRA = {
-+  clubId: "other-club",
-+  actorMembershipId: "other-membership",
-+  userId: "other-user",
-+  parentId: "other-user",
-+  role: "OWNER",
-+  status: "ACTIVE",
-+  email: "other@example.test",
-+  affectedClubSlugs: ["other-club"],
-+};
++const MUTATIONS = [mocks.name, mocks.create, mocks.update, mocks.add, mocks.withdraw];
++
++// Next.jsの制御例外を模した印。実HTTPの遷移・ステータスを再現するものではない。
++class ControlError extends Error { }
++
++// 許可された値だけの初期stateを操作ごとに用意する。
++function nameState(): AccountNameActionState {
++  return {
++    status: "idle",
++    values: {
++      name: "古い氏名",
++    },
++    fieldErrors: {},
++    formError: null,
++    requestId: REQUEST_ID,
++  };
++}
++
++// Childごとの状態は氏名・学年とrequestIdだけを持つ。
++function childState(): ChildActionState {
++  return {
++    ...nameState(),
++    values: {
++      name: "古いChild氏名",
++      grade: "YOUJI",
++    },
++  };
++}
++
++// 所属操作は対象Child IDとrequestIdだけの状態を使う。
++function membershipState(): ChildMembershipActionState {
++  return {
++    ...nameState(),
++    values: {
++      childId: CHILD_ID,
++    },
++    fieldErrors: {},
++  };
++}
++
++// 各フォームの単一fieldとrequestIdを用意する。
++function form(): FormData {
++  const data = new FormData();
++  data.set("requestId", REQUEST_ID);
++  data.set("name", "  新氏名  ");
++  data.set("grade", "");
++  data.set("childId", CHILD_ID);
++  return data;
++}
 +
 +beforeEach(() => {
 +  vi.resetAllMocks();
 +  vi.spyOn(console, "error").mockImplementation(() => undefined);
 +  vi.spyOn(console, "warn").mockImplementation(() => undefined);
 +  vi.spyOn(console, "log").mockImplementation(() => undefined);
-+  for (const repository of Object.values(mocks)) {
-+    repository.mockResolvedValue({
++  mocks.access.mockResolvedValue(CONTEXT);
++  for (const mutation of MUTATIONS) {
++    mutation.mockResolvedValue({
 +      outcome: "UPDATED",
-+      affectedClubSlugs: repository === mocks.name || repository === mocks.update
-+        ? ["club-a", "club-b", "club-a"]
-+        : ["club-a"],
-+      cause: PRIVATE_DETAIL,
-+      userId: PRIVATE_DETAIL,
-+    });
++      affectedClubSlugs: ["canonical-club", "related-club"],
++    },);
 +  }
-+});
++  mocks.candidates.mockResolvedValue({
++    outcome: "FOUND",
++    children: [],
++  },);
++  mocks.redirect.mockImplementation((path) => {
++    throw new ControlError(path);
++  },);
++  mocks.rethrow.mockImplementation((error) => {
++    if (error instanceof ControlError) {
++      throw error;
++    }
++  },);
++},);
 +
-+// 自動再送信やログ出力をServiceへ持ち込まない。
++// 氏名・email・原文例外をログへ出さず、無関係な保存操作も呼ばない。
 +afterEach(() => {
-+  const usedRepositories = Object.values(mocks).filter((repository) =>
-+    repository.mock.calls.length > 0);
-+  expect(usedRepositories.length).toBeLessThanOrEqual(1);
 +  expect(console.error).not.toHaveBeenCalled();
 +  expect(console.warn).not.toHaveBeenCalled();
 +  expect(console.log).not.toHaveBeenCalled();
++  expect(MUTATIONS.filter((mutation) => mutation.mock.calls.length > 0).length)
++    .toBeLessThanOrEqual(1,);
 +  vi.restoreAllMocks();
-+});
++},);
 +
-+it("氏名更新にはcontextのIDと正規化したnameだけを渡す", async () => {
-+  expect(await updateClubAccountName(CONTEXT, {
-+    ...EXTRA,
-+    name: "  本人氏名  ",
-+  })).toEqual({
-+    outcome: "UPDATED",
-+    affectedClubSlugs: ["club-a", "club-b"],
-+  });
-+  expect(mocks.name).toHaveBeenCalledWith({
-+    ...SCOPE,
-+    name: "本人氏名",
-+  });
-+});
++it("氏名更新は認可由来context・正規化したname・サーバーの影響先だけを使う", async () => {
++  const data = form();
++  for (const field of ["clubId", "userId", "actorMembershipId", "email", "affectedClubSlugs"]) {
++    data.set(field, PRIVATE_DETAIL);
++  }
++  data.set("returnTo", "https://external.invalid/path");
++  await expect(updateAccountNameAction("requested-club", nameState(), data))
++    .rejects.toBeInstanceOf(ControlError,);
++  expect(mocks.access).toHaveBeenCalledWith("requested-club");
++  expect(mocks.name).toHaveBeenCalledWith(CONTEXT, { name: "新氏名" });
++  expect(mocks.namePaths).toHaveBeenCalledWith(["canonical-club", "related-club"]);
++  expect(mocks.accountPaths).not.toHaveBeenCalled();
++  expect(mocks.redirect).toHaveBeenCalledWith(
++    `/club/canonical-club/account?toast=name-saved&toastId=${REQUEST_ID}`,
++  );
++},);
 +
-+// Child操作は親・クラブ・所属状態を入力から引き継がない。
-+describe.each([
-+  ["作成", createClubChild, mocks.create],
-+  ["編集", updateClubChild, mocks.update],
-+] as const)("Child%s", (_label, operation, repository) => {
-+  it("検証したchildId・name・gradeだけをcontextに加える", async () => {
-+    expect(await operation(CONTEXT, {
-+      ...CHILD_VALUES,
-+      ...EXTRA,
-+    })).toEqual({
-+      outcome: "UPDATED",
-+      affectedClubSlugs: operation === createClubChild ? ["club-a"] : ["club-a", "club-b"],
-+    });
-+    expect(repository).toHaveBeenCalledWith({
-+      ...SCOPE,
-+      childId: CHILD_ID,
-+      name: "子ども",
++it("作成はrequestIdをChild.idとし、同じフォームの再送でも作成IDを変えない", async () => {
++  for (let attempt = 0; attempt < 2; attempt += 1) {
++    await expect(createChildAction("requested-club", childState(), form()))
++      .rejects.toBeInstanceOf(ControlError,);
++  }
++  expect(mocks.create.mock.calls).toEqual([
++    [CONTEXT, {
++      childId: REQUEST_ID,
++      name: "新氏名",
 +      grade: null,
-+    });
-+  });
++    },],
++    [CONTEXT, {
++      childId: REQUEST_ID,
++      name: "新氏名",
++      grade: null,
++    },],
++  ],);
++  expect(mocks.accountPaths).toHaveBeenCalledTimes(2);
++},);
 +
-+  it.each([
-+    { childId: "invalid" },
-+    { name: " " },
-+    { name: "あ".repeat(101) },
-+    { grade: undefined },
-+    { grade: "invalid" },
-+  ])("不正な入力%jではRepositoryを呼ばない", async (invalid) => {
-+    expect(await operation(CONTEXT, {
-+      ...CHILD_VALUES,
-+      ...invalid,
-+    } as typeof CHILD_VALUES)).toEqual({
-+      outcome: "UPDATE_FAILED",
-+    });
-+    expect(repository).not.toHaveBeenCalled();
-+  });
-+});
++it("編集はbind対象と単一hidden値を照合し、name・gradeだけを渡す", async () => {
++  const data = form();
++  data.set("grade", "ELEMENTARY_3");
++  await expect(updateChildAction("requested-club", CHILD_ID, childState(), data))
++    .rejects.toBeInstanceOf(ControlError,);
++  expect(mocks.update).toHaveBeenCalledWith(CONTEXT, {
++    childId: CHILD_ID,
++    name: "新氏名",
++    grade: "ELEMENTARY_3",
++  },);
++  expect(mocks.namePaths).not.toHaveBeenCalled();
++},);
 +
-+// 所属操作に氏名・学年を要求せず、対象IDだけを渡す。
++// 所属操作はChild本体の入力を要求せず、対象IDだけを渡す。
 +describe.each([
-+  ["追加", addClubChild, mocks.add],
-+  ["解除", withdrawClubChild, mocks.withdraw],
-+] as const)("所属%s", (_label, operation, repository) => {
-+  it("入力の親・クラブ・状態・影響先を取り込まない", async () => {
-+    expect(await operation(CONTEXT, {
-+      ...EXTRA,
-+      childId: CHILD_ID,
-+    })).toEqual({
-+      outcome: "UPDATED",
-+      affectedClubSlugs: ["club-a"],
-+    });
-+    expect(repository).toHaveBeenCalledWith({
-+      ...SCOPE,
-+      childId: CHILD_ID,
-+    });
-+  });
++  ["追加", addChildToClubAction, mocks.add, "child-added"],
++  ["解除", withdrawChildFromClubAction, mocks.withdraw, "child-withdrawn"],
++] as const,)("所属%s", (_label, action, service, toast) => {
++  it("氏名・学年・親・状態をServiceへ渡さない", async () => {
++    const data = form();
++    data.delete("name");
++    data.delete("grade");
++    data.set("parentId", PRIVATE_DETAIL);
++    data.set("status", "ACTIVE");
++    await expect(action("requested-club", CHILD_ID, membershipState(), data))
++      .rejects.toBeInstanceOf(ControlError,);
++    expect(service).toHaveBeenCalledWith(CONTEXT, { childId: CHILD_ID });
++    expect(mocks.redirect).toHaveBeenCalledWith(
++      `/club/canonical-club/account?toast=${toast}&toastId=${REQUEST_ID}`,
++    );
++  },);
++},);
 +
-+  it("不正なchildIdではRepositoryを呼ばない", async () => {
-+    expect(await operation(CONTEXT, { childId: "invalid" })).toEqual({
-+      outcome: "UPDATE_FAILED",
-+    });
-+    expect(repository).not.toHaveBeenCalled();
-+  });
-+});
-+
-+it.each(["", " ", "あ".repeat(101)])("不正な本人氏名%jは保存しない", async (name) => {
-+  expect(await updateClubAccountName(CONTEXT, { name })).toEqual({
-+    outcome: "UPDATE_FAILED",
-+  });
-+  expect(mocks.name).not.toHaveBeenCalled();
-+});
-+
-+// 全公開操作でRepository例外・失敗結果から余分なデータを返さない。
++// 全書込Actionの認可・requestId・固定結果・保存後の境界を直接呼出しで確認する。
 +describe.each([
-+  ["氏名", () => updateClubAccountName(CONTEXT, { name: "本人" }), mocks.name],
-+  ["作成", () => createClubChild(CONTEXT, CHILD_VALUES), mocks.create],
-+  ["編集", () => updateClubChild(CONTEXT, CHILD_VALUES), mocks.update],
-+  ["追加", () => addClubChild(CONTEXT, { childId: CHILD_ID }), mocks.add],
-+  ["解除", () => withdrawClubChild(CONTEXT, { childId: CHILD_ID }), mocks.withdraw],
-+] as const)("%sの固定結果", (_label, operation, repository) => {
++  ["氏名", (data: FormData, ...states: unknown[]) =>
++    updateAccountNameAction(
++      "requested-club",
++      (states.length ? states[0] : nameState()) as AccountNameActionState,
++      data,
++    ), mocks.name,],
++  ["作成", (data: FormData, ...states: unknown[]) =>
++    createChildAction(
++      "requested-club",
++      (states.length ? states[0] : childState()) as ChildActionState,
++      data,
++    ), mocks.create,],
++  ["編集", (data: FormData, ...states: unknown[]) =>
++    updateChildAction(
++      "requested-club",
++      CHILD_ID,
++      (states.length ? states[0] : childState()) as ChildActionState,
++      data,
++    ), mocks.update,],
++  ["追加", (data: FormData, ...states: unknown[]) =>
++    addChildToClubAction(
++      "requested-club",
++      CHILD_ID,
++      (states.length ? states[0] : membershipState()) as ChildMembershipActionState,
++      data,
++    ),
++    mocks.add,],
++  ["解除", (data: FormData, ...states: unknown[]) =>
++    withdrawChildFromClubAction(
++      "requested-club",
++      CHILD_ID,
++      (states.length ? states[0] : membershipState()) as ChildMembershipActionState,
++      data,
++    ),
++    mocks.withdraw,],
++] as const,)("%sの書込境界", (_label, invoke, service) => {
++  it.each(["未ログイン", "別クラブ", "非ACTIVE", "利用不可プラン"])(
++    "%sの直接呼出しでは認可を通過できない",
++    async (reason) => {
++      const error = new ControlError(reason);
++      mocks.access.mockRejectedValueOnce(error);
++      await expect(invoke(new FormData())).rejects.toBe(error);
++      expect(service).not.toHaveBeenCalled();
++      expect(mocks.redirect).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each(["missing", "duplicate", "file", "invalid", "mismatch"])(
++    "requestId %sをServiceへ渡さない",
++    async (kind) => {
++      const data = form();
++      if (kind === "missing") {
++        data.delete("requestId");
++      }
++      if (kind === "duplicate") {
++        data.append("requestId", REQUEST_ID);
++      }
++      if (kind === "file") {
++        data.set("requestId", new File(["x"], "id.txt"));
++      }
++      if (kind === "invalid") {
++        data.set("requestId", "invalid");
++      }
++      if (kind === "mismatch") {
++        data.set("requestId", OTHER_ID);
++      }
++      const result = await invoke(data);
++      expect(result.status).toBe("error");
++      expect(result.requestId).toBe(REQUEST_ID);
++      expect(service).not.toHaveBeenCalled();
++      expect(mocks.access).toHaveBeenCalledTimes(1);
++    },
++  );
++
++  it.each([null, undefined, {}, { requestId: { secret: PRIVATE_DETAIL } }])(
++    "改ざん前state %jの値やエラーを反射しない",
++    async (state) => {
++      const result = await invoke(form(), state);
++      expect(result.status).toBe("error");
++      expect(isRequestId(result.requestId)).toBe(true);
++      expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++      expect(service).not.toHaveBeenCalled();
++    },
++  );
++
++  it("前stateのstatus・values・fieldErrors・dataを信用しない", async () => {
++    service.mockResolvedValueOnce({ outcome: "UPDATE_FAILED" });
++    const result = await invoke(form(), {
++      requestId: REQUEST_ID,
++      status: "success",
++      values: { hidden: PRIVATE_DETAIL },
++      fieldErrors: { hidden: [PRIVATE_DETAIL] },
++      formError: PRIVATE_DETAIL,
++      data: PRIVATE_DETAIL,
++      extra: PRIVATE_DETAIL,
++    },);
++    expect(Object.keys(result).sort()).toEqual([
++      "fieldErrors", "formError", "requestId", "status", "values",
++    ],);
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++    expect(service).toHaveBeenCalledTimes(1);
++  },);
++
 +  it.each(["NOT_FOUND", "FORBIDDEN", "CONFLICT", "UPDATE_FAILED"] as const)(
-+    "%sだけを返す",
++    "別親・所属不一致・競合等の結果%sで再検証しない",
 +    async (outcome) => {
-+      repository.mockResolvedValue({
++      service.mockResolvedValueOnce({
 +        outcome,
-+        cause: PRIVATE_DETAIL,
-+        affectedClubSlugs: ["other-club"],
-+      });
-+      expect(await operation()).toEqual({
-+        outcome,
-+      });
++        message: PRIVATE_DETAIL,
++      },);
++      const result = await invoke(form());
++      expect(result.status).toBe("error");
++      expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++      expect(mocks.namePaths).not.toHaveBeenCalled();
++      expect(mocks.accountPaths).not.toHaveBeenCalled();
++      expect(mocks.redirect).not.toHaveBeenCalled();
 +    },
 +  );
 +
 +  it.each([
-+    "ALREADY_ACTIVE",
-+    "ALREADY_WITHDRAWN",
-+    "MEMBERSHIP_NOT_FOUND",
-+    "STATUS_CHANGE_NOT_ALLOWED",
-+    "INVALID_STATUS",
-+  ] as const)("固定の状態違反%sだけを返す", async (reason) => {
-+    repository.mockResolvedValue({
-+      outcome: "RULE_VIOLATION",
-+      reason,
-+      message: PRIVATE_DETAIL,
-+    });
-+    expect(await operation()).toEqual({
-+      outcome: "RULE_VIOLATION",
-+      reason,
-+    });
-+  });
-+
-+  it("未知の違反理由は反射しない", async () => {
-+    repository.mockResolvedValue({
-+      outcome: "RULE_VIOLATION",
-+      reason: PRIVATE_DETAIL,
-+    });
-+    expect(await operation()).toEqual({
-+      outcome: "UPDATE_FAILED",
-+    });
-+  });
++    "ALREADY_ACTIVE", "ALREADY_WITHDRAWN", "MEMBERSHIP_NOT_FOUND",
++    "STATUS_CHANGE_NOT_ALLOWED", "INVALID_STATUS",
++  ],)("状態違反%sは固定メッセージを返す", async (reason) => {
++    service.mockResolvedValueOnce(
++      {
++        outcome: "RULE_VIOLATION",
++        reason,
++        cause: PRIVATE_DETAIL,
++      },
++    );
++    const result = await invoke(form());
++    expect(result.status).toBe("error");
++    expect(result.formError).toBeTruthy();
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++    expect(mocks.redirect).not.toHaveBeenCalled();
++  },);
 +
 +  it.each([
 +    new Error(PRIVATE_DETAIL),
-+    new DomainError("CONFLICT", PRIVATE_DETAIL, { cause: PRIVATE_DETAIL }),
-+    { outcome: "UPDATED", cause: PRIVATE_DETAIL },
-+  ])("任意の例外を反射・自動再試行しない: %#", async (error) => {
-+    repository.mockRejectedValueOnce(error);
-+    expect(await operation()).toEqual({
-+      outcome: "UPDATE_FAILED",
-+    });
-+    expect(repository).toHaveBeenCalledTimes(1);
-+  });
-+});
-diff --git a/src/application/club/account/update-club-account.ts b/src/application/club/account/update-club-account.ts
-new file mode 100644
-index 0000000..9305255
---- /dev/null
-+++ b/src/application/club/account/update-club-account.ts
-@@ -0,0 +1,170 @@
-+// src/application/club/account/update-club-account.ts
-+// 認可済み本人contextと許可された入力だけをRepositoryへ渡し、内部の更新結果を返す。
++    new DomainError("INTERNAL", PRIVATE_DETAIL, { cause: PRIVATE_DETAIL }),
++  ],)("Service例外の原文を公開・再試行しない: %#", async (error) => {
++    service.mockRejectedValueOnce(error);
++    const result = await invoke(form());
++    expect(result.status).toBe("error");
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++    expect(service).toHaveBeenCalledTimes(1);
++    expect(mocks.rethrow).toHaveBeenCalledWith(error);
++  },);
 +
-+import "server-only";
++  it("Service内のNext制御例外を固定エラーへ変換しない", async () => {
++    const error = new ControlError("NEXT_NOT_FOUND");
++    service.mockRejectedValueOnce(error);
++    await expect(invoke(form())).rejects.toBe(error);
++    expect(mocks.rethrow).toHaveBeenCalledWith(error);
++  },);
 +
-+import type {
-+  ClubAccessContext,
-+} from "@/app/(club-app)/club/club-membership-authorization";
-+import {
-+  validateAccountNameInput,
-+  type AccountNameFormValues,
-+} from "@/domain/club/account/account-form";
-+import type {
-+  ClubAccountMutationResult,
-+} from "@/domain/club/account/account-types";
-+import {
-+  validateChildIdInput,
-+  validateChildInput,
-+} from "@/domain/club/account/child-form";
-+import {
-+  updateAccountNameForUser,
-+  type ClubAccountReadScope,
-+} from "@/src/infrastructure/prisma/repositories/club-account-repository";
-+import {
-+  addChildToClubForUser,
-+  createChildForUser,
-+  updateChildForUser,
-+  withdrawChildFromClubForUser,
-+  type ChildForUserInput,
-+  type ChildMembershipForUserInput,
-+} from "@/src/infrastructure/prisma/repositories/club-child-repository";
++  it("保存済みの再検証失敗では保存を再実行せずsaved-reloadへ遷移する", async () => {
++    const error = new Error(PRIVATE_DETAIL);
++    mocks.namePaths.mockImplementationOnce(() => {
++      throw error;
++    },);
++    mocks.accountPaths.mockImplementationOnce(() => {
++      throw error;
++    },);
++    await expect(invoke(form())).rejects.toBeInstanceOf(ControlError);
++    expect(mocks.redirect).toHaveBeenCalledWith(
++      `/club/canonical-club/account?toast=saved-reload&toastId=${REQUEST_ID}`,
++    );
++    expect(service).toHaveBeenCalledTimes(1);
++    expect(mocks.rethrow).toHaveBeenCalledWith(error);
++  },);
 +
-+export type ClubChildValues = Pick<ChildForUserInput, "childId" | "name" | "grade">;
-+export type ClubChildMembershipValues = Pick<ChildMembershipForUserInput, "childId">;
++  it("再検証中のNext制御例外も保持する", async () => {
++    const error = new ControlError("NEXT_REDIRECT");
++    mocks.namePaths.mockImplementationOnce(() => {
++      throw error;
++    },);
++    mocks.accountPaths.mockImplementationOnce(() => {
++      throw error;
++    },);
++    await expect(invoke(form())).rejects.toBe(error);
++    expect(service).toHaveBeenCalledTimes(1);
++    expect(mocks.redirect).not.toHaveBeenCalled();
++  },);
++},);
 +
-+// Repositoryの固定結果だけを投影し、入力由来のslug・任意のメッセージを返さない。
-+async function runAccountMutation(
-+  context: ClubAccessContext,
-+  operation: (scope: ClubAccountReadScope) => Promise<ClubAccountMutationResult>,
-+): Promise<ClubAccountMutationResult> {
-+  try {
-+    const result = await operation({
-+      clubId: context.club.id,
-+      actorMembershipId: context.membership.id,
-+      userId: context.userId,
-+    });
-+    switch (result.outcome) {
-+      case "UPDATED":
-+        return {
-+          outcome: "UPDATED",
-+          affectedClubSlugs: [...new Set(result.affectedClubSlugs)],
-+        };
-+      case "NOT_FOUND":
-+      case "FORBIDDEN":
-+      case "CONFLICT":
-+      case "UPDATE_FAILED":
-+        return {
-+          outcome: result.outcome,
-+        };
-+      case "RULE_VIOLATION":
-+        switch (result.reason) {
-+          case "ALREADY_ACTIVE":
-+          case "ALREADY_WITHDRAWN":
-+          case "MEMBERSHIP_NOT_FOUND":
-+          case "STATUS_CHANGE_NOT_ALLOWED":
-+          case "INVALID_STATUS":
-+            return {
-+              outcome: "RULE_VIOLATION",
-+              reason: result.reason,
-+            };
-+        }
-+    }
-+  } catch {
-+    // 例外を自動再試行せず、DomainErrorの原文・causeも公開しない。
-+  }
-+  return {
-+    outcome: "UPDATE_FAILED",
-+  };
-+}
-+
-+// 本人氏名だけを渡す。影響クラブはRepositoryが本人の全所属から取得する。
-+export async function updateClubAccountName(
-+  context: ClubAccessContext,
-+  input: AccountNameFormValues,
-+): Promise<ClubAccountMutationResult> {
-+  const validation = validateAccountNameInput(input);
-+  if (!validation.success) {
-+    return {
-+      outcome: "UPDATE_FAILED",
-+    };
-+  }
-+  return runAccountMutation(context, (scope) => updateAccountNameForUser({
-+    ...scope,
-+    name: validation.data.name,
-+  }));
-+}
-+
-+// 作成・編集に必要な3項目だけを検証し、親・クラブ・状態を入力からコピーしない。
-+async function saveClubChild(
-+  context: ClubAccessContext,
-+  input: ClubChildValues,
-+  operation: typeof createChildForUser,
-+): Promise<ClubAccountMutationResult> {
-+  const validation = validateChildInput(input);
-+  const id = validateChildIdInput(input?.childId);
-+  if (
-+    !validation.success ||
-+    !id.success
-+  ) {
-+    return {
-+      outcome: "UPDATE_FAILED",
-+    };
-+  }
-+  return runAccountMutation(context, (scope) => operation({
-+    ...scope,
-+    childId: id.data.childId,
-+    name: validation.data.name,
-+    grade: validation.data.grade,
-+  }));
-+}
-+
-+// 作成識別子は同じフォームの再送で変えず、現在クラブの初回所属と一体作成する。
-+export async function createClubChild(
-+  context: ClubAccessContext,
-+  input: ClubChildValues,
-+): Promise<ClubAccountMutationResult> {
-+  return saveClubChild(context, input, createChildForUser);
-+}
-+
-+// グローバルChildを編集し、関連クラブのaccount再検証用slugを内部結果に残す。
-+export async function updateClubChild(
-+  context: ClubAccessContext,
-+  input: ClubChildValues,
-+): Promise<ClubAccountMutationResult> {
-+  return saveClubChild(context, input, updateChildForUser);
-+}
-+
-+// 所属操作に氏名・学年・親・clubIdを受け渡さず、対象IDだけを検証する。
-+async function changeClubChildMembership(
-+  context: ClubAccessContext,
-+  input: ClubChildMembershipValues,
-+  operation: typeof addChildToClubForUser,
-+): Promise<ClubAccountMutationResult> {
-+  const validation = validateChildIdInput(input?.childId);
-+  if (!validation.success) {
-+    return {
-+      outcome: "UPDATE_FAILED",
-+    };
-+  }
-+  return runAccountMutation(context, (scope) => operation({
-+    ...scope,
-+    childId: validation.data.childId,
-+  }));
-+}
-+
-+// 本人の既存Childを現在クラブへ追加する。状態遷移はRepositoryで再照合する。
-+export async function addClubChild(
-+  context: ClubAccessContext,
-+  input: ClubChildMembershipValues,
-+): Promise<ClubAccountMutationResult> {
-+  return changeClubChildMembership(context, input, addChildToClubForUser);
-+}
-+
-+// 現在クラブからの解除だけを行い、Child本体や他クラブには変更を広げない。
-+export async function withdrawClubChild(
-+  context: ClubAccessContext,
-+  input: ClubChildMembershipValues,
-+): Promise<ClubAccountMutationResult> {
-+  return changeClubChildMembership(context, input, withdrawChildFromClubForUser);
-+}
-diff --git a/tests/club-account-revalidation.test.ts b/tests/club-account-revalidation.test.ts
-new file mode 100644
-index 0000000..a361aa4
---- /dev/null
-+++ b/tests/club-account-revalidation.test.ts
-@@ -0,0 +1,89 @@
-+// tests/club-account-revalidation.test.ts
-+// 保存後にサーバーが決めた影響slugに対するNext.js再検証の範囲を確認する。
-+
-+import {
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+import {
-+  revalidateClubAccountNamePaths,
-+  revalidateClubAccountPaths,
-+  revalidateClubMemberPaths,
-+} from "@/app/(club-app)/club/revalidate-club-paths";
-+
-+const mocks = vi.hoisted(() => ({
-+  revalidate: vi.fn(),
-+}));
-+
-+// Next実行環境へ接続せず、具体的なパスと引数を確認する。
-+vi.mock("next/cache", () => ({
-+  revalidatePath: mocks.revalidate,
-+}));
-+
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+});
-+
-+describe("本人向け再検証", () => {
-+  it("氏名更新は影響する全クラブの会員管理・accountを重複なく再検証する", () => {
-+    revalidateClubAccountNamePaths(["club-a", "club-b", "club-a"]);
-+    expect(mocks.revalidate.mock.calls).toEqual([
-+      ["/club/club-a/admin/members"],
-+      ["/club/club-a/account"],
-+      ["/club/club-b/admin/members"],
-+      ["/club/club-b/account"],
-+    ]);
-+  });
-+
-+  it("Childグローバル編集は関連クラブのaccountだけを再検証する", () => {
-+    revalidateClubAccountPaths(["club-a", "club-b", "club-a"]);
-+    expect(mocks.revalidate.mock.calls).toEqual([
-+      ["/club/club-a/account"],
-+      ["/club/club-b/account"],
-+    ]);
-+  });
-+
-+  it("新規作成・所属追加・解除の影響先1件は現在accountだけになる", () => {
-+    revalidateClubAccountPaths(["club-a"]);
-+    expect(mocks.revalidate.mock.calls).toEqual([
-+      ["/club/club-a/account"],
-+    ]);
-+  });
-+
-+  it("既存の会員管理用関数の対象は維持する", () => {
-+    revalidateClubMemberPaths("club-a");
-+    expect(mocks.revalidate.mock.calls).toEqual([
-+      ["/club/club-a/admin/members"],
-+      ["/club/club-a/account"],
-+    ]);
-+  });
-+});
-+
-+// 全slugを検証してから再検証し、パス生成エラーによる部分実行を防ぐ。
++// 氏名・Child入力は重複・File・欠損を、入力の長さ・学年と併せて検証する。
 +describe.each([
-+  ["氏名", revalidateClubAccountNamePaths],
-+  ["Child", revalidateClubAccountPaths],
-+] as const)("%sの再検証境界", (_label, operation) => {
-+  it("対象なしなら呼び出さない", () => {
-+    operation([]);
-+    expect(mocks.revalidate).not.toHaveBeenCalled();
-+  });
++  [
++    "氏名",
++    (data: FormData) => updateAccountNameAction("requested-club", nameState(), data),
++  ],
++  [
++    "作成",
++    (data: FormData) => createChildAction("requested-club", childState(), data),
++  ],
++  [
++    "編集",
++    (data: FormData) => updateChildAction("requested-club", CHILD_ID, childState(), data),
++  ],
++] as const,)("%s入力", (_label, invoke) => {
++  it.each(["missing", "duplicate", "file", "empty", "long"])("name %sを拒否する", async (kind) => {
++    const data = form();
++    if (kind === "missing") {
++      data.delete("name");
++    }
++    if (kind === "duplicate") {
++      data.append("name", "another");
++    }
++    if (kind === "file") {
++      data.set("name", new File(["x"], "name.txt"));
++    }
++    if (kind === "empty") {
++      data.set("name", " ");
++    }
++    if (kind === "long") {
++      data.set("name", "あ".repeat(101));
++    }
++    const result = await invoke(data);
++    expect(result.status).toBe("error");
++    expect(result.fieldErrors.name).toBeTruthy();
++    expect(result.values.name.length).toBeLessThanOrEqual(100);
++    for (const service of MUTATIONS) {
++      expect(service).not.toHaveBeenCalled();
++    }
++  },);
++},);
 +
-+  it("不正なslugを含む場合は有効な先頭分も実行しない", () => {
-+    expect(() => operation(["club-a", "../other-club"]))
-+      .toThrow(RangeError);
-+    expect(mocks.revalidate).not.toHaveBeenCalled();
-+  });
++describe.each([
++  [
++    "作成",
++    (data: FormData) => createChildAction("requested-club", childState(), data),
++  ],
++  [
++    "編集",
++    (data: FormData) => updateChildAction("requested-club", CHILD_ID, childState(), data),
++  ],
++] as const,)("%s学年", (_label, invoke) => {
++  it.each(["missing", "duplicate", "file", "invalid"])("grade %sを未設定へ丸めない", async (kind) => {
++    const data = form();
++    if (kind === "missing") {
++      data.delete("grade");
++    }
++    if (kind === "duplicate") {
++      data.append("grade", "YOUJI");
++    }
++    if (kind === "file") {
++      data.set("grade", new File(["x"], "grade.txt"));
++    }
++    if (kind === "invalid") {
++      data.set("grade", PRIVATE_DETAIL);
++    }
++    const result = await invoke(data);
++    expect(result.status).toBe("error");
++    expect(result.fieldErrors.grade).toBeTruthy();
++    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++    for (const service of MUTATIONS) {
++      expect(service).not.toHaveBeenCalled();
++    }
++  },);
++},);
 +
-+  it("Next側の失敗を保存成功と区別して呼出元へ通知する", () => {
-+    mocks.revalidate.mockImplementationOnce(() => {
-+      throw new Error("revalidation failed");
-+    });
-+    expect(() => operation(["club-a"])).toThrow("revalidation failed");
-+    expect(mocks.revalidate).toHaveBeenCalledTimes(1);
-+  });
-+});
++// 対象IDはbind値とhidden値の双方を検証し、他Childのフォームを混ぜない。
++describe.each([
++  ["編集", (target: string, data: FormData) =>
++    updateChildAction("requested-club", target, childState(), data),],
++  ["追加", (target: string, data: FormData) =>
++    addChildToClubAction("requested-club", target, membershipState(), data),],
++  ["解除", (target: string, data: FormData) =>
++    withdrawChildFromClubAction("requested-club", target, membershipState(), data),],
++] as const,)("%s対象", (_label, invoke) => {
++  it.each(["missing", "duplicate", "file", "invalid", "other-child"])(
++    "hidden childId %sを拒否する",
++    async (kind) => {
++      const data = form();
++      if (kind === "missing") {
++        data.delete("childId");
++      }
++      if (kind === "duplicate") {
++        data.append("childId", CHILD_ID);
++      }
++      if (kind === "file") {
++        data.set("childId", new File(["x"], "child.txt"));
++      }
++      if (kind === "invalid") {
++        data.set("childId", "invalid");
++      }
++      if (kind === "other-child") {
++        data.set("childId", OTHER_ID);
++      }
++      const result = await invoke(CHILD_ID, data);
++      expect(result.status).toBe("error");
++      for (const service of MUTATIONS) {
++        expect(service).not.toHaveBeenCalled();
++      }
++    },
++  );
++
++  it.each([null, undefined, "invalid"])("不正bind対象%jを作成へ切り替えない", async (target) => {
++    const result = await invoke(target as string, form());
++    expect(result.status).toBe("error");
++    for (const service of MUTATIONS) {
++      expect(service).not.toHaveBeenCalled();
++    }
++  },);
++},);
++
++describe("getAttachableChildrenAction", () => {
++  it("表示を経由せず認可し、候補の許可項目だけを返す", async () => {
++    mocks.candidates.mockResolvedValueOnce({
++      outcome: "FOUND",
++      children: [{
++        id: CHILD_ID,
++        name: "子ども",
++        grade: null,
++        parentId: PRIVATE_DETAIL,
++      },],
++      cause: PRIVATE_DETAIL,
++    },);
++    expect(await getAttachableChildrenAction("requested-club")).toEqual({
++      outcome: "FOUND",
++      children: [{
++        id: CHILD_ID,
++        name: "子ども",
++        grade: null,
++      },],
++    },);
++    expect(mocks.access).toHaveBeenCalledWith("requested-club");
++    expect(mocks.candidates).toHaveBeenCalledWith(CONTEXT);
++    for (const service of MUTATIONS) {
++      expect(service).not.toHaveBeenCalled();
++    }
++    expect(mocks.accountPaths).not.toHaveBeenCalled();
++    expect(mocks.namePaths).not.toHaveBeenCalled();
++  },);
++
++  it.each(["未ログイン", "別クラブ", "非ACTIVE", "利用不可プラン"])("%sでは候補を返さない", async (reason) => {
++    const error = new ControlError(reason);
++    mocks.access.mockRejectedValueOnce(error);
++    await expect(getAttachableChildrenAction("requested-club")).rejects.toBe(error);
++    expect(mocks.candidates).not.toHaveBeenCalled();
++  },);
++
++  it.each(["UNAVAILABLE", "FETCH_FAILED"] as const)("%sから余分な情報を返さない", async (outcome) => {
++    mocks.candidates.mockResolvedValueOnce({
++      outcome,
++      cause: PRIVATE_DETAIL,
++    },);
++    expect(await getAttachableChildrenAction("requested-club")).toEqual({ outcome });
++  },);
++
++  it("取得例外を固定結果にし、制御例外は保持する", async () => {
++    mocks.candidates.mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
++    expect(await getAttachableChildrenAction("requested-club")).toEqual(
++      { outcome: "FETCH_FAILED" },
++    );
++    const control = new ControlError("NEXT_NOT_FOUND");
++    mocks.candidates.mockRejectedValueOnce(control);
++    await expect(getAttachableChildrenAction("requested-club")).rejects.toBe(control);
++  },);
++},);
