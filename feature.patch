@@ -1,765 +1,1233 @@
-diff --git a/docs/implementation/phases/F08.md b/docs/implementation/phases/F08.md
-index 9e14e2d..5deeebe 100644
---- a/docs/implementation/phases/F08.md
-+++ b/docs/implementation/phases/F08.md
-@@ -22,4 +22,33 @@ F08. 不具合・サポート報告送信
- 理解する重要箇所
- - DB保存を正式受付、メールを補助通知とする理由
- - 報告者snapshotを残す理由
--- client入力とserver取得データの境界
-\ No newline at end of file
-+- client入力とserver取得データの境界
-+
-+<!-- 【追加：F08粒度1】ユーザー回答と入力・metadata・結果の責務境界を明文化する。 -->
-+粒度1の仕様・入力・結果契約
-+- 全ACTIVE会員は、CLUB_APPを利用できるプラン内のOWNER・COACH・OFFICER・MEMBER全員を指す。
-+  現在はSTANDARDが対象であり、STARTER・PROへ利用範囲を広げない。
-+- categoryはBUG・QUESTION・REQUEST・OTHERの4種。初期値はBUG、messageは空文字とする。
-+  FormDataのcategory・messageは各1個の文字列を要求し、欠損・File・重複・不正値を拒否する。
-+- messageはtrim後の空欄を拒否し、JavaScriptのlengthで2000文字以内とする。
-+  表示用valuesを2000文字へ制限しても、保存前の検証は切り詰め前の入力に対して行う。
-+- 入力の成功値とActionStateのvaluesはcategory・messageだけを持つ。
-+  clubId・membershipId・reporter情報・status・通知結果・任意の戻り先を入力からコピーしない。
-+- pageUrlは送信時のマイページを示す相対パスとする。直前ページの履歴管理は追加しない。
-+  後続Actionが認可済みslugから `/club/{encodedSlug}/account` を構築してallowlistを確認する。
-+  クライアントのpageUrl・Referer・Hostを保存先の根拠にせず、query・fragmentは保存しない。
-+  別クラブ・認証・招待・外部URL等は許可せず、許可できないmetadataはnullとする。
-+- userAgentは後続Actionがawait headers()から取得し、制御文字除去・trim後に512文字へ制限する。
-+  欠損・空はnullとする。UAは偽装可能な補助情報であり、認証・認可には利用しない。
-+- reporterName・reporterEmailは保存時のAppUser、reporterRoleは最新Membershipからsnapshot保存する。
-+  name・emailのnullを許可し、AuthとAppUserのemailを同期・修復しない。
-+- 新規SupportReportはOPENで作成する。既存status enumや管理用列は変更しない。
-+- DB受付内部はCREATED・ALREADY_ACCEPTED・拒否・失敗を区別する。
-+  検証済みrequestIdを既存SupportReport.idへ使用する重複対策と、本人・内容の照合は後続Repositoryが行う。
-+  requestIdの形式一致だけでは認証・認可や一回限り保存を保証しない。
-+- 通知は固定結果と固定notifyErrorコードだけを扱い、SDK/DB例外の原文・本文・snapshotをログへ渡さない。
-+  通知の設定不足・失敗・結果不明や通知結果保存の失敗でも、保存済みの受付成功を維持する。
-+- 成功はActionStateで返し、新requestIdのkeyで報告フォーム内側だけをresetして固定トーストを表示する。
-+  ページ全体のredirectで既存の氏名・Childフォームの未保存入力を消さない。
-+- 粒度1の純粋関数と型は、認可・snapshot取得・DB保存・通知・画面resetを実行しない。
-+  Repository、通知adapter、Service、Action、Pageへの接続は後続粒度で実装する。
-diff --git a/domain/club/support/support-report-form.test.ts b/domain/club/support/support-report-form.test.ts
+diff --git a/src/infrastructure/prisma/repositories/support-report-repository.ts b/src/infrastructure/prisma/repositories/support-report-repository.ts
 new file mode 100644
-index 0000000..6e285d7
+index 0000000..404631e
 --- /dev/null
-+++ b/domain/club/support/support-report-form.test.ts
-@@ -0,0 +1,296 @@
-+// domain/club/support/support-report-form.test.ts
-+// 報告入力の境界、FormData改ざん、表示用valuesと内部・公開結果の分離を確認する。
++++ b/src/infrastructure/prisma/repositories/support-report-repository.ts
+@@ -0,0 +1,388 @@
++// src/infrastructure/prisma/repositories/support-report-repository.ts
++// 最新の本人・クラブ所属を照合して報告を保存し、受付後の通知結果だけを限定更新する。
++
++import "server-only";
 +
 +import {
-+  describe,
-+  expect,
-+  expectTypeOf,
-+  it,
-+} from "vitest";
++  Prisma,
++} from "@prisma/client";
 +
 +import {
-+  createInitialActionState,
-+} from "@/domain/shared/action-state";
++  hasClubFeature,
++} from "@/domain/club/plan-features";
 +import {
-+  isRequestId,
-+} from "@/domain/shared/request-id";
-+import type {
-+  SupportReport,
-+  SupportReportCategory,
-+} from "@/types/prisma";
-+
-+import {
-+  buildSupportReportFormValues,
-+  parseSupportReportFormData,
-+  SUPPORT_REPORT_CATEGORY_OPTIONS,
-+  SUPPORT_REPORT_INITIAL_VALUES,
-+  SUPPORT_REPORT_MESSAGE_MAX_LENGTH,
 +  validateSupportReportInput,
-+  type SupportReportActionState,
 +  type SupportReportFormValues,
-+} from "./support-report-form";
-+import type {
-+  SupportReportAcceptanceResult,
-+  SupportReportCreationResult,
-+  SupportReportMetadata,
-+  SupportReportNotificationErrorCode,
-+  SupportReportNotificationResult,
-+  SupportReportReceipt,
-+} from "./support-report-types";
-+
-+// 特別な値を含まない単一項目のFormDataを毎回用意する。
-+function form(): FormData {
-+  const data = new FormData();
-+  data.set("category", "BUG");
-+  data.set("message", "報告本文");
-+  return data;
-+}
-+
-+describe("報告の許可入力", () => {
-+  it.each(["BUG", "QUESTION", "REQUEST", "OTHER"])("%sとtrim後の本文を許可する", (category) => {
-+    const input = {
-+      category,
-+      message: "　 Ａ画面で\n  エラーになりました。　 ",
-+      clubId: "foreign-club",
-+      membershipId: "foreign-membership",
-+      reporterEmail: "private@example.test",
-+      reporterRole: "OWNER",
-+      status: "RESOLVED",
-+      notifyError: "raw-secret",
-+    };
-+    expect(validateSupportReportInput(input)).toEqual({
-+      success: true,
-+      data: {
-+        category,
-+        message: "Ａ画面で\n  エラーになりました。",
-+      },
-+    });
-+    expect(input.message).toBe("　 Ａ画面で\n  エラーになりました。　 ");
-+  });
-+
-+  it.each([
-+    undefined,
-+    null,
-+    [],
-+    "報告",
-+    123,
-+    {},
-+  ])("不正な入力全体で両方の項目エラーを返す %#", (input) => {
-+    expect(validateSupportReportInput(input)).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        category: ["種別を選択してください。"],
-+        message: ["内容を入力してください。"],
-+      },
-+    });
-+  });
-+
-+  it.each([
-+    undefined,
-+    null,
-+    123,
-+    "",
-+    "BUG ",
-+    "bug",
-+    "OPEN",
-+    "__proto__",
-+    "constructor",
-+    new File(["BUG"], "category.txt"),
-+  ])("不正categoryをBUGへ丸めて保存しない %#", (category) => {
-+    expect(validateSupportReportInput({
-+      category,
-+      message: "本文",
-+    })).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        category: ["種別を選択してください。"],
-+      },
-+    });
-+  });
-+
-+  it.each([
-+    undefined,
-+    null,
-+    123,
-+    [],
-+    {},
-+    "",
-+    "　 \t\r\n ",
-+    new File(["秘密を含む本文"], "message.txt"),
-+  ])("空欄・非文字列の本文を拒否する %#", (message) => {
-+    expect(validateSupportReportInput({
-+      category: "BUG",
-+      message,
-+    })).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        message: ["内容を入力してください。"],
-+      },
-+    });
-+  });
-+
-+  it("trim後の2000文字を許可し、2001文字は成功値へ含めない", () => {
-+    expect(validateSupportReportInput({
-+      category: "OTHER",
-+      message: ` ${"あ".repeat(SUPPORT_REPORT_MESSAGE_MAX_LENGTH)} `,
-+    }).success).toBe(true);
-+    expect(validateSupportReportInput({
-+      category: "OTHER",
-+      message: "あ".repeat(SUPPORT_REPORT_MESSAGE_MAX_LENGTH + 1),
-+    })).toEqual({
-+      success: false,
-+      fieldErrors: {
-+        message: ["内容は2000文字以内で入力してください。"],
-+      },
-+    });
-+  });
-+
-+  it("既存フォームと同じUTF-16のlengthで上限を判定する", () => {
-+    expect(validateSupportReportInput({
-+      category: "BUG",
-+      message: "😀".repeat(1000),
-+    }).success).toBe(true);
-+    expect(validateSupportReportInput({
-+      category: "BUG",
-+      message: `${"😀".repeat(1000)}あ`,
-+    }).success).toBe(false);
-+  });
-+});
-+
-+describe("FormDataと表示用values", () => {
-+  it("成功値と表示用valuesへ報告者・metadata・通知状態をコピーしない", () => {
-+    const data = form();
-+    for (const key of [
-+      "clubId",
-+      "membershipId",
-+      "reporterName",
-+      "reporterEmail",
-+      "reporterRole",
-+      "pageUrl",
-+      "userAgent",
-+      "status",
-+      "notifiedAt",
-+      "notifyError",
-+      "returnTo",
-+      "requestId",
-+    ]) {
-+      data.set(key, "private-token@example.test");
-+    }
-+    const values = {
-+      category: "BUG",
-+      message: "報告本文",
-+    };
-+    expect(parseSupportReportFormData(data)).toEqual({
-+      success: true,
-+      data: values,
-+    });
-+    expect(buildSupportReportFormValues(data)).toEqual(values);
-+  });
-+
-+  describe.each(["category", "message"] as const)("%sの単一文字列制約", (field) => {
-+    it.each(["missing", "file", "duplicate", "same-duplicate"])(
-+      "%sでも表示値の復元を保存前の検証と混同しない",
-+      (kind) => {
-+        const data = form();
-+        if (kind === "missing") {
-+          data.delete(field);
-+        } else if (kind === "file") {
-+          data.set(field, new File(["private"], "input.txt"));
-+        } else {
-+          data.append(field, kind === "same-duplicate" ? String(data.get(field)) : "OTHER");
-+        }
-+        const result = parseSupportReportFormData(data);
-+        expect(result.success).toBe(false);
-+        if (!result.success) {
-+          expect(Object.keys(result.fieldErrors)).toEqual([field]);
-+        }
-+        expect(buildSupportReportFormValues(data)[field])
-+          .toBe(SUPPORT_REPORT_INITIAL_VALUES[field]);
-+      },
-+    );
-+  });
-+
-+  it("表示用本文の切り詰めが2001文字の不正入力を成功に変えない", () => {
-+    const data = form();
-+    data.set("category", "invalid-private-category");
-+    data.set("message", "あ".repeat(2001));
-+    const values = buildSupportReportFormValues(data);
-+    expect(values.category).toBe("BUG");
-+    expect(values.message).toHaveLength(2000);
-+    const result = parseSupportReportFormData(data);
-+    expect(result.success).toBe(false);
-+    if (!result.success) {
-+      expect(Object.keys(result.fieldErrors).sort()).toEqual(["category", "message"]);
-+    }
-+    expect(data.get("message")).toHaveLength(2001);
-+  });
-+
-+  it("表示時の未保存空白を保持し、新しいオブジェクトを返す", () => {
-+    const data = form();
-+    data.set("message", " 未保存の本文 \n ");
-+    const first = buildSupportReportFormValues(data);
-+    const second = buildSupportReportFormValues(data);
-+    expect(first.message).toBe(" 未保存の本文 \n ");
-+    expect(first).not.toBe(second);
-+  });
-+
-+  it("FormData以外を渡されても固定の初期表示値と項目エラーに限定する", () => {
-+    const invalid = null as unknown as FormData;
-+    expect(buildSupportReportFormValues(invalid)).toEqual(SUPPORT_REPORT_INITIAL_VALUES);
-+    expect(parseSupportReportFormData(invalid).success).toBe(false);
-+  });
-+});
-+
-+describe("初期stateと内部・公開の型契約", () => {
-+  it("共通の初期stateを利用し、報告フォームごとに別requestIdを持つ", () => {
-+    const first: SupportReportActionState = createInitialActionState({
-+      ...SUPPORT_REPORT_INITIAL_VALUES,
-+    });
-+    const second = createInitialActionState({
-+      ...SUPPORT_REPORT_INITIAL_VALUES,
-+    });
-+    expect(first.values).toEqual({
-+      category: "BUG",
-+      message: "",
-+    });
-+    expect(first.status).toBe("idle");
-+    expect(first.fieldErrors).toEqual({});
-+    expect(first.formError).toBeNull();
-+    expect(first.data).toBeUndefined();
-+    expect(isRequestId(first.requestId)).toBe(true);
-+    expect(first.requestId).not.toBe(second.requestId);
-+  });
-+
-+  it("DB由来enum・nullableと合わせ、入力・公開結果へsnapshotを漏らさない", () => {
-+    expectTypeOf<typeof SUPPORT_REPORT_CATEGORY_OPTIONS[number]["value"]>()
-+      .toEqualTypeOf<SupportReportCategory>();
-+    expectTypeOf<keyof SupportReportFormValues>().toEqualTypeOf<"category" | "message">();
-+    expectTypeOf<SupportReportActionState["data"]>().toEqualTypeOf<undefined>();
-+    expectTypeOf<SupportReportMetadata>()
-+      .toEqualTypeOf<Pick<SupportReport, "pageUrl" | "userAgent">>();
-+    expectTypeOf<SupportReportReceipt["reporterName"]>()
-+      .toEqualTypeOf<SupportReport["reporterName"]>();
-+    expectTypeOf<SupportReportReceipt["reporterEmail"]>()
-+      .toEqualTypeOf<SupportReport["reporterEmail"]>();
-+    expectTypeOf<SupportReportReceipt["reporterRole"]>()
-+      .toEqualTypeOf<SupportReport["reporterRole"]>();
-+    expectTypeOf<SupportReportReceipt["membershipId"]>()
-+      .toEqualTypeOf<SupportReport["membershipId"]>();
-+    expectTypeOf<keyof SupportReportAcceptanceResult>().toEqualTypeOf<"outcome">();
-+    expectTypeOf<Extract<
-+      SupportReportCreationResult,
-+      { outcome: "CREATED" }
-+    >["report"]>().toEqualTypeOf<SupportReportReceipt>();
-+    expectTypeOf<Extract<
-+      keyof SupportReportReceipt,
-+      "internalNote" | "handledByPlatformAdminId" | "notifyError" | "status"
-+    >>().toEqualTypeOf<never>();
-+    expectTypeOf<SupportReportNotificationErrorCode>().toEqualTypeOf<
-+      "EMAIL_CONFIGURATION_MISSING" | "EMAIL_SEND_FAILED" | "EMAIL_SEND_RESULT_UNKNOWN"
-+    >();
-+    expectTypeOf<Extract<
-+      SupportReportNotificationResult,
-+      { outcome: "UNKNOWN" }
-+    >["errorCode"]>().toEqualTypeOf<"EMAIL_SEND_RESULT_UNKNOWN">();
-+  });
-+});
-diff --git a/domain/club/support/support-report-form.ts b/domain/club/support/support-report-form.ts
-new file mode 100644
-index 0000000..6e08e09
---- /dev/null
-+++ b/domain/club/support/support-report-form.ts
-@@ -0,0 +1,145 @@
-+// domain/club/support/support-report-form.ts
-+// サポート報告の許可入力、表示用values、検証結果を定義する。
-+
-+import type {
-+  ActionState,
-+  FieldErrors,
-+} from "@/domain/shared/action-state";
-+import type {
-+  SupportReportCategory,
-+} from "@/types/prisma";
-+
-+export const SUPPORT_REPORT_MESSAGE_MAX_LENGTH = 2000;
-+
-+export const SUPPORT_REPORT_CATEGORY_OPTIONS = [
-+  {
-+    value: "BUG",
-+    label: "不具合",
-+  },
-+  {
-+    value: "QUESTION",
-+    label: "質問",
-+  },
-+  {
-+    value: "REQUEST",
-+    label: "改善要望",
-+  },
-+  {
-+    value: "OTHER",
-+    label: "その他",
-+  },
-+] as const satisfies readonly {
-+  value: SupportReportCategory;
-+  label: string;
-+}[];
-+
-+export type SupportReportFormValues = {
-+  category: SupportReportCategory;
-+  message: string;
-+};
-+
-+export type SupportReportFormField = keyof SupportReportFormValues;
-+
-+export type SupportReportActionState = ActionState<
-+  SupportReportFormValues,
-+  SupportReportFormField
-+>;
-+
-+export const SUPPORT_REPORT_INITIAL_VALUES: Readonly<SupportReportFormValues> = {
-+  category: "BUG",
-+  message: "",
-+};
-+
-+export const SUPPORT_REPORT_ACCEPTED_MESSAGE =
-+  "不具合報告を受け付けました。開発チームにて確認し、サービスの改善に役立てさせていただきます。ご協力ありがとうございます。";
-+
-+export const SUPPORT_REPORT_FAILED_MESSAGE =
-+  "送信できませんでした。時間をおいてもう一度お試しください。";
-+
-+export type SupportReportValidationResult =
-+  | {
-+      success: true;
-+      data: SupportReportFormValues;
-+    }
-+  | {
-+      success: false;
-+      fieldErrors: FieldErrors<SupportReportFormField>;
-+    };
-+
-+// DBに定義済みの4種だけを許可し、不正値を既定値へ丸めて保存しない。
-+function isSupportReportCategory(value: unknown): value is SupportReportCategory {
-+  return SUPPORT_REPORT_CATEGORY_OPTIONS.some((option) => option.value === value);
-+}
-+
-+// 単一の文字列だけを取り出し、File・欠損・重複を入力として採用しない。
-+function singleFormString(
-+  formData: FormData,
-+  field: SupportReportFormField,
-+): string | undefined {
-+  const entries = formData instanceof FormData ? formData.getAll(field) : [];
-+  return (
-+    entries.length === 1 &&
-+    typeof entries[0] === "string"
-+  ) ? entries[0] : undefined;
-+}
-+
-+// エラー表示用の値だけを復元する。切り詰めた本文を保存前の検証へ渡してはいけない。
-+export function buildSupportReportFormValues(
-+  formData: FormData,
-+): SupportReportFormValues {
-+  const category = singleFormString(formData, "category");
-+  const message = singleFormString(formData, "message");
-+  return {
-+    category: isSupportReportCategory(category) ? category : "BUG",
-+    message: (message ?? "").slice(0, SUPPORT_REPORT_MESSAGE_MAX_LENGTH),
-+  };
-+}
-+
-+// 許可項目だけを検証・正規化する。本人・クラブ・報告者snapshotは後続層で再確認する。
-+export function validateSupportReportInput(
-+  input: unknown,
-+): SupportReportValidationResult {
-+  const record = (
-+    typeof input === "object" &&
-+    input !== null &&
-+    !Array.isArray(input)
-+  ) ? input as Record<string, unknown> : undefined;
-+  const category = isSupportReportCategory(record?.category) ? record.category : null;
-+  const message = typeof record?.message === "string" ? record.message.trim() : "";
-+  const fieldErrors: FieldErrors<SupportReportFormField> = {};
-+
-+  if (category === null) {
-+    fieldErrors.category = ["種別を選択してください。"];
-+  }
-+  if (!message) {
-+    fieldErrors.message = ["内容を入力してください。"];
-+  } else if (message.length > SUPPORT_REPORT_MESSAGE_MAX_LENGTH) {
-+    fieldErrors.message = ["内容は2000文字以内で入力してください。"];
-+  }
-+  if (
-+    category === null ||
-+    fieldErrors.message !== undefined
-+  ) {
-+    return {
-+      success: false,
-+      fieldErrors,
-+    };
-+  }
-+  return {
-+    success: true,
-+    data: {
-+      category,
-+      message,
-+    },
-+  };
-+}
-+
-+// 表示用valuesを経由せず、元のFormDataを厳密に検証する。
-+export function parseSupportReportFormData(
-+  formData: FormData,
-+): SupportReportValidationResult {
-+  return validateSupportReportInput({
-+    category: singleFormString(formData, "category"),
-+    message: singleFormString(formData, "message"),
-+  });
-+}
-diff --git a/domain/club/support/support-report-metadata.test.ts b/domain/club/support/support-report-metadata.test.ts
-new file mode 100644
-index 0000000..b8a9799
---- /dev/null
-+++ b/domain/club/support/support-report-metadata.test.ts
-@@ -0,0 +1,129 @@
-+// domain/club/support/support-report-metadata.test.ts
-+// 許可した現在accountのパスだけを保存し、UAの型・制御文字・長さを制限する。
-+
-+import {
-+  describe,
-+  expect,
-+  it,
-+} from "vitest";
-+
++} from "@/domain/club/support/support-report-form";
 +import {
 +  sanitizeSupportPageUrl,
 +  sanitizeSupportUserAgent,
-+  SUPPORT_REPORT_USER_AGENT_MAX_LENGTH,
-+} from "./support-report-metadata";
++} from "@/domain/club/support/support-report-metadata";
++import type {
++  SupportReportCreationResult,
++  SupportReportMetadata,
++  SupportReportNotificationRecordResult,
++  SupportReportNotificationResult,
++} from "@/domain/club/support/support-report-types";
++import {
++  isRequestId,
++} from "@/domain/shared/request-id";
++import {
++  prisma,
++} from "@/src/infrastructure/prisma/client";
 +
-+const SLUG = "club-a";
-+const ACCOUNT_PATH = "/club/club-a/account";
++export type SupportReportMemberScope = {
++  clubId: string;
++  actorMembershipId: string;
++  userId: string;
++};
 +
-+describe("現在マイページのURL allowlist", () => {
-+  it.each([
-+    ACCOUNT_PATH,
-+    `${ACCOUNT_PATH}?token=private-token&email=private%40example.test`,
-+    `${ACCOUNT_PATH}#access_token=private-token`,
-+    `${ACCOUNT_PATH}?code=private-code#refresh_token=private-token`,
-+    `${ACCOUNT_PATH}#private-fragment?token=private-token`,
-+  ])("query・fragmentを含まないcanonicalパスだけを返す %#", (value) => {
-+    expect(sanitizeSupportPageUrl(value, SLUG)).toBe(ACCOUNT_PATH);
-+  });
++export type CreateSupportReportForMemberInput = SupportReportMemberScope &
++  SupportReportFormValues & SupportReportMetadata & {
++    requestId: string;
++  };
 +
-+  it.each([
-+    undefined,
-+    null,
-+    123,
-+    {},
-+    "",
-+    "https://app.example.test/club/club-a/account?token=private",
-+    "https://user:password@app.example.test/club/club-a/account",
-+    "https://remote.test/club/club-a/account",
-+    "//remote.test/club/club-a/account",
-+    "javascript:alert(1)",
-+    "data:text/plain,private",
-+    "/club/club-b/account",
-+    "/club/club-a/events",
-+    "/club/club-a/invitation?token=private",
-+    "/club/club-a/account/private-token",
-+    "/welcome?token=private",
-+    "/auth/confirm?token_hash=private",
-+    "/club-login/reset-password#access_token=private",
-+    "/club/club-a/account/",
-+    "/club/club-a/../club-a/account",
-+    "/club/club-a/%2e%2e/club-a/account",
-+    "/club/club-a%2faccount",
-+    "/club/club-a%252faccount",
-+    "/club/club-a\\account",
-+    " /club/club-a/account",
-+    "/club/club-a/account ",
-+    "/club/club-a/account\n",
-+    "/club/club-a/account?token=private\r\n",
-+    new File([ACCOUNT_PATH], "page-url.txt"),
-+  ])("許可外の値をパーサーで補正したり生のまま返したりしない %#", (value) => {
-+    expect(sanitizeSupportPageUrl(value, SLUG)).toBeNull();
-+  });
++// 受付後のサーバー処理だけが、受領したreport.id・clubIdから作る。任意のAction入力を渡さない。
++export type RecordSupportReportNotificationInput = {
++  reportId: string;
++  clubId: string;
++  notification: SupportReportNotificationResult;
++};
 +
-+  it.each([
-+    "",
-+    " club-a",
-+    "club-a ",
-+    ".",
-+    "..",
-+    "club/a",
-+    "club\\a",
-+    "club?token=private",
-+    "club#private",
-+    "club%2fa",
-+    "club\u0000a",
-+    "\ud800",
-+  ])("安全な単一segmentにできないslugで例外や別パスを返さない %#", (slug) => {
-+    expect(sanitizeSupportPageUrl(ACCOUNT_PATH, slug)).toBeNull();
-+  });
++// 初回に加え、Serializable競合のP2034だけを最大3回再試行する。
++const MAX_TRANSACTION_RETRIES = 3;
 +
-+  it("日本語slugもencodeURIComponentによるパスだけを許可する", () => {
-+    const slug = "荒尾クラブ";
-+    const path = `/club/${encodeURIComponent(slug)}/account`;
-+    expect(sanitizeSupportPageUrl(`${path}?token=private`, slug)).toBe(path);
-+    expect(sanitizeSupportPageUrl(`/club/${slug}/account`, slug)).toBeNull();
-+  });
-+
-+  it("繰り返し呼んでもquery・fragmentを再利用しない", () => {
-+    const value = `${ACCOUNT_PATH}?token=private#secret`;
-+    expect(sanitizeSupportPageUrl(value, SLUG)).toBe(ACCOUNT_PATH);
-+    expect(sanitizeSupportPageUrl(value, SLUG)).toBe(ACCOUNT_PATH);
-+    expect(sanitizeSupportPageUrl(ACCOUNT_PATH, null as unknown as string)).toBeNull();
-+  });
-+});
-+
-+describe("サーバーから渡すuserAgentの正規化", () => {
-+  it.each([
-+    undefined,
-+    null,
-+    123,
-+    {},
-+    [],
-+    "",
-+    " \t\r\n ",
-+    "\u0000\u007f\u009f",
-+    new File(["private"], "user-agent.txt"),
-+  ])("空欄・非文字列をnullへ限定する %#", (value) => {
-+    expect(sanitizeSupportUserAgent(value)).toBeNull();
-+  });
-+
-+  it("表示文字を保持して制御文字を除き、前後だけtrimする", () => {
-+    expect(sanitizeSupportUserAgent(" \tMozilla/5.0\r\n (iPhone)\u007f Safari\u009f "))
-+      .toBe("Mozilla/5.0 (iPhone) Safari");
-+    expect(sanitizeSupportUserAgent("ブラウザー  端末情報"))
-+      .toBe("ブラウザー  端末情報");
-+  });
-+
-+  it("512文字は保持し、制御文字除去・trim後の513文字目以降は保存しない", () => {
-+    const boundary = "a".repeat(SUPPORT_REPORT_USER_AGENT_MAX_LENGTH);
-+    expect(sanitizeSupportUserAgent(boundary)).toBe(boundary);
-+    expect(sanitizeSupportUserAgent(` \r\n${boundary}private-suffix \t`)).toBe(boundary);
-+  });
-+
-+  it("複数回の呼出しでもすべての制御文字を除去する", () => {
-+    const value = "Chrome\u0000\n Safari\u009f";
-+    expect(sanitizeSupportUserAgent(value)).toBe("Chrome Safari");
-+    expect(sanitizeSupportUserAgent(value)).toBe("Chrome Safari");
-+  });
-+});
-diff --git a/domain/club/support/support-report-metadata.ts b/domain/club/support/support-report-metadata.ts
-new file mode 100644
-index 0000000..a20b709
---- /dev/null
-+++ b/domain/club/support/support-report-metadata.ts
-@@ -0,0 +1,52 @@
-+// domain/club/support/support-report-metadata.ts
-+// サーバーが導出・取得した報告metadataを保存可能な値へ限定する。
-+
-+export const SUPPORT_REPORT_USER_AGENT_MAX_LENGTH = 512;
-+
-+const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f-\u009f]/u;
-+const USER_AGENT_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/gu;
-+const UNSAFE_SLUG_CHARACTER_PATTERN = /[/\\?#%]/u;
-+
-+// 現在クラブのaccountパスだけを返す。呼出元は認可済みslugから候補パスを構築する。
-+export function sanitizeSupportPageUrl(
-+  value: unknown,
-+  clubSlug: string,
-+): string | null {
++// 空のscopeをDBへ渡さず、認可済みcontext由来のIDをすべて要求する。
++function hasMemberScope(input: unknown): input is SupportReportMemberScope {
 +  if (
-+    typeof value !== "string" ||
-+    typeof clubSlug !== "string" ||
-+    !clubSlug ||
-+    clubSlug !== clubSlug.trim() ||
-+    clubSlug === "." ||
-+    clubSlug === ".." ||
-+    UNSAFE_SLUG_CHARACTER_PATTERN.test(clubSlug) ||
-+    CONTROL_CHARACTER_PATTERN.test(clubSlug) ||
-+    CONTROL_CHARACTER_PATTERN.test(value)
++    typeof input !== "object" ||
++    input === null ||
++    Array.isArray(input)
++  ) {
++    return false;
++  }
++  const record = input as Record<string, unknown>;
++  return (
++    typeof record.clubId === "string" &&
++    record.clubId.trim().length > 0 &&
++    typeof record.actorMembershipId === "string" &&
++    record.actorMembershipId.trim().length > 0 &&
++    typeof record.userId === "string" &&
++    record.userId.trim().length > 0
++  );
++}
++
++// 任意オブジェクトのcodeを信用せず、Prismaの既知エラーだけを分類する。
++function isPrismaError(
++  error: unknown,
++  code: string,
++): boolean {
++  return error instanceof Prisma.PrismaClientKnownRequestError &&
++    error.code === code;
++}
++
++// 同じtransactionで最新のrole・プラン・AppUserを読み、入力のsnapshotは使わない。
++async function findReportActor(
++  transaction: Prisma.TransactionClient,
++  scope: SupportReportMemberScope,
++) {
++  const actor = await transaction.clubMembership.findFirst({
++    where: {
++      id: scope.actorMembershipId,
++      clubId: scope.clubId,
++      userId: scope.userId,
++      status: "ACTIVE",
++    },
++    select: {
++      id: true,
++      clubId: true,
++      userId: true,
++      status: true,
++      role: true,
++      user: {
++        select: {
++          id: true,
++          name: true,
++          email: true,
++        },
++      },
++      club: {
++        select: {
++          id: true,
++          name: true,
++          slug: true,
++          planType: true,
++        },
++      },
++    },
++  });
++  if (
++    !actor ||
++    actor.id !== scope.actorMembershipId ||
++    actor.clubId !== scope.clubId ||
++    actor.userId !== scope.userId ||
++    actor.status !== "ACTIVE" ||
++    !actor.user ||
++    actor.user.id !== scope.userId ||
++    !actor.club ||
++    actor.club.id !== scope.clubId ||
++    !hasClubFeature(actor.club.planType, "CLUB_APP")
 +  ) {
 +    return null;
 +  }
-+
-+  // URI変換不能な不正サロゲートでも報告metadataのために例外を漏らさない。
-+  let accountPath: string;
-+  try {
-+    accountPath = `/club/${encodeURIComponent(clubSlug)}/account`;
-+  } catch {
-+    return null;
-+  }
-+
-+  // URLパーサーでdot segment等を正規化せず、許可パスとの厳密一致で判定する。
-+  const path = value.split(/[?#]/u, 1)[0];
-+  return path === accountPath ? accountPath : null;
++  return actor;
 +}
 +
-+// UAはサーバー側のheadersから渡す。偽装可能な補助情報として長さと制御文字だけを制限する。
-+export function sanitizeSupportUserAgent(value: unknown): string | null {
-+  if (typeof value !== "string") {
++// 同一受付だけを再送成功とし、他人・別クラブ・元Membership違いの内容を読まない。
++async function findExistingReport(
++  transaction: Prisma.TransactionClient,
++  input: CreateSupportReportForMemberInput,
++) {
++  return transaction.supportReport.findFirst({
++    where: {
++      id: input.requestId,
++      clubId: input.clubId,
++      membershipId: input.actorMembershipId,
++      membership: {
++        is: {
++          id: input.actorMembershipId,
++          clubId: input.clubId,
++          userId: input.userId,
++        },
++      },
++    },
++    select: {
++      id: true,
++      clubId: true,
++      membershipId: true,
++      category: true,
++      message: true,
++    },
++  });
++}
++
++// DB受付とsnapshotを原子的に保存する。メール送信はこのtransactionへ含めない。
++export async function createSupportReportForMember(
++  input: CreateSupportReportForMemberInput,
++): Promise<SupportReportCreationResult> {
++  if (!hasMemberScope(input)) {
++    return { outcome: "FORBIDDEN" };
++  }
++  const validation = validateSupportReportInput(input);
++  if (
++    !isRequestId(input.requestId) ||
++    !validation.success
++  ) {
++    return { outcome: "CREATE_FAILED" };
++  }
++  let retries = 0;
++  let existingOnly = false;
++  while (true) {
++    let attemptedCreate = false;
++    try {
++      return await prisma.$transaction(
++        async (transaction): Promise<SupportReportCreationResult> => {
++          const actor = await findReportActor(transaction, input);
++          if (!actor) {
++            return { outcome: "FORBIDDEN" };
++          }
++          const existing = await findExistingReport(transaction, input);
++          if (existing) {
++            return {
++              outcome: existing.id === input.requestId &&
++                existing.clubId === actor.clubId &&
++                existing.membershipId === actor.id &&
++                existing.category === validation.data.category &&
++                existing.message === validation.data.message
++                ? "ALREADY_ACCEPTED"
++                : "CONFLICT",
++            };
++          }
++          if (existingOnly) {
++            return { outcome: "CONFLICT" };
++          }
++
++          attemptedCreate = true;
++          const report = await transaction.supportReport.create({
++            data: {
++              id: input.requestId,
++              clubId: actor.clubId,
++              membershipId: actor.id,
++              category: validation.data.category,
++              message: validation.data.message,
++              status: "OPEN",
++              pageUrl: sanitizeSupportPageUrl(input.pageUrl, actor.club.slug),
++              userAgent: sanitizeSupportUserAgent(input.userAgent),
++              reporterName: actor.user.name,
++              reporterEmail: actor.user.email,
++              reporterRole: actor.role,
++              notifiedAt: null,
++              notifyError: null,
++            },
++            select: {
++              id: true,
++              clubId: true,
++              membershipId: true,
++              category: true,
++              message: true,
++              pageUrl: true,
++              userAgent: true,
++              reporterName: true,
++              reporterEmail: true,
++              reporterRole: true,
++              createdAt: true,
++            },
++          });
++          if (
++            report.id !== input.requestId ||
++            report.clubId !== actor.clubId ||
++            report.membershipId !== actor.id
++          ) {
++            throw new Error("報告の保存先を確認できません。");
++          }
++          return {
++            outcome: "CREATED",
++            report: {
++              id: report.id,
++              clubId: report.clubId,
++              membershipId: report.membershipId,
++              clubName: actor.club.name,
++              category: report.category,
++              message: report.message,
++              pageUrl: report.pageUrl,
++              userAgent: report.userAgent,
++              reporterName: report.reporterName,
++              reporterEmail: report.reporterEmail,
++              reporterRole: report.reporterRole,
++              createdAt: report.createdAt,
++            },
++          };
++        },
++        {
++          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
++        },
++      );
++    } catch (error) {
++      if (isPrismaError(error, "P2034")) {
++        if (retries < MAX_TRANSACTION_RETRIES) {
++          retries += 1;
++          continue;
++        }
++        return { outcome: "CONFLICT" };
++      }
++      if (
++        attemptedCreate &&
++        !existingOnly &&
++        isPrismaError(error, "P2002")
++      ) {
++        // unique違反のtransactionを再利用せず、新transactionで認可と限定再読取を行う。
++        existingOnly = true;
++        continue;
++      }
++      // message・meta・cause等を結果やログへ渡さず、不明な失敗を受付済みにしない。
++      return { outcome: "CREATE_FAILED" };
++    }
++  }
++}
++
++// 通知結果の型だけを信用せず、保存可能な固定コードと更新列を実行時にも限定する。
++function notificationData(
++  notification: SupportReportNotificationResult,
++): Prisma.SupportReportUpdateManyMutationInput | null {
++  if (
++    !notification ||
++    typeof notification !== "object"
++  ) {
 +    return null;
 +  }
-+  const sanitized = value
-+    .replace(USER_AGENT_CONTROL_CHARACTERS, "")
-+    .trim()
-+    .slice(0, SUPPORT_REPORT_USER_AGENT_MAX_LENGTH);
-+  return sanitized || null;
++  if (notification.outcome === "ACCEPTED") {
++    return {
++      notifiedAt: new Date(),
++      notifyError: null,
++    };
++  }
++  if (
++    (notification.outcome === "FAILED" && (
++      notification.errorCode === "EMAIL_CONFIGURATION_MISSING" ||
++      notification.errorCode === "EMAIL_SEND_FAILED"
++    )) ||
++    (notification.outcome === "UNKNOWN" &&
++      notification.errorCode === "EMAIL_SEND_RESULT_UNKNOWN")
++  ) {
++    return {
++      notifiedAt: null,
++      notifyError: notification.errorCode,
++    };
++  }
++  return null;
 +}
-diff --git a/domain/club/support/support-report-types.ts b/domain/club/support/support-report-types.ts
++
++// 受付済みIDとクラブに限定して通知結果を保存する。Membershipが削除済みでも記録できる。
++export async function recordSupportReportNotification(
++  input: RecordSupportReportNotificationInput,
++): Promise<SupportReportNotificationRecordResult> {
++  if (
++    !input ||
++    !isRequestId(input.reportId) ||
++    typeof input.clubId !== "string" ||
++    !input.clubId.trim()
++  ) {
++    return { outcome: "UPDATE_FAILED" };
++  }
++  const data = notificationData(input.notification);
++  if (!data) {
++    return { outcome: "UPDATE_FAILED" };
++  }
++  let retries = 0;
++  while (true) {
++    try {
++      return await prisma.$transaction(
++        async (transaction) => {
++          const updated = await transaction.supportReport.updateMany({
++            where: {
++              id: input.reportId,
++              clubId: input.clubId,
++              notifiedAt: null,
++            },
++            data,
++          });
++          if (updated.count === 1) {
++            return { outcome: "RECORDED" as const };
++          }
++          if (updated.count !== 0) {
++            throw new Error("通知結果の更新件数を確認できません。");
++          }
++          const existing = await transaction.supportReport.findFirst({
++            where: {
++              id: input.reportId,
++              clubId: input.clubId,
++            },
++            select: {
++              id: true,
++              notifiedAt: true,
++            },
++          });
++          if (!existing) {
++            return { outcome: "NOT_FOUND" as const };
++          }
++          // 先に記録されたprovider受付を、遅れて来た失敗結果で上書きしない。
++          return {
++            outcome: existing.notifiedAt ? "RECORDED" as const : "UPDATE_FAILED" as const,
++          };
++        },
++        {
++          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
++        },
++      );
++    } catch (error) {
++      if (
++        isPrismaError(error, "P2034") &&
++        retries < MAX_TRANSACTION_RETRIES
++      ) {
++        retries += 1;
++        continue;
++      }
++      return { outcome: "UPDATE_FAILED" };
++    }
++  }
++}
+diff --git a/tests/support-report-repository.test.ts b/tests/support-report-repository.test.ts
 new file mode 100644
-index 0000000..119387e
+index 0000000..c99a344
 --- /dev/null
-+++ b/domain/club/support/support-report-types.ts
-@@ -0,0 +1,73 @@
-+// domain/club/support/support-report-types.ts
-+// DB受付、内部通知、利用者へ返す結果を分離する。型だけで認可や保存済み状態は保証しない。
++++ b/tests/support-report-repository.test.ts
+@@ -0,0 +1,833 @@
++// tests/support-report-repository.test.ts
++// 実DB・dotenv・メールなしで、受付の本人境界、snapshot、限定再送、通知記録の条件を確認する。
++
++import {
++  Prisma,
++} from "@prisma/client";
++import {
++  afterEach,
++  beforeEach,
++  describe,
++  expect,
++  it,
++  vi,
++} from "vitest";
 +
 +import type {
++  SupportReportNotificationResult,
++  SupportReportReceipt,
++} from "@/domain/club/support/support-report-types";
++import {
++  createSupportReportForMember,
++  recordSupportReportNotification,
++  type CreateSupportReportForMemberInput,
++  type RecordSupportReportNotificationInput,
++} from "@/src/infrastructure/prisma/repositories/support-report-repository";
++import type {
 +  ClubMemberRole,
-+  SupportReportCategory,
++  ClubMembershipStatus,
++  PlanType,
 +} from "@/types/prisma";
 +
-+// サーバー側で正規化するmetadata。FormDataの値をそのまま格納してはいけない。
-+export type SupportReportMetadata = {
-+  pageUrl: string | null;
-+  userAgent: string | null;
-+};
++const mocks = vi.hoisted(() => ({
++  transaction: vi.fn(),
++  actor: vi.fn(),
++  findReport: vi.fn(),
++  create: vi.fn(),
++  update: vi.fn(),
++}));
 +
-+// 保存済みの内部通知用DTO。報告者snapshotをClientのprops・ActionState・ログへ渡さない。
-+export type SupportReportReceipt = SupportReportMetadata & {
++// 共有clientを評価せず、実接続とdotenv読込を起動しない。
++vi.mock("@/src/infrastructure/prisma/client", () => ({
++  prisma: {
++    $transaction: mocks.transaction,
++  },
++}));
++
++const REPORT_ID = "11111111-1111-4111-8111-111111111111";
++const OTHER_REPORT_ID = "22222222-2222-4222-8222-222222222222";
++const PRIVATE_DETAIL = "private@example.test raw-secret-token db-connection-secret";
++const NOW = new Date("2026-10-22T00:00:00.000Z");
++
++type Actor = {
 +  id: string;
 +  clubId: string;
-+  membershipId: string | null;
-+  clubName: string;
-+  category: SupportReportCategory;
-+  message: string;
-+  reporterName: string | null;
-+  reporterEmail: string | null;
-+  reporterRole: ClubMemberRole | null;
-+  createdAt: Date;
++  userId: string;
++  status: ClubMembershipStatus;
++  role: ClubMemberRole;
++  club: {
++    id: string;
++    name: string;
++    slug: string;
++    planType: PlanType;
++  } | null;
++  user: {
++    id: string;
++    name: string | null;
++    email: string | null;
++  } | null;
++};
++type StoredReport = SupportReportReceipt & {
++  status: string;
++  internalNote: string | null;
++  notifiedAt: Date | null;
++  notifyError: string | null;
 +};
 +
-+// 新規受付だけが通知を開始する。同一受付の再送判定と一回限り保存は後続Repositoryの責務。
-+export type SupportReportCreationResult =
-+  | {
-+      outcome: "CREATED";
-+      report: SupportReportReceipt;
++let actor: Actor | null;
++let reports: Map<string, StoredReport>;
++let tail: Promise<unknown>;
++
++// ID・本文・metadataの既定入力を毎回別オブジェクトで用意する。
++function input(): CreateSupportReportForMemberInput {
++  return {
++    clubId: "club-a",
++    actorMembershipId: "membership-a",
++    userId: "user-a",
++    requestId: REPORT_ID,
++    category: "BUG",
++    message: " 報告本文 ",
++    pageUrl: "/club/club-a/account?token=private#secret",
++    userAgent: " Chrome\r\n Safari ",
++  };
++}
++
++// 作成済みの内部行を用意し、内部メモ等がDTOへ漏れないことも確認する。
++function report(): StoredReport {
++  return {
++    id: REPORT_ID,
++    clubId: "club-a",
++    membershipId: "membership-a",
++    clubName: "現在クラブ",
++    category: "BUG",
++    message: "報告本文",
++    pageUrl: "/club/club-a/account",
++    userAgent: "Chrome Safari",
++    reporterName: "保存時氏名",
++    reporterEmail: "snapshot@example.test",
++    reporterRole: "MEMBER",
++    createdAt: NOW,
++    status: "OPEN",
++    internalNote: PRIVATE_DETAIL,
++    notifiedAt: null,
++    notifyError: null,
++  };
++}
++
++// codeを持つだけの偽物と、Prismaの既知エラーを区別できるようにする。
++function prismaError(code: string) {
++  return new Prisma.PrismaClientKnownRequestError(PRIVATE_DETAIL, {
++    code,
++    clientVersion: "test",
++    meta: {
++      detail: PRIVATE_DETAIL,
++    },
++  });
++}
++
++// 通知結果はサーバーが受領した受付IDとクラブへ関連付ける。
++function notificationInput(
++  notification: SupportReportNotificationResult = { outcome: "ACCEPTED" },
++): RecordSupportReportNotificationInput {
++  return {
++    reportId: REPORT_ID,
++    clubId: "club-a",
++    notification,
++  };
++}
++
++// 試験ごとにstoreとdelegateを作り直し、SQLの保証とは分けて条件とrollback境界を確認する。
++beforeEach(() => {
++  vi.resetAllMocks();
++  vi.useFakeTimers();
++  vi.setSystemTime(NOW);
++  vi.spyOn(console, "error").mockImplementation(() => undefined);
++  vi.spyOn(console, "warn").mockImplementation(() => undefined);
++  vi.spyOn(console, "log").mockImplementation(() => undefined);
++  actor = {
++    id: "membership-a",
++    clubId: "club-a",
++    userId: "user-a",
++    status: "ACTIVE",
++    role: "MEMBER",
++    club: {
++      id: "club-a",
++      name: "現在クラブ",
++      slug: "club-a",
++      planType: "STANDARD",
++    },
++    user: {
++      id: "user-a",
++      name: "保存時氏名",
++      email: "snapshot@example.test",
++    },
++  };
++  reports = new Map();
++  tail = Promise.resolve();
++  mocks.actor.mockImplementation(async ({ where }) => {
++    expect(where).toEqual({
++      id: "membership-a",
++      clubId: "club-a",
++      userId: "user-a",
++      status: "ACTIVE",
++    });
++    return structuredClone(actor);
++  });
++  mocks.findReport.mockImplementation(async ({ where }) => {
++    const row = reports.get(where.id);
++    if (!row || row.clubId !== where.clubId) {
++      return null;
 +    }
-+  | {
-+      outcome: "ALREADY_ACCEPTED";
++    if (where.membershipId !== undefined) {
++      if (
++        row.membershipId !== where.membershipId ||
++        where.membership.is.id !== "membership-a" ||
++        where.membership.is.clubId !== "club-a" ||
++        where.membership.is.userId !== "user-a"
++      ) {
++        return null;
++      }
 +    }
-+  | {
-+      outcome: "FORBIDDEN" | "CONFLICT" | "CREATE_FAILED";
++    return structuredClone(row);
++  });
++  mocks.create.mockImplementation(async ({ data }) => {
++    if (reports.has(data.id)) {
++      throw prismaError("P2002");
++    }
++    const row: StoredReport = {
++      ...report(),
++      ...data,
 +    };
-+
-+// メール原文やSDKレスポンスを保存せず、この固定コードだけをnotifyErrorへ記録する。
-+export type SupportReportNotificationErrorCode =
-+  | "EMAIL_CONFIGURATION_MISSING"
-+  | "EMAIL_SEND_FAILED"
-+  | "EMAIL_SEND_RESULT_UNKNOWN";
-+
-+// provider受付と配送完了を区別し、不明結果を明確な送信失敗へ丸めない。
-+export type SupportReportNotificationResult =
-+  | {
-+      outcome: "ACCEPTED";
++    reports.set(row.id, structuredClone(row));
++    return row;
++  });
++  mocks.update.mockImplementation(async ({ where, data }) => {
++    expect(Object.keys(where).sort()).toEqual(["clubId", "id", "notifiedAt"]);
++    expect(where.notifiedAt).toBeNull();
++    expect(Object.keys(data).sort()).toEqual(["notifiedAt", "notifyError"]);
++    const row = reports.get(where.id);
++    if (!row || row.clubId !== where.clubId || row.notifiedAt !== null) {
++      return { count: 0 };
 +    }
-+  | {
-+      outcome: "FAILED";
-+      errorCode: Exclude<
-+        SupportReportNotificationErrorCode,
-+        "EMAIL_SEND_RESULT_UNKNOWN"
-+      >;
-+    }
-+  | {
-+      outcome: "UNKNOWN";
-+      errorCode: "EMAIL_SEND_RESULT_UNKNOWN";
++    Object.assign(row, data);
++    return { count: 1 };
++  });
++  mocks.transaction.mockImplementation((operation, options) => {
++    expect(options).toEqual({
++      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
++    });
++    // 実SQLの代替ではない。callbackを直列化し、throw時のstore復元だけを模す。
++    const execute = async () => {
++      const before = structuredClone(reports);
++      try {
++        return await operation({
++          clubMembership: {
++            findFirst: mocks.actor,
++          },
++          supportReport: {
++            findFirst: mocks.findReport,
++            create: mocks.create,
++            updateMany: mocks.update,
++          },
++        });
++      } catch (error) {
++        reports = before;
++        throw error;
++      }
 +    };
++    const result = tail.then(execute);
++    tail = result.catch(() => undefined);
++    return result;
++  });
++});
 +
-+// 通知結果の記録失敗は、既に保存した報告の受付結果を取り消さない。
-+export type SupportReportNotificationRecordResult = {
-+  outcome: "RECORDED" | "NOT_FOUND" | "UPDATE_FAILED";
-+};
++// 個人情報入り例外もログへ出さず、時刻・spyを他の試験へ持ち越さない。
++afterEach(() => {
++  expect(console.error).not.toHaveBeenCalled();
++  expect(console.warn).not.toHaveBeenCalled();
++  expect(console.log).not.toHaveBeenCalled();
++  vi.useRealTimers();
++  vi.restoreAllMocks();
++});
 +
-+// 公開結果へ報告者情報・報告DTO・通知状態・任意のエラー原文を含めない。
-+export type SupportReportAcceptanceResult = {
-+  outcome: "ACCEPTED" | "FORBIDDEN" | "CONFLICT" | "CREATE_FAILED";
-+};
++describe("受付の本人・クラブ境界", () => {
++  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)(
++    "%sを許可し、最新DBのsnapshotと限定metadataだけを保存する",
++    async (role) => {
++      actor!.role = role;
++      const data = {
++        ...input(),
++        reporterName: "偽の氏名",
++        reporterEmail: PRIVATE_DETAIL,
++        reporterRole: "OWNER",
++        clubName: "偽のクラブ",
++        clubSlug: "foreign-club",
++        status: "RESOLVED",
++        notifiedAt: NOW,
++        notifyError: PRIVATE_DETAIL,
++        internalNote: PRIVATE_DETAIL,
++      };
++      const result = await createSupportReportForMember(data);
++      expect(result.outcome).toBe("CREATED");
++      expect(mocks.create).toHaveBeenCalledWith({
++        data: {
++          id: REPORT_ID,
++          clubId: "club-a",
++          membershipId: "membership-a",
++          category: "BUG",
++          message: "報告本文",
++          status: "OPEN",
++          pageUrl: "/club/club-a/account",
++          userAgent: "Chrome Safari",
++          reporterName: "保存時氏名",
++          reporterEmail: "snapshot@example.test",
++          reporterRole: role,
++          notifiedAt: null,
++          notifyError: null,
++        },
++        select: {
++          id: true,
++          clubId: true,
++          membershipId: true,
++          category: true,
++          message: true,
++          pageUrl: true,
++          userAgent: true,
++          reporterName: true,
++          reporterEmail: true,
++          reporterRole: true,
++          createdAt: true,
++        },
++      });
++      if (result.outcome === "CREATED") {
++        expect(result.report).toEqual({
++          id: REPORT_ID,
++          clubId: "club-a",
++          membershipId: "membership-a",
++          clubName: "現在クラブ",
++          category: "BUG",
++          message: "報告本文",
++          pageUrl: "/club/club-a/account",
++          userAgent: "Chrome Safari",
++          reporterName: "保存時氏名",
++          reporterEmail: "snapshot@example.test",
++          reporterRole: role,
++          createdAt: NOW,
++        });
++      }
++      expect(mocks.update).not.toHaveBeenCalled();
++    },
++  );
++
++  it("AppUserのnullを保持し、metadataのnullや不正パスも安全に扱う", async () => {
++    actor!.user!.name = null;
++    actor!.user!.email = null;
++    const result = await createSupportReportForMember({
++      ...input(),
++      pageUrl: "https://remote.test/?token=private",
++      userAgent: null,
++    });
++    expect(result).toMatchObject({
++      outcome: "CREATED",
++      report: {
++        reporterName: null,
++        reporterEmail: null,
++        pageUrl: null,
++        userAgent: null,
++      },
++    });
++  });
++
++  it("サーバーmetadataも既存関数で再制限し、別クラブパスと長すぎるUAを保存しない", async () => {
++    const result = await createSupportReportForMember({
++      ...input(),
++      pageUrl: "/club/foreign-club/account",
++      userAgent: "a".repeat(513),
++    });
++    expect(result).toMatchObject({
++      outcome: "CREATED",
++      report: {
++        pageUrl: null,
++        userAgent: "a".repeat(512),
++      },
++    });
++  });
++
++  it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)("最新statusが%sなら拒否する", async (status) => {
++    actor!.status = status;
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.create).not.toHaveBeenCalled();
++    expect(mocks.findReport).not.toHaveBeenCalled();
++  });
++
++  it.each(["STARTER", "PRO"] as const)("最新プランが%sなら拒否する", async (planType) => {
++    actor!.club!.planType = planType;
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.create).not.toHaveBeenCalled();
++  });
++
++  it.each(["id", "clubId", "userId"] as const)("DBから返った%sがscopeと違えば拒否する", async (field) => {
++    actor![field] = "foreign";
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.create).not.toHaveBeenCalled();
++  });
++
++  it.each(["clubId", "actorMembershipId", "userId"] as const)(
++    "非空の別%sを入力しても元の本人行を流用しない",
++    async (field) => {
++      mocks.actor.mockResolvedValueOnce(actor);
++      const data = {
++        ...input(),
++        [field]: "foreign"
++      };
++      expect(await createSupportReportForMember(data)).toEqual({ outcome: "FORBIDDEN" });
++      expect(
++        mocks.actor.mock.calls[0][0].where[field === "actorMembershipId" ? "id" : field]
++      )
++        .toBe("foreign");
++      expect(mocks.create).not.toHaveBeenCalled();
++    },
++  );
++
++  it.each(["missing", "user", "user-id", "club", "club-id"])(
++    "本人・関連行不整合%sを修復せず拒否する", async (kind) => {
++      if (kind === "missing") {
++        actor = null;
++      }
++      if (kind === "user") {
++        actor!.user = null;
++      }
++      if (kind === "user-id") {
++        actor!.user!.id = "foreign-user";
++      }
++      if (kind === "club") {
++        actor!.club = null;
++      }
++      if (kind === "club-id") {
++        actor!.club!.id = "foreign-club";
++      }
++      expect(await createSupportReportForMember(input())).toEqual({ outcome: "FORBIDDEN" });
++      expect(mocks.create).not.toHaveBeenCalled();
++    });
++
++  it.each(["clubId", "actorMembershipId", "userId"] as const)(
++    "入力scopeの%sが空ならDBを呼ばない", async (field) => {
++      expect(await createSupportReportForMember({
++        ...input(),
++        [field]: " "
++      }))
++        .toEqual({ outcome: "FORBIDDEN" });
++      expect(mocks.transaction).not.toHaveBeenCalled();
++    });
++
++  it.each([null, undefined, "invalid", []])("非オブジェクトscopeを拒否する %#", async (value) => {
++    expect(
++      await createSupportReportForMember(value as unknown as CreateSupportReportForMemberInput)
++    )
++      .toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    { requestId: "invalid" },
++    { message: " " },
++    { message: "あ".repeat(2001) },
++    { category: "INVALID" },
++  ])("不正なID・本文・種別をDBへ渡さない %#", async (patch) => {
++    expect(
++      await createSupportReportForMember(
++        {
++          ...input(),
++          ...patch
++        } as CreateSupportReportForMemberInput
++      )
++    )
++      .toEqual({ outcome: "CREATE_FAILED" });
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++});
++
++describe("同一受付とtransaction", () => {
++  it("再送は本人・クラブ・元Membership・内容だけを照合し、snapshotと通知状態を変えない", async () => {
++    const existing = report();
++    existing.notifiedAt = NOW;
++    existing.status = "RESOLVED";
++    reports.set(REPORT_ID, existing);
++    actor!.role = "COACH";
++    actor!.user!.name = "後日の氏名";
++    const before = structuredClone(reports);
++    expect(await createSupportReportForMember(input())).toEqual(
++      { outcome: "ALREADY_ACCEPTED" }
++    );
++    expect(mocks.findReport).toHaveBeenCalledWith({
++      where: {
++        id: REPORT_ID,
++        clubId: "club-a",
++        membershipId: "membership-a",
++        membership: {
++          is: {
++            id: "membership-a",
++            clubId: "club-a",
++            userId: "user-a",
++          },
++        },
++      },
++      select: {
++        id: true,
++        clubId: true,
++        membershipId: true,
++        category: true,
++        message: true,
++      },
++    });
++    expect(reports).toEqual(before);
++    expect(mocks.create).not.toHaveBeenCalled();
++    expect(mocks.update).not.toHaveBeenCalled();
++  });
++
++  it("同時呼出しの単体モデルでも1件だけ作成する。実SQL競合は後続DB試験で確認する", async () => {
++    const results = await Promise.all([
++      createSupportReportForMember(input()),
++      createSupportReportForMember(input()),
++    ]);
++    expect(results.map((result) => result.outcome).sort()).toEqual(
++      ["ALREADY_ACCEPTED", "CREATED"]
++    );
++    expect(reports.size).toBe(1);
++    expect(mocks.create).toHaveBeenCalledTimes(1);
++  });
++
++  it.each(["category", "message"] as const)("既存受付の%sが違えば成功にしない", async (field) => {
++    const existing = report();
++    if (field === "category") {
++      existing.category = "OTHER";
++    }
++    if (field === "message") {
++      existing.message = "異なる内容";
++    }
++    reports.set(REPORT_ID, existing);
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "CONFLICT" });
++    expect(mocks.create).not.toHaveBeenCalled();
++  });
++
++  it.each(["clubId", "membershipId"] as const)(
++    "同一IDが別%sへ属するならunique違反後も受付済みにしない", async (field) => {
++      const existing = report();
++      existing[field] = "foreign";
++      reports.set(REPORT_ID, existing);
++      const before = structuredClone(reports);
++      expect(await createSupportReportForMember(input())).toEqual({ outcome: "CONFLICT" });
++      expect(mocks.transaction).toHaveBeenCalledTimes(2);
++      expect(mocks.actor).toHaveBeenCalledTimes(2);
++      expect(mocks.create).toHaveBeenCalledTimes(1);
++      expect(reports).toEqual(before);
++    });
++
++  it("同時INSERTのP2002後は新transactionで再認可し、限定再読取だけを行う", async () => {
++    mocks.create.mockRejectedValueOnce(prismaError("P2002"));
++    mocks.findReport.mockResolvedValueOnce(null).mockResolvedValueOnce(report());
++    expect(await createSupportReportForMember(input())).toEqual(
++      { outcome: "ALREADY_ACCEPTED" }
++    );
++    expect(mocks.transaction).toHaveBeenCalledTimes(2);
++    expect(mocks.actor).toHaveBeenCalledTimes(2);
++    expect(mocks.create).toHaveBeenCalledTimes(1);
++  });
++
++  it("P2002後でも親所属が失効すれば拒否する", async () => {
++    mocks.create.mockImplementationOnce(async () => {
++      actor!.status = "WITHDRAWN";
++      throw prismaError("P2002");
++    });
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.findReport).toHaveBeenCalledTimes(1);
++  });
++
++  it("読取中のP2002をINSERT競合と見なさない", async () => {
++    mocks.findReport.mockRejectedValueOnce(prismaError("P2002"));
++    expect(await createSupportReportForMember(input())).toEqual(
++      { outcome: "CREATE_FAILED" }
++    );
++    expect(mocks.transaction).toHaveBeenCalledTimes(1);
++  });
++
++  it("unique競合後の再読取例外を受付済みへ丸めない", async () => {
++    mocks.create.mockRejectedValueOnce(prismaError("P2002"));
++    mocks.findReport.mockResolvedValueOnce(null).mockRejectedValueOnce(
++      new Error(PRIVATE_DETAIL)
++    );
++    expect(await createSupportReportForMember(input())).toEqual(
++      { outcome: "CREATE_FAILED" }
++    );
++    expect(mocks.transaction).toHaveBeenCalledTimes(2);
++    expect(mocks.create).toHaveBeenCalledTimes(1);
++  });
++
++  it("P2034後の再試行でも所属失効を再照合する", async () => {
++    mocks.create.mockImplementationOnce(async () => {
++      actor!.status = "WITHDRAWN";
++      throw prismaError("P2034");
++    });
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.actor).toHaveBeenCalledTimes(2);
++    expect(mocks.create).toHaveBeenCalledTimes(1);
++    expect(reports.size).toBe(0);
++  });
++
++  it("作成後のP2034でstoreをrollbackし、最初の認可からやり直す", async () => {
++    const create = mocks.create.getMockImplementation()!;
++    mocks.create.mockImplementationOnce(async (args) => {
++      await create(args);
++      throw prismaError("P2034");
++    });
++    expect((await createSupportReportForMember(input())).outcome).toBe("CREATED");
++    expect(reports.size).toBe(1);
++    expect(mocks.actor).toHaveBeenCalledTimes(2);
++    expect(mocks.create).toHaveBeenCalledTimes(2);
++  });
++
++  it("作成後の任意例外ではrollbackし、原文や部分受付を返さない", async () => {
++    const create = mocks.create.getMockImplementation()!;
++    mocks.create.mockImplementationOnce(async (args) => {
++      await create(args);
++      throw new Error(PRIVATE_DETAIL);
++    });
++    expect(await createSupportReportForMember(input())).toEqual(
++      { outcome: "CREATE_FAILED" }
++    );
++    expect(reports.size).toBe(0);
++    expect(mocks.create).toHaveBeenCalledTimes(1);
++  });
++
++  it("保存先の不整合はrollbackして失敗とする", async () => {
++    const create = mocks.create.getMockImplementation()!;
++    mocks.create.mockImplementationOnce(async (args) => {
++      const row = await create(args);
++      return {
++        ...row,
++        clubId: "foreign-club"
++      };
++    });
++    expect(await createSupportReportForMember(input())).toEqual(
++      { outcome: "CREATE_FAILED" }
++    );
++    expect(reports.size).toBe(0);
++  });
++
++  it("P2034再試行は初回に加えて3回だけ", async () => {
++    mocks.transaction.mockRejectedValue(prismaError("P2034"));
++    expect(await createSupportReportForMember(input())).toEqual({ outcome: "CONFLICT" });
++    expect(mocks.transaction).toHaveBeenCalledTimes(4);
++  });
++
++  it.each([new Error(PRIVATE_DETAIL), {
++    code: "P2034",
++    message: PRIVATE_DETAIL
++  }])(
++    "任意例外・偽のcodeは再試行や成功へ変換しない %#",
++    async (error) => {
++      mocks.transaction.mockRejectedValueOnce(error);
++      expect(await createSupportReportForMember(input())).toEqual(
++        { outcome: "CREATE_FAILED" }
++      );
++      expect(mocks.transaction).toHaveBeenCalledTimes(1);
++    },
++  );
++});
++
++describe("受付後の通知結果記録", () => {
++  beforeEach(() => {
++    reports.set(REPORT_ID, report());
++  });
++
++  it("成功はnotifiedAtとnotifyErrorだけを書き、本文・snapshot・statusは維持する", async () => {
++    const before = structuredClone(reports.get(REPORT_ID)!);
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "RECORDED" }
++    );
++    expect(mocks.update).toHaveBeenCalledWith({
++      where: {
++        id: REPORT_ID,
++        clubId: "club-a",
++        notifiedAt: null,
++      },
++      data: {
++        notifiedAt: NOW,
++        notifyError: null,
++      },
++    });
++    expect(reports.get(REPORT_ID)).toEqual({
++      ...before,
++      notifiedAt: NOW
++    });
++    expect(mocks.actor).not.toHaveBeenCalled();
++    expect(mocks.create).not.toHaveBeenCalled();
++  });
++
++  it.each([
++    {
++      outcome: "FAILED",
++      errorCode: "EMAIL_CONFIGURATION_MISSING"
++    },
++    {
++      outcome: "FAILED",
++      errorCode: "EMAIL_SEND_FAILED"
++    },
++    {
++      outcome: "UNKNOWN",
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN"
++    },
++  ] as const)("固定の通知結果を保存する：$errorCode", async (notification) => {
++    expect(await recordSupportReportNotification(notificationInput(notification)))
++      .toEqual({ outcome: "RECORDED" });
++    expect(reports.get(REPORT_ID)).toMatchObject({
++      notifiedAt: null,
++      notifyError: notification.errorCode,
++    });
++  });
++
++  it("失敗記録の後に成功した場合は固定エラーを消して受付時刻を記録する", async () => {
++    await recordSupportReportNotification(notificationInput({
++      outcome: "FAILED",
++      errorCode: "EMAIL_SEND_FAILED",
++    }));
++    expect(await recordSupportReportNotification(notificationInput()))
++      .toEqual({ outcome: "RECORDED" });
++    expect(reports.get(REPORT_ID)).toMatchObject({
++      notifiedAt: NOW,
++      notifyError: null,
++    });
++  });
++
++  it("Membership削除後も受付IDとclubIdで記録できる", async () => {
++    reports.get(REPORT_ID)!.membershipId = null;
++    actor = null;
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "RECORDED" }
++    );
++    expect(reports.get(REPORT_ID)!.membershipId).toBeNull();
++    expect(mocks.actor).not.toHaveBeenCalled();
++  });
++
++  it.each(["club", "report"])("対象%sが違う場合はNOT_FOUNDで他レコードを変えない", async (kind) => {
++    const data = notificationInput();
++    if (kind === "club") {
++      data.clubId = "foreign-club";
++    }
++    if (kind === "report") {
++      data.reportId = OTHER_REPORT_ID;
++    }
++    const before = structuredClone(reports);
++    expect(await recordSupportReportNotification(data)).toEqual({ outcome: "NOT_FOUND" });
++    expect(reports).toEqual(before);
++  });
++
++  it("成功記録の後に遅れた失敗を受けてもprovider受付を上書きしない", async () => {
++    await recordSupportReportNotification(notificationInput());
++    const before = structuredClone(reports);
++    expect(await recordSupportReportNotification(notificationInput({
++      outcome: "UNKNOWN",
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
++    }))).toEqual({ outcome: "RECORDED" });
++    expect(reports).toEqual(before);
++  });
++
++  it.each([
++    null,
++    {
++      outcome: "FAILED",
++      errorCode: PRIVATE_DETAIL
++    },
++    {
++      outcome: "UNKNOWN",
++      errorCode: "EMAIL_SEND_FAILED"
++    },
++    {
++      outcome: "FAILED",
++      errorCode: "EMAIL_SEND_RESULT_UNKNOWN"
++    },
++    { outcome: "INVALID" },
++  ])("不正な通知結果を保存・反射しない %#", async (notification) => {
++    const data = notificationInput(notification as SupportReportNotificationResult);
++    expect(await recordSupportReportNotification(data)).toEqual(
++      { outcome: "UPDATE_FAILED" }
++    );
++    expect(mocks.transaction).not.toHaveBeenCalled();
++  });
++
++  it("結果オブジェクトの余分な情報を更新データへ含めない", async () => {
++    const notification = {
++      outcome: "ACCEPTED" as const,
++      message: PRIVATE_DETAIL,
++      reporterEmail: PRIVATE_DETAIL,
++      internalNote: PRIVATE_DETAIL,
++    };
++    expect(await recordSupportReportNotification(notificationInput(notification)))
++      .toEqual({ outcome: "RECORDED" });
++    expect(mocks.update.mock.calls[0][0].data).toEqual({
++      notifiedAt: NOW,
++      notifyError: null,
++    });
++  });
++
++  it.each([null, { reportId: "invalid" }, { clubId: " " }])(
++    "不正な通知scopeでDBを呼ばない %#", async (patch) => {
++      const data = patch === null ? null : {
++        ...notificationInput(),
++        ...patch
++      };
++      expect(
++        await recordSupportReportNotification(data as RecordSupportReportNotificationInput)
++      )
++        .toEqual({ outcome: "UPDATE_FAILED" });
++      expect(mocks.transaction).not.toHaveBeenCalled();
++    });
++
++  it("更新0件なのに未記録の行が残る場合は成功にしない", async () => {
++    mocks.update.mockResolvedValueOnce({ count: 0 });
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "UPDATE_FAILED" }
++    );
++  });
++
++  it("更新件数不整合はrollbackし、受付本体を失敗扱いや削除へ変更しない", async () => {
++    const before = structuredClone(reports);
++    const update = mocks.update.getMockImplementation()!;
++    mocks.update.mockImplementationOnce(async (args) => {
++      await update(args);
++      return { count: 2 };
++    });
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "UPDATE_FAILED" }
++    );
++    expect(reports).toEqual(before);
++  });
++
++  it("通知保存のP2034もrollback後だけ再試行する", async () => {
++    const update = mocks.update.getMockImplementation()!;
++    mocks.update.mockImplementationOnce(async (args) => {
++      await update(args);
++      throw prismaError("P2034");
++    });
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "RECORDED" }
++    );
++    expect(mocks.update).toHaveBeenCalledTimes(2);
++  });
++
++  it("通知保存の競合上限と任意失敗はUPDATE_FAILEDに限定し、受付を残す", async () => {
++    const before = structuredClone(reports);
++    mocks.transaction.mockRejectedValue(prismaError("P2034"));
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "UPDATE_FAILED" }
++    );
++    expect(mocks.transaction).toHaveBeenCalledTimes(4);
++    expect(reports).toEqual(before);
++    mocks.transaction.mockReset().mockRejectedValueOnce(new Error(PRIVATE_DETAIL));
++    expect(await recordSupportReportNotification(notificationInput())).toEqual(
++      { outcome: "UPDATE_FAILED" }
++    );
++    expect(mocks.transaction).toHaveBeenCalledTimes(1);
++    expect(reports).toEqual(before);
++  });
++});
