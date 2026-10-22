@@ -17,13 +17,17 @@ import {
   vi,
 } from "vitest";
 
-import AccountPage from "@/app/(club-app)/club/[clubSlug]/account/page";
-import LineSettingsPage from "@/app/(club-app)/club/[clubSlug]/admin/settings/line/page";
+import {
+  default as AccountPage, // 【追加】クラブのマイページ
+} from "@/app/(club-app)/club/[clubSlug]/account/page";
+import {
+  default as LineSettingsPage, // 【追加】OWNER用LINE設定ページ
+} from "@/app/(club-app)/club/[clubSlug]/admin/settings/line/page";
 import type {
-  ClubAccessContext,
+  ClubAccessContext, // 【追加】認可成功時に返すデータの型
 } from "@/app/(club-app)/club/club-membership-authorization";
 import type {
-  ClubAccountView,
+  ClubAccountView, // 【追加】クラブアカウントの表示情報の型
 } from "@/domain/club/account/account-types";
 
 const mocks = vi.hoisted(() => ({
@@ -34,6 +38,9 @@ const mocks = vi.hoisted(() => ({
   notFound: vi.fn(),
   logout: vi.fn(),
   // 【追加：F07粒度9】Clientのprops接続をPage試験で確認する。
+  // 【追加：F08粒度6】報告フォームとActionの接続を独立に確認する。
+  supportForm: vi.fn(),
+  supportAction: vi.fn(),
   nameForm: vi.fn(),
   childForm: vi.fn(),
   operations: vi.fn(),
@@ -114,6 +121,14 @@ vi.mock("@/app/(club-app)/club/[clubSlug]/account/actions", () => ({
   getAttachableChildrenAction: mocks.candidatesAction,
 }));
 
+// 【追加：F08粒度6】フォーム内部と受付処理は専用試験へ分ける。
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/SupportReportForm", () => ({
+  SupportReportForm: mocks.supportForm,
+}));
+vi.mock("@/app/(club-app)/club/[clubSlug]/account/support-actions", () => ({
+  createSupportReportAction: mocks.supportAction,
+}));
+
 const PRIVATE_DETAIL = "private-auth-id raw-error secret-token";
 const CONTEXT: ClubAccessContext = {
   userId: "user-a",
@@ -175,6 +190,8 @@ beforeEach(() => {
   vi.spyOn(console, "warn").mockImplementation(() => undefined);
   vi.spyOn(console, "log").mockImplementation(() => undefined);
   // 【追加：F07粒度9】DOMなし試験ではフォーム本体を展開しない。
+  // 【追加：F08粒度6】Page試験では報告フォームのpropsだけを検証する。
+  mocks.supportForm.mockReturnValue(null);
   mocks.nameForm.mockReturnValue(null);
   mocks.childForm.mockReturnValue(null);
   mocks.operations.mockReturnValue(null);
@@ -279,6 +296,8 @@ describe("マイページ", () => {
       mocks.access.mockRejectedValueOnce(error);
       await expect(page()).rejects.toBe(error);
       expect(mocks.read).not.toHaveBeenCalled();
+      // 【追加：F08粒度6】認可失敗時には報告フォームも表示しない。
+      expect(mocks.supportForm).not.toHaveBeenCalled();
     },
   );
 
@@ -289,6 +308,8 @@ describe("マイページ", () => {
     },
     );
     await expect(page()).rejects.toThrow("NEXT_NOT_FOUND");
+    // 【追加：F08粒度6】所属失効後は報告フォームを接続しない。
+    expect(mocks.supportForm).not.toHaveBeenCalled();
   },
   );
 
@@ -434,4 +455,43 @@ it("Pageはフォームごとにstateを作り、IDを認可済みslugへbindす
     toastId: oldCreationId,
   });
   expect(mocks.childForm.mock.calls[2][0].initialState.requestId).not.toBe(oldCreationId);
+});
+
+// 【追加：F08粒度6】本人DTOに依存せず、認可済みslugと独立stateだけを報告フォームへ渡す。
+it.each(["FOUND", "FETCH_FAILED"])("%sでも認可済みの報告フォームを接続する", async (outcome) => {
+  mocks.read.mockResolvedValueOnce({
+    outcome,
+    view: VIEW,
+    message: PRIVATE_DETAIL,
+  });
+  await page();
+  expect(mocks.supportForm).toHaveBeenCalledTimes(1);
+  const support = mocks.supportForm.mock.calls[0][0];
+  expect(Object.keys(support).sort()).toEqual(["action", "initialState"]);
+  expect(support.initialState).toEqual({
+    status: "idle",
+    values: {
+      category: "BUG",
+      message: "",
+    },
+    fieldErrors: {},
+    formError: null,
+    requestId: expect.any(String),
+  });
+  expect(JSON.stringify(support)).not.toContain(PRIVATE_DETAIL);
+  const data = new FormData();
+  await support.action(support.initialState, data);
+  expect(mocks.supportAction).toHaveBeenCalledWith(CONTEXT.club.slug, support.initialState, data);
+  if (outcome === "FOUND") {
+    const otherStates = [
+      mocks.nameForm.mock.calls[0][0].initialState,
+      ...mocks.childForm.mock.calls.map((call) => call[0].initialState),
+    ];
+    for (const other of otherStates) {
+      expect(support.initialState.requestId).not.toBe(other.requestId);
+    }
+  } else {
+    expect(mocks.nameForm).not.toHaveBeenCalled();
+    expect(mocks.childForm).not.toHaveBeenCalled();
+  }
 });

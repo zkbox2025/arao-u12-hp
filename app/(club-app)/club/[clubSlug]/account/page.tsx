@@ -29,12 +29,12 @@ import {
   ChildMembershipOperations,//props.mode === "add"であれば、メンバーシップに追加する子どもの候補を表示して、追加を実行するためのエリア全体を表示し、違うなら子どものメンバーシップの退会処理のためのフォームを表示する関数
 } from "./ChildMembershipOperations";
 import {
-  addChildToClubAction,
-  createChildAction,
-  getAttachableChildrenAction,
-  updateAccountNameAction,
-  updateChildAction,
-  withdrawChildFromClubAction,
+  addChildToClubAction, // 子どもを現在クラブへ追加するAction
+  createChildAction, // 子どもの情報を新規保存するAction
+  getAttachableChildrenAction, // 現在クラブへ追加可能な子どもの候補を取得するAction
+  updateAccountNameAction, // アカウント名を更新するAction
+  updateChildAction, // 子どもの氏名と学年を更新するAction
+  withdrawChildFromClubAction, //子どもを現在クラブから外すAction
 } from "./actions";
 import {
   getAccountFeedbackMessage,// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
@@ -52,6 +52,17 @@ import {
 import {
   AccountNavigation,//ログインしているユーザーの「権限（役割）」や「所属クラブ」の状態に合わせて、マイページのメニュー画面を動的に切り替えて表示するナビゲーションコンポーネント
 } from "./AccountNavigation";
+
+
+import {
+  SUPPORT_REPORT_INITIAL_VALUES, // サポート報告フォームの初期値
+} from "@/domain/club/support/support-report-form";
+import {
+  SupportReportForm, // サポート報告のフォーム
+} from "./SupportReportForm";
+import {
+  createSupportReportAction, //サポート報告を作成する本丸のアクション関数
+} from "./support-actions";
 
 type Props = {
   params: Promise<{
@@ -74,6 +85,14 @@ export default async function ClubAccountPage({
   if (result.outcome === "UNAVAILABLE") {
     notFound();
   }
+  // サポート報告フォーム
+  const supportForm = (
+    <SupportReportForm
+      key={access.club.slug}
+      initialState={createInitialActionState({ ...SUPPORT_REPORT_INITIAL_VALUES })}
+      action={createSupportReportAction.bind(null, access.club.slug)}
+    />
+  );
   if (result.outcome !== "FOUND") {
     return (
       <section className="space-y-4">
@@ -84,6 +103,7 @@ export default async function ClubAccountPage({
         <Link href={`/club/${encodeURIComponent(access.club.slug)}/account`}>
           マイページを開き直す
         </Link>
+        {supportForm}
       </section>
     );
   }
@@ -184,10 +204,11 @@ export default async function ClubAccountPage({
         <ChildMembershipOperations
           key={`candidates:${newChildState.requestId}`}
           mode="add"
-          loadAction={getAttachableChildrenAction.bind(null, view.club.slug)}
+          loadAction={getAttachableChildrenAction.bind(null, view.club.slug)}//loadAction：選択肢をDBからとってくる関数
           action={addChildToClubAction.bind(null, view.club.slug)}
         />
       </section>
+      {supportForm}
       <AccountNavigation
         club={view.club}
         role={view.role}

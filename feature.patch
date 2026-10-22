@@ -1,243 +1,649 @@
-diff --git a/app/(club-app)/club/[clubSlug]/account/support-actions.ts b/app/(club-app)/club/[clubSlug]/account/support-actions.ts
+diff --git a/app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx b/app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx
 new file mode 100644
-index 0000000..4001382
+index 0000000..e4a1c1b
 --- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/support-actions.ts
-@@ -0,0 +1,127 @@
-+// app/(club-app)/club/[clubSlug]/account/support-actions.ts
-+// サポート報告を直接呼び出す場合も認可し、許可入力とサーバーmetadataだけを受付へ渡す。
++++ b/app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx
+@@ -0,0 +1,172 @@
++// app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx
++// 確認後にサポート報告を送信し、成功時は報告入力と未保存ガードだけを初期化する。
 +
-+"use server";
++"use client";
 +
-+import { headers } from "next/headers";
-+import { unstable_rethrow } from "next/navigation";
++import { useId } from "react";
 +
 +import {
-+  requireActiveClubMembership, // ログイン情報からACTIVEなクラブ所属とクラブ情報を取得する関数
-+} from "@/app/(club-app)/club/club-membership-authorization";
++  FieldErrorList, // 各入力項目のエラーメッセージを表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
 +import {
-+  requireClubFeature, // プランに応じた機能が無効な場合はエラーを投げる関数
-+} from "@/domain/club/plan-features";
++  FormErrorAlert, // フォーム全体のエラーをアラートとして表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
 +import {
-+  buildSupportReportFormValues, // サポート報告の表示用フォーム値を生成する関数
-+  parseSupportReportFormData, // フォームのcategory・messageを検証する関数
-+  SUPPORT_REPORT_FAILED_MESSAGE, // サポート報告の送信失敗メッセージ
-+  SUPPORT_REPORT_INITIAL_VALUES, // サポート報告フォームの初期値
++  useScrollToFormError, // フォームエラー発生時にエラー箇所へ移動するhook
++} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
++import {
++  useUnsavedChangesGuard, // 未保存の入力があるページからの移動を確認するhook
++} from "@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard";
++import {
++  ToastMessage, // 管理画面用のトースト通知を表示するComponent
++} from "@/components/admin/ToastMessage";
++import {
++  SUPPORT_REPORT_ACCEPTED_MESSAGE, // サポート報告の固定受付完了メッセージ
++  SUPPORT_REPORT_CATEGORY_OPTIONS, // サポート報告のカテゴリ値とラベル一覧
++  SUPPORT_REPORT_MESSAGE_MAX_LENGTH, // サポート報告本文の最大文字数
 +  type SupportReportActionState, // サポート報告のアクションステイトの型
 +  type SupportReportFormValues, // サポート報告フォームの値の型
 +} from "@/domain/club/support/support-report-form";
-+import {
-+  sanitizeSupportPageUrl, // 現在クラブのアカウントページURLか検証する関数
-+  sanitizeSupportUserAgent, // UAの制御文字除去・長さ制限・空白除去を行う関数
-+} from "@/domain/club/support/support-report-metadata";
-+import {
-+  createRequestId, // 新しいrequestIdをUUID v4形式で生成する関数
-+  isRequestId, // 値がUUID v4形式のrequestIdか検証する関数
-+} from "@/domain/shared/request-id";
-+import {
-+  createSupportReport, // DB受付・補助通知・通知結果保存を順序付ける関数
-+} from "@/src/application/club/support/create-support-report";
 +
-+const EXPIRED_FORM_MESSAGE =
-+  "フォームの有効期限が切れました。ページを開き直してください。";
++import {
++  AccountConfirmDialog, // アカウントページで使う確認ダイアログComponent
++  useConfirmedAccountForm, // 確認前の入力を保持し、確認後だけ単一送信するhook
++} from "./AccountConfirmDialog";
 +
-+// 前stateを引き継がず、許可した表示値と固定エラーだけで状態を作る。
-+function errorState(
-+  values: SupportReportFormValues,
-+  requestId: string,
-+  formError: string | null,
-+  fieldErrors: SupportReportActionState["fieldErrors"] = {},
-+): SupportReportActionState {
-+  return {
-+    status: "error",
-+    values,
-+    fieldErrors,
-+    formError,
-+    requestId,
-+  };
++type Props = {
++  initialState: SupportReportActionState;
++  action: (
++    previousState: SupportReportActionState,
++    formData: FormData,
++  ) => Promise<SupportReportActionState>;
++};
++
++type ConfirmedForm = ReturnType<typeof useConfirmedAccountForm<SupportReportFormValues>>;
++
++// Actionの状態とトーストは外側に保持し、入力部分だけをrequestIdで再マウントする。
++export function SupportReportForm({ initialState, action }: Props) {
++  const form = useConfirmedAccountForm(action, initialState);
++
++  return (
++    <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
++      <h2 className="text-lg font-bold text-slate-900">不具合・サポート報告</h2>
++      {form.state.status === "success" ? (
++        <div role="status">
++          <ToastMessage
++            key={form.state.requestId}
++            message={SUPPORT_REPORT_ACCEPTED_MESSAGE}
++          />
++        </div>
++      ) : null}
++      <SupportReportFields
++        key={form.state.requestId}
++        form={form}
++      />
++    </section>
++  );
 +}
 +
-+// 認可済みslugからだけURLを構築し、変換不能な補助情報はnullにする。
-+function accountPageUrl(clubSlug: string): string | null {
-+  try {
-+    return sanitizeSupportPageUrl(
-+      `/club/${encodeURIComponent(clubSlug)}/account`,
-+      clubSlug,
-+    );
-+  } catch {
-+    return null;
-+  }
++// エラー・キャンセルでは入力とガードを維持し、新requestIdの成功後だけ作り直す。
++function SupportReportFields({ form }: { form: ConfirmedForm }) {
++  const formRef = useScrollToFormError(form.state);
++  const guard = useUnsavedChangesGuard(form.pending);
++  const id = useId();
++  const categoryId = `${id}-category`;
++  const categoryErrorId = `${categoryId}-error`;
++  const messageId = `${id}-message`;
++  const messageErrorId = `${messageId}-error`;
++  const hintId = `${id}-hint`;
++  const categoryHasError = Boolean(form.state.fieldErrors.category?.length);
++  const messageHasError = Boolean(form.state.fieldErrors.message?.length);
++
++  return (
++    <>
++      <form
++        ref={formRef}
++        method="post"
++        onSubmit={form.onSubmit}
++        onChange={guard.markDirty}
++      >
++        <fieldset
++          disabled={
++            form.pending ||
++            form.isOpen
++          }
++          className="space-y-3"
++        >
++          <legend className="font-bold">報告内容</legend>
++          <input
++            type="hidden"
++            name="requestId"
++            value={form.state.requestId}
++          />
++          <FormErrorAlert message={form.state.formError} />
++          <label
++            htmlFor={categoryId}
++            className="block text-sm font-bold"
++          >種別</label>
++          <select
++            id={categoryId}
++            name="category"
++            defaultValue={form.state.values.category}
++            required
++            aria-invalid={categoryHasError}
++            aria-describedby={categoryHasError ? categoryErrorId : undefined}
++            className="w-full rounded-lg border border-slate-300 px-3 py-2"
++          >
++            {SUPPORT_REPORT_CATEGORY_OPTIONS.map((option) => (
++              <option
++                key={option.value}
++                value={option.value}
++              >{option.label}</option>
++            ))}
++          </select>
++          <FieldErrorList
++            id={categoryErrorId}
++            errors={form.state.fieldErrors.category}
++          />
++          <label
++            htmlFor={messageId}
++            className="block text-sm font-bold"
++          >内容（2000文字以内）</label>
++          <textarea
++            id={messageId}
++            name="message"
++            defaultValue={form.state.values.message}
++            maxLength={SUPPORT_REPORT_MESSAGE_MAX_LENGTH}
++            rows={6}
++            required
++            aria-invalid={messageHasError}
++            aria-describedby={messageHasError ? `${hintId} ${messageErrorId}` : hintId}
++            className="w-full rounded-lg border border-slate-300 px-3 py-2"
++          />
++          <FieldErrorList
++            id={messageErrorId}
++            errors={form.state.fieldErrors.message}
++          />
++          <p
++            id={hintId}
++            className="text-sm text-slate-600"
++          >パスワード・認証情報や、不要な個人情報は入力しないでください。</p>
++          <button
++            type="submit"
++            className="rounded-lg bg-blue-700 px-4 py-2 text-white disabled:opacity-50"
++          >
++            {form.pending ? "送信中…" : "確認して送信"}
++          </button>
++        </fieldset>
++      </form>
++      <AccountConfirmDialog
++        isOpen={form.isOpen}
++        pending={form.pending}
++        returnFocusRef={form.returnFocusRef}
++        title="報告を送信しますか？"
++        confirmLabel="送信する"
++        onClose={form.close}
++        onConfirm={() => form.confirm(guard.markSubmitting)}
++      >
++        入力した内容を運営者へ送信します。パスワードや不要な個人情報が含まれていないか確認してください。
++      </AccountConfirmDialog>
++    </>
++  );
 +}
+diff --git a/app/(club-app)/club/[clubSlug]/account/page.tsx b/app/(club-app)/club/[clubSlug]/account/page.tsx
+index 8524b22..9d0dc67 100644
+--- a/app/(club-app)/club/[clubSlug]/account/page.tsx
++++ b/app/(club-app)/club/[clubSlug]/account/page.tsx
+@@ -29,12 +29,12 @@ import {
+   ChildMembershipOperations,//props.mode === "add"であれば、メンバーシップに追加する子どもの候補を表示して、追加を実行するためのエリア全体を表示し、違うなら子どものメンバーシップの退会処理のためのフォームを表示する関数
+ } from "./ChildMembershipOperations";
+ import {
+-  addChildToClubAction,
+-  createChildAction,
+-  getAttachableChildrenAction,
+-  updateAccountNameAction,
+-  updateChildAction,
+-  withdrawChildFromClubAction,
++  addChildToClubAction, // 【追加】子どもを現在クラブへ追加するAction
++  createChildAction, // 【追加】子どもの情報を新規保存するAction
++  getAttachableChildrenAction, // 【追加】現在クラブへ追加可能な子どもの候補を取得するAction
++  updateAccountNameAction, // 【追加】アカウント名を更新するAction
++  updateChildAction, // 【追加】子どもの氏名と学年を更新するAction
++  withdrawChildFromClubAction, // 【追加】子どもを現在クラブから外すAction
+ } from "./actions";
+ import {
+   getAccountFeedbackMessage,// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
+@@ -53,6 +53,17 @@ import {
+   AccountNavigation,//ログインしているユーザーの「権限（役割）」や「所属クラブ」の状態に合わせて、マイページのメニュー画面を動的に切り替えて表示するナビゲーションコンポーネント
+ } from "./AccountNavigation";
+ 
++// 【追加：F08粒度6】報告フォームは本人DTOと独立したstate・Actionへ接続する。
++import {
++  SUPPORT_REPORT_INITIAL_VALUES, // 【追加】サポート報告フォームの初期値
++} from "@/domain/club/support/support-report-form";
++import {
++  SupportReportForm, // 【追加】確認付き送信と成功時の入力resetを行う報告フォームComponent
++} from "./SupportReportForm";
++import {
++  createSupportReportAction, // 【追加】認可と入力検証を行いサポート報告を受け付けるAction
++} from "./support-actions";
 +
-+// ACTIVE所属・プラン・requestId・入力を確認し、受付成功時だけ新しいフォーム状態を返す。
-+export async function createSupportReportAction(
-+  clubSlug: string,
-+  previousState: SupportReportActionState,
-+  formData: FormData,
-+): Promise<SupportReportActionState> {
-+  const access = await requireActiveClubMembership(clubSlug);
-+  requireClubFeature(access.club, "CLUB_APP");
+ type Props = {
+   params: Promise<{
+     clubSlug: string;
+@@ -74,6 +85,14 @@ export default async function ClubAccountPage({
+   if (result.outcome === "UNAVAILABLE") {
+     notFound();
+   }
++  // 【追加：F08粒度6】認可後のslugだけで接続し、本人DTOの取得失敗時も報告できる。
++  const supportForm = (
++    <SupportReportForm
++      key={access.club.slug}
++      initialState={createInitialActionState({ ...SUPPORT_REPORT_INITIAL_VALUES })}
++      action={createSupportReportAction.bind(null, access.club.slug)}
++    />
++  );
+   if (result.outcome !== "FOUND") {
+     return (
+       <section className="space-y-4">
+@@ -84,6 +103,8 @@ export default async function ClubAccountPage({
+         <Link href={`/club/${encodeURIComponent(access.club.slug)}/account`}>
+           マイページを開き直す
+         </Link>
++        {/* 【追加：F08粒度6】部分的な本人情報を表示せず、報告フォームだけを接続する。 */}
++        {supportForm}
+       </section>
+     );
+   }
+@@ -188,6 +209,8 @@ export default async function ClubAccountPage({
+           action={addChildToClubAction.bind(null, view.club.slug)}
+         />
+       </section>
++      {/* 【追加：F08粒度6】既存フォームのstateやkeyを変更せず、報告フォームを追加する。 */}
++      {supportForm}
+       <AccountNavigation
+         club={view.club}
+         role={view.role}
+diff --git a/tests/club-account-pages.test.ts b/tests/club-account-pages.test.ts
+index 2355c7a..d782680 100644
+--- a/tests/club-account-pages.test.ts
++++ b/tests/club-account-pages.test.ts
+@@ -17,13 +17,17 @@ import {
+   vi,
+ } from "vitest";
+ 
+-import AccountPage from "@/app/(club-app)/club/[clubSlug]/account/page";
+-import LineSettingsPage from "@/app/(club-app)/club/[clubSlug]/admin/settings/line/page";
++import {
++  default as AccountPage, // 【追加】クラブのマイページ
++} from "@/app/(club-app)/club/[clubSlug]/account/page";
++import {
++  default as LineSettingsPage, // 【追加】OWNER用LINE設定ページ
++} from "@/app/(club-app)/club/[clubSlug]/admin/settings/line/page";
+ import type {
+-  ClubAccessContext,
++  ClubAccessContext, // 【追加】認可成功時に返すデータの型
+ } from "@/app/(club-app)/club/club-membership-authorization";
+ import type {
+-  ClubAccountView,
++  ClubAccountView, // 【追加】クラブアカウントの表示情報の型
+ } from "@/domain/club/account/account-types";
+ 
+ const mocks = vi.hoisted(() => ({
+@@ -34,6 +38,9 @@ const mocks = vi.hoisted(() => ({
+   notFound: vi.fn(),
+   logout: vi.fn(),
+   // 【追加：F07粒度9】Clientのprops接続をPage試験で確認する。
++  // 【追加：F08粒度6】報告フォームとActionの接続を独立に確認する。
++  supportForm: vi.fn(),
++  supportAction: vi.fn(),
+   nameForm: vi.fn(),
+   childForm: vi.fn(),
+   operations: vi.fn(),
+@@ -114,6 +121,14 @@ vi.mock("@/app/(club-app)/club/[clubSlug]/account/actions", () => ({
+   getAttachableChildrenAction: mocks.candidatesAction,
+ }));
+ 
++// 【追加：F08粒度6】フォーム内部と受付処理は専用試験へ分ける。
++vi.mock("@/app/(club-app)/club/[clubSlug]/account/SupportReportForm", () => ({
++  SupportReportForm: mocks.supportForm,
++}));
++vi.mock("@/app/(club-app)/club/[clubSlug]/account/support-actions", () => ({
++  createSupportReportAction: mocks.supportAction,
++}));
 +
-+  const values = buildSupportReportFormValues(formData);
-+  const previousId = (
-+    typeof previousState === "object" &&
-+    previousState !== null &&
-+    !Array.isArray(previousState)
-+  ) ? previousState.requestId : undefined;
-+  const requestId = isRequestId(previousId) ? previousId : createRequestId();
-+  const submittedIds = formData instanceof FormData ? formData.getAll("requestId") : [];
+ const PRIVATE_DETAIL = "private-auth-id raw-error secret-token";
+ const CONTEXT: ClubAccessContext = {
+   userId: "user-a",
+@@ -175,6 +190,8 @@ beforeEach(() => {
+   vi.spyOn(console, "warn").mockImplementation(() => undefined);
+   vi.spyOn(console, "log").mockImplementation(() => undefined);
+   // 【追加：F07粒度9】DOMなし試験ではフォーム本体を展開しない。
++  // 【追加：F08粒度6】Page試験では報告フォームのpropsだけを検証する。
++  mocks.supportForm.mockReturnValue(null);
+   mocks.nameForm.mockReturnValue(null);
+   mocks.childForm.mockReturnValue(null);
+   mocks.operations.mockReturnValue(null);
+@@ -279,6 +296,8 @@ describe("マイページ", () => {
+       mocks.access.mockRejectedValueOnce(error);
+       await expect(page()).rejects.toBe(error);
+       expect(mocks.read).not.toHaveBeenCalled();
++      // 【追加：F08粒度6】認可失敗時には報告フォームも表示しない。
++      expect(mocks.supportForm).not.toHaveBeenCalled();
+     },
+   );
+ 
+@@ -289,6 +308,8 @@ describe("マイページ", () => {
+     },
+     );
+     await expect(page()).rejects.toThrow("NEXT_NOT_FOUND");
++    // 【追加：F08粒度6】所属失効後は報告フォームを接続しない。
++    expect(mocks.supportForm).not.toHaveBeenCalled();
+   },
+   );
+ 
+@@ -435,3 +456,42 @@ it("Pageはフォームごとにstateを作り、IDを認可済みslugへbindす
+   });
+   expect(mocks.childForm.mock.calls[2][0].initialState.requestId).not.toBe(oldCreationId);
+ });
 +
-+  if (
-+    submittedIds.length !== 1 ||
-+    !isRequestId(submittedIds[0]) ||
-+    submittedIds[0] !== previousId
-+  ) {
-+    return errorState(values, requestId, EXPIRED_FORM_MESSAGE);
-+  }
-+
-+  const validation = parseSupportReportFormData(formData);
-+
-+  if (!validation.success) {
-+    return errorState(values, requestId, null, validation.fieldErrors);
-+  }
-+
-+  try {
-+    const headersList = await headers();
-+    const result = await createSupportReport(
-+      access,
-+      requestId,
-+      validation.data,
-+      {
-+        pageUrl: accountPageUrl(access.club.slug),
-+        userAgent: sanitizeSupportUserAgent(headersList.get("user-agent")),
-+      },
-+    );
-+
-+    if (result.outcome !== "ACCEPTED") {
-+      return errorState(values, requestId, SUPPORT_REPORT_FAILED_MESSAGE);
-+    }
-+  } catch (error) {
-+    unstable_rethrow(error);
-+    return errorState(values, requestId, SUPPORT_REPORT_FAILED_MESSAGE);
-+  }
-+
-+  return {
-+    status: "success",
++// 【追加：F08粒度6】本人DTOに依存せず、認可済みslugと独立stateだけを報告フォームへ渡す。
++it.each(["FOUND", "FETCH_FAILED"])("%sでも認可済みの報告フォームを接続する", async (outcome) => {
++  mocks.read.mockResolvedValueOnce({
++    outcome,
++    view: VIEW,
++    message: PRIVATE_DETAIL,
++  });
++  await page();
++  expect(mocks.supportForm).toHaveBeenCalledTimes(1);
++  const support = mocks.supportForm.mock.calls[0][0];
++  expect(Object.keys(support).sort()).toEqual(["action", "initialState"]);
++  expect(support.initialState).toEqual({
++    status: "idle",
 +    values: {
-+      ...SUPPORT_REPORT_INITIAL_VALUES,
++      category: "BUG",
++      message: "",
 +    },
 +    fieldErrors: {},
 +    formError: null,
-+    requestId: createRequestId(),
-+  };
-+}
-diff --git a/tests/support-report-actions.test.ts b/tests/support-report-actions.test.ts
++    requestId: expect.any(String),
++  });
++  expect(JSON.stringify(support)).not.toContain(PRIVATE_DETAIL);
++  const data = new FormData();
++  await support.action(support.initialState, data);
++  expect(mocks.supportAction).toHaveBeenCalledWith(CONTEXT.club.slug, support.initialState, data);
++  if (outcome === "FOUND") {
++    const otherStates = [
++      mocks.nameForm.mock.calls[0][0].initialState,
++      ...mocks.childForm.mock.calls.map((call) => call[0].initialState),
++    ];
++    for (const other of otherStates) {
++      expect(support.initialState.requestId).not.toBe(other.requestId);
++    }
++  } else {
++    expect(mocks.nameForm).not.toHaveBeenCalled();
++    expect(mocks.childForm).not.toHaveBeenCalled();
++  }
++});
+diff --git a/tests/support-report-form.test.ts b/tests/support-report-form.test.ts
 new file mode 100644
-index 0000000..ad6c03c
+index 0000000..1463290
 --- /dev/null
-+++ b/tests/support-report-actions.test.ts
-@@ -0,0 +1,533 @@
-+// tests/support-report-actions.test.ts
-+// Actionを直接呼び、実際の所属認可と入力・ヘッダー・返却状態の境界を検証する。
++++ b/tests/support-report-form.test.ts
+@@ -0,0 +1,504 @@
++// tests/support-report-form.test.ts
++// hook境界を模したnode試験。実DOM保持・focus・native dialogはブラウザー確認へ分ける。
 +
++import {
++  cloneElement,
++  isValidElement,
++  type ReactNode,
++} from "react";
++import { renderToStaticMarkup } from "react-dom/server";
 +import {
 +  afterEach,
 +  beforeEach,
-+  describe,
 +  expect,
 +  it,
 +  vi,
 +} from "vitest";
 +
 +import {
-+  createSupportReportAction, // 認可と入力検証を行いサポート報告を受け付けるServer Action
-+} from "@/app/(club-app)/club/[clubSlug]/account/support-actions";
-+import type {
-+  ClubAccessContext, // 認可成功時に返すデータの型
-+} from "@/app/(club-app)/club/club-membership-authorization";
++  SupportReportForm, // 確認付き送信と成功時の入力resetを行う報告フォームComponent
++} from "@/app/(club-app)/club/[clubSlug]/account/SupportReportForm";
 +import {
-+  ClubFeatureUnavailableError, // プランで対象機能を利用できないことを示すエラークラス
-+} from "@/domain/club/plan-features";
++  AccountNameForm, // アカウント名編集フォームComponent
++} from "@/app/(club-app)/club/[clubSlug]/account/AccountNameForm";
 +import {
-+  SUPPORT_REPORT_FAILED_MESSAGE, // サポート報告の送信失敗メッセージ
++  ChildForm, // 子どもの情報を編集する確認付きフォームComponent
++} from "@/app/(club-app)/club/[clubSlug]/account/ChildForm";
++import {
++  SUPPORT_REPORT_ACCEPTED_MESSAGE, // サポート報告の固定受付完了メッセージ
 +  type SupportReportActionState, // サポート報告のアクションステイトの型
 +} from "@/domain/club/support/support-report-form";
-+import {
-+  DomainError, // ドメイン処理で発生する画面表示可能なエラーのクラス
-+} from "@/domain/shared/domain-error";
-+import {
-+  isRequestId, // 値がUUID v4形式のrequestIdか検証する関数
-+} from "@/domain/shared/request-id";
 +
 +const mocks = vi.hoisted(() => ({
-+  getUser: vi.fn(),
-+  findMembership: vi.fn(),
-+  create: vi.fn(),
-+  headers: vi.fn(),
-+  getHeader: vi.fn(),
-+  redirect: vi.fn(),
-+  notFound: vi.fn(),
-+  rethrow: vi.fn(),
++  state: vi.fn(),
++  ref: vi.fn(),
++  actionState: vi.fn(),
++  id: vi.fn(),
++  effect: vi.fn(),
 +}));
 +
-+// 認可関数とプラン判定は実装を通し、Auth・DB・Service・Nextの境界だけを置換する。
-+vi.mock("@/src/infrastructure/supabase/server", () => ({
-+  createClient: async () => ({
-+    auth: {
-+      getUser: mocks.getUser,
-+    },
++// Reactのhook領域と手動再描画だけを模し、共有の確認hookは実装を通す。
++vi.mock("react", async (original) => ({
++  ...await original<typeof import("react")>(),
++  useState: mocks.state,
++  useRef: mocks.ref,
++  useId: mocks.id,
++  useEffect: mocks.effect,
++  useActionState: mocks.actionState,
++  startTransition: (callback: () => void) => callback(),
++}));
++vi.mock("@/app/(club-app)/club/admin/_hooks/useScrollToFormError", () => ({
++  useScrollToFormError: () => ({
++    current: null,
 +  }),
 +}));
-+vi.mock("@/src/infrastructure/prisma/client", () => ({
-+  prisma: {
-+    clubMembership: {
-+      findFirst: mocks.findMembership,
-+    },
-+  },
-+}));
-+vi.mock("@/src/application/club/support/create-support-report", () => ({
-+  createSupportReport: mocks.create,
-+}));
-+vi.mock("next/headers", () => ({
-+  headers: mocks.headers,
-+}));
-+vi.mock("next/navigation", () => ({
-+  redirect: mocks.redirect,
-+  notFound: mocks.notFound,
-+  unstable_rethrow: mocks.rethrow,
++vi.mock("@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard", () => ({
++  useUnsavedChangesGuard: () => slot(() => {
++    const guard = {
++      dirty: false,
++      markDirty: () => {
++        guard.dirty = true;
++      },
++      markSubmitting: vi.fn(),
++    };
++    guards.push(guard);
++    return guard;
++  }),
 +}));
 +
-+const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
-+const OTHER_ID = "22222222-2222-4222-8222-222222222222";
-+const PRIVATE_DETAIL = "private@example.test private-token private-db-error";
-+const CONTEXT: ClubAccessContext = {
-+  userId: "user-a",
-+  club: {
-+    id: "club-a",
-+    name: "クラブA",
-+    slug: "canonical-club",
-+    timezone: "Asia/Tokyo",
-+    planType: "STANDARD",
-+  },
-+  membership: {
-+    id: "membership-a",
-+    role: "MEMBER",
-+  },
++type Guard = {
++  dirty: boolean;
++  markDirty: () => void;
++  markSubmitting: ReturnType<typeof vi.fn>;
 +};
++let guards: Guard[];
 +
-+// テスト用のNext制御例外。実HTTPのOrigin保護や遷移を再現するものではない。
-+class ControlError extends Error {}
++type Frame = {
++  values: unknown[];
++  cursor: number;
++};
++type Cell = {
++  value: unknown;
++  pending: boolean;
++};
++const frames = new Map<string, Frame>();
++let frame: Frame;
++let tasks: Promise<unknown>[];
++let idNumber: number;
++const NativeFormData = globalThis.FormData;
++const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
++const OTHER_REQUEST_ID = "22222222-2222-4222-8222-222222222222";
 +
-+let currentContext: ClubAccessContext;
-+let membershipStatus: string;
 +
-+// 前stateの入力内容は保存対象にしないため、送信内容と異なる値を用意する。
-+function state(): SupportReportActionState {
++// Componentごとのhook領域を保持する。ReactのschedulerやDOM状態を検証する実装ではない。
++function run<T>(
++  key: string,
++  callback: () => T
++): T {
++  frame = frames.get(key) ?? {
++    values: [],
++    cursor: 0
++  };
++  frame.cursor = 0;
++  frames.set(key, frame);
++  return callback();
++}
++
++// hook呼出し順に値を保存する。
++function slot(initial: () => unknown): unknown {
++  const index = frame.cursor++;
++  if (!(index in frame.values)) {
++    frame.values[index] = initial();
++  }
++  return frame.values[index];
++}
++
++// Component境界を展開し、静的な要素とイベントhandlerだけを取り出す。
++function expand(
++  node: ReactNode,
++  path: string
++): ReactNode {
++  if (Array.isArray(node)) {
++    return node.map((child, index) => expand(child, `${path}/${index}`));
++  }
++  if (!isValidElement<Record<string, unknown>>(node)) {
++    return node;
++  }
++  if (typeof node.type === "function") {
++    const component = node.type as (props: Record<string, unknown>) => ReactNode;
++    const key = `${path}/${component.name}:${node.key ?? ""}`;
++    return expand(run(key, () => component(node.props)), key);
++  }
++  return cloneElement(node, {
++    key: node.key ?? path,
++    children: expand(node.props.children as ReactNode, `${path}/child`),
++  });
++}
++
++// 再描画を明示し、Component間のhook領域を混ぜない。
++function view(
++  component: () => ReactNode,
++  key = "root"
++): ReactNode {
++  return expand(run(key, component), key);
++}
++
++// 静的要素から対象のタグだけを収集する。
++function nodes(
++  node: ReactNode,
++  type: string
++): Record<string, unknown>[] {
++  if (Array.isArray(node)) {
++    return node.flatMap((child) => nodes(child, type));
++  }
++  if (!isValidElement<Record<string, unknown>>(node)) {
++    return [];
++  }
++  return [
++    ...(node.type === type ? [node.props] : []),
++    ...nodes(node.props.children as ReactNode, type),
++  ];
++}
++
++// イベントを発火せず、静的文面だけを取得する。
++function text(node: ReactNode): string {
++  return renderToStaticMarkup(node);
++}
++
++// 文面で確認・キャンセルbuttonを選ぶ。
++function button(
++  tree: ReactNode,
++  label: string
++): Record<string, unknown> {
++  const result = nodes(tree, "button").find((item) => (
++    text(item.children as ReactNode) === label &&
++    typeof item.onClick === "function"
++  ));
++  expect(result).toBeDefined();
++  return result!;
++}
++
++// クリックhandlerだけを直接呼ぶ。ブラウザイベントの伝播は検証しない。
++function click(item: Record<string, unknown>) {
++  (item.onClick as () => void)();
++}
++
++// FormData(form)はDOMの代わりに渡したfixtureを複写する。
++function submit(
++  form: Record<string, unknown>,
++  data: FormData
++) {
++  const preventDefault = vi.fn();
++  (form.onSubmit as (event: unknown) => void)({
++    preventDefault,
++    currentTarget: data,
++  });
++  expect(preventDefault).toHaveBeenCalledOnce();
++}
++
++// 非同期Actionの完了を明示的に待つ。
++async function flush() {
++  while (tasks.length) {
++    await Promise.all(tasks.splice(0));
++  }
++}
++
++beforeEach(() => {
++  vi.resetAllMocks();
++  frames.clear();
++  tasks = [];
++  idNumber = 0;
++  guards = [];
++  vi.spyOn(console, "error").mockImplementation(() => undefined);
++  vi.spyOn(console, "warn").mockImplementation(() => undefined);
++  vi.spyOn(console, "log").mockImplementation(() => undefined);
++  vi.stubGlobal("FormData", class extends NativeFormData {
++    constructor(source?: FormData) {
++      super();
++      if (source) {
++        for (const [key, value] of source.entries()) {
++          this.append(key, value);
++        }
++      }
++    }
++  });
++  mocks.state.mockImplementation((initial) => {
++    const cell = slot(() => ({
++      value: typeof initial === "function" ? initial() : initial,
++    })) as Cell;
++    return [cell.value, (value: unknown) => {
++      cell.value = typeof value === "function" ? value(cell.value) : value;
++    }];
++  });
++  mocks.ref.mockImplementation((initial) => slot(() => ({ current: initial })));
++  mocks.id.mockImplementation(() => slot(() => `field-${++idNumber}`));
++  mocks.actionState.mockImplementation((action, initial) => {
++    const cell = slot(() => ({
++      value: initial,
++      pending: false
++    })) as Cell;
++    return [cell.value, (data: FormData) => {
++      cell.pending = true;
++      tasks.push(Promise.resolve().then(() => action(cell.value, data)).then((value) => {
++        cell.value = value;
++      }).finally(() => {
++        cell.pending = false;
++      }));
++    }, cell.pending];
++  });
++
++});
++
++afterEach(() => {
++  expect(console.error).not.toHaveBeenCalled();
++  expect(console.warn).not.toHaveBeenCalled();
++  expect(console.log).not.toHaveBeenCalled();
++  vi.unstubAllGlobals();
++  vi.restoreAllMocks();
++});
++
++
++// 報告フォームはcategory・messageと固有requestIdだけを初期状態に持つ。
++function initialState(): SupportReportActionState {
 +  return {
 +    status: "idle",
 +    values: {
-+      category: "OTHER",
-+      message: "前stateの本文",
++      category: "BUG",
++      message: "",
 +    },
 +    fieldErrors: {},
 +    formError: null,
@@ -245,428 +651,233 @@ index 0000000..ad6c03c
 +  };
 +}
 +
-+// requestId・category・messageをそれぞれ単一の文字列として送信する。
-+function form(): FormData {
++// 確認対象のsnapshotを作り、DOMの代わりに共有hookへ渡す。
++function reportData(requestId = REQUEST_ID): FormData {
 +  const data = new FormData();
-+  data.set("requestId", REQUEST_ID);
++  data.set("requestId", requestId);
 +  data.set("category", "QUESTION");
-+  data.set("message", "  問い合わせ本文  ");
++  data.set("message", "確認した問い合わせ");
 +  return data;
 +}
 +
-+// 最新のAuth・所属状態を認可クエリの条件と照合し、実DBへ接続しない。
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  currentContext = structuredClone(CONTEXT);
-+  membershipStatus = "ACTIVE";
-+  mocks.getUser.mockResolvedValue({
-+    data: {
-+      user: {
-+        id: CONTEXT.userId,
-+      },
-+    },
-+    error: null,
-+  });
-+  mocks.findMembership.mockImplementation(async ({ where }) => {
-+    if (
-+      where.userId !== currentContext.userId ||
-+      where.club.is.slug !== currentContext.club.slug ||
-+      where.status !== membershipStatus
-+    ) {
-+      return null;
-+    }
-+    return {
-+      ...currentContext.membership,
-+      club: currentContext.club,
-+    };
-+  });
-+  mocks.create.mockResolvedValue({
-+    outcome: "ACCEPTED",
-+  });
-+  mocks.getHeader.mockReturnValue(" テストブラウザ ");
-+  mocks.headers.mockResolvedValue({
-+    get: mocks.getHeader,
-+  });
-+  mocks.redirect.mockImplementation((path) => {
-+    throw new ControlError(path);
-+  });
-+  mocks.notFound.mockImplementation(() => {
-+    throw new ControlError("NEXT_NOT_FOUND");
-+  });
-+  mocks.rethrow.mockImplementation((error) => {
-+    if (error instanceof ControlError) {
-+      throw error;
-+    }
-+  });
-+  vi.spyOn(console, "error").mockImplementation(() => undefined);
-+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
-+  vi.spyOn(console, "log").mockImplementation(() => undefined);
-+});
-+
-+// Actionでの自動再送・生ログ出力・不要なヘッダー取得を検出する。
-+afterEach(() => {
-+  expect(mocks.create.mock.calls.length).toBeLessThanOrEqual(1);
-+  expect(mocks.getUser).toHaveBeenCalledTimes(1);
-+  for (const [name] of mocks.getHeader.mock.calls) {
-+    expect(name).toBe("user-agent");
++// 生のComponent要素からkeyを集める。DOMのマウントそのものは検証しない。
++function componentKeys(node: ReactNode): string[] {
++  if (Array.isArray(node)) {
++    return node.flatMap(componentKeys);
 +  }
-+  expect(console.error).not.toHaveBeenCalled();
-+  expect(console.warn).not.toHaveBeenCalled();
-+  expect(console.log).not.toHaveBeenCalled();
-+  vi.restoreAllMocks();
++  if (!isValidElement<Record<string, unknown>>(node)) {
++    return [];
++  }
++  return [
++    ...(
++      typeof node.type === "function" &&
++      node.key !== null
++        ? [String(node.key)]
++        : []
++    ),
++    ...componentKeys(node.props.children as ReactNode),
++  ];
++}
++
++it("種別4択・本文上限・補足文と、許可したhiddenだけを表示する", () => {
++  const tree = view(() => SupportReportForm({
++    initialState: initialState(),
++    action: vi.fn(),
++  }));
++  expect(nodes(tree, "select")[0].name).toBe("category");
++  expect(nodes(tree, "select")[0].defaultValue).toBe("BUG");
++  expect(nodes(tree, "option").map((item) => item.value)).toEqual([
++    "BUG", "QUESTION", "REQUEST", "OTHER",
++  ]);
++  const message = nodes(tree, "textarea")[0];
++  expect(message.name).toBe("message");
++  expect(message.maxLength).toBe(2000);
++  expect(message.required).toBe(true);
++  expect(text(tree)).toContain("パスワード・認証情報");
++  expect(nodes(tree, "input").map((item) => item.name)).toEqual(["requestId"]);
++  expect(nodes(tree, "form")[0].method).toBe("post");
++  expect(nodes(tree, "form")[0].action).toBeUndefined();
 +});
 +
-+describe("直接呼出し時の認証・認可", () => {
-+  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)(
-+    "利用可能プランのACTIVEな%sは送信できる",
-+    async (role) => {
-+      currentContext.membership.role = role;
-+      const result = await createSupportReportAction(" canonical-club ", state(), form());
-+
-+      expect(result).toEqual({
-+        status: "success",
-+        values: {
-+          category: "BUG",
-+          message: "",
-+        },
-+        fieldErrors: {},
-+        formError: null,
-+        requestId: expect.any(String),
-+      });
-+      expect(isRequestId(result.requestId)).toBe(true);
-+      expect(result.requestId).not.toBe(REQUEST_ID);
-+      expect(mocks.findMembership).toHaveBeenCalledWith(expect.objectContaining({
-+        where: {
-+          userId: CONTEXT.userId,
-+          status: "ACTIVE",
-+          club: {
-+            is: {
-+              slug: CONTEXT.club.slug,
-+            },
-+          },
-+        },
-+      }));
-+      expect(mocks.create).toHaveBeenCalledWith(
-+        currentContext,
-+        REQUEST_ID,
-+        {
-+          category: "QUESTION",
-+          message: "問い合わせ本文",
-+        },
-+        {
-+          pageUrl: "/club/canonical-club/account",
-+          userAgent: "テストブラウザ",
-+        },
-+      );
-+      expect(mocks.redirect).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it.each(["INVITED", "SUSPENDED", "WITHDRAWN"])(
-+    "最新所属が%sなら保存もヘッダー取得もしない",
-+    async (status) => {
-+      membershipStatus = status;
-+      await expect(createSupportReportAction(CONTEXT.club.slug, state(), form()))
-+        .rejects.toThrow("NEXT_NOT_FOUND");
-+      expect(mocks.create).not.toHaveBeenCalled();
-+      expect(mocks.headers).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it.each(["未ログイン", "期限切れセッション"])("%sはログインへ遷移する", async (kind) => {
-+    mocks.getUser.mockResolvedValue({
-+      data: {
-+        user: kind === "未ログイン" ? null : {
-+          id: CONTEXT.userId,
-+        },
-+      },
-+      error: kind === "期限切れセッション" ? new Error(PRIVATE_DETAIL) : null,
-+    });
-+    await expect(createSupportReportAction(CONTEXT.club.slug, state(), form()))
-+      .rejects.toBeInstanceOf(ControlError);
-+    expect(mocks.redirect).toHaveBeenCalledWith("/club-login");
-+    expect(mocks.findMembership).not.toHaveBeenCalled();
-+    expect(mocks.create).not.toHaveBeenCalled();
-+    expect(mocks.headers).not.toHaveBeenCalled();
-+  });
-+
-+  it("他クラブのURLを指定しても所属がなければ拒否する", async () => {
-+    await expect(createSupportReportAction("other-club", state(), form()))
-+      .rejects.toThrow("NEXT_NOT_FOUND");
-+    expect(mocks.create).not.toHaveBeenCalled();
-+    expect(mocks.headers).not.toHaveBeenCalled();
-+  });
-+
-+  it.each(["STARTER", "PRO"] as const)("%sプランを開放しない", async (planType) => {
-+    currentContext.club.planType = planType;
-+    await expect(createSupportReportAction(CONTEXT.club.slug, state(), form()))
-+      .rejects.toBeInstanceOf(ClubFeatureUnavailableError);
-+    expect(mocks.create).not.toHaveBeenCalled();
-+    expect(mocks.headers).not.toHaveBeenCalled();
-+  });
-+});
-+
-+describe("requestIdと前stateの境界", () => {
-+  it.each(["missing", "duplicate", "file", "invalid", "mismatch"])(
-+    "requestId %sをServiceへ渡さない",
-+    async (kind) => {
-+      const data = form();
-+      if (kind === "missing") {
-+        data.delete("requestId");
-+      }
-+      if (kind === "duplicate") {
-+        data.append("requestId", REQUEST_ID);
-+      }
-+      if (kind === "file") {
-+        data.set("requestId", new File(["x"], "request.txt"));
-+      }
-+      if (kind === "invalid") {
-+        data.set("requestId", "invalid");
-+      }
-+      if (kind === "mismatch") {
-+        data.set("requestId", OTHER_ID);
-+      }
-+      const result = await createSupportReportAction(CONTEXT.club.slug, state(), data);
-+      expect(result.status).toBe("error");
-+      expect(result.formError).toBe(
-+        "フォームの有効期限が切れました。ページを開き直してください。",
-+      );
-+      expect(result.requestId).toBe(REQUEST_ID);
-+      expect(mocks.create).not.toHaveBeenCalled();
-+      expect(mocks.headers).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it.each([null, undefined, {}, [], { requestId: PRIVATE_DETAIL }])(
-+    "不正な前stateを反射しない %#",
-+    async (previousState) => {
-+      const result = await createSupportReportAction(
-+        CONTEXT.club.slug,
-+        previousState as SupportReportActionState,
-+        form(),
-+      );
-+      expect(result.status).toBe("error");
-+      expect(isRequestId(result.requestId)).toBe(true);
-+      expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+      expect(mocks.create).not.toHaveBeenCalled();
-+    },
-+  );
-+
-+  it("前stateから採用するのはrequestIdだけで、失敗状態も新たに組み立てる", async () => {
-+    mocks.create.mockResolvedValue({
-+      outcome: "CREATE_FAILED",
-+      cause: PRIVATE_DETAIL,
-+    });
-+    const result = await createSupportReportAction(
-+      CONTEXT.club.slug,
-+      {
-+        ...state(),
-+        values: {
-+          category: "OTHER",
-+          message: PRIVATE_DETAIL,
-+        },
-+        fieldErrors: {
-+          message: [PRIVATE_DETAIL],
-+        },
-+        formError: PRIVATE_DETAIL,
-+        data: PRIVATE_DETAIL,
-+      } as unknown as SupportReportActionState,
-+      form(),
-+    );
-+    expect(result).toEqual({
++it("項目エラーをlabel・aria-describedby・表示IDへ関連付ける", () => {
++  const tree = view(() => SupportReportForm({
++    initialState: {
++      ...initialState(),
 +      status: "error",
 +      values: {
 +        category: "QUESTION",
-+        message: "  問い合わせ本文  ",
++        message: "保持する入力",
 +      },
++      fieldErrors: {
++        category: ["種別エラー"],
++        message: ["本文エラー"],
++      },
++      formError: "固定フォームエラー",
++    },
++    action: vi.fn(),
++  }));
++  const labels = nodes(tree, "label");
++  const category = nodes(tree, "select")[0];
++  const message = nodes(tree, "textarea")[0];
++  expect(labels.map((label) => label.htmlFor)).toEqual([category.id, message.id]);
++  expect(category["aria-invalid"]).toBe(true);
++  expect(message["aria-invalid"]).toBe(true);
++  const errorIds = nodes(tree, "ul").map((item) => item.id);
++  expect(errorIds).toContain(category["aria-describedby"]);
++  expect(String(message["aria-describedby"])).toContain(String(errorIds[1]));
++  expect(text(tree)).toContain("種別エラー");
++  expect(text(tree)).toContain("本文エラー");
++  expect(text(tree)).toContain("固定フォームエラー");
++});
++
++it("確認前は送信せず、確認後にsnapshotを一度だけ送る", async () => {
++  const action = vi.fn().mockResolvedValue({
++    ...initialState(),
++    status: "error",
++  });
++  const render = () => view(() => SupportReportForm({
++    initialState: initialState(),
++    action,
++  }));
++  const data = reportData();
++  submit(nodes(render(), "form")[0], data);
++  expect(action).not.toHaveBeenCalled();
++  data.set("message", "確認後に差し替えた値");
++  const confirming = render();
++  expect(nodes(confirming, "fieldset")[0].disabled).toBe(true);
++  const confirm = button(confirming, "送信する");
++  click(confirm);
++  click(confirm);
++  const pending = render();
++  expect(nodes(pending, "fieldset")[0].disabled).toBe(true);
++  expect(button(pending, "キャンセル").disabled).toBe(true);
++  expect(text(pending)).toContain("送信中…");
++  click(button(pending, "キャンセル"));
++  expect(nodes(render(), "dialog")).toHaveLength(1);
++  await flush();
++  expect(action).toHaveBeenCalledTimes(1);
++  expect(action.mock.calls[0][1].get("message")).toBe("確認した問い合わせ");
++  expect(guards[0].markSubmitting).toHaveBeenCalledTimes(1);
++  expect(nodes(render(), "dialog")).toHaveLength(0);
++});
++
++it("確認キャンセルとエラーでは入力部分のkey・guardを維持する", async () => {
++  const action = vi.fn().mockResolvedValue({
++    ...initialState(),
++    status: "error",
++    values: {
++      category: "QUESTION",
++      message: "確認した問い合わせ",
++    },
++    formError: "固定失敗メッセージ",
++  });
++  const raw = () => run("root", () => SupportReportForm({
++    initialState: initialState(),
++    action,
++  }));
++  const render = () => expand(raw(), "root");
++  const keys = componentKeys(raw());
++  const first = render();
++  (nodes(first, "form")[0].onChange as () => void)();
++  submit(nodes(first, "form")[0], reportData());
++  click(button(render(), "キャンセル"));
++  expect(action).not.toHaveBeenCalled();
++  expect(componentKeys(raw())).toEqual(keys);
++  submit(nodes(render(), "form")[0], reportData());
++  click(button(render(), "送信する"));
++  await flush();
++  expect(componentKeys(raw())).toEqual(keys);
++  const failed = render();
++  expect(nodes(failed, "textarea")[0].defaultValue).toBe("確認した問い合わせ");
++  expect(text(failed)).toContain("固定失敗メッセージ");
++  expect(guards).toHaveLength(1);
++  expect(guards[0].dirty).toBe(true);
++  expect(text(failed)).not.toContain(SUPPORT_REPORT_ACCEPTED_MESSAGE);
++});
++
++it("成功後は新keyで報告入力とguardを作り直し、固定トーストを表示する", async () => {
++  const thirdRequestId = "33333333-3333-4333-8333-333333333333";
++  const action = vi.fn()
++    .mockResolvedValueOnce({
++      ...initialState(),
++      status: "success",
++      requestId: OTHER_REQUEST_ID,
++    })
++    .mockResolvedValueOnce({
++      ...initialState(),
++      status: "success",
++      requestId: thirdRequestId,
++    });
++  const raw = () => run("root", () => SupportReportForm({
++    initialState: initialState(),
++    action,
++  }));
++  const render = () => expand(raw(), "root");
++  for (const requestId of [OTHER_REQUEST_ID, thirdRequestId]) {
++    const tree = render();
++    (nodes(tree, "form")[0].onChange as () => void)();
++    submit(
++      nodes(tree, "form")[0],
++      reportData(nodes(tree, "input")[0].value as string),
++    );
++    click(button(render(), "送信する"));
++    await flush();
++    expect(componentKeys(raw())).toEqual([requestId, requestId]);
++    const success = render();
++    expect(nodes(success, "textarea")[0].defaultValue).toBe("");
++    expect(nodes(success, "select")[0].defaultValue).toBe("BUG");
++    expect(nodes(success, "input")[0].value).toBe(requestId);
++    expect(text(success)).toContain(SUPPORT_REPORT_ACCEPTED_MESSAGE);
++    expect(guards.at(-1)?.dirty).toBe(false);
++  }
++  expect(guards).toHaveLength(3);
++  expect(action.mock.calls[1][0].requestId).toBe(OTHER_REQUEST_ID);
++  expect(action.mock.calls[1][1].get("requestId")).toBe(OTHER_REQUEST_ID);
++});
++
++it("報告成功でも氏名・Childのhook領域・ID・guardを作り直さない", async () => {
++  const idle = initialState();
++  const renderName = () => view(() => AccountNameForm({
++    initialState: {
++      ...idle,
 +      fieldErrors: {},
-+      formError: SUPPORT_REPORT_FAILED_MESSAGE,
-+      requestId: REQUEST_ID,
-+    });
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+  });
-+});
-+
-+describe("入力とサーバーmetadataの境界", () => {
-+  it("hidden・Referer・Host・前stateから所属情報やmetadataを取り込まない", async () => {
-+    const data = form();
-+    for (const name of [
-+      "clubId",
-+      "membershipId",
-+      "userId",
-+      "reporterName",
-+      "reporterEmail",
-+      "reporterRole",
-+      "status",
-+      "notifiedAt",
-+      "notifyError",
-+      "pageUrl",
-+      "userAgent",
-+      "returnTo",
-+    ]) {
-+      data.set(name, PRIVATE_DETAIL);
-+    }
-+    const result = await createSupportReportAction(CONTEXT.club.slug, state(), data);
-+    expect(mocks.create).toHaveBeenCalledWith(
-+      CONTEXT,
-+      REQUEST_ID,
-+      {
-+        category: "QUESTION",
-+        message: "問い合わせ本文",
++      values: {
++        name: "編集中の氏名",
 +      },
-+      {
-+        pageUrl: "/club/canonical-club/account",
-+        userAgent: "テストブラウザ",
-+      },
-+    );
-+    expect(mocks.getHeader).toHaveBeenCalledWith("user-agent");
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+    expect(Object.keys(result.values).sort()).toEqual(["category", "message"]);
-+  });
-+
-+  describe.each(["category", "message"] as const)("%sの単一値検証", (field) => {
-+    it.each(["missing", "duplicate", "file"])("%sを拒否する", async (kind) => {
-+      const data = form();
-+      if (kind === "missing") {
-+        data.delete(field);
-+      }
-+      if (kind === "duplicate") {
-+        data.append(field, data.get(field) as string);
-+      }
-+      if (kind === "file") {
-+        data.set(field, new File(["x"], "input.txt"));
-+      }
-+      const result = await createSupportReportAction(CONTEXT.club.slug, state(), data);
-+      expect(result.status).toBe("error");
-+      expect(result.formError).toBeNull();
-+      expect(result.fieldErrors[field]).toBeDefined();
-+      expect(mocks.create).not.toHaveBeenCalled();
-+      expect(mocks.headers).not.toHaveBeenCalled();
-+    });
-+  });
-+
-+  it.each(["", "INVALID", "bug"])("不正なcategory %sを拒否する", async (category) => {
-+    const data = form();
-+    data.set("category", category);
-+    const result = await createSupportReportAction(CONTEXT.club.slug, state(), data);
-+    expect(result.fieldErrors.category).toEqual(["種別を選択してください。"]);
-+    expect(result.values.category).toBe("BUG");
-+    expect(mocks.create).not.toHaveBeenCalled();
-+  });
-+
-+  it.each(["", "  ", "あ".repeat(2001)])("空欄・長すぎる本文を保存しない %#", async (message) => {
-+    const data = form();
-+    data.set("message", message);
-+    const result = await createSupportReportAction(CONTEXT.club.slug, state(), data);
-+    expect(result.status).toBe("error");
-+    expect(result.fieldErrors.message).toBeDefined();
-+    expect(result.values.message.length).toBeLessThanOrEqual(2000);
-+    expect(mocks.create).not.toHaveBeenCalled();
-+  });
-+
-+  it("trim後2000文字の本文は切り詰めず保存へ渡す", async () => {
-+    const data = form();
-+    data.set("message", ` ${"あ".repeat(2000)} `);
-+    await createSupportReportAction(CONTEXT.club.slug, state(), data);
-+    expect(mocks.create.mock.calls[0][2].message).toBe("あ".repeat(2000));
-+  });
-+
-+  it.each([null, "", "   "])("UAの欠損・空欄はnullにする %#", async (userAgent) => {
-+    mocks.getHeader.mockReturnValue(userAgent);
-+    await createSupportReportAction(CONTEXT.club.slug, state(), form());
-+    expect(mocks.create.mock.calls[0][3].userAgent).toBeNull();
-+  });
-+
-+  it("UAの制御文字と空白を除去し、512文字へ制限する", async () => {
-+    mocks.getHeader.mockReturnValue(` \u0000\r\n${"A".repeat(600)}\u007f `);
-+    await createSupportReportAction(CONTEXT.club.slug, state(), form());
-+    expect(mocks.create.mock.calls[0][3].userAgent).toBe("A".repeat(512));
-+  });
-+
-+  it("URLには認可済みの日本語slugをエンコードして使う", async () => {
-+    currentContext.club.slug = "日本語クラブ";
-+    await createSupportReportAction(currentContext.club.slug, state(), form());
-+    expect(mocks.create.mock.calls[0][3].pageUrl).toBe(
-+      `/club/${encodeURIComponent(currentContext.club.slug)}/account`,
-+    );
-+  });
-+
-+  it.each(["club?token=secret", "club#secret", "../other", "\ud800"])(
-+    "不正なサーバーslugのURLも保存しない %#",
-+    async (slug) => {
-+      currentContext.club.slug = slug;
-+      await createSupportReportAction(slug, state(), form());
-+      expect(mocks.create.mock.calls[0][3].pageUrl).toBeNull();
 +    },
-+  );
-+});
-+
-+describe("固定結果とNext制御例外", () => {
-+  it.each(["FORBIDDEN", "CONFLICT", "CREATE_FAILED", PRIVATE_DETAIL])(
-+    "Serviceの%sを固定フォームエラーへ変換する",
-+    async (outcome) => {
-+      mocks.create.mockResolvedValue({
-+        outcome,
-+        message: PRIVATE_DETAIL,
-+      });
-+      const result = await createSupportReportAction(CONTEXT.club.slug, state(), form());
-+      expect(result.status).toBe("error");
-+      expect(result.formError).toBe(SUPPORT_REPORT_FAILED_MESSAGE);
-+      expect(result.requestId).toBe(REQUEST_ID);
-+      expect(result.values).toEqual({
-+        category: "QUESTION",
-+        message: "  問い合わせ本文  ",
-+      });
-+      expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+    },
-+  );
-+
-+  it.each(["headers", "service"])("%sの一般例外を公開しない", async (stage) => {
-+    const error = new DomainError("INTERNAL", PRIVATE_DETAIL, {
-+      cause: PRIVATE_DETAIL,
-+    });
-+    if (stage === "headers") {
-+      mocks.headers.mockRejectedValue(error);
-+    } else {
-+      mocks.create.mockRejectedValue(error);
-+    }
-+    const result = await createSupportReportAction(CONTEXT.club.slug, state(), form());
-+    expect(result.status).toBe("error");
-+    expect(result.formError).toBe(SUPPORT_REPORT_FAILED_MESSAGE);
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+    expect(mocks.rethrow).toHaveBeenCalledWith(error);
-+  });
-+
-+  it.each(["headers", "service"])("%sのNext制御例外を握りつぶさない", async (stage) => {
-+    const error = new ControlError("NEXT_CONTROL");
-+    if (stage === "headers") {
-+      mocks.headers.mockRejectedValue(error);
-+    } else {
-+      mocks.create.mockRejectedValue(error);
-+    }
-+    await expect(createSupportReportAction(CONTEXT.club.slug, state(), form()))
-+      .rejects.toBe(error);
-+    expect(mocks.rethrow).toHaveBeenCalledWith(error);
-+  });
-+
-+  it("メール失敗を内部に含む受付成功でも通知状態を公開しない", async () => {
-+    mocks.create.mockResolvedValue({
-+      outcome: "ACCEPTED",
-+      notifyError: "EMAIL_SEND_FAILED",
-+      report: {
-+        reporterEmail: PRIVATE_DETAIL,
++    action: vi.fn(),
++  }), "name");
++  const renderChild = () => view(() => ChildForm({
++    initialState: {
++      ...idle,
++      fieldErrors: {},
++      values: {
++        name: "編集中の子ども",
++        grade: "",
 +      },
-+    });
-+    const result = await createSupportReportAction(CONTEXT.club.slug, state(), form());
-+    expect(result.status).toBe("success");
-+    expect(result.values).toEqual({
-+      category: "BUG",
-+      message: "",
-+    });
-+    expect(result.formError).toBeNull();
-+    expect(result).not.toHaveProperty("data");
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
-+    expect(JSON.stringify(result)).not.toContain("EMAIL_SEND_FAILED");
-+    expect(mocks.redirect).not.toHaveBeenCalled();
++    },
++    action: vi.fn(),
++  }), "child");
++  const beforeName = renderName();
++  const beforeChild = renderChild();
++  for (const tree of [beforeName, beforeChild]) {
++    (nodes(tree, "form")[0].onChange as () => void)();
++  }
++  const action = vi.fn().mockResolvedValue({
++    ...idle,
++    status: "success",
++    requestId: OTHER_REQUEST_ID,
 +  });
++  const render = () => view(() => SupportReportForm({
++    initialState: idle,
++    action,
++  }), "support");
++  submit(nodes(render(), "form")[0], reportData());
++  click(button(render(), "送信する"));
++  await flush();
++  render();
++  expect(nodes(renderName(), "input")).toEqual(nodes(beforeName, "input"));
++  expect(nodes(renderChild(), "input")).toEqual(nodes(beforeChild, "input"));
++  expect(guards[0].dirty).toBe(true);
++  expect(guards[1].dirty).toBe(true);
 +});
