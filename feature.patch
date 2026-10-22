@@ -1,883 +1,883 @@
-diff --git a/app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx b/app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx
-new file mode 100644
-index 0000000..e4a1c1b
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx
-@@ -0,0 +1,172 @@
-+// app/(club-app)/club/[clubSlug]/account/SupportReportForm.tsx
-+// 確認後にサポート報告を送信し、成功時は報告入力と未保存ガードだけを初期化する。
-+
-+"use client";
-+
-+import { useId } from "react";
-+
-+import {
-+  FieldErrorList, // 各入力項目のエラーメッセージを表示するComponent
-+} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
-+import {
-+  FormErrorAlert, // フォーム全体のエラーをアラートとして表示するComponent
-+} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
-+import {
-+  useScrollToFormError, // フォームエラー発生時にエラー箇所へ移動するhook
-+} from "@/app/(club-app)/club/admin/_hooks/useScrollToFormError";
-+import {
-+  useUnsavedChangesGuard, // 未保存の入力があるページからの移動を確認するhook
-+} from "@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard";
-+import {
-+  ToastMessage, // 管理画面用のトースト通知を表示するComponent
-+} from "@/components/admin/ToastMessage";
-+import {
-+  SUPPORT_REPORT_ACCEPTED_MESSAGE, // サポート報告の固定受付完了メッセージ
-+  SUPPORT_REPORT_CATEGORY_OPTIONS, // サポート報告のカテゴリ値とラベル一覧
-+  SUPPORT_REPORT_MESSAGE_MAX_LENGTH, // サポート報告本文の最大文字数
-+  type SupportReportActionState, // サポート報告のアクションステイトの型
-+  type SupportReportFormValues, // サポート報告フォームの値の型
-+} from "@/domain/club/support/support-report-form";
-+
-+import {
-+  AccountConfirmDialog, // アカウントページで使う確認ダイアログComponent
-+  useConfirmedAccountForm, // 確認前の入力を保持し、確認後だけ単一送信するhook
-+} from "./AccountConfirmDialog";
-+
-+type Props = {
-+  initialState: SupportReportActionState;
-+  action: (
-+    previousState: SupportReportActionState,
-+    formData: FormData,
-+  ) => Promise<SupportReportActionState>;
-+};
-+
-+type ConfirmedForm = ReturnType<typeof useConfirmedAccountForm<SupportReportFormValues>>;
-+
-+// Actionの状態とトーストは外側に保持し、入力部分だけをrequestIdで再マウントする。
-+export function SupportReportForm({ initialState, action }: Props) {
-+  const form = useConfirmedAccountForm(action, initialState);
-+
-+  return (
-+    <section className="space-y-4 rounded-xl border border-slate-200 bg-white p-5">
-+      <h2 className="text-lg font-bold text-slate-900">不具合・サポート報告</h2>
-+      {form.state.status === "success" ? (
-+        <div role="status">
-+          <ToastMessage
-+            key={form.state.requestId}
-+            message={SUPPORT_REPORT_ACCEPTED_MESSAGE}
-+          />
-+        </div>
-+      ) : null}
-+      <SupportReportFields
-+        key={form.state.requestId}
-+        form={form}
-+      />
-+    </section>
-+  );
-+}
-+
-+// エラー・キャンセルでは入力とガードを維持し、新requestIdの成功後だけ作り直す。
-+function SupportReportFields({ form }: { form: ConfirmedForm }) {
-+  const formRef = useScrollToFormError(form.state);
-+  const guard = useUnsavedChangesGuard(form.pending);
-+  const id = useId();
-+  const categoryId = `${id}-category`;
-+  const categoryErrorId = `${categoryId}-error`;
-+  const messageId = `${id}-message`;
-+  const messageErrorId = `${messageId}-error`;
-+  const hintId = `${id}-hint`;
-+  const categoryHasError = Boolean(form.state.fieldErrors.category?.length);
-+  const messageHasError = Boolean(form.state.fieldErrors.message?.length);
-+
-+  return (
-+    <>
-+      <form
-+        ref={formRef}
-+        method="post"
-+        onSubmit={form.onSubmit}
-+        onChange={guard.markDirty}
-+      >
-+        <fieldset
-+          disabled={
-+            form.pending ||
-+            form.isOpen
-+          }
-+          className="space-y-3"
-+        >
-+          <legend className="font-bold">報告内容</legend>
-+          <input
-+            type="hidden"
-+            name="requestId"
-+            value={form.state.requestId}
-+          />
-+          <FormErrorAlert message={form.state.formError} />
-+          <label
-+            htmlFor={categoryId}
-+            className="block text-sm font-bold"
-+          >種別</label>
-+          <select
-+            id={categoryId}
-+            name="category"
-+            defaultValue={form.state.values.category}
-+            required
-+            aria-invalid={categoryHasError}
-+            aria-describedby={categoryHasError ? categoryErrorId : undefined}
-+            className="w-full rounded-lg border border-slate-300 px-3 py-2"
-+          >
-+            {SUPPORT_REPORT_CATEGORY_OPTIONS.map((option) => (
-+              <option
-+                key={option.value}
-+                value={option.value}
-+              >{option.label}</option>
-+            ))}
-+          </select>
-+          <FieldErrorList
-+            id={categoryErrorId}
-+            errors={form.state.fieldErrors.category}
-+          />
-+          <label
-+            htmlFor={messageId}
-+            className="block text-sm font-bold"
-+          >内容（2000文字以内）</label>
-+          <textarea
-+            id={messageId}
-+            name="message"
-+            defaultValue={form.state.values.message}
-+            maxLength={SUPPORT_REPORT_MESSAGE_MAX_LENGTH}
-+            rows={6}
-+            required
-+            aria-invalid={messageHasError}
-+            aria-describedby={messageHasError ? `${hintId} ${messageErrorId}` : hintId}
-+            className="w-full rounded-lg border border-slate-300 px-3 py-2"
-+          />
-+          <FieldErrorList
-+            id={messageErrorId}
-+            errors={form.state.fieldErrors.message}
-+          />
-+          <p
-+            id={hintId}
-+            className="text-sm text-slate-600"
-+          >パスワード・認証情報や、不要な個人情報は入力しないでください。</p>
-+          <button
-+            type="submit"
-+            className="rounded-lg bg-blue-700 px-4 py-2 text-white disabled:opacity-50"
-+          >
-+            {form.pending ? "送信中…" : "確認して送信"}
-+          </button>
-+        </fieldset>
-+      </form>
-+      <AccountConfirmDialog
-+        isOpen={form.isOpen}
-+        pending={form.pending}
-+        returnFocusRef={form.returnFocusRef}
-+        title="報告を送信しますか？"
-+        confirmLabel="送信する"
-+        onClose={form.close}
-+        onConfirm={() => form.confirm(guard.markSubmitting)}
-+      >
-+        入力した内容を運営者へ送信します。パスワードや不要な個人情報が含まれていないか確認してください。
-+      </AccountConfirmDialog>
-+    </>
-+  );
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/account/page.tsx b/app/(club-app)/club/[clubSlug]/account/page.tsx
-index 8524b22..9d0dc67 100644
---- a/app/(club-app)/club/[clubSlug]/account/page.tsx
-+++ b/app/(club-app)/club/[clubSlug]/account/page.tsx
-@@ -29,12 +29,12 @@ import {
-   ChildMembershipOperations,//props.mode === "add"であれば、メンバーシップに追加する子どもの候補を表示して、追加を実行するためのエリア全体を表示し、違うなら子どものメンバーシップの退会処理のためのフォームを表示する関数
- } from "./ChildMembershipOperations";
- import {
--  addChildToClubAction,
--  createChildAction,
--  getAttachableChildrenAction,
--  updateAccountNameAction,
--  updateChildAction,
--  withdrawChildFromClubAction,
-+  addChildToClubAction, // 【追加】子どもを現在クラブへ追加するAction
-+  createChildAction, // 【追加】子どもの情報を新規保存するAction
-+  getAttachableChildrenAction, // 【追加】現在クラブへ追加可能な子どもの候補を取得するAction
-+  updateAccountNameAction, // 【追加】アカウント名を更新するAction
-+  updateChildAction, // 【追加】子どもの氏名と学年を更新するAction
-+  withdrawChildFromClubAction, // 【追加】子どもを現在クラブから外すAction
- } from "./actions";
- import {
-   getAccountFeedbackMessage,// アカウントに関するURL等の識別子から固定メッセージだけを返す関数
-@@ -53,6 +53,17 @@ import {
-   AccountNavigation,//ログインしているユーザーの「権限（役割）」や「所属クラブ」の状態に合わせて、マイページのメニュー画面を動的に切り替えて表示するナビゲーションコンポーネント
- } from "./AccountNavigation";
- 
-+// 【追加：F08粒度6】報告フォームは本人DTOと独立したstate・Actionへ接続する。
-+import {
-+  SUPPORT_REPORT_INITIAL_VALUES, // 【追加】サポート報告フォームの初期値
-+} from "@/domain/club/support/support-report-form";
-+import {
-+  SupportReportForm, // 【追加】確認付き送信と成功時の入力resetを行う報告フォームComponent
-+} from "./SupportReportForm";
-+import {
-+  createSupportReportAction, // 【追加】認可と入力検証を行いサポート報告を受け付けるAction
-+} from "./support-actions";
-+
- type Props = {
-   params: Promise<{
-     clubSlug: string;
-@@ -74,6 +85,14 @@ export default async function ClubAccountPage({
-   if (result.outcome === "UNAVAILABLE") {
-     notFound();
-   }
-+  // 【追加：F08粒度6】認可後のslugだけで接続し、本人DTOの取得失敗時も報告できる。
-+  const supportForm = (
-+    <SupportReportForm
-+      key={access.club.slug}
-+      initialState={createInitialActionState({ ...SUPPORT_REPORT_INITIAL_VALUES })}
-+      action={createSupportReportAction.bind(null, access.club.slug)}
-+    />
-+  );
-   if (result.outcome !== "FOUND") {
-     return (
-       <section className="space-y-4">
-@@ -84,6 +103,8 @@ export default async function ClubAccountPage({
-         <Link href={`/club/${encodeURIComponent(access.club.slug)}/account`}>
-           マイページを開き直す
-         </Link>
-+        {/* 【追加：F08粒度6】部分的な本人情報を表示せず、報告フォームだけを接続する。 */}
-+        {supportForm}
-       </section>
-     );
-   }
-@@ -188,6 +209,8 @@ export default async function ClubAccountPage({
-           action={addChildToClubAction.bind(null, view.club.slug)}
-         />
-       </section>
-+      {/* 【追加：F08粒度6】既存フォームのstateやkeyを変更せず、報告フォームを追加する。 */}
-+      {supportForm}
-       <AccountNavigation
-         club={view.club}
-         role={view.role}
-diff --git a/tests/club-account-pages.test.ts b/tests/club-account-pages.test.ts
-index 2355c7a..d782680 100644
---- a/tests/club-account-pages.test.ts
-+++ b/tests/club-account-pages.test.ts
-@@ -17,13 +17,17 @@ import {
-   vi,
- } from "vitest";
- 
--import AccountPage from "@/app/(club-app)/club/[clubSlug]/account/page";
--import LineSettingsPage from "@/app/(club-app)/club/[clubSlug]/admin/settings/line/page";
-+import {
-+  default as AccountPage, // 【追加】クラブのマイページ
-+} from "@/app/(club-app)/club/[clubSlug]/account/page";
-+import {
-+  default as LineSettingsPage, // 【追加】OWNER用LINE設定ページ
-+} from "@/app/(club-app)/club/[clubSlug]/admin/settings/line/page";
- import type {
--  ClubAccessContext,
-+  ClubAccessContext, // 【追加】認可成功時に返すデータの型
- } from "@/app/(club-app)/club/club-membership-authorization";
- import type {
--  ClubAccountView,
-+  ClubAccountView, // 【追加】クラブアカウントの表示情報の型
- } from "@/domain/club/account/account-types";
- 
- const mocks = vi.hoisted(() => ({
-@@ -34,6 +38,9 @@ const mocks = vi.hoisted(() => ({
-   notFound: vi.fn(),
-   logout: vi.fn(),
-   // 【追加：F07粒度9】Clientのprops接続をPage試験で確認する。
-+  // 【追加：F08粒度6】報告フォームとActionの接続を独立に確認する。
-+  supportForm: vi.fn(),
-+  supportAction: vi.fn(),
-   nameForm: vi.fn(),
-   childForm: vi.fn(),
-   operations: vi.fn(),
-@@ -114,6 +121,14 @@ vi.mock("@/app/(club-app)/club/[clubSlug]/account/actions", () => ({
-   getAttachableChildrenAction: mocks.candidatesAction,
- }));
- 
-+// 【追加：F08粒度6】フォーム内部と受付処理は専用試験へ分ける。
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/SupportReportForm", () => ({
-+  SupportReportForm: mocks.supportForm,
-+}));
-+vi.mock("@/app/(club-app)/club/[clubSlug]/account/support-actions", () => ({
-+  createSupportReportAction: mocks.supportAction,
-+}));
-+
- const PRIVATE_DETAIL = "private-auth-id raw-error secret-token";
- const CONTEXT: ClubAccessContext = {
-   userId: "user-a",
-@@ -175,6 +190,8 @@ beforeEach(() => {
-   vi.spyOn(console, "warn").mockImplementation(() => undefined);
-   vi.spyOn(console, "log").mockImplementation(() => undefined);
-   // 【追加：F07粒度9】DOMなし試験ではフォーム本体を展開しない。
-+  // 【追加：F08粒度6】Page試験では報告フォームのpropsだけを検証する。
-+  mocks.supportForm.mockReturnValue(null);
-   mocks.nameForm.mockReturnValue(null);
-   mocks.childForm.mockReturnValue(null);
-   mocks.operations.mockReturnValue(null);
-@@ -279,6 +296,8 @@ describe("マイページ", () => {
-       mocks.access.mockRejectedValueOnce(error);
-       await expect(page()).rejects.toBe(error);
-       expect(mocks.read).not.toHaveBeenCalled();
-+      // 【追加：F08粒度6】認可失敗時には報告フォームも表示しない。
-+      expect(mocks.supportForm).not.toHaveBeenCalled();
-     },
-   );
- 
-@@ -289,6 +308,8 @@ describe("マイページ", () => {
-     },
-     );
-     await expect(page()).rejects.toThrow("NEXT_NOT_FOUND");
-+    // 【追加：F08粒度6】所属失効後は報告フォームを接続しない。
-+    expect(mocks.supportForm).not.toHaveBeenCalled();
+diff --git a/package.json b/package.json
+index 05e6bb6..c8e86a3 100644
+--- a/package.json
++++ b/package.json
+@@ -26,7 +26,8 @@
+     "test:club-invitation:recovery": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-invitation-recovery.integration.test.ts",
+     "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts",
+     "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts",
+-    "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts"
++    "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts",
++    "test:support-report:local": "RUN_SUPPORT_REPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/support-report.flow.integration.test.ts"
    },
-   );
- 
-@@ -435,3 +456,42 @@ it("Pageはフォームごとにstateを作り、IDを認可済みslugへbindす
-   });
-   expect(mocks.childForm.mock.calls[2][0].initialState.requestId).not.toBe(oldCreationId);
- });
-+
-+// 【追加：F08粒度6】本人DTOに依存せず、認可済みslugと独立stateだけを報告フォームへ渡す。
-+it.each(["FOUND", "FETCH_FAILED"])("%sでも認可済みの報告フォームを接続する", async (outcome) => {
-+  mocks.read.mockResolvedValueOnce({
-+    outcome,
-+    view: VIEW,
-+    message: PRIVATE_DETAIL,
-+  });
-+  await page();
-+  expect(mocks.supportForm).toHaveBeenCalledTimes(1);
-+  const support = mocks.supportForm.mock.calls[0][0];
-+  expect(Object.keys(support).sort()).toEqual(["action", "initialState"]);
-+  expect(support.initialState).toEqual({
-+    status: "idle",
-+    values: {
-+      category: "BUG",
-+      message: "",
-+    },
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: expect.any(String),
-+  });
-+  expect(JSON.stringify(support)).not.toContain(PRIVATE_DETAIL);
-+  const data = new FormData();
-+  await support.action(support.initialState, data);
-+  expect(mocks.supportAction).toHaveBeenCalledWith(CONTEXT.club.slug, support.initialState, data);
-+  if (outcome === "FOUND") {
-+    const otherStates = [
-+      mocks.nameForm.mock.calls[0][0].initialState,
-+      ...mocks.childForm.mock.calls.map((call) => call[0].initialState),
-+    ];
-+    for (const other of otherStates) {
-+      expect(support.initialState.requestId).not.toBe(other.requestId);
-+    }
-+  } else {
-+    expect(mocks.nameForm).not.toHaveBeenCalled();
-+    expect(mocks.childForm).not.toHaveBeenCalled();
-+  }
-+});
-diff --git a/tests/support-report-form.test.ts b/tests/support-report-form.test.ts
+   "dependencies": {
+     "@axiomhq/js": "^1.8.0",
+diff --git a/tests/support-report.flow.integration.test.ts b/tests/support-report.flow.integration.test.ts
 new file mode 100644
-index 0000000..1463290
+index 0000000..7ebf4c7
 --- /dev/null
-+++ b/tests/support-report-form.test.ts
-@@ -0,0 +1,504 @@
-+// tests/support-report-form.test.ts
-+// hook境界を模したnode試験。実DOM保持・focus・native dialogはブラウザー確認へ分ける。
++++ b/tests/support-report.flow.integration.test.ts
+@@ -0,0 +1,863 @@
++// tests/support-report.flow.integration.test.ts
++// 接続ガード後だけ専用DBへ接続し、実Action・Service・Repositoryとmock SDKを照合する。
 +
++import { AsyncLocalStorage } from "node:async_hooks";
++import { randomUUID } from "node:crypto";
++import type { PrismaClient } from "@prisma/client";
 +import {
-+  cloneElement,
-+  isValidElement,
-+  type ReactNode,
-+} from "react";
-+import { renderToStaticMarkup } from "react-dom/server";
-+import {
++  afterAll,
 +  afterEach,
++  beforeAll,
 +  beforeEach,
++  describe,
 +  expect,
 +  it,
 +  vi,
 +} from "vitest";
 +
++import type {
++  ClubAccessContext, // 認可成功時に返すデータの型
++} from "@/app/(club-app)/club/club-membership-authorization";
 +import {
-+  SupportReportForm, // 確認付き送信と成功時の入力resetを行う報告フォームComponent
-+} from "@/app/(club-app)/club/[clubSlug]/account/SupportReportForm";
-+import {
-+  AccountNameForm, // アカウント名編集フォームComponent
-+} from "@/app/(club-app)/club/[clubSlug]/account/AccountNameForm";
-+import {
-+  ChildForm, // 子どもの情報を編集する確認付きフォームComponent
-+} from "@/app/(club-app)/club/[clubSlug]/account/ChildForm";
-+import {
-+  SUPPORT_REPORT_ACCEPTED_MESSAGE, // サポート報告の固定受付完了メッセージ
-+  type SupportReportActionState, // サポート報告のアクションステイトの型
++  createInitialActionState, // 初期値と新しいrequestIdを持つActionStateを作成する関数
++} from "@/domain/shared/action-state";
++import type {
++  SupportReportActionState, // サポート報告のアクションステイトの型
 +} from "@/domain/club/support/support-report-form";
 +
-+const mocks = vi.hoisted(() => ({
-+  state: vi.fn(),
-+  ref: vi.fn(),
-+  actionState: vi.fn(),
-+  id: vi.fn(),
-+  effect: vi.fn(),
++const mail = vi.hoisted(() => ({
++  send: vi.fn(),
++  adminEmail: "operator@example.test" as string | undefined,
 +}));
++const requests = new AsyncLocalStorage<ClubAccessContext>();
++let client: PrismaClient | undefined;
 +
-+// Reactのhook領域と手動再描画だけを模し、共有の確認hookは実装を通す。
-+vi.mock("react", async (original) => ({
-+  ...await original<typeof import("react")>(),
-+  useState: mocks.state,
-+  useRef: mocks.ref,
-+  useId: mocks.id,
-+  useEffect: mocks.effect,
-+  useActionState: mocks.actionState,
-+  startTransition: (callback: () => void) => callback(),
-+}));
-+vi.mock("@/app/(club-app)/club/admin/_hooks/useScrollToFormError", () => ({
-+  useScrollToFormError: () => ({
-+    current: null,
-+  }),
-+}));
-+vi.mock("@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard", () => ({
-+  useUnsavedChangesGuard: () => slot(() => {
-+    const guard = {
-+      dirty: false,
-+      markDirty: () => {
-+        guard.dirty = true;
-+      },
-+      markSubmitting: vi.fn(),
-+    };
-+    guards.push(guard);
-+    return guard;
-+  }),
-+}));
-+
-+type Guard = {
-+  dirty: boolean;
-+  markDirty: () => void;
-+  markSubmitting: ReturnType<typeof vi.fn>;
++type Environment = Record<string, string | undefined>;
++type Fixture = {
++  clubs: string[];
++  users: string[];
++  reports: Set<string>;
++  a: ClubAccessContext;
++  b: ClubAccessContext;
++  other: ClubAccessContext;
 +};
-+let guards: Guard[];
 +
-+type Frame = {
-+  values: unknown[];
-+  cursor: number;
-+};
-+type Cell = {
-+  value: unknown;
-+  pending: boolean;
-+};
-+const frames = new Map<string, Frame>();
-+let frame: Frame;
-+let tasks: Promise<unknown>[];
-+let idNumber: number;
-+const NativeFormData = globalThis.FormData;
-+const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
-+const OTHER_REQUEST_ID = "22222222-2222-4222-8222-222222222222";
++// 両方の専用flagが揃うまで接続設定を評価しない。
++function enabled(environment: Environment): boolean {
++  return (
++    environment.RUN_SUPPORT_REPORT_TESTS === "1" &&
++    environment.RUN_DB_INTEGRATION_TESTS === "1"
++  );
++}
 +
++// 使い捨て確認済みのloopback専用URLだけを許可し、接続文字列をエラーへ含めない。
++function localConfiguration(environment: Environment): string {
++  try {
++    const url = new URL(environment.DATABASE_URL ?? "invalid");
++    if (
++      !enabled(environment) ||
++      environment.SUPPORT_REPORT_DISPOSABLE !== "1" ||
++      environment.NODE_ENV === "production" ||
++      !["postgres:", "postgresql:"].includes(url.protocol) ||
++      !["localhost", "127.0.0.1"].includes(url.hostname) ||
++      url.port !== "54322" ||
++      url.pathname !== "/postgres" ||
++      url.search !== "" ||
++      url.hash !== "" ||
++      !url.username ||
++      !url.password
++    ) {
++      throw new Error("Invalid configuration");
++    }
++    return url.toString();
++  } catch {
++    throw new Error("F08専用の使い捨てローカルDB設定と明示flagを確認してください。");
++  }
++}
 +
-+// Componentごとのhook領域を保持する。ReactのschedulerやDOM状態を検証する実装ではない。
-+function run<T>(
-+  key: string,
-+  callback: () => T
-+): T {
-+  frame = frames.get(key) ?? {
-+    values: [],
-+    cursor: 0
++// fixture・SQL・SDK例外・設定値をVitestの失敗出力へ展開しない。
++async function safeCheck(operation: () => Promise<void>): Promise<void> {
++  try {
++    await operation();
++  } catch {
++    throw new Error("F08統合確認に失敗しました。対象ケースと実行条件を確認してください。");
++  }
++}
++
++// ガード試験は実環境や環境変数ファイルを使わず、架空の設定だけを評価する。
++function sampleEnvironment(): Environment {
++  return {
++    RUN_SUPPORT_REPORT_TESTS: "1",
++    RUN_DB_INTEGRATION_TESTS: "1",
++    SUPPORT_REPORT_DISPOSABLE: "1",
++    NODE_ENV: "test",
++    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
 +  };
-+  frame.cursor = 0;
-+  frames.set(key, frame);
-+  return callback();
 +}
 +
-+// hook呼出し順に値を保存する。
-+function slot(initial: () => unknown): unknown {
-+  const index = frame.cursor++;
-+  if (!(index in frame.values)) {
-+    frame.values[index] = initial();
-+  }
-+  return frame.values[index];
-+}
++// 共有clientとdotenvを初期化せず、ガード後に生成した専用clientを注入する。
++vi.mock("@/src/infrastructure/prisma/client", () => ({
++  prisma: new Proxy({} as PrismaClient, {
++    get(_target, property) {
++      if (!client) {
++        throw new Error("F08専用clientは未初期化です。");
++      }
++      const value = Reflect.get(client, property);
++      return typeof value === "function" ? value.bind(client) : value;
++    },
++  }),
++}));
 +
-+// Component境界を展開し、静的な要素とイベントhandlerだけを取り出す。
-+function expand(
-+  node: ReactNode,
-+  path: string
-+): ReactNode {
-+  if (Array.isArray(node)) {
-+    return node.map((child, index) => expand(child, `${path}/${index}`));
-+  }
-+  if (!isValidElement<Record<string, unknown>>(node)) {
-+    return node;
-+  }
-+  if (typeof node.type === "function") {
-+    const component = node.type as (props: Record<string, unknown>) => ReactNode;
-+    const key = `${path}/${component.name}:${node.key ?? ""}`;
-+    return expand(run(key, () => component(node.props)), key);
-+  }
-+  return cloneElement(node, {
-+    key: node.key ?? path,
-+    children: expand(node.props.children as ReactNode, `${path}/child`),
++// 共通メール初期化を置換し、実adapterを通しても実SDK・実メールへ到達させない。
++vi.mock("@/lib/mail/resend", () => ({
++  resend: {
++    emails: {
++      send: mail.send,
++    },
++  },
++  get adminEmail() {
++    return mail.adminEmail;
++  },
++  buildMailFrom: () => "F08 fixture <from@example.test>",
++}));
++
++// Authだけをリクエスト単位で置換し、ACTIVE所属の認可は実DBで行う。
++vi.mock("@/src/infrastructure/supabase/server", () => ({
++  createClient: async () => ({
++    auth: {
++      getUser: async () => ({
++        data: {
++          user: requests.getStore() ? {
++            id: requests.getStore()!.userId,
++          } : null,
++        },
++        error: null,
++      }),
++    },
++  }),
++}));
++
++// Nextの制御例外を一般失敗と区別し、Actionで握りつぶされないことを確認する。
++class NextControl extends Error {}
++vi.mock("next/navigation", () => ({
++  redirect: () => {
++    throw new NextControl("F08 test redirect");
++  },
++  notFound: () => {
++    throw new NextControl("F08 test not found");
++  },
++  unstable_rethrow: (error: unknown) => {
++    if (error instanceof NextControl) {
++      throw error;
++    }
++  },
++}));
++vi.mock("next/headers", () => ({
++  headers: async () => new Headers({
++    "user-agent": "F08 test browser",
++  }),
++}));
++
++describe("F08接続ガード（DB・SDK・dotenvなし）", () => {
++  it.each(["RUN_SUPPORT_REPORT_TESTS", "RUN_DB_INTEGRATION_TESTS"])(
++    "%sがなければ接続しない",
++    (flag) => {
++      const environment = sampleEnvironment();
++      delete environment[flag];
++      expect(enabled(environment)).toBe(false);
++      expect(() => localConfiguration(environment)).toThrow("F08専用");
++    },
++  );
++
++  it.each([
++    ["SUPPORT_REPORT_DISPOSABLE", undefined],
++    ["SUPPORT_REPORT_DISPOSABLE", "0"],
++    ["NODE_ENV", "production"],
++    ["DATABASE_URL", undefined],
++    ["DATABASE_URL", "private-secret-invalid-url"],
++    ["DATABASE_URL", "https://fixture:fixture@localhost:54322/postgres"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@remote.test:54322/postgres"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@localhost.remote.test:54322/postgres"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.test"],
++    ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#secret"],
++    ["DATABASE_URL", "postgresql://127.0.0.1:54322/postgres"],
++    ["DATABASE_URL", "postgresql://fixture@127.0.0.1:54322/postgres"],
++  ])("不許可設定を固定エラーで拒否する：%s（%#）", (key, value) => {
++    const environment = sampleEnvironment();
++    environment[key!] = value;
++    expect(() => localConfiguration(environment)).toThrow(
++      "F08専用の使い捨てローカルDB設定と明示flagを確認してください。",
++    );
++    expect(client).toBeUndefined();
++    expect(mail.send).not.toHaveBeenCalled();
 +  });
-+}
 +
-+// 再描画を明示し、Component間のhook領域を混ぜない。
-+function view(
-+  component: () => ReactNode,
-+  key = "root"
-+): ReactNode {
-+  return expand(run(key, component), key);
-+}
-+
-+// 静的要素から対象のタグだけを収集する。
-+function nodes(
-+  node: ReactNode,
-+  type: string
-+): Record<string, unknown>[] {
-+  if (Array.isArray(node)) {
-+    return node.flatMap((child) => nodes(child, type));
-+  }
-+  if (!isValidElement<Record<string, unknown>>(node)) {
-+    return [];
-+  }
-+  return [
-+    ...(node.type === type ? [node.props] : []),
-+    ...nodes(node.props.children as ReactNode, type),
-+  ];
-+}
-+
-+// イベントを発火せず、静的文面だけを取得する。
-+function text(node: ReactNode): string {
-+  return renderToStaticMarkup(node);
-+}
-+
-+// 文面で確認・キャンセルbuttonを選ぶ。
-+function button(
-+  tree: ReactNode,
-+  label: string
-+): Record<string, unknown> {
-+  const result = nodes(tree, "button").find((item) => (
-+    text(item.children as ReactNode) === label &&
-+    typeof item.onClick === "function"
-+  ));
-+  expect(result).toBeDefined();
-+  return result!;
-+}
-+
-+// クリックhandlerだけを直接呼ぶ。ブラウザイベントの伝播は検証しない。
-+function click(item: Record<string, unknown>) {
-+  (item.onClick as () => void)();
-+}
-+
-+// FormData(form)はDOMの代わりに渡したfixtureを複写する。
-+function submit(
-+  form: Record<string, unknown>,
-+  data: FormData
-+) {
-+  const preventDefault = vi.fn();
-+  (form.onSubmit as (event: unknown) => void)({
-+    preventDefault,
-+    currentTarget: data,
++  it.each(["localhost", "127.0.0.1"])("使い捨て確認済み%sだけを許可する", (host) => {
++    const environment = sampleEnvironment();
++    environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
++    expect(localConfiguration(environment)).toBe(environment.DATABASE_URL);
 +  });
-+  expect(preventDefault).toHaveBeenCalledOnce();
-+}
 +
-+// 非同期Actionの完了を明示的に待つ。
-+async function flush() {
-+  while (tasks.length) {
-+    await Promise.all(tasks.splice(0));
-+  }
-+}
++  it("失敗の原文・causeを固定エラーへ残さない", async () => {
++    await expect(safeCheck(async () => {
++      throw new Error("private-secret-database-url");
++    })).rejects.toThrow(
++      "F08統合確認に失敗しました。対象ケースと実行条件を確認してください。",
++    );
++  });
++});
 +
-+beforeEach(() => {
-+  vi.resetAllMocks();
-+  frames.clear();
-+  tasks = [];
-+  idNumber = 0;
-+  guards = [];
-+  vi.spyOn(console, "error").mockImplementation(() => undefined);
-+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
-+  vi.spyOn(console, "log").mockImplementation(() => undefined);
-+  vi.stubGlobal("FormData", class extends NativeFormData {
-+    constructor(source?: FormData) {
-+      super();
-+      if (source) {
-+        for (const [key, value] of source.entries()) {
-+          this.append(key, value);
++const describeDatabase = enabled(process.env) ? describe : describe.skip;
++
++describeDatabase("F08実DBフロー（専用flag未指定時はskip）", () => {
++  let db: PrismaClient;
++  let fixture: Fixture | undefined;
++  let actions: typeof import("@/app/(club-app)/club/[clubSlug]/account/support-actions");
++  let service: typeof import("@/src/application/club/support/create-support-report");
++  let repository: typeof import(
++    "@/src/infrastructure/prisma/repositories/support-report-repository"
++  );
++  const PRIVATE_DETAIL = "private@example.test private-token private-db-error";
++
++  // すべての接続条件の検証後だけSDK・専用client・本体モジュールを初期化する。
++  beforeAll(async () => {
++    await safeCheck(async () => {
++      const connectionString = localConfiguration(process.env);
++      const { PrismaClient: Client } = await import("@prisma/client");
++      const { PrismaPg } = await import("@prisma/adapter-pg");
++      db = new Client({
++        adapter: new PrismaPg({ connectionString }),
++        log: [],
++      });
++      client = db;
++      await db.$connect();
++      actions = await import("@/app/(club-app)/club/[clubSlug]/account/support-actions");
++      service = await import("@/src/application/club/support/create-support-report");
++      repository = await import(
++        "@/src/infrastructure/prisma/repositories/support-report-repository"
++      );
++    });
++  });
++
++  // 書込み前にすべての親UUIDを登録し、fixture作成の途中失敗も限定cleanupする。
++  beforeEach(async () => {
++    fixture = undefined;
++    client = db;
++    vi.spyOn(console, "error").mockImplementation(() => undefined);
++    vi.spyOn(console, "warn").mockImplementation(() => undefined);
++    mail.send.mockReset();
++    mail.adminEmail = "operator@example.test";
++    mail.send.mockResolvedValue({
++      data: {
++        id: "f08-provider-id",
++      },
++      error: null,
++      headers: null,
++    });
++    await safeCheck(async () => {
++      const clubs = [randomUUID(), randomUUID()];
++      const users = [randomUUID(), randomUUID()];
++      // IDはDB作成前に登録し、Authの実アカウントを作成しない。
++      const context = (clubId: string, userId: string): ClubAccessContext => ({
++        userId,
++        club: {
++          id: clubId,
++          name: "F08 fixture",
++          slug: `f08-${clubId}`,
++          timezone: "Asia/Tokyo",
++          planType: "STANDARD",
++        },
++        membership: {
++          id: randomUUID(),
++          role: "MEMBER",
++        },
++      });
++      fixture = {
++        clubs,
++        users,
++        reports: new Set(),
++        a: context(clubs[0], users[0]),
++        b: context(clubs[1], users[0]),
++        other: context(clubs[0], users[1]),
++      };
++      await db.appUser.createMany({
++        data: users.map((id) => ({
++          id,
++          name: "初期氏名",
++          email: `${id}@fixture.example.test`,
++        })),
++      });
++      await db.club.createMany({
++        data: clubs.map((id) => ({
++          id,
++          slug: `f08-${id}`,
++          name: "F08 fixture",
++          planType: "STANDARD",
++        })),
++      });
++      await db.clubMembership.createMany({
++        data: [fixture.a, fixture.b, fixture.other].map((context) => ({
++          id: context.membership.id,
++          clubId: context.club.id,
++          userId: context.userId,
++          role: context.membership.role,
++          status: "ACTIVE",
++        })),
++      });
++    });
++  });
++
++  // この試験が登録したUUIDだけを削除し、全件削除やmigrationは実行しない。
++  afterEach(async () => {
++    vi.restoreAllMocks();
++    client = db;
++    const current = fixture;
++    fixture = undefined;
++    if (!current) {
++      return;
++    }
++    await safeCheck(async () => {
++      try {
++        await db.supportReport.deleteMany({
++          where: {
++            id: {
++              in: [...current.reports],
++            },
++          },
++        });
++      } finally {
++        try {
++          await db.club.deleteMany({
++            where: {
++              id: {
++                in: current.clubs,
++              },
++            },
++          });
++        } finally {
++          await db.appUser.deleteMany({
++            where: {
++              id: {
++                in: current.users,
++              },
++            },
++          });
 +        }
 +      }
-+    }
-+  });
-+  mocks.state.mockImplementation((initial) => {
-+    const cell = slot(() => ({
-+      value: typeof initial === "function" ? initial() : initial,
-+    })) as Cell;
-+    return [cell.value, (value: unknown) => {
-+      cell.value = typeof value === "function" ? value(cell.value) : value;
-+    }];
-+  });
-+  mocks.ref.mockImplementation((initial) => slot(() => ({ current: initial })));
-+  mocks.id.mockImplementation(() => slot(() => `field-${++idNumber}`));
-+  mocks.actionState.mockImplementation((action, initial) => {
-+    const cell = slot(() => ({
-+      value: initial,
-+      pending: false
-+    })) as Cell;
-+    return [cell.value, (data: FormData) => {
-+      cell.pending = true;
-+      tasks.push(Promise.resolve().then(() => action(cell.value, data)).then((value) => {
-+        cell.value = value;
-+      }).finally(() => {
-+        cell.pending = false;
-+      }));
-+    }, cell.pending];
-+  });
-+
-+});
-+
-+afterEach(() => {
-+  expect(console.error).not.toHaveBeenCalled();
-+  expect(console.warn).not.toHaveBeenCalled();
-+  expect(console.log).not.toHaveBeenCalled();
-+  vi.unstubAllGlobals();
-+  vi.restoreAllMocks();
-+});
-+
-+
-+// 報告フォームはcategory・messageと固有requestIdだけを初期状態に持つ。
-+function initialState(): SupportReportActionState {
-+  return {
-+    status: "idle",
-+    values: {
-+      category: "BUG",
-+      message: "",
-+    },
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: REQUEST_ID,
-+  };
-+}
-+
-+// 確認対象のsnapshotを作り、DOMの代わりに共有hookへ渡す。
-+function reportData(requestId = REQUEST_ID): FormData {
-+  const data = new FormData();
-+  data.set("requestId", requestId);
-+  data.set("category", "QUESTION");
-+  data.set("message", "確認した問い合わせ");
-+  return data;
-+}
-+
-+// 生のComponent要素からkeyを集める。DOMのマウントそのものは検証しない。
-+function componentKeys(node: ReactNode): string[] {
-+  if (Array.isArray(node)) {
-+    return node.flatMap(componentKeys);
-+  }
-+  if (!isValidElement<Record<string, unknown>>(node)) {
-+    return [];
-+  }
-+  return [
-+    ...(
-+      typeof node.type === "function" &&
-+      node.key !== null
-+        ? [String(node.key)]
-+        : []
-+    ),
-+    ...componentKeys(node.props.children as ReactNode),
-+  ];
-+}
-+
-+it("種別4択・本文上限・補足文と、許可したhiddenだけを表示する", () => {
-+  const tree = view(() => SupportReportForm({
-+    initialState: initialState(),
-+    action: vi.fn(),
-+  }));
-+  expect(nodes(tree, "select")[0].name).toBe("category");
-+  expect(nodes(tree, "select")[0].defaultValue).toBe("BUG");
-+  expect(nodes(tree, "option").map((item) => item.value)).toEqual([
-+    "BUG", "QUESTION", "REQUEST", "OTHER",
-+  ]);
-+  const message = nodes(tree, "textarea")[0];
-+  expect(message.name).toBe("message");
-+  expect(message.maxLength).toBe(2000);
-+  expect(message.required).toBe(true);
-+  expect(text(tree)).toContain("パスワード・認証情報");
-+  expect(nodes(tree, "input").map((item) => item.name)).toEqual(["requestId"]);
-+  expect(nodes(tree, "form")[0].method).toBe("post");
-+  expect(nodes(tree, "form")[0].action).toBeUndefined();
-+});
-+
-+it("項目エラーをlabel・aria-describedby・表示IDへ関連付ける", () => {
-+  const tree = view(() => SupportReportForm({
-+    initialState: {
-+      ...initialState(),
-+      status: "error",
-+      values: {
-+        category: "QUESTION",
-+        message: "保持する入力",
-+      },
-+      fieldErrors: {
-+        category: ["種別エラー"],
-+        message: ["本文エラー"],
-+      },
-+      formError: "固定フォームエラー",
-+    },
-+    action: vi.fn(),
-+  }));
-+  const labels = nodes(tree, "label");
-+  const category = nodes(tree, "select")[0];
-+  const message = nodes(tree, "textarea")[0];
-+  expect(labels.map((label) => label.htmlFor)).toEqual([category.id, message.id]);
-+  expect(category["aria-invalid"]).toBe(true);
-+  expect(message["aria-invalid"]).toBe(true);
-+  const errorIds = nodes(tree, "ul").map((item) => item.id);
-+  expect(errorIds).toContain(category["aria-describedby"]);
-+  expect(String(message["aria-describedby"])).toContain(String(errorIds[1]));
-+  expect(text(tree)).toContain("種別エラー");
-+  expect(text(tree)).toContain("本文エラー");
-+  expect(text(tree)).toContain("固定フォームエラー");
-+});
-+
-+it("確認前は送信せず、確認後にsnapshotを一度だけ送る", async () => {
-+  const action = vi.fn().mockResolvedValue({
-+    ...initialState(),
-+    status: "error",
-+  });
-+  const render = () => view(() => SupportReportForm({
-+    initialState: initialState(),
-+    action,
-+  }));
-+  const data = reportData();
-+  submit(nodes(render(), "form")[0], data);
-+  expect(action).not.toHaveBeenCalled();
-+  data.set("message", "確認後に差し替えた値");
-+  const confirming = render();
-+  expect(nodes(confirming, "fieldset")[0].disabled).toBe(true);
-+  const confirm = button(confirming, "送信する");
-+  click(confirm);
-+  click(confirm);
-+  const pending = render();
-+  expect(nodes(pending, "fieldset")[0].disabled).toBe(true);
-+  expect(button(pending, "キャンセル").disabled).toBe(true);
-+  expect(text(pending)).toContain("送信中…");
-+  click(button(pending, "キャンセル"));
-+  expect(nodes(render(), "dialog")).toHaveLength(1);
-+  await flush();
-+  expect(action).toHaveBeenCalledTimes(1);
-+  expect(action.mock.calls[0][1].get("message")).toBe("確認した問い合わせ");
-+  expect(guards[0].markSubmitting).toHaveBeenCalledTimes(1);
-+  expect(nodes(render(), "dialog")).toHaveLength(0);
-+});
-+
-+it("確認キャンセルとエラーでは入力部分のkey・guardを維持する", async () => {
-+  const action = vi.fn().mockResolvedValue({
-+    ...initialState(),
-+    status: "error",
-+    values: {
-+      category: "QUESTION",
-+      message: "確認した問い合わせ",
-+    },
-+    formError: "固定失敗メッセージ",
-+  });
-+  const raw = () => run("root", () => SupportReportForm({
-+    initialState: initialState(),
-+    action,
-+  }));
-+  const render = () => expand(raw(), "root");
-+  const keys = componentKeys(raw());
-+  const first = render();
-+  (nodes(first, "form")[0].onChange as () => void)();
-+  submit(nodes(first, "form")[0], reportData());
-+  click(button(render(), "キャンセル"));
-+  expect(action).not.toHaveBeenCalled();
-+  expect(componentKeys(raw())).toEqual(keys);
-+  submit(nodes(render(), "form")[0], reportData());
-+  click(button(render(), "送信する"));
-+  await flush();
-+  expect(componentKeys(raw())).toEqual(keys);
-+  const failed = render();
-+  expect(nodes(failed, "textarea")[0].defaultValue).toBe("確認した問い合わせ");
-+  expect(text(failed)).toContain("固定失敗メッセージ");
-+  expect(guards).toHaveLength(1);
-+  expect(guards[0].dirty).toBe(true);
-+  expect(text(failed)).not.toContain(SUPPORT_REPORT_ACCEPTED_MESSAGE);
-+});
-+
-+it("成功後は新keyで報告入力とguardを作り直し、固定トーストを表示する", async () => {
-+  const thirdRequestId = "33333333-3333-4333-8333-333333333333";
-+  const action = vi.fn()
-+    .mockResolvedValueOnce({
-+      ...initialState(),
-+      status: "success",
-+      requestId: OTHER_REQUEST_ID,
-+    })
-+    .mockResolvedValueOnce({
-+      ...initialState(),
-+      status: "success",
-+      requestId: thirdRequestId,
 +    });
-+  const raw = () => run("root", () => SupportReportForm({
-+    initialState: initialState(),
-+    action,
-+  }));
-+  const render = () => expand(raw(), "root");
-+  for (const requestId of [OTHER_REQUEST_ID, thirdRequestId]) {
-+    const tree = render();
-+    (nodes(tree, "form")[0].onChange as () => void)();
-+    submit(
-+      nodes(tree, "form")[0],
-+      reportData(nodes(tree, "input")[0].value as string),
-+    );
-+    click(button(render(), "送信する"));
-+    await flush();
-+    expect(componentKeys(raw())).toEqual([requestId, requestId]);
-+    const success = render();
-+    expect(nodes(success, "textarea")[0].defaultValue).toBe("");
-+    expect(nodes(success, "select")[0].defaultValue).toBe("BUG");
-+    expect(nodes(success, "input")[0].value).toBe(requestId);
-+    expect(text(success)).toContain(SUPPORT_REPORT_ACCEPTED_MESSAGE);
-+    expect(guards.at(-1)?.dirty).toBe(false);
-+  }
-+  expect(guards).toHaveLength(3);
-+  expect(action.mock.calls[1][0].requestId).toBe(OTHER_REQUEST_ID);
-+  expect(action.mock.calls[1][1].get("requestId")).toBe(OTHER_REQUEST_ID);
-+});
-+
-+it("報告成功でも氏名・Childのhook領域・ID・guardを作り直さない", async () => {
-+  const idle = initialState();
-+  const renderName = () => view(() => AccountNameForm({
-+    initialState: {
-+      ...idle,
-+      fieldErrors: {},
-+      values: {
-+        name: "編集中の氏名",
-+      },
-+    },
-+    action: vi.fn(),
-+  }), "name");
-+  const renderChild = () => view(() => ChildForm({
-+    initialState: {
-+      ...idle,
-+      fieldErrors: {},
-+      values: {
-+        name: "編集中の子ども",
-+        grade: "",
-+      },
-+    },
-+    action: vi.fn(),
-+  }), "child");
-+  const beforeName = renderName();
-+  const beforeChild = renderChild();
-+  for (const tree of [beforeName, beforeChild]) {
-+    (nodes(tree, "form")[0].onChange as () => void)();
-+  }
-+  const action = vi.fn().mockResolvedValue({
-+    ...idle,
-+    status: "success",
-+    requestId: OTHER_REQUEST_ID,
 +  });
-+  const render = () => view(() => SupportReportForm({
-+    initialState: idle,
-+    action,
-+  }), "support");
-+  submit(nodes(render(), "form")[0], reportData());
-+  click(button(render(), "送信する"));
-+  await flush();
-+  render();
-+  expect(nodes(renderName(), "input")).toEqual(nodes(beforeName, "input"));
-+  expect(nodes(renderChild(), "input")).toEqual(nodes(beforeChild, "input"));
-+  expect(guards[0].dirty).toBe(true);
-+  expect(guards[1].dirty).toBe(true);
++
++  // 接続に失敗した場合も専用clientだけを解放する。
++  afterAll(async () => {
++    await safeCheck(async () => {
++      try {
++        await db?.$disconnect();
++      } finally {
++        client = undefined;
++      }
++    });
++  });
++
++  // 各DBケースのSQL・アサーション原文を公開せず、fixture有無も確認する。
++  function databaseCase(label: string, operation: (f: Fixture) => Promise<void>): void {
++    it(label, async () => {
++      await safeCheck(async () => {
++        if (!fixture) {
++          throw new Error("Fixture is unavailable");
++        }
++        await operation(fixture);
++      });
++    }, 20_000);
++  }
++
++  // 受付IDを作成前に登録し、Actionへ渡すstateとFormDataを限定して作る。
++  function submission(f: Fixture) {
++    const state = createInitialActionState({
++      category: "BUG" as const,
++      message: "",
++    });
++    f.reports.add(state.requestId);
++    const data = new FormData();
++    data.set("requestId", state.requestId);
++    data.set("category", "QUESTION");
++    data.set("message", "  F08保存本文  ");
++    return {
++      state,
++      data,
++    };
++  }
++
++  // 実Action・実認可・実Serviceを通し、Authだけをリクエスト単位で置換する。
++  async function invoke(
++    context: ClubAccessContext,
++    request: ReturnType<typeof submission>,
++    slug = context.club.slug,
++  ): Promise<SupportReportActionState> {
++    return requests.run(context, () => actions.createSupportReportAction(
++      slug,
++      request.state,
++      request.data,
++    ));
++  }
++
++  // 生の例外や本文・snapshotを残さず、許可された固定ログだけであることを確認する。
++  function checkSafeLogs(): void {
++    const logs = vi.mocked(console.error).mock.calls;
++    const serialized = JSON.stringify(logs);
++    expect(serialized).not.toContain(PRIVATE_DETAIL);
++    expect(serialized).not.toContain("F08保存本文");
++    expect(serialized).not.toContain("fixture.example.test");
++    for (const [message, context] of logs) {
++      expect(message).toBe("support_report_operation_failed");
++      expect(Object.keys(context).sort()).toEqual([
++        "errorCode", "operation", "requestId", "result",
++      ]);
++    }
++    expect(console.warn).not.toHaveBeenCalled();
++  }
++
++  for (const role of ["OWNER", "COACH", "OFFICER", "MEMBER"] as const) {
++    databaseCase(`ACTIVEな${role}のAction受付・通知成功を永続化する`, async (f) => {
++      await db.clubMembership.update({
++        where: {
++          id: f.a.membership.id,
++        },
++        data: {
++          role,
++        },
++      });
++      const request = submission(f);
++      const result = await invoke(f.a, request);
++      expect(result.status).toBe("success");
++      expect(result.requestId).not.toBe(request.state.requestId);
++      expect(result.values).toEqual({
++        category: "BUG",
++        message: "",
++      });
++      const row = await db.supportReport.findUniqueOrThrow({
++        where: {
++          id: request.state.requestId,
++        },
++      });
++      expect(row).toMatchObject({
++        clubId: f.a.club.id,
++        membershipId: f.a.membership.id,
++        category: "QUESTION",
++        message: "F08保存本文",
++        reporterRole: role,
++        status: "OPEN",
++        pageUrl: `/club/${f.a.club.slug}/account`,
++        userAgent: "F08 test browser",
++        notifyError: null,
++      });
++      expect(row.notifiedAt).toBeInstanceOf(Date);
++      expect(mail.send).toHaveBeenCalledTimes(1);
++      checkSafeLogs();
++    });
++  }
++
++  databaseCase("hiddenの別クラブ・他人・URLを採用せず現在クラブへ保存する", async (f) => {
++    const request = submission(f);
++    for (const field of [
++      "clubId", "membershipId", "reporterName", "reporterEmail", "reporterRole",
++      "pageUrl", "userAgent", "status", "notifiedAt", "notifyError", "returnTo",
++    ]) {
++      request.data.set(field, PRIVATE_DETAIL);
++    }
++    request.data.set("clubId", f.b.club.id);
++    request.data.set("membershipId", f.other.membership.id);
++    expect((await invoke(f.a, request)).status).toBe("success");
++    const row = await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: request.state.requestId,
++      },
++    });
++    expect(row.clubId).toBe(f.a.club.id);
++    expect(row.membershipId).toBe(f.a.membership.id);
++    expect(JSON.stringify(row)).not.toContain(PRIVATE_DETAIL);
++    expect(await db.supportReport.count({
++      where: {
++        clubId: f.b.club.id,
++      },
++    })).toBe(0);
++  });
++
++  databaseCase("最新DBの氏名・email・roleをsnapshotにし、後の編集で変えない", async (f) => {
++    await db.appUser.update({
++      where: {
++        id: f.a.userId,
++      },
++      data: {
++        name: "保存時氏名",
++        email: `${randomUUID()}@snapshot.example.test`,
++      },
++    });
++    await db.clubMembership.update({
++      where: {
++        id: f.a.membership.id,
++      },
++      data: {
++        role: "COACH",
++      },
++    });
++    const request = submission(f);
++    expect(await service.createSupportReport(
++      f.a,
++      request.state.requestId,
++      {
++        category: "QUESTION",
++        message: "F08保存本文",
++      },
++      {
++        pageUrl: `/club/${f.a.club.slug}/account?token=secret#fragment`,
++        userAgent: ` \r\n${"A".repeat(600)} `,
++      },
++    )).toEqual({
++      outcome: "ACCEPTED",
++    });
++    const before = await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: request.state.requestId,
++      },
++    });
++    expect(before.reporterName).toBe("保存時氏名");
++    expect(before.reporterEmail).toContain("@snapshot.example.test");
++    expect(before.reporterRole).toBe("COACH");
++    expect(before.pageUrl).toBe(`/club/${f.a.club.slug}/account`);
++    expect(before.userAgent).toBe("A".repeat(512));
++    await db.appUser.update({
++      where: {
++        id: f.a.userId,
++      },
++      data: {
++        name: "編集後氏名",
++        email: null,
++      },
++    });
++    expect(await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: before.id,
++      },
++    })).toEqual(before);
++  });
++
++  databaseCase("nullの報告者snapshotを維持しreplyToを付けない", async (f) => {
++    await db.appUser.update({
++      where: {
++        id: f.a.userId,
++      },
++      data: {
++        name: null,
++        email: null,
++      },
++    });
++    const request = submission(f);
++    expect((await invoke(f.a, request)).status).toBe("success");
++    const row = await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: request.state.requestId,
++      },
++    });
++    expect(row.reporterName).toBeNull();
++    expect(row.reporterEmail).toBeNull();
++    expect(mail.send.mock.calls[0][0]).not.toHaveProperty("replyTo");
++  });
++
++  for (const status of ["INVITED", "SUSPENDED", "WITHDRAWN"] as const) {
++    databaseCase(`親Membershipが${status}ならActionとRepositoryの両方で拒否する`, async (f) => {
++      await db.clubMembership.update({
++        where: {
++          id: f.a.membership.id,
++        },
++        data: {
++          status,
++        },
++      });
++      const request = submission(f);
++      await expect(invoke(f.a, request)).rejects.toBeInstanceOf(NextControl);
++      expect(await service.createSupportReport(
++        f.a,
++        request.state.requestId,
++        {
++          category: "QUESTION",
++          message: "F08保存本文",
++        },
++        {
++          pageUrl: null,
++          userAgent: null,
++        },
++      )).toEqual({
++        outcome: "FORBIDDEN",
++      });
++      expect(await db.supportReport.count({
++        where: {
++          id: request.state.requestId,
++        },
++      })).toBe(0);
++      expect(mail.send).not.toHaveBeenCalled();
++    });
++  }
++
++  for (const planType of ["STARTER", "PRO"] as const) {
++    databaseCase(`${planType}プランへの変更後は古いcontextでも保存しない`, async (f) => {
++      await db.club.update({
++        where: {
++          id: f.a.club.id,
++        },
++        data: {
++          planType,
++        },
++      });
++      const request = submission(f);
++      await expect(invoke(f.a, request)).rejects.toThrow();
++      expect(await service.createSupportReport(
++        f.a,
++        request.state.requestId,
++        {
++          category: "QUESTION",
++          message: "F08保存本文",
++        },
++        {
++          pageUrl: null,
++          userAgent: null,
++        },
++      )).toEqual({
++        outcome: "FORBIDDEN",
++      });
++      expect(mail.send).not.toHaveBeenCalled();
++    });
++  }
++
++  databaseCase("RepositoryのclubId・会員・本人の不一致を拒否する", async (f) => {
++    const request = submission(f);
++    for (const scope of [
++      {
++        clubId: f.b.club.id,
++        actorMembershipId: f.a.membership.id,
++        userId: f.a.userId,
++      },
++      {
++        clubId: f.a.club.id,
++        actorMembershipId: f.other.membership.id,
++        userId: f.a.userId,
++      },
++    ]) {
++      expect(await repository.createSupportReportForMember({
++        ...scope,
++        requestId: request.state.requestId,
++        category: "QUESTION",
++        message: "F08保存本文",
++        pageUrl: null,
++        userAgent: null,
++      })).toEqual({
++        outcome: "FORBIDDEN",
++      });
++    }
++    await expect(invoke(f.other, request, f.b.club.slug)).rejects.toBeInstanceOf(NextControl);
++    expect(mail.send).not.toHaveBeenCalled();
++  });
++
++  databaseCase("再送と同時作成は1受付・1通知となり、既存snapshotを変えない", async (f) => {
++    const request = submission(f);
++    const results = await Promise.allSettled([
++      invoke(f.a, request),
++      invoke(f.a, request),
++    ]);
++    expect(results.map((result) => result.status === "fulfilled"
++      ? result.value.status
++      : "rejected")).toEqual(["success", "success"]);
++    const before = await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: request.state.requestId,
++      },
++    });
++    expect((await invoke(f.a, request)).status).toBe("success");
++    expect(await db.supportReport.count({
++      where: {
++        id: request.state.requestId,
++      },
++    })).toBe(1);
++    expect(await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: before.id,
++      },
++    })).toEqual(before);
++    expect(mail.send).toHaveBeenCalledTimes(1);
++  });
++
++  databaseCase("同じIDでも別人・別クラブ・内容差は成功や再通知にしない", async (f) => {
++    const request = submission(f);
++    expect((await invoke(f.a, request)).status).toBe("success");
++    expect((await invoke(f.other, request)).status).toBe("error");
++    expect((await invoke(f.b, request)).status).toBe("error");
++    request.data.set("message", "変更された本文");
++    expect((await invoke(f.a, request)).status).toBe("error");
++    expect(mail.send).toHaveBeenCalledTimes(1);
++  });
++
++  databaseCase("既存DBの同一クラブ制約が別クラブ参照を拒否する", async (f) => {
++    const request = submission(f);
++    await expect(db.supportReport.create({
++      data: {
++        id: request.state.requestId,
++        clubId: f.a.club.id,
++        membershipId: f.b.membership.id,
++        message: "不整合テスト",
++      },
++    })).rejects.toThrow();
++    expect(await db.supportReport.count({
++      where: {
++        id: request.state.requestId,
++      },
++    })).toBe(0);
++    expect(mail.send).not.toHaveBeenCalled();
++  });
++
++  databaseCase("DB transaction失敗の注入時は受付を残さず通知しない", async (f) => {
++    client = new Proxy(db, {
++      get(target, property) {
++        if (property === "$transaction") {
++          return async () => {
++            throw new Error(PRIVATE_DETAIL);
++          };
++        }
++        const value = Reflect.get(target, property);
++        return typeof value === "function" ? value.bind(target) : value;
++      },
++    });
++    const request = submission(f);
++    expect((await invoke(f.a, request)).status).toBe("error");
++    expect(await db.supportReport.count({
++      where: {
++        id: request.state.requestId,
++      },
++    })).toBe(0);
++    expect(mail.send).not.toHaveBeenCalled();
++    checkSafeLogs();
++  });
++
++  for (const failure of ["rejected", "unknown", "exception", "configuration"] as const) {
++    databaseCase(`通知${failure}でもAction成功と受付を保持し固定notifyErrorを保存する`, async (f) => {
++      if (failure === "configuration") {
++        mail.adminEmail = undefined;
++      } else if (failure === "exception") {
++        mail.send.mockRejectedValue(new Error(PRIVATE_DETAIL));
++      } else {
++        mail.send.mockResolvedValue({
++          data: null,
++          error: {
++            name: "validation_error",
++            statusCode: failure === "rejected" ? 422 : 503,
++            message: PRIVATE_DETAIL,
++          },
++          headers: {
++            privateValue: PRIVATE_DETAIL,
++          },
++        });
++      }
++      const request = submission(f);
++      const result = await invoke(f.a, request);
++      expect(result.status).toBe("success");
++      expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
++      const row = await db.supportReport.findUniqueOrThrow({
++        where: {
++          id: request.state.requestId,
++        },
++      });
++      const expectedCode = {
++        configuration: "EMAIL_CONFIGURATION_MISSING",
++        rejected: "EMAIL_SEND_FAILED",
++        unknown: "EMAIL_SEND_RESULT_UNKNOWN",
++        exception: "EMAIL_SEND_RESULT_UNKNOWN",
++      }[failure];
++      expect(row.notifyError).toBe(expectedCode);
++      expect(row.notifiedAt).toBeNull();
++      expect(row.message).toBe("F08保存本文");
++      expect(mail.send).toHaveBeenCalledTimes(failure === "configuration" ? 0 : 1);
++      checkSafeLogs();
++      const sendCount = mail.send.mock.calls.length;
++      expect((await invoke(f.a, request)).status).toBe("success");
++      expect(mail.send).toHaveBeenCalledTimes(sendCount);
++    });
++  }
++
++  databaseCase("通知はDB commit後に試行され、結果更新失敗でも受付を維持する", async (f) => {
++    const request = submission(f);
++    mail.send.mockImplementation(async () => {
++      expect(await db.supportReport.count({
++        where: {
++          id: request.state.requestId,
++        },
++      })).toBe(1);
++      client = new Proxy(db, {
++        get(target, property) {
++          if (property === "$transaction") {
++            return async () => {
++              throw new Error(PRIVATE_DETAIL);
++            };
++          }
++          const value = Reflect.get(target, property);
++          return typeof value === "function" ? value.bind(target) : value;
++        },
++      });
++      return {
++        data: {
++          id: "f08-provider-id",
++        },
++        error: null,
++        headers: null,
++      };
++    });
++    expect((await invoke(f.a, request)).status).toBe("success");
++    const row = await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: request.state.requestId,
++      },
++    });
++    expect(row.message).toBe("F08保存本文");
++    expect(row.notifiedAt).toBeNull();
++    expect(row.notifyError).toBeNull();
++    expect(console.error).toHaveBeenCalledWith(
++      "support_report_operation_failed",
++      {
++        requestId: request.state.requestId,
++        operation: "supportReport.recordNotification",
++        result: "UPDATE_FAILED",
++        errorCode: "INTERNAL",
++      },
++    );
++    checkSafeLogs();
++  });
++
++  databaseCase("受付直後にMembershipが削除されてもsnapshotと通知記録を残す", async (f) => {
++    const request = submission(f);
++    mail.send.mockImplementation(async () => {
++      await db.clubMembership.delete({
++        where: {
++          id: f.a.membership.id,
++        },
++      });
++      return {
++        data: {
++          id: "f08-provider-id",
++        },
++        error: null,
++        headers: null,
++      };
++    });
++    expect((await invoke(f.a, request)).status).toBe("success");
++    const row = await db.supportReport.findUniqueOrThrow({
++      where: {
++        id: request.state.requestId,
++      },
++    });
++    expect(row.membershipId).toBeNull();
++    expect(row.reporterName).toBe("初期氏名");
++    expect(row.reporterEmail).toBe(`${f.a.userId}@fixture.example.test`);
++    expect(row.reporterRole).toBe("MEMBER");
++    expect(row.notifiedAt).toBeInstanceOf(Date);
++    checkSafeLogs();
++  });
 +});
