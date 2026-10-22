@@ -9,7 +9,7 @@ import {
 import {
   requireClubAppAccess,//クラブのアプリが使えるか確認する関数
 } from "@/app/(club-app)/club/club-app-authorization";
-// 【追加：F07粒度9】独立した初期stateとフォームを接続する。
+
 import {
   ToastMessage,// 管理画面用のトースト通知（3秒表示して消す）
 } from "@/components/admin/ToastMessage";
