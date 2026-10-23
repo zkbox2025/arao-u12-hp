@@ -1,256 +1,1002 @@
-diff --git a/docs/runbooks/support-report.md b/docs/runbooks/support-report.md
+diff --git a/docs/implementation/phases/F09.md b/docs/implementation/phases/F09.md
+index 76a6857..5266ac7 100644
+--- a/docs/implementation/phases/F09.md
++++ b/docs/implementation/phases/F09.md
+@@ -23,4 +23,29 @@ DEVELOPERまたはSUPPORTが全クラブのSupportReportを管理できるよう
+ 理解する重要箇所
+ - PlatformAdminとClubMembershipが別権限であること
+ - サポート担当者が全クラブ報告を見られる例外の境界
+-- Platform専用layoutとクラブlayoutを分ける理由
+\ No newline at end of file
++- Platform専用layoutとクラブlayoutを分ける理由
++
++【追加】粒度1：管理入力・一覧・結果の契約
++- ユーザー確定事項：内部メモ保存時は対応者を更新する。
++- ユーザー確定事項：statusChangedAt・resolvedAtは実際のstatus変更時だけ更新する。
++  同じstatusの再送は変更なしとして成功し、日時・対応者を維持する。
++- 実変更でRESOLVEDへ入ると、状態変更日時と解決日時を同一のサーバー時刻にする。
++  非RESOLVEDへの実変更ではresolvedAtをnullにする。メモ保存では両日時を維持する。
++- ユーザー確定事項：一覧は1ページ50件。clubId・status・categoryをAND条件で絞り込む。
++- 実装方針：queryは単一文字列のみ。フィルター省略・空欄は全対象、page省略は1。
++  pageは1〜10000の正整数表記のみとし、不正値・配列・重複は全件取得に丸めず拒否する。
++  createdAt降順・id降順のoffset方式。新規投稿によるページ間移動は保証しない。
++- 実装方針：内部メモはtrim後5000 UTF-16コード単位以内。空欄はnull。
++  超過分を切り捨てず拒否する。既存保存値を表示時に切り捨てない。
++  オブジェクト入力の正規化済みnullも許可し、FormDataは単一文字列のみとする。
++- 実装方針：reportIdはUUID、requestIdはUUID v4。いずれも認可の代用にはしない。
++  expectedUpdatedAtはミリ秒付きUTC ISO表記（Date.toISOString形式）で検証する。
++  更新時には最新のSupportReport.updatedAtと比較し、競合はCONFLICTとして返す。
++  同じstatusでも最新権限・対象・versionの確認を省略しない。
++  通知結果保存でもupdatedAtが変わり得るため、競合を無条件再試行しない。
++- 実装方針：statusとメモは別入力・別更新。担当者は認可context、管理日時はサーバー由来。
++  本文・snapshot・所属・クラブ・通知列を管理フォームから更新しない。
++- 結果契約：一覧はFOUNDまたは固定失敗分類、更新はUPDATED/UNCHANGEDまたは固定失敗分類。
++  更新結果は報告ID・versionだけを成功時に返し、本文・メモ・例外原文を返さない。
++- この粒度では純粋な検証・更新方針と型だけを追加する。
++  認可・Repositoryでの原子的更新・Action・画面・再検証への接続は後続粒度で実装する。
+diff --git a/domain/platform/support/support-report-management-form.test.ts b/domain/platform/support/support-report-management-form.test.ts
 new file mode 100644
-index 0000000..73f2c16
+index 0000000..8067f89
 --- /dev/null
-+++ b/docs/runbooks/support-report.md
-@@ -0,0 +1,250 @@
-+<!-- docs/runbooks/support-report.md -->
++++ b/domain/platform/support/support-report-management-form.test.ts
+@@ -0,0 +1,232 @@
++// domain/platform/support/support-report-management-form.test.ts
++// 管理操作の限定入力、メモ境界、version、公開結果の型を確認する。
 +
-+# F08 サポート報告の運用と統合受入
++import {
++  describe,
++  expect,
++  expectTypeOf,
++  it,
++} from "vitest";
 +
-+F08粒度8の手順書です。DB保存を正式な受付、メールを補助通知として扱います。
-+実装済み、単体・mock試験済み、実DB試験済み、ブラウザー・HTTP確認済み、
-+実配送確認済みを分けて記録します。patch適用や単体試験の成功だけで受入完了にしません。
-+この文書の作成では実DB・実Auth・本番設定を変更せず、実メールも送信しません。
++import type {
++  SupportReport, // Prismaのサポート報告モデル型
++} from "@/types/prisma";
++import {
++  isSupportReportVersion, // 更新日時のUTC ISO表記を検証する関数
++  parseSupportReportNoteFormData, // メモFormDataを検証する関数
++  parseSupportReportStatusFormData, // status FormDataを検証する関数
++  SUPPORT_REPORT_NOTE_MAX_LENGTH, // 内部メモのUTF-16単位の最大長
++  validateSupportReportNoteInput, // メモ入力を正規化・検証する関数
++  validateSupportReportStatusInput, // status入力を検証する関数
++  type SupportReportNoteInput, // 検証済みメモ保存入力の型
++  type SupportReportStatusInput, // 検証済みステータス変更入力の型
++} from "./support-report-management-form";
++import type {
++  PlatformSupportReport, // 認可後の管理画面に限定した報告DTOの型
++  PlatformSupportUpdateResult, // 管理更新の固定返却結果型
++} from "./support-report-management-types";
 +
-+## 対象と実装境界
++const identity = {
++  reportId: "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6",
++  requestId: "8c4d5e1f-75ba-47bf-9b72-3129f21a2ac6",
++  expectedUpdatedAt: "2026-10-23T01:02:03.004Z",
++};
 +
-+- 現在の利用可能プランSTANDARDに属するACTIVEなOWNER・COACH・OFFICER・MEMBERが対象です。
-+  STARTER・PROを利用可能にせず、Actionでも認可とプランを再確認します。
-+- categoryはBUG・QUESTION・REQUEST・OTHER。本文はtrim後に空欄を拒否し、
-+  JavaScriptのlengthで2000文字以内とします。表示用の切り詰めと保存前検証は別です。
-+- 保存する本人・クラブ・所属はサーバーから取得します。requestIdの一致は認証の代わりではありません。
-+- pageUrlは送信時の認可済みマイページの相対パスです。直前ページの履歴は取得しません。
-+  query・fragment、hiddenのURL、Referer・Hostを保存先の根拠にしません。
-+- UAはサーバーのheadersから取得し、制御文字除去・trim後に512文字までとします。
-+  UAは偽装できる補助情報で、認可には使いません。
-+- AppUserのname・email、最新Membershipのroleをsnapshot保存します。
-+  name・emailのnullは維持し、Auth emailとの同期・修復は行いません。
-+- F08では受付一覧、Platformの対応操作、通知再送queue・復旧workerを追加しません。
-+  本文・snapshot・statusの手動DB更新を標準運用にしません。
++// 許可された識別値と操作値だけを持つ送信データを作る。
++function form(kind: "status" | "internalNote"): FormData { // 試験用フォーム生成関数 / 操作名の型 / FormData型
++  const data = new FormData(); // フォーム値を保持するFormDataコンストラクター
++  for (const [key, value] of Object.entries(identity)) { // 識別値のキー・値を列挙するメソッド
++    data.set(key, value); // フォーム項目を設定するメソッド
++  }
++  data.set(kind, kind === "status" ? "RESOLVED" : " メモ "); // 操作値を設定するメソッド
++  return data;
++}
 +
-+## ユーザー操作からDBまで
++describe("管理入力の許可列", () => { // 管理入力の試験群を定義する関数とコールバック
++  it.each(["OPEN", "IN_PROGRESS", "ON_HOLD", "RESOLVED"])( // 全statusの試験定義メソッド
++    "%sを許可し、内部列を取り込まない",
++    (status) => { // ステータスごとの試験コールバック
++      const result = validateSupportReportStatusInput({ // ステータス入力を検証する関数
++        ...identity,
++        status,
++        internalNote: "無関係なメモ",
++        handledByPlatformAdminId: "foreign-admin",
++        statusChangedAt: "forged",
++        resolvedAt: "forged",
++        notifyError: "private",
++        clubId: "foreign-club",
++      });
++      expect(result).toEqual({ // 検証結果の期待値生成関数と等値比較メソッド
++        success: true,
++        data: {
++          ...identity,
++          status,
++        },
++      });
++    },
++  );
 +
-+画面・Actionの基点は `app/(club-app)/club/[clubSlug]/account/` です。
-+Serviceは `src/application/club/support/`、Repositoryは
-+`src/infrastructure/prisma/repositories/support-report-repository.ts` です。
++  it("trim済みメモ以外の管理列を採用しない", () => { // メモの限定入力を確認する試験関数とコールバック
++    expect(validateSupportReportNoteInput({ // メモ検証関数と期待値生成関数
++      ...identity,
++      internalNote: "　 メモ\n本文　 ",
++      status: "RESOLVED",
++      handledByPlatformAdminId: "foreign-admin",
++      message: "別本文",
++    })).toEqual({ // 許可列だけの等値比較メソッド
++      success: true,
++      data: {
++        ...identity,
++        internalNote: "メモ\n本文",
++      },
++    });
++  });
 +
-+| 段階 | ファイル・関数、受け取る値と返す値 | DB変更 |
-+| --- | --- | --- |
-+| 表示 | `page.tsx / ClubAccountPage` が認可し、独立初期stateと認可済みslugをbindしたActionを渡す | 読取のみ |
-+| 入力・確認 | `SupportReportForm.tsx / SupportReportForm` → `AccountConfirmDialog.tsx / useConfirmedAccountForm` がcategory・message・requestIdのFormDataを保持し、確認後だけ送信する | なし |
-+| Action | `support-actions.ts / createSupportReportAction` がslug・前state・FormDataを受け、ACTIVE所属、プラン、単一UUID v4のrequestIdと前stateの一致、category・messageを検証する | Service経由 |
-+| metadata | 同Actionが認可済みslugからURLを構築し、`await headers()` のUAだけを取得。`domain/club/support/support-report-metadata.ts` の2関数で安全化する | まだ書き込まない |
-+| 受付 | `create-support-report.ts / createSupportReport` がcontext・requestId・許可入力・metadataを再検証してRepositoryへ渡す | Repository経由 |
-+| 保存 | `createSupportReportForMember` が最新所属・本人・プランを照合し、requestIdをSupportReport.idとして保存。CREATEDのときだけ保存済みDTOを返す | OPENの報告、snapshot、metadataをtransaction内で作成 |
-+| 通知 | `lib/mail/support-report-mail.ts / sendSupportReportEmail` が保存済みDTOを受け、共通Resendへ1回試行。固定結果だけを返す | なし |
-+| 通知記録 | `recordSupportReportNotification` が受付ID・clubId・固定通知結果を受け、RECORDED等の結果を返す | notifiedAt・notifyErrorだけを更新 |
-+| 完了 | Actionがsuccess・BUG・空の本文・新requestIdを返す。フォーム内側だけを新keyで再マウントし、外側に固定トーストを出す | 再保存なし |
++  it.each(["", "　 \t\n", null])("空メモをnullに正規化する %#", (internalNote) => { // 空メモごとの試験メソッドとコールバック
++    expect(validateSupportReportNoteInput({ // メモ入力を検証する関数と期待値生成関数
++      ...identity,
++      internalNote,
++    })).toEqual({ // メモ検証関数と等値比較メソッド
++      success: true,
++      data: {
++        ...identity,
++        internalNote: null,
++      },
++    });
++  });
 +
-+既存account DTOがFETCH_FAILEDでも、認可成功後なら非開示エラーと報告フォームを表示します。
-+UNAVAILABLEはnotFound、未ログインは既存のログイン遷移を維持します。
-+氏名・Childのstateやkey、既存toast、URL、再検証処理をF08の成功で変更しません。
-+このフローに未接続の後続粒度はありません。実環境での受入結果は別途必要です。
++  it("5000文字とUTF-16境界を許可し、超過を切り捨てない", () => { // メモ上限の試験関数とコールバック
++    const valid = "あ".repeat(SUPPORT_REPORT_NOTE_MAX_LENGTH); // 上限長の文字列を生成するメソッド
++    expect(validateSupportReportNoteInput({ // メモ検証関数と期待値生成関数
++      ...identity,
++      internalNote: ` ${valid} `,
++    }).success).toBe(true); // 上限長の成功を比較するメソッド
++    expect(validateSupportReportNoteInput({ // メモ検証関数と期待値生成関数
++      ...identity,
++      internalNote: "😀".repeat(2500), // UTF-16で5000単位の文字列を生成するメソッド
++    }).success).toBe(true); // UTF-16上限の成功を比較するメソッド
++    expect(validateSupportReportNoteInput({ // メモ検証関数と期待値生成関数
++      ...identity,
++      internalNote: `${valid}あ`,
++    }).success).toBe(false); // 超過の拒否を比較するメソッド
++  });
 +
-+## 通知設定の責任と手順
++  it.each([undefined, 0, {}, [], new File(["秘密"], "note.txt")])( // 非文字列の試験定義メソッド / Fileコンストラクター
++    "非文字列メモを拒否する %#",
++    (internalNote) => { // 非文字列メモの試験コールバック
++      expect(validateSupportReportNoteInput({ // メモ入力を検証する関数と期待値生成関数
++        ...identity,
++        internalNote,
++      }).success).toBe(false); // メモ検証関数と拒否の比較メソッド
++    },
++  );
 +
-+運用開始前に以下の担当者名を割り当てて記録します。現在の資料から個人名は確定できません。
++  it.each([undefined, null, [], "input", {}, { // 不正入力ごとの試験を定義するメソッド
++    ...identity,
++    status: "UNKNOWN",
++  }])( // 不正入力ごとの試験定義メソッド
++    "不正status入力を拒否する %#",
++    (input) => { // 不正入力の試験コールバック
++      expect(validateSupportReportStatusInput(input).success).toBe(false); // status検証関数と拒否の比較メソッド
++    },
++  );
 +
-+| 担当 | 設定・確認すること |
-+| --- | --- |
-+| デプロイ設定管理者 | 保護された環境変数設定へRESEND_API_KEY・MAIL_FROM_ADDRESS・ADMIN_EMAILを登録し、対象環境と反映を確認する |
-+| 通知先管理者 | ADMIN_EMAILの受信先、必要な閲覧権限、担当引継ぎと受信確認を管理する |
-+| 受入担当者 | 実メール送信の承認範囲、受信結果、DB受付との対応、未実施事項を記録する |
++  it.each(["reportId", "requestId", "expectedUpdatedAt"] as const)( // 識別項目別の試験メソッド / 読取専用リテラル型
++    "%sを検証する",
++    (field) => { // 識別項目ごとの試験コールバック
++      const result = validateSupportReportStatusInput({ // status入力を検証する関数
++        ...identity,
++        status: "OPEN",
++        [field]: "invalid-private-value",
++      });
++      expect(result.success).toBe(false); // 拒否を比較するメソッド
++      if (!result.success) {
++        expect(Object.keys(result.fieldErrors)).toEqual([field]); // エラー項目を列挙する関数 / 等値比較メソッド
++        expect(JSON.stringify(result)).not.toContain("invalid-private-value"); // JSON文字列化メソッド / 秘密値非反射の検証メソッド
++      }
++    },
++  );
 +
-+| 設定 | 現在のコード上の意味 |
-+| --- | --- |
-+| `RESEND_API_KEY` | `lib/mail/resend.ts` で共通SDKを初期化するAPIキー。本番では既存の起動前検証とモジュール読込で必須 |
-+| `MAIL_FROM_ADDRESS` | 全クラブ共通のFromアドレス。本番は必須。非本番の未設定時はonboarding@resend.devが既存fallback |
-+| `ADMIN_EMAIL` | サポート通知の単一宛先。既存env schemaでは任意だが、通知には有効なアドレスが必要 |
++  it("reportIdはUUID v7も許可するがrequestIdはv4に限定する", () => { // UUID用途の分離を確認する試験関数とコールバック
++    const uuid7 = "7b4d5e1f-75ba-77bf-9b72-3129f21a2ac6";
++    expect(validateSupportReportStatusInput({ // status入力を検証する関数と期待値生成関数
++      ...identity,
++      reportId: uuid7,
++      status: "OPEN",
++    }).success).toBe(true); // 報告IDの許可を比較するメソッド
++    expect(validateSupportReportStatusInput({ // status入力を検証する関数と期待値生成関数
++      ...identity,
++      requestId: uuid7,
++      status: "OPEN",
++    }).success).toBe(false); // requestIdの拒否を比較するメソッド
++  });
++});
 +
-+1. 担当者は対象環境と受信先を確認し、デプロイ先の保護された設定方法で値を登録します。
-+   実値をチャット、コマンド引数、画面写真、公開資料、運用ログへ貼り付けません。
-+2. 共通モジュールは読込時に設定を評価するため、対象環境で必要な再起動・再デプロイを行います。
-+   変更方法や権限は運用先の手順に従います。このrunbookは設定変更を自動実行しません。
-+3. `scripts/validate-env.mjs` の本番要件と起動可否を確認します。
-+   このスクリプトは環境変数ファイルを読み込むため、patch作成時には実行しません。
-+4. 実配送確認は別途承認されたローカル・検証環境だけで行い、結果を後述の記録へ残します。
-+   HPのFormType別通知設定はF08の宛先設定には使いません。
++describe("単一FormData", () => { // FormData改ざんの試験群を定義する関数とコールバック
++  describe.each(["status", "internalNote"] as const)( // 操作別の試験群定義メソッド / 読取専用リテラル型
++    "%sフォーム",
++    (kind) => { // 操作別の試験コールバック
++      const parse = kind === "status" ? parseSupportReportStatusFormData : parseSupportReportNoteFormData; // 各操作用FormData検証関数の参照
++      it("余分な権限・通知・本文を返さない", () => { // 許可列の試験関数とコールバック
++        const data = form(kind); // 試験用フォーム生成関数
++        data.set("handledByPlatformAdminId", "private-admin"); // 余分な項目を設定するメソッド
++        data.set("notifyError", "private-error"); // 余分な通知列を設定するメソッド
++        const result = parse(data); // 操作別のFormData検証関数
++        expect(result.success).toBe(true); // 成功を比較するメソッド
++        if (result.success) {
++          expect(Object.keys(result.data).sort()).toEqual([ // 成功値のキー列挙・整列・等値比較メソッド
++            "expectedUpdatedAt", kind, "reportId", "requestId",
++          ].sort()); // 期待するキーを整列するメソッド
++        }
++      });
++      describe.each(["reportId", "expectedUpdatedAt", "requestId", kind])( // 全必須項目の試験群定義メソッド
++        "%s",
++        (field) => { // 項目別の試験コールバック
++          it.each(["missing", "duplicate", "file"])( // 改ざん種別ごとの試験定義メソッド
++            "%sを成功値へ変換しない",
++            (mode) => { // 改ざん種別ごとの試験コールバック
++              const data = form(kind); // 試験用フォーム生成関数
++              if (mode === "missing") {
++                data.delete(field); // 必須項目を削除するメソッド
++              } else if (mode === "duplicate") {
++                data.append(field, String(data.get(field))); // 同名値を追加・文字列化・取得するメソッド
++              } else {
++                data.set(field, new File(["private"], "input.txt")); // File項目の設定メソッドとコンストラクター
++              }
++              expect(parse(data).success).toBe(false); // 操作別検証関数と拒否の比較メソッド
++            },
++          );
++        },
++      );
++      it("FormData以外を固定エラーにする", () => { // 不正入力全体の試験関数とコールバック
++        expect(parse(null as unknown as FormData).success).toBe(false); // 検証関数 / 不明値とFormDataへの意図的な型アサーション / 比較メソッド
++      });
++    },
++  );
++});
 +
-+Fromは `buildMailFrom(report.clubName)` で表示名を安全化し、アドレスは共通設定を使います。
-+reporterEmailは検証後のreplyToに限定し、null・不正なら省略します。
-+通知本文には保存済み本文・snapshotが含まれるため、運営者の受信箱も閲覧を制限します。
++describe("versionと型の境界", () => { // 日時・型契約の試験群を定義する関数とコールバック
++  it.each([ // 不正日時の試験定義メソッド
++    "2026-02-30T01:02:03.004Z", "2026-10-23T25:02:03.004Z",
++    "2026-10-23T01:02:03Z", "2026-10-23T01:02:03.004+00:00",
++    "invalid", "", null, new Date(), // Dateを作るコンストラクター
++  ])("不正versionを拒否する %#", (value) => { // 不正日時の試験コールバック
++    expect(isSupportReportVersion(value)).toBe(false); // version検証関数と比較メソッド
++  });
 +
-+メール設定不備を稼働中のadapterが捕捉できれば、DB受付後は通知失敗として扱います。
-+一方、起動前のenv検証で本番必須設定が不足していればアプリ自体が起動できません。
-+「キー未設定でも必ずアプリが稼働する」とは扱いません。
++  it("UTC ISO文字列を許可する", () => { // 正規日時の試験関数とコールバック
++    expect(isSupportReportVersion(identity.expectedUpdatedAt)).toBe(true); // version検証関数と比較メソッド
++    expect(isSupportReportVersion("2024-02-29T00:00:00.000Z")).toBe(true); // うるう日検証関数と比較メソッド
++  });
 +
-+## 受付と通知障害の切り分け
++  it("入力と公開更新結果に管理列・本文を混ぜない", () => { // 型による非開示境界の試験関数とコールバック
++    expectTypeOf<keyof SupportReportStatusInput>() // status入力のキー型を検査する関数
++      .toEqualTypeOf<"reportId" | "requestId" | "expectedUpdatedAt" | "status">(); // 許可キー型との一致を検証するメソッド
++    expectTypeOf<SupportReportNoteInput["internalNote"]>() // 正規化メモの型を検査する関数
++      .toEqualTypeOf<SupportReport["internalNote"]>(); // DBのメモnullable型との一致を検証するメソッド
++    expectTypeOf<keyof Extract<PlatformSupportUpdateResult, { outcome: "UPDATED" | "UNCHANGED" }>>() // 更新成功結果のキー型を抽出・検査する関数
++      .toEqualTypeOf<"outcome" | "reportId" | "updatedAt">(); // 公開結果の許可キー型との一致を検証するメソッド
++    expectTypeOf<Extract<keyof PlatformSupportReport, "notifyError" | "membershipId">>() // 管理DTOの不要キー型を抽出・検査する関数
++      .toEqualTypeOf<never>(); // 不要キーが存在しないnever型を検証するメソッド
++  });
++});
+diff --git a/domain/platform/support/support-report-management-form.ts b/domain/platform/support/support-report-management-form.ts
+new file mode 100644
+index 0000000..b91f66b
+--- /dev/null
++++ b/domain/platform/support/support-report-management-form.ts
+@@ -0,0 +1,196 @@
++// domain/platform/support/support-report-management-form.ts
++// 管理用status・メモを別々に検証し、担当者・日時・通知列の入力を排除する。
 +
-+SupportReportの存在が受付の正本です。通知メールの有無だけで受付失敗と判定しません。
++import {
++  isRequestId, // UUID v4形式のrequestIdを検証する関数。認証・認可には使わない
++} from "@/domain/shared/request-id";
++import type {
++  SupportReportStatus, // サポート報告ステータスの型
++} from "@/types/prisma";
++import type {
++  SupportManagementValidation, // 検証済み値と項目別エラーを分ける型
++} from "./support-report-management-types";
++import {
++  isSupportReportIdentifier, // 報告・クラブIDのUUID形式を検証する関数
++  isSupportReportStatus, // 報告ステータスを検証する関数
++} from "./support-report-query";
 +
-+| DBの通知状態 | 読み取れることと対応 |
-+| --- | --- |
-+| notifiedAtあり・notifyError=null | SDKが有効な受付IDを返し、成功記録が保存された。受信者への配送完了は未証明 |
-+| EMAIL_CONFIGURATION_MISSING | 宛先の未設定・不正、共通メールモジュール初期化失敗等。設定担当へ確認する |
-+| EMAIL_SEND_FAILED | 明確な拒否または送信前の生成失敗等。固定コードから対象段階を確認する |
-+| EMAIL_SEND_RESULT_UNKNOWN | 通信例外・timeout等、結果を確定できない。未送信とは断定しない |
-+| notifiedAt=null・notifyError=null | 受付直後、処理中断、通知結果保存不能等を区別できない。未送信の証明にはならない |
++export const SUPPORT_REPORT_NOTE_MAX_LENGTH = 5000;
 +
-+- DB commit後にプロセスが停止すると、通知や結果保存、利用者への応答が完了しない場合があります。
-+- 通知結果のDB更新が不能なら、notifyErrorの永続化も保証できません。
-+  安全なログは試みますが、ログ基盤自体の障害でも失われ得ます。
-+- notifiedAtは配送時刻ではなく、provider受付を記録した時刻です。
-+  `support-report/{report.id}` の冪等キーだけで完全な重複配送防止は保証しません。
-+- 同じ本人・元所属・内容の再送はALREADY_ACCEPTEDとして成功へ統一し、通知を再試行しません。
-+  別人・別クラブ・内容差の同一IDは成功扱いにしません。
++export type SupportReportUpdateIdentity = { // 管理操作の識別値の型。権限情報を含めない
++  reportId: string; // 対象報告IDの文字列型
++  expectedUpdatedAt: string; // 画面取得時の更新日時を表すUTC ISO文字列型
++  requestId: string; // 追跡用UUID v4の文字列型
++};
 +
-+調査は次の順で行います。
++export type SupportReportStatusInput = SupportReportUpdateIdentity & { // 識別値と更新先ステータスを結合した型
++  status: SupportReportStatus; // 許可された報告ステータスの型
++};
 +
-+1. 承認済みの読取手段で、対象クラブと元の受付IDに対応する報告の存在・通知状態を確認します。
-+   成功後の画面hiddenは次回用の新requestIdであり、元の受付IDとは異なります。
-+2. 元の受付IDをログのrequestIdと照合します。固定operationは `supportReport.create`、
-+   `supportReport.notify`、`supportReport.recordNotification` です。
-+   通知コードやNOT_FOUND・UPDATE_FAILEDはresult、共通分類はerrorCodeに記録します。
-+3. 本文・氏名・email・URL・UA・Cookie・token・SDK headers・例外原文を調査ログへ転記しません。
-+   日付、対象ケース、受付の有無、固定コード、対応担当と確認結果だけを残します。
-+4. 通知失敗を理由に利用者へ再送を依頼しません。応答不明時も先にDB受付を調査します。
-+   新requestIdを発行しての再送や、DBの通知列の手動更新を復旧の標準手順にしません。
-+5. 再通知が必要な場合は別途承認・設計の対象として記録します。
-+   F08には復旧worker・再送コマンド・Platform対応操作はありません。
++export type SupportReportNoteInput = SupportReportUpdateIdentity & { // 識別値と正規化メモを結合した型
++  internalNote: string | null; // trim済みメモの文字列または空欄のnull型
++};
 +
-+## DBなしの自動回帰
++export type SupportReportManagementField = keyof SupportReportUpdateIdentity | // 識別値のキーを含む項目名の型
++  "status" | "internalNote"; // 操作固有の項目名リテラル型
 +
-+実DB用flagを未設定にした環境で、次の対象だけを実行します。
-+`npm run verify`・`verify:local`・既存 `test:db` はこの確認の代用にしません。
-+環境変数ファイルや実接続設定は読み込みません。
++type IdentityValidation = SupportManagementValidation< // 識別値の成功・失敗を分ける検証結果型
++  SupportReportUpdateIdentity, // 管理操作の識別値の型
++  SupportReportManagementField // 管理操作の項目名の型
++>;
 +
-+```sh
-+npm test -- \
-+  domain/club/support \
-+  src/application/club/support \
-+  tests/support-report-repository.test.ts \
-+  tests/support-report-actions.test.ts \
-+  tests/support-report-form.test.ts \
-+  tests/support-report.flow.integration.test.ts \
-+  tests/club-membership-authorization.test.ts \
-+  domain/club/plan-features.test.ts \
-+  src/infrastructure/logging/sanitize-log-context.test.ts \
-+  lib/mail/support-report-mail.test.ts \
-+  lib/mail/club-invitation-mail.test.ts \
-+  tests/club-account-pages.test.ts \
-+  tests/club-account-forms.test.ts
-+```
++// 非配列のオブジェクトだけを、未知の値を持つ辞書として読む。
++function inputRecord( // 不明入力を辞書化する関数
++  input: unknown, // 外部からの不明値型
++): Record<string, unknown> { // 文字列キーと不明値の辞書型
++  return (
++    typeof input === "object" &&
++    input !== null &&
++    !Array.isArray(input) // 配列判定メソッド
++  ) ? input as Record<string, unknown> // 文字列キーと不明値の辞書型
++    : {};
++}
 +
-+接続ガード19件は架空の設定だけを使い、実DBケース23件は専用flagが未指定ならskipします。
-+関数直接試験はHTTP Origin保護を証明しません。フォームのnode試験はhook境界を模しており、
-+実DOM保持・native dialog・focus・ブラウザー履歴・beforeunloadの実証にはしません。
++// DBのミリ秒精度に合わせ、実在するUTC ISO表記だけを受け付ける。
++export function isSupportReportVersion(value: unknown): value is string { // 更新日時検証関数 / 不明値型 / 文字列型述語
++  if (
++    typeof value !== "string" ||
++    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) // ISO表記を判定する正規表現メソッド
++  ) {
++    return false;
++  }
++  const date = new Date(value); // UTC日時文字列からDateを作るコンストラクター
++  return (
++    Number.isFinite(date.getTime()) && // 有限値判定とミリ秒取得メソッド
++    date.toISOString() === value // UTC ISO文字列化メソッド
++  );
++}
 +
-+## 使い捨てDBでの専用統合試験
++// 識別値の検証は権限確認とは分離し、固定の項目エラーだけを返す。
++function validateIdentity( // 管理操作の識別値を検証する関数
++  record: Record<string, unknown>, // 文字列キーと不明値の辞書型
++): IdentityValidation { // 識別値の検証結果型
++  const fieldErrors: Partial<Record<SupportReportManagementField, string[]>> = {}; // 管理項目別の部分エラー辞書型
++  if (!isSupportReportIdentifier(record.reportId)) { // 報告IDのUUID検証関数
++    fieldErrors.reportId = ["報告の指定が不正です。"];
++  }
++  if (!isSupportReportVersion(record.expectedUpdatedAt)) { // 更新日時のUTC ISO検証関数
++    fieldErrors.expectedUpdatedAt = ["更新日時が不正です。再読込してください。"];
++  }
++  if (!isRequestId(record.requestId)) { // 追跡用UUID v4の検証関数
++    fieldErrors.requestId = ["操作の識別値が不正です。再読込してください。"];
++  }
++  if (Object.keys(fieldErrors).length > 0) { // エラー項目名を列挙するメソッド
++    return {
++      success: false,
++      fieldErrors,
++    };
++  }
++  return {
++    success: true,
++    data: {
++      reportId: record.reportId as string, // 検証済み報告IDの文字列型
++      expectedUpdatedAt: record.expectedUpdatedAt as string, // 検証済みUTC ISO日時の文字列型
++      requestId: record.requestId as string, // 検証済みUUID v4の文字列型
++    },
++  };
++}
 +
-+1. 日常の開発データ・本番データを含まない、破棄できる専用ローカルDBを用意します。
-+2. 既存migrationの適用を担当者が確認します。試験はmigration・seed・resetを実行しません。
-+   SupportReportの同一クラブ参照制約とMembership削除時のSetNullも検証対象です。
-+3. loopbackがリモートDBへのトンネルやproxyではないことを確認します。
-+   URL検査だけで転送先や使い捨て状態は証明できません。
-+4. 接続設定は承認された方法でプロセス環境へ渡し、URL・資格情報を公開しません。
-+   使い捨てを確認した担当者だけが `SUPPORT_REPORT_DISPOSABLE=1` を設定します。
++// status専用の許可入力だけを構築し、メモを含めない。
++export function validateSupportReportStatusInput( // ステータス変更入力を検証する関数
++  input: unknown, // 外部からの不明値型
++): SupportManagementValidation<SupportReportStatusInput, SupportReportManagementField> { // ステータス変更の検証結果型
++  const record = inputRecord(input); // 不明入力を辞書化する関数
++  const identity = validateIdentity(record); // 識別値を検証する関数
++  if (!identity.success) {
++    return identity;
++  }
++  if (!isSupportReportStatus(record.status)) { // 報告ステータスの検証関数
++    return {
++      success: false,
++      fieldErrors: { status: ["ステータスを選択してください。"] },
++    };
++  }
++  return {
++    success: true,
++    data: {
++      ...identity.data,
++      status: record.status,
++    },
++  };
++}
 +
-+| 条件 | 許可する値・用途 |
-+| --- | --- |
-+| DATABASE_URL | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、ユーザー名・PWあり。query・fragmentなし |
-+| NODE_ENV | production以外 |
-+| SUPPORT_REPORT_DISPOSABLE | 担当者の確認後に設定する1 |
-+| RUN_SUPPORT_REPORT_TESTS・RUN_DB_INTEGRATION_TESTS | 両方1が必要。専用scriptが設定する |
++// メモ専用入力をtrimし、空欄はnullに正規化する。超過分を切り捨てない。
++export function validateSupportReportNoteInput( // 内部メモ保存入力を検証する関数
++  input: unknown, // 外部からの不明値型
++): SupportManagementValidation<SupportReportNoteInput, SupportReportManagementField> { // 内部メモ保存の検証結果型
++  const record = inputRecord(input); // 不明入力を辞書化する関数
++  const identity = validateIdentity(record); // 識別値を検証する関数
++  if (!identity.success) {
++    return identity;
++  }
++  if (
++    typeof record.internalNote !== "string" &&
++    record.internalNote !== null
++  ) {
++    return {
++      success: false,
++      fieldErrors: { internalNote: ["内部メモが不正です。"] },
++    };
++  }
++  const internalNote = typeof record.internalNote === "string"
++    ? record.internalNote.trim() // メモ前後の空白を除去するメソッド
++    : null;
++  if (
++    internalNote !== null &&
++    internalNote.length > SUPPORT_REPORT_NOTE_MAX_LENGTH
++  ) {
++    return {
++      success: false,
++      fieldErrors: { internalNote: ["内部メモは5000文字以内で入力してください。"] },
++    };
++  }
++  return {
++    success: true,
++    data: {
++      ...identity.data,
++      internalNote: internalNote || null,
++    },
++  };
++}
 +
-+すべての前提を満たす環境で、次の専用コマンドだけを実行します。
++// 欠落・重複・Fileを、文字列の成功値に変換しない。
++function singleString( // フォームから単一文字列だけを読み取る関数
++  formData: FormData, // 送信値を保持するFormData型
++  field: SupportReportManagementField, // 管理操作の項目名の型
++): string | undefined { // 文字列または未定義の型
++  const entries = formData instanceof FormData ? formData.getAll(field) : []; // FormDataの型確認と同名項目取得メソッド
++  return (
++    entries.length === 1 &&
++    typeof entries[0] === "string"
++  ) ? entries[0] : undefined;
++}
 +
-+```sh
-+npm run test:support-report:local
-+```
++// statusフォームから許可した4項目だけを検証する。
++export function parseSupportReportStatusFormData( // ステータスFormDataを検証する関数
++  formData: FormData, // ブラウザー送信値を保持するFormData型
++): SupportManagementValidation<SupportReportStatusInput, SupportReportManagementField> { // ステータス変更の検証結果型
++  return validateSupportReportStatusInput({ // ステータス専用入力の検証関数
++    reportId: singleString(formData, "reportId"), // 単一文字列を取得する関数
++    expectedUpdatedAt: singleString(formData, "expectedUpdatedAt"), // 単一文字列を取得する関数
++    requestId: singleString(formData, "requestId"), // 単一文字列を取得する関数
++    status: singleString(formData, "status"), // 単一文字列を取得する関数
++  });
++}
 +
-+専用scriptは当該ファイルだけを実行し、dotenvを自動読込しません。
-+両flagがあっても設定が不正なら接続前に固定エラーで失敗します。ガードを緩和しません。
-+共有clientを初期化せず、ガード後に作った専用Prisma clientを注入します。
++// メモフォームから許可した4項目だけを検証する。
++export function parseSupportReportNoteFormData( // 内部メモFormDataを検証する関数
++  formData: FormData, // ブラウザー送信値を保持するFormData型
++): SupportManagementValidation<SupportReportNoteInput, SupportReportManagementField> { // 内部メモ保存の検証結果型
++  return validateSupportReportNoteInput({ // 内部メモ専用入力の検証関数
++    reportId: singleString(formData, "reportId"), // 単一文字列を取得する関数
++    expectedUpdatedAt: singleString(formData, "expectedUpdatedAt"), // 単一文字列を取得する関数
++    requestId: singleString(formData, "requestId"), // 単一文字列を取得する関数
++    internalNote: singleString(formData, "internalNote"), // 単一文字列を取得する関数
++  });
++}
+diff --git a/domain/platform/support/support-report-management-policy.test.ts b/domain/platform/support/support-report-management-policy.test.ts
+new file mode 100644
+index 0000000..b9f2b18
+--- /dev/null
++++ b/domain/platform/support/support-report-management-policy.test.ts
+@@ -0,0 +1,82 @@
++// domain/platform/support/support-report-management-policy.test.ts
++// 全状態遷移と、メモ保存による日時・通知列の不変を確認する。
 +
-+23ケースでは4ロール、A/Bクラブ・他人、所属失効・利用不可プラン、最新snapshotとnull、
-+同じIDの再送・同時作成・内容差、DB保存失敗、通知失敗・不明、通知結果更新失敗、
-+受付直後のMembership削除とsnapshot保持を確認します。
-+AuthとNextの境界、共通ResendのSDKをmockし、Action・認可のDB照合・Service・Repositoryは実装を通します。
-+実Authユーザーや実メールは使いません。実配送やHTTP経由の保護は別試験です。
-+transaction障害の注入と、実SQLのunique・参照制約・同時作成の確認は分けて記録します。
-+同時開始は特定SQL順序や特定の競合コードの発生を強制するものではありません。
++import {
++  describe,
++  expect,
++  expectTypeOf,
++  it,
++} from "vitest";
 +
-+fixtureのUUIDは作成前に登録し、その報告・クラブ・AppUserだけをcleanupします。
-+全件削除・truncateは行いません。途中失敗・強制終了では残存し得るため、担当者が専用環境で確認します。
-+失敗出力へDB・SDKの原文や設定値を追加せず、ケース名・固定エラーと理由を記録します。
++import {
++  buildSupportReportNoteUpdate, // メモと対応者の限定更新列を構築する純粋関数
++  buildSupportReportStatusUpdate, // 同statusの非更新または状態更新列を構築する純粋関数
++  type SupportReportNoteUpdate, // メモ保存の限定更新列の型
++  type SupportReportStatusUpdate, // ステータス実変更の限定更新列の型
++} from "./support-report-management-policy";
++import {
++  SUPPORT_REPORT_STATUS_OPTIONS, // 報告ステータスの値と表示ラベル一覧
++} from "./support-report-query";
 +
-+## ブラウザーでの受入
++const actorId = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
++const now = new Date("2026-10-23T01:02:03.004Z"); // 試験用サーバー日時のDateコンストラクター
 +
-+使い捨てのAuthアカウントとクラブA/Bを別途用意します。
-+専用DB試験のfixtureはAuthユーザーを作らないため、そのままログイン用途には使えません。
-+送信操作は事前承認した検証環境だけで実施します。実メール未承認時は、ADMIN_EMAIL未設定等の
-+SDK送信へ到達しない条件を使うか、送信操作自体をskipし理由を残します。
++describe("ステータス遷移", () => { // 遷移の試験群を定義する関数とコールバック
++  describe.each(SUPPORT_REPORT_STATUS_OPTIONS)( // 遷移元ごとの試験群定義メソッド
++    "$valueから",
++    (current) => { // 遷移元を試験するコールバック
++      it.each(SUPPORT_REPORT_STATUS_OPTIONS)( // 遷移先ごとの試験定義メソッド
++        "$valueへの変更だけで状態日時を更新する",
++        (next) => { // 遷移先を試験するコールバック
++          const result = buildSupportReportStatusUpdate(current.value, next.value, actorId, now); // 状態更新列を構築する純粋関数
++          if (current.value === next.value) {
++            expect(result).toEqual({ outcome: "UNCHANGED" }); // 同statusで更新列を持たないことの等値比較メソッド
++            return;
++          }
++          expect(result).toEqual({ // 実変更の等値比較メソッド
++            outcome: "UPDATED",
++            data: {
++              status: next.value,
++              handledByPlatformAdminId: actorId,
++              statusChangedAt: now,
++              resolvedAt: next.value === "RESOLVED" ? now : null,
++            },
++          });
++          if (result.outcome === "UPDATED") {
++            expect(result.data.statusChangedAt).not.toBe(now); // 入力日時を参照共有しないことの比較メソッド
++            result.data.statusChangedAt.setUTCFullYear(2000); // 返却日時を変更するメソッド
++            expect(now.toISOString()).toBe("2026-10-23T01:02:03.004Z"); // 入力日時をUTC ISO化して不変を検証するメソッド
++            if (result.data.resolvedAt) {
++              expect(result.data.resolvedAt.toISOString()).toBe(now.toISOString()); // 解決日時も参照共有しないことをUTC ISOで比較するメソッド
++            }
++          }
++        },
++      );
++    },
++  );
 +
-+| 観点 | 操作と期待結果 |
-+| --- | --- |
-+| 全ロール | STANDARDのACTIVEな4ロールで表示・送信できる。OWNER限定にしない |
-+| 認可 | 未ログインはログインへ遷移。別クラブ・非ACTIVE・利用不可プランでは表示・直接送信を拒否する |
-+| 取得失敗 | account DTOのFETCH_FAILED時も非開示エラーと報告フォームを表示し、本人情報を漏らさない。UNAVAILABLE時は表示しない |
-+| 入力 | 種別4択、本文必須、2000文字上限、パスワード・不要な個人情報を入力しない補足文を確認する |
-+| 確認 | 送信ボタンでは確認を開くだけ。キャンセルで送信せず、種別・本文を保持。確定後だけ送信する |
-+| Esc・focus | dialogの見出し、初期focus、Tab/Shift+Tab、Escとキャンセル、閉じた後のfocus復帰を確認する |
-+| pending | 通信遅延中の連打・再確認・Esc・キャンセルを試し、二重送信や閉じる操作が起きないことを確認する |
-+| エラー | 種別・本文のエラー表示と関連付け、最初のエラーへのfocus移動、本文保持を確認する |
-+| 成功 | 本文が空、種別がBUG、新requestIdになり、固定受付トーストが表示される。次の成功でも再表示される |
-+| F07との独立 | 氏名・複数Childの未保存入力を用意して報告を送る。それらの入力・state・エラーをresetしない |
-+| 未保存ガード | 報告編集中の離脱警告、キャンセル・失敗後の警告、成功後の報告guard初期化を確認する。F07のdirty状態は維持する |
-+| 戻る・再読込 | 確認中・送信後に戻る/再読込を試し、意図しないPOST再送や重複受付がないことをDBと照合する |
-+| 通知障害 | 未設定宛先等の承認済み障害条件でDB受付が残り、画面は受付成功・reset・固定トーストとなる |
-+| 情報非開示 | Client propsは初期stateとbind済みAction、hiddenはrequestIdだけ。報告者snapshot・生URL・UA・内部通知状態を追加しない |
++  it("不正な現在日時では実変更列を構築しない", () => { // 不正日時の試験関数とコールバック
++    expect(() => buildSupportReportStatusUpdate( // 例外検証のコールバックと状態更新列構築関数
++      "OPEN",
++      "RESOLVED",
++      actorId,
++      new Date("invalid"), // 無効なDateを作るコンストラクター
++    )).toThrow("状態変更日時が不正です。"); // 固定エラーだけを検証するメソッド
++  });
++});
 +
-+通知例外・結果更新不能はまず専用DB試験の障害注入で確認します。
-+ブラウザー側で同条件を安全に用意できない場合はskipし、mock試験成功で代替済みにしません。
++describe("内部メモの限定更新", () => { // メモ更新の試験群を定義する関数とコールバック
++  it.each(["対応を確認中", "", null])("%sでも状態日時を返さず対応者を更新する", (note) => { // メモ別の試験定義メソッドとコールバック
++    expect(buildSupportReportNoteUpdate(note, actorId)).toEqual({ // メモ更新列構築関数 / 等値比較メソッド
++      internalNote: note,
++      handledByPlatformAdminId: actorId,
++    });
++  });
 +
-+## HTTPでの直接呼出しと入力改ざん
++  it("更新型を管理対象の列だけに制限する", () => { // 更新列の型境界を確認する試験関数とコールバック
++    expectTypeOf<keyof SupportReportStatusUpdate>() // 状態更新列のキー型を検査する関数
++      .toEqualTypeOf<"status" | "handledByPlatformAdminId" | "statusChangedAt" | "resolvedAt">(); // 状態更新の許可キー型を検証するメソッド
++    expectTypeOf<keyof SupportReportNoteUpdate>() // メモ更新列のキー型を検査する関数
++      .toEqualTypeOf<"internalNote" | "handledByPlatformAdminId">(); // メモと対応者だけのキー型を検証するメソッド
++  });
++});
+diff --git a/domain/platform/support/support-report-management-policy.ts b/domain/platform/support/support-report-management-policy.ts
+new file mode 100644
+index 0000000..1513a35
+--- /dev/null
++++ b/domain/platform/support/support-report-management-policy.ts
+@@ -0,0 +1,62 @@
++// domain/platform/support/support-report-management-policy.ts
++// 検証・認可後に使用する、管理列だけの更新方針。DB操作や権限付与は行わない。
 +
-+使い捨て環境で、正常なリクエストと対象fixtureのDB状態を先に確認します。
-+認証Cookie、現在のAction ID、認証ヘッダー、リクエスト本文を公開資料や結果ログへ保存しません。
-+Action IDを文書へ固定しません。
++import type {
++  SupportReportStatus, // サポート報告ステータスの型
++} from "@/types/prisma";
 +
-+1. 正常リクエストの複製でOriginだけをforeign Originへ変更します。
-+   Nextが拒否し、対象DBに書込みがないことを確認します。応答の結果を記録し、固定のHTTP番号を推測しません。
-+2. 正常OriginではhiddenのclubId・membershipId・reporterName/Email/Role・status・notifiedAt・
-+   notifyError・pageUrl・userAgent・returnToを変更し、他クラブ保存・snapshot偽装・外部遷移がないことを確認します。
-+3. requestIdの欠損・重複・File・不正形式・前stateとの不一致、category/messageの欠損・重複・File・
-+   不正カテゴリ・空欄・trim後2001文字を送信し、保存されず固定エラーとなることを確認します。
-+4. 表示後にMembershipを失効させた送信も拒否されることを確認します。
-+5. マイページのquery・fragmentやhidden URLへ検証用の架空tokenを加えても、DBのpageUrlには
-+   認可済みマイページ相対パスだけが残ることを確認します。実tokenは使いません。
-+6. HTTPクライアントから長い検証用UAを送り、DBは512文字以内となることを確認します。
-+   HTTP層が拒否する制御文字の試験と、純粋関数での制御文字除去は区別します。
-+7. `next.config.ts` のServer Actions bodySizeLimitは既存の12mbです。
-+   リクエスト全体の上限と本文2000文字の検証は別です。既存設定を緩めず、上限超過時の非保存を確認します。
++export type SupportReportStatusUpdate = { // ステータス実変更時だけ書き込む列の型
++  status: SupportReportStatus; // 新しい報告ステータスの型
++  handledByPlatformAdminId: string; // 認可contextから取得する対応者IDの文字列型
++  statusChangedAt: Date; // 実変更のサーバー日時を保持するDate型
++  resolvedAt: Date | null; // 解決日時を保持するDateまたはnull型
++};
 +
-+allowedDevOriginsをServer Actionsのforeign Origin許可と混同しません。
-+HTTP拒否・Cookie・Next実行環境は関数直接試験の対象外なので、別の証跡を残します。
++export type SupportReportNoteUpdate = { // 内部メモ保存時だけ書き込む列の型
++  internalNote: string | null; // 正規化済みメモの文字列またはnull型
++  handledByPlatformAdminId: string; // 認可contextから取得する対応者IDの文字列型
++};
 +
-+## 結果記録と受入保留
++export type SupportReportStatusDecision = // 同statusの非更新と、実変更の限定列を分ける型
++  | {
++      outcome: "UNCHANGED"; // 同statusで更新しないリテラル型
++  }
++  | {
++      outcome: "UPDATED"; // 実status変更を示すリテラル型
++      data: SupportReportStatusUpdate; // ステータス更新列の型
++  };
 +
-+基準は `feat/club-app-foundation`、コミット
-+`586c45945c0faba09230e6292efdfab4b3a1054c` です。
++// 認可・入力検証・version照合は呼出し元の責務。同statusでは日時・担当者を維持する。
++export function buildSupportReportStatusUpdate( // ステータス更新列を構築する純粋関数
++  currentStatus: SupportReportStatus, // 現在の報告ステータスの型
++  nextStatus: SupportReportStatus, // 更新先の報告ステータスの型
++  actorId: string, // 認可済み対応者IDの文字列型
++  now: Date, // 呼出し元が渡すサーバー現在日時のDate型
++): SupportReportStatusDecision { // 非更新または限定更新列の判定結果型
++  if (currentStatus === nextStatus) {
++    return { outcome: "UNCHANGED" };
++  }
++  if (!Number.isFinite(now.getTime())) { // 有限値判定とDateのミリ秒取得メソッド
++    throw new RangeError("状態変更日時が不正です。"); // 固定エラーを生成するRangeErrorコンストラクター
++  }
++  return {
++    outcome: "UPDATED",
++    data: {
++      status: nextStatus,
++      handledByPlatformAdminId: actorId,
++      statusChangedAt: new Date(now.getTime()), // サーバー日時を複製するDateコンストラクターとミリ秒取得メソッド
++      resolvedAt: nextStatus === "RESOLVED" ? new Date(now.getTime()) : null, // 解決日時を複製するDateコンストラクターとミリ秒取得メソッド
++    },
++  };
++}
 +
-+| 区分 | 本patch作成時点の結果・理由 |
-+| --- | --- |
-+| 通常単体・mock・既存回帰 | pass。一時環境で上記14ファイル、429件成功。接続flagを除いて実行 |
-+| 専用接続ガード | pass。上記429件に含む19件。実設定を使わず確認 |
-+| 実DB統合 | skip。23件。実DB変更を行わない条件のため、永続化・実制約・競合・cleanupの実動作は未確認 |
-+| 実Auth・ブラウザー | skip。使い捨てログイン環境での操作は未実施 |
-+| HTTP・foreign Origin | skip。実HTTP送信は未実施 |
-+| 実配送 | skip。実メール送信は未承認・未実施。provider受付を配送確認へ読み替えない |
-+| F08受入完了 | 保留。未実施項目の確認結果が必要 |
++// メモ保存は対応者だけを併せて更新し、status・状態日時・解決日時を返さない。
++export function buildSupportReportNoteUpdate( // メモの限定更新列を構築する純粋関数
++  internalNote: string | null, // 検証・正規化済みメモの文字列またはnull型
++  actorId: string, // 認可済み対応者IDの文字列型
++): SupportReportNoteUpdate { // メモと対応者だけの更新列型
++  return {
++    internalNote,
++    handledByPlatformAdminId: actorId,
++  };
++}
+diff --git a/domain/platform/support/support-report-management-types.ts b/domain/platform/support/support-report-management-types.ts
+new file mode 100644
+index 0000000..63a9c0a
+--- /dev/null
++++ b/domain/platform/support/support-report-management-types.ts
+@@ -0,0 +1,76 @@
++// domain/platform/support/support-report-management-types.ts
++// Platform管理で公開する限定DTOと、内部更新・画面返却の境界を定義する。
 +
-+各確認について、担当者・日付・基準コミット・環境の識別名・対象ケース・pass/fail/skip・理由・
-+機密値を除いた証跡の所在を記録します。DB試験ではPostgreSQL/Prisma版とmigration適用状況も記録します。
-+未割当の設定責任者・通知先管理者、実環境の設定充足、実DB・ブラウザー・HTTP・配送は未確認事項です。
-+不一致が出た場合はファイル・関数・再現条件と修正対象の粒度を報告し、この運用粒度で本体を改修しません。
++import type {
++  ClubMemberRole, // クラブ内の報告者ロールの型
++  SupportReportCategory, // サポート報告カテゴリの型
++  SupportReportStatus, // サポート報告ステータスの型
++} from "@/types/prisma";
++
++// 入力検証の成功値と項目別エラーを分ける型。
++export type SupportManagementValidation<TData, TField extends string> = // 成功値の型 / 項目名の文字列型
++  | {
++      success: true; // 検証成功を示すリテラル型
++      data: TData; // 検証済みの値の型
++  }
++  | {
++      success: false; // 検証失敗を示すリテラル型
++      fieldErrors: Partial<Record<TField, string[]>>; // 項目名とエラー配列を対応させる部分辞書型
++  };
++
++// 全クラブ一覧で必要なクラブ情報だけを返す型。
++export type PlatformSupportClub = { // 一覧・絞り込み候補のクラブ型
++  id: string; // クラブIDの文字列型
++  name: string; // クラブ名の文字列型
++  slug: string; // クラブslugの文字列型
++};
++
++// 認可後の管理画面だけに渡す報告DTO。DBモデル全体は公開しない。
++export type PlatformSupportReport = { // Platform用サポート報告の型
++  id: string; // 報告IDの文字列型
++  createdAt: string; // 作成日時のUTC ISO文字列型
++  updatedAt: string; // 競合検出に用いるUTC ISO文字列型
++  club: PlatformSupportClub; // 必要列に限定したクラブ型
++  category: SupportReportCategory; // 報告カテゴリの型
++  status: SupportReportStatus; // 報告ステータスの型
++  message: string; // 全文表示する本文の文字列型
++  pageUrl: string | null; // 保存済みURLの文字列またはnull型
++  userAgent: string | null; // 保存済みブラウザー情報の文字列またはnull型
++  reporterName: string | null; // 報告時氏名の文字列またはnull型
++  reporterEmail: string | null; // 報告時メールの文字列またはnull型
++  reporterRole: ClubMemberRole | null; // 報告時ロールまたはnull型
++  handler: { // 対応者の表示に限定したオブジェクト型
++    id: string; // 対応者IDの文字列型
++    name: string | null; // 対応者名の文字列またはnull型
++  } | null; // 未対応・担当者削除時のnull型
++  statusChangedAt: string | null; // 状態変更日時のUTC ISO文字列またはnull型
++  resolvedAt: string | null; // 解決日時のUTC ISO文字列またはnull型
++  internalNote: string | null; // 内部メモの文字列またはnull型
++  notifiedAt: string | null; // 通知受付日時のUTC ISO文字列またはnull型
++  notificationFailed: boolean; // 通知失敗の有無を表す真偽値型
++};
++
++// 一覧取得の成功と、情報を開示しない失敗を分ける型。
++export type PlatformSupportListResult = // 管理一覧取得結果の型
++  | {
++      outcome: "FOUND"; // 一覧取得成功を示すリテラル型
++      reports: PlatformSupportReport[]; // 限定した報告DTOの配列型
++      clubs: PlatformSupportClub[]; // 絞り込み候補のクラブ配列型
++      totalCount: number; // 条件に一致する総件数の数値型
++      page: number; // 現在ページの数値型
++      pageSize: 50; // 取得件数を50へ固定するリテラル型
++  }
++  | {
++      outcome: "FORBIDDEN" | "INVALID_QUERY" | "READ_FAILED"; // 固定失敗分類の型
++  };
++
++// 更新Actionへ返す値。本文・内部メモ・対応者IDは返却結果へ混ぜない。
++export type PlatformSupportUpdateResult = // 更新処理の固定結果型
++  | {
++      outcome: "UPDATED" | "UNCHANGED"; // 更新済み・変更なしの成功分類型
++      reportId: string; // 対象報告IDの文字列型
++      updatedAt: string; // 保存後または現在の競合検出用UTC ISO文字列型
++  }
++  | {
++      outcome: "FORBIDDEN" | "NOT_FOUND" | "CONFLICT" | "INVALID_INPUT" | "UPDATE_FAILED"; // 固定失敗分類の型
++  };
+diff --git a/domain/platform/support/support-report-query.test.ts b/domain/platform/support/support-report-query.test.ts
+new file mode 100644
+index 0000000..fe7a4da
+--- /dev/null
++++ b/domain/platform/support/support-report-query.test.ts
+@@ -0,0 +1,123 @@
++// domain/platform/support/support-report-query.test.ts
++// 単一query・取得上限・許可enum・条件の保持を確認する。
++
++import {
++  describe,
++  expect,
++  expectTypeOf,
++  it,
++} from "vitest";
++
++import type {
++  SupportReportStatus, // DB由来の報告ステータス型
++} from "@/types/prisma";
++import {
++  isSupportReportIdentifier, // UUID形式のIDを検証する関数
++  parseSupportReportQuery, // 一覧queryを検証する関数
++  PLATFORM_SUPPORT_MAX_PAGE, // 一覧で許可する最大ページ番号
++  PLATFORM_SUPPORT_PAGE_SIZE, // 一覧を50件に固定する取得件数
++  SUPPORT_REPORT_STATUS_OPTIONS, // 報告ステータスの値と表示ラベル一覧
++} from "./support-report-query";
++
++const clubId = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
++
++describe("Platform一覧query", () => { // 一覧queryの試験群を定義する関数とコールバック
++  it("省略を50件の先頭ページとし、任意の取得件数を採用しない", () => { // 既定値を検証する試験関数とコールバック
++    expect(parseSupportReportQuery({ // 一覧queryを検証する関数と期待値生成関数
++      pageSize: "9999",
++      skip: "-1",
++    })).toEqual({ // query検証関数 / 期待値生成・等値検証メソッド
++      success: true,
++      data: {
++        clubId: null,
++        status: null,
++        category: null,
++        page: 1,
++        pageSize: 50,
++        skip: 0,
++      },
++    });
++  });
++
++  it("3フィルターを保ち、2ページ目のoffsetを計算する", () => { // 条件保持の試験関数とコールバック
++    expect(parseSupportReportQuery({ // query検証関数と期待値生成関数
++      clubId,
++      status: "IN_PROGRESS",
++      category: "REQUEST",
++      page: "2",
++    })).toEqual({ // 検証結果の等値検証メソッド
++      success: true,
++      data: {
++        clubId,
++        status: "IN_PROGRESS",
++        category: "REQUEST",
++        page: 2,
++        pageSize: 50,
++        skip: 50,
++      },
++    });
++  });
++
++  it("空フィルターと上限ページを許可し、skipを上限内に保つ", () => { // 上限の試験関数とコールバック
++    const result = parseSupportReportQuery({ // query検証関数
++      clubId: "",
++      status: "",
++      category: "",
++      page: String(PLATFORM_SUPPORT_MAX_PAGE), // 上限を文字列化する関数
++    });
++    expect(result.success).toBe(true); // 成功判定の検証関数と比較メソッド
++    if (result.success) {
++      expect(result.data.skip).toBe(499950); // offsetの検証関数と比較メソッド
++      expect(result.data.pageSize).toBe(PLATFORM_SUPPORT_PAGE_SIZE); // 固定件数の検証関数と比較メソッド
++    }
++  });
++
++  it.each([ // ページ不正値ごとの試験を定義するメソッド
++    "", "0", "-1", "1.5", "01", " 1", "1 ", "1e2", "10001",
++    "999999999999999999999999", 1, null, ["1"], new File(["1"], "page.txt"), // Fileを生成するコンストラクター
++  ])("不正pageを先頭ページに丸めない %#", (page) => { // パラメーター試験のコールバック
++    const result = parseSupportReportQuery({ page }); // query検証関数
++    expect(result.success).toBe(false); // 拒否の検証関数と比較メソッド
++    if (!result.success) {
++      expect(result.fieldErrors.page).toBeDefined(); // ページエラーの存在検証メソッド
++    }
++  });
++
++  describe.each(["clubId", "status", "category"] as const)( // 項目別試験群を定義するメソッド / 読取専用リテラル型
++    "%sの単一文字列制約",
++    (field) => { // 各フィルターを試験するコールバック
++      it.each([null, 1, [], [""], ["BUG", "BUG"], new File(["BUG"], "filter.txt")])( // 不正値別の試験定義メソッド / Fileコンストラクター
++        "不正値を全対象へ変換しない %#",
++        (value) => { // フィルター不正値を検証するコールバック
++          const result = parseSupportReportQuery({ [field]: value }); // query検証関数
++          expect(result.success).toBe(false); // 拒否の検証関数と比較メソッド
++        },
++      );
++    },
++  );
++
++  it.each([ // 不正な条件・入力全体ごとの試験定義メソッド
++    undefined, null, [], "page=1", { clubId: "foreign" },
++    { status: "open" }, { status: "OPEN " }, { category: "constructor" },
++  ])("不正条件を成功DTOにしない %#", (input) => { // 不正条件の試験コールバック
++    expect(parseSupportReportQuery(input).success).toBe(false); // query検証関数 / 拒否の検証メソッド
++  });
++
++  it.each(["BUG", "QUESTION", "REQUEST", "OTHER"])( // 全カテゴリの試験定義メソッド
++    "%sを保持する",
++    (category) => { // 各カテゴリを試験するコールバック
++      const result = parseSupportReportQuery({ category }); // query検証関数
++      expect(result.success).toBe(true); // 成功の検証関数と比較メソッド
++      if (result.success) {
++        expect(result.data.category).toBe(category); // カテゴリ保持の検証メソッド
++      }
++    },
++  );
++
++  it("IDのUUID検証とstatusの型をDB定義へ合わせる", () => { // ID・型契約の試験関数とコールバック
++    expect(isSupportReportIdentifier(clubId)).toBe(true); // UUID検証関数 / 比較メソッド
++    expect(isSupportReportIdentifier("7b4d5e1f-75ba-77bf-9b72-3129f21a2ac6")).toBe(true); // UUID v7の検証関数 / 比較メソッド
++    expectTypeOf<typeof SUPPORT_REPORT_STATUS_OPTIONS[number]["value"]>() // 選択肢のリテラル型を検査する関数
++      .toEqualTypeOf<SupportReportStatus>(); // DBステータス型との一致を検証するメソッド
++  });
++});
+diff --git a/domain/platform/support/support-report-query.ts b/domain/platform/support/support-report-query.ts
+new file mode 100644
+index 0000000..fb9e321
+--- /dev/null
++++ b/domain/platform/support/support-report-query.ts
+@@ -0,0 +1,153 @@
++// domain/platform/support/support-report-query.ts
++// 全クラブ一覧の単一queryを検証し、安全な固定件数とoffsetへ変換する。
++
++import { z } from "zod";
++
++import {
++  SUPPORT_REPORT_CATEGORY_OPTIONS, // 不具合・サポート報告のカテゴリ値とラベル一覧
++} from "@/domain/club/support/support-report-form";
++import type {
++  SupportReportCategory, // サポート報告カテゴリの型
++  SupportReportStatus, // サポート報告ステータスの型
++} from "@/types/prisma";
++import type {
++  SupportManagementValidation, // 検証済み値と項目別エラーを分ける型
++} from "./support-report-management-types";
++
++export const PLATFORM_SUPPORT_PAGE_SIZE = 50;
++// offsetを最大499950に制限する。上限超過を全件表示へ変換しない。
++export const PLATFORM_SUPPORT_MAX_PAGE = 10000;
++export const SUPPORT_REPORT_STATUS_OPTIONS = [
++  {
++    value: "OPEN",
++    label: "未対応",
++  },
++  {
++    value: "IN_PROGRESS",
++    label: "対応中",
++  },
++  {
++    value: "ON_HOLD",
++    label: "保留",
++  },
++  {
++    value: "RESOLVED",
++    label: "対応済み",
++  },
++] as const satisfies readonly { // 読取専用リテラル配列と選択肢の構造型
++  value: SupportReportStatus; // DB由来のステータス型
++  label: string; // 表示ラベルの文字列型
++}[];
++
++const uuidSchema = z.uuid(); // UUIDを検証するZodスキーマ生成関数
++
++// 型付き呼出し元でも、外部入力のステータス値を再検証する。
++export function isSupportReportStatus(value: unknown): value is SupportReportStatus { // ステータス検証関数 / 不明値型 / ステータス型述語
++  return SUPPORT_REPORT_STATUS_OPTIONS.some((option) => option.value === value); // 選択肢との一致判定メソッドとコールバック
++}
++
++// 保存済みIDはrequestIdのUUID v4制約と分離してUUID形式を検証する。
++export function isSupportReportIdentifier(value: unknown): value is string { // ID検証関数 / 不明値型 / 文字列型述語
++  return (
++    typeof value === "string" &&
++    uuidSchema.safeParse(value).success // UUIDスキーマの安全な検証メソッド
++  );
++}
++
++// 省略・空欄のフィルターはnull、page省略は1として返す一覧条件の型。
++export type PlatformSupportQuery = { // 検証済み一覧条件の型
++  clubId: string | null; // クラブIDの文字列またはnull型
++  status: SupportReportStatus | null; // ステータスまたはnull型
++  category: SupportReportCategory | null; // カテゴリまたはnull型
++  page: number; // ページ番号の数値型
++  pageSize: typeof PLATFORM_SUPPORT_PAGE_SIZE; // 固定50件のリテラル型
++  skip: number; // 取得開始位置の数値型
++};
++
++export type PlatformSupportQueryField = "clubId" | "status" | "category" | "page"; // query項目名の型
++
++// 単一文字列だけを許可し、配列・File・数値を空条件へ丸めない。
++export function parseSupportReportQuery( // 一覧queryを検証する関数
++  input: unknown, // 外部からの不明値型
++): SupportManagementValidation<PlatformSupportQuery, PlatformSupportQueryField> { // 一覧条件の検証結果型
++  if (
++    typeof input !== "object" ||
++    input === null ||
++    Array.isArray(input) // 配列の判定関数
++  ) {
++    return {
++      success: false,
++      fieldErrors: { page: ["一覧条件が不正です。"] },
++    };
++  }
++  const record = input as Record<string, unknown>; // 文字列キー・不明値の辞書型
++  const fieldErrors: Partial<Record<PlatformSupportQueryField, string[]>> = {}; // query項目別の部分エラー辞書型
++  for (const field of ["clubId", "status", "category"] as const) { // フィルター名を保持する読取専用リテラル型
++    if (
++      record[field] !== undefined &&
++      typeof record[field] !== "string"
++    ) {
++      fieldErrors[field] = ["一覧条件は単一の文字列で指定してください。"];
++    }
++  }
++  const clubId = (
++    record.clubId === undefined ||
++    record.clubId === ""
++  ) ? null : record.clubId;
++  const status = (
++    record.status === undefined ||
++    record.status === ""
++  ) ? null : record.status;
++  const category = (
++    record.category === undefined ||
++    record.category === ""
++  ) ? null : record.category;
++  const pageValue = record.page === undefined ? "1" : record.page;
++  const page = (
++    typeof pageValue === "string" &&
++    /^[1-9][0-9]{0,4}$/.test(pageValue) // 正整数表記を判定する正規表現メソッド
++  ) ? Number(pageValue) // ページ文字列を数値へ変換する関数
++    : NaN;
++  const categoryOption = SUPPORT_REPORT_CATEGORY_OPTIONS.find((option) => option.value === category); // カテゴリ検索メソッドとコールバック
++  if (
++    clubId !== null &&
++    !isSupportReportIdentifier(clubId) // UUID形式のID検証関数
++  ) {
++    fieldErrors.clubId = ["クラブの指定が不正です。"];
++  }
++  if (
++    status !== null &&
++    !isSupportReportStatus(status) // ステータス検証関数
++  ) {
++    fieldErrors.status = ["ステータスの指定が不正です。"];
++  }
++  if (
++    category !== null &&
++    !categoryOption
++  ) {
++    fieldErrors.category = ["カテゴリの指定が不正です。"];
++  }
++  if (
++    !Number.isSafeInteger(page) || // 安全な整数の判定メソッド
++    page > PLATFORM_SUPPORT_MAX_PAGE
++  ) {
++    fieldErrors.page = ["ページは1〜10000の整数で指定してください。"];
++  }
++  if (Object.keys(fieldErrors).length > 0) { // エラー項目名を列挙するメソッド
++    return {
++      success: false,
++      fieldErrors,
++    };
++  }
++  return {
++    success: true,
++    data: {
++      clubId: clubId as string | null, // 検証済みクラブIDの文字列またはnull型
++      status: status as SupportReportStatus | null, // 検証済みステータスまたはnull型
++      category: categoryOption?.value ?? null,
++      page,
++      pageSize: PLATFORM_SUPPORT_PAGE_SIZE,
++      skip: (page - 1) * PLATFORM_SUPPORT_PAGE_SIZE,
++    },
++  };
++}
