@@ -6,8 +6,8 @@ import { notFound } from "next/navigation";
 import { findAdminNoticeById } from "@/lib/repositories/admin-notice";
 import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge";
 import { ToastMessage } from "@/components/admin/ToastMessage";
-import { NoticeEditModal } from "./NoticeEditModal";
-import { NoticeDeleteButton } from "./NoticeDeleteButton";
+import { WebsiteNoticeEditModal } from "./WebsiteNoticeEditModal";
+import { WebsiteNoticeDeleteButton } from "./WebsiteNoticeDeleteButton";
 import { formatJapaneseDate } from "@/lib/utils/date";
 
 type AdminNoticeDetailPageProps = {
@@ -85,14 +85,14 @@ export default async function AdminNoticeDetailPage({
 
     <section className="py-6">
       <div className="flex flex-col gap-3 sm:flex-row">
-       <NoticeEditModal
+       <WebsiteNoticeEditModal
   noticeId={notice.id}
   defaultTitle={notice.title}
   defaultContent={notice.content}
   defaultStatus={notice.status}
 />
 
-        <NoticeDeleteButton noticeId={notice.id} />
+        <WebsiteNoticeDeleteButton noticeId={notice.id} />
       </div>
 
       <div className="mt-5">

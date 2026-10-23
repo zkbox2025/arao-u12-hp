@@ -1,0 +1,763 @@
+// tests/club-invitation-acceptance-actions.test.ts
+
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import {
+  completeClubInvitationAction,
+} from "@/app/(club-app)/welcome/actions";
+import {
+  acceptExistingClubInvitationAction,
+} from "@/app/(club-app)/club-invitations/accept/actions";
+import type {
+  WelcomeActionState,
+} from "@/domain/club/invitation/acceptance-form";
+import type {
+  ClubInvitationAcceptanceInvitation,
+  ClubInvitationAcceptanceMembership,
+} from "@/domain/club/invitation/acceptance-policy";
+import { AuthApiError } from "@supabase/supabase-js";
+import { DomainError } from "@/domain/shared/domain-error";
+import { isRequestId } from "@/domain/shared/request-id";
+import {
+  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
+  createClubInvitationContext,
+  serializeClubInvitationContext,
+  type ClubInvitationContext,
+} from "@/src/infrastructure/security/club-invitation-context";
+
+// 認証adapter・Service・Repository・Domainは実装を使い、外部との境界だけを模擬する。
+const mocks = vi.hoisted(() => ({
+  cookies: vi.fn(),
+  cookieGet: vi.fn(),
+  cookieSet: vi.fn(),
+  getSession: vi.fn(),
+  getUser: vi.fn(),
+  getClaims: vi.fn(),
+  updateUser: vi.fn(),
+  find: vi.fn(),
+  invitationUpdate: vi.fn(),
+  membershipUpdate: vi.fn(),
+  transaction: vi.fn(),
+  service: vi.fn(),
+  revalidatePath: vi.fn(),
+  redirect: vi.fn(),
+}));
+
+vi.mock("next/headers", () => ({ cookies: mocks.cookies }));
+vi.mock("next/cache", () => ({ revalidatePath: mocks.revalidatePath }));
+vi.mock("next/navigation", async (importOriginal) => ({
+  ...await importOriginal<typeof import("next/navigation")>(),
+  redirect: mocks.redirect,
+}));
+vi.mock("@/src/infrastructure/supabase/server", () => ({
+  createClient: async () => ({
+    auth: {
+      getSession: mocks.getSession,
+      getUser: mocks.getUser,
+      getClaims: mocks.getClaims,
+      updateUser: mocks.updateUser,
+    },
+  }),
+}));
+vi.mock("@/src/infrastructure/prisma/client", () => ({
+  prisma: {
+    clubInvitation: { findFirst: mocks.find },
+    $transaction: mocks.transaction,
+  },
+}));
+vi.mock("@/src/application/club/invitation/accept-club-invitation", async (importOriginal) => ({
+  ...await importOriginal<
+    typeof import("@/src/application/club/invitation/accept-club-invitation")
+  >(),
+  acceptClubInvitation: mocks.service,
+}));
+
+const NOW = new Date("2026-10-18T00:00:00Z");
+const USER_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_ID = "22222222-2222-4222-8222-222222222222";
+const SESSION_ID = "33333333-3333-4333-8333-333333333333";
+const REQUEST_ID = "44444444-4444-4444-8444-444444444444";
+const SLUG = "canonical-club";
+const EMAIL = "member@example.test";
+const PASSWORD = "  Private-password1!  ";
+const PRIVATE_DETAIL = `${PASSWORD} private@example.test token-secret service-role-secret`;
+
+type Row = ClubInvitationAcceptanceInvitation & {
+  id: string;
+  club: {
+    name: string;
+    slug: string;
+  };
+  membership: ClubInvitationAcceptanceMembership & {
+    user: {
+      email: string;
+    };
+  };
+};
+
+type Lookup = {
+  where: {
+    tokenHash: string;
+    authUserId: string;
+    club: {
+      is: {
+        slug: string;
+      };
+    };
+  };
+};
+
+type ActionKind = "complete" | "existing";
+let invitationContext: ClubInvitationContext;
+let cookieValue: string | undefined;
+let row: Row;
+
+// 実際のCookie形式と対応するDB行を用意する。
+function makeContext(): ClubInvitationContext {
+  const context = createClubInvitationContext(new URLSearchParams({
+    clubSlug: SLUG,
+    token: "a".repeat(43),
+  }));
+  if (!context) {
+    throw new Error("Test context unavailable");
+  }
+  return context;
+}
+
+// Cookieのuserは信用せず、getUserが返した現在の本人を使わせる。
+function user(id = USER_ID, email = EMAIL) {
+  return {
+    id,
+    email,
+    user_metadata: { private: PRIVATE_DETAIL },
+  };
+}
+
+// SDKによる検証成功後のclaimsを模擬する。
+function claims(method = "otp", id = USER_ID) {
+  return {
+    sub: id,
+    role: "authenticated",
+    session_id: SESSION_ID,
+    exp: NOW.getTime() / 1_000 + 3_600,
+    amr: [method],
+  };
+}
+
+// 前回stateは型の初期値だけとし、requestIdは認証根拠にしない。
+function state(): WelcomeActionState {
+  return {
+    status: "idle",
+    values: {},
+    fieldErrors: {},
+    formError: null,
+    requestId: REQUEST_ID,
+  };
+}
+
+// 通常フォームと同じ値だけで直接Actionを呼ぶ。
+function form(kind: ActionKind): FormData {
+  const data = new FormData();
+  data.set("requestId", REQUEST_ID);
+  data.set("contextId", invitationContext.contextId);
+  if (kind === "complete") {
+    data.set("password", PASSWORD);
+    data.set("confirmation", PASSWORD);
+  }
+  return data;
+}
+
+// それぞれの公開Actionの実引数契約を使う。
+function invoke(kind: ActionKind, data = form(kind), previousState = state()) {
+  return kind === "complete"
+    ? completeClubInvitationAction(previousState, data)
+    : acceptExistingClubInvitationAction(previousState, data);
+}
+
+// Next.jsの実unstable_rethrowが認識する制御例外を作る。
+function navigationError(digest: string): Error & { digest: string } {
+  return Object.assign(new Error("NEXT_NAVIGATION"), { digest });
+}
+
+// 前回state・フォーム値・外部例外を公開stateやログへ反射していないことを確認する。
+function expectSafe(result: WelcomeActionState): void {
+  expect(result.values).toEqual({});
+  const serialized = JSON.stringify(result);
+  for (const secret of [PASSWORD, PRIVATE_DETAIL, EMAIL, USER_ID, "token-secret"]) {
+    expect(serialized).not.toContain(secret);
+  }
+  expect(result.data).toBeUndefined();
+}
+
+beforeEach(async () => {
+  vi.resetAllMocks();
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+  invitationContext = makeContext();
+  cookieValue = serializeClubInvitationContext(invitationContext);
+  row = {
+    id: "invitation-a",
+    clubId: "club-a",
+    tokenHash: invitationContext.tokenHash,
+    authUserId: USER_ID,
+    email: EMAIL,
+    membershipId: "membership-a",
+    status: "SENT",
+    acceptedAt: null,
+    expiresAt: new Date(NOW.getTime() + 60_000),
+    club: {
+      name: "招待先クラブ",
+      slug: SLUG,
+    },
+    membership: {
+      id: "membership-a",
+      clubId: "club-a",
+      userId: USER_ID,
+      status: "INVITED",
+      user: { email: EMAIL },
+    },
+  };
+  mocks.cookies.mockResolvedValue({
+    get: mocks.cookieGet,
+    set: mocks.cookieSet,
+  });
+  mocks.cookieGet.mockImplementation((name: string) => (
+    name === CLUB_INVITATION_CONTEXT_COOKIE_NAME && cookieValue !== undefined
+      ? { value: cookieValue }
+      : undefined
+  ));
+  mocks.cookieSet.mockImplementation((_name: string, value: string) => {
+    cookieValue = value;
+  });
+  mocks.getSession.mockResolvedValue({
+    data: { session: { access_token: "test-access" } },
+    error: null,
+  });
+  mocks.getUser.mockResolvedValue({
+    data: { user: user() },
+    error: null,
+  });
+  mocks.getClaims.mockResolvedValue({
+    data: { claims: claims() },
+    error: null,
+  });
+  mocks.updateUser.mockResolvedValue({
+    data: { user: user() },
+    error: null,
+  });
+  mocks.find.mockImplementation(async (input: Lookup) => (
+    input.where.tokenHash === row.tokenHash &&
+    input.where.authUserId === row.authUserId &&
+    input.where.club.is.slug === row.club.slug
+      ? structuredClone(row)
+      : null
+  ));
+  mocks.invitationUpdate.mockImplementation(async () => {
+    if (row.status === "ACCEPTED") {
+      return { count: 0 };
+    }
+    row.status = "ACCEPTED";
+    row.acceptedAt = new Date();
+    return { count: 1 };
+  });
+  mocks.membershipUpdate.mockImplementation(async () => {
+    row.membership.status = "ACTIVE";
+    return { count: 1 };
+  });
+  const tx = {
+    clubInvitation: {
+      findFirst: mocks.find,
+      updateMany: mocks.invitationUpdate,
+    },
+    clubMembership: { updateMany: mocks.membershipUpdate },
+  };
+  mocks.transaction.mockImplementation(async (
+    operation: (client: typeof tx) => Promise<unknown>,
+  ) => operation(tx));
+  const service = await vi.importActual<
+    typeof import("@/src/application/club/invitation/accept-club-invitation")
+  >("@/src/application/club/invitation/accept-club-invitation");
+  mocks.service.mockImplementation(service.acceptClubInvitation);
+  mocks.redirect.mockImplementation((path: string) => {
+    throw navigationError(`NEXT_REDIRECT;push;${path};303;`);
+  });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+describe.each(["complete", "existing"] as const)("%sの直接呼出し", (kind) => {
+  beforeEach(() => {
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims(kind === "existing" ? "password" : "otp") },
+      error: null,
+    });
+  });
+
+  it("本人・DBの確認後にCookie削除・既存再検証・固定遷移を行う", async () => {
+    const data = form(kind);
+    for (const field of ["clubId", "clubSlug", "role", "userId", "invitationId", "redirectTo"]) {
+      data.set(field, "https://attacker.example.test");
+    }
+    await expect(invoke(kind, data)).rejects.toMatchObject({
+      digest: `NEXT_REDIRECT;push;/club/${SLUG}/events;303;`,
+    });
+    expect(mocks.service).toHaveBeenCalledExactlyOnceWith({
+      context: serializeClubInvitationContext(invitationContext),
+      contextId: invitationContext.contextId,
+      password: kind === "complete" ? PASSWORD : undefined,
+      confirmation: kind === "complete" ? PASSWORD : undefined,
+    });
+    expect(mocks.getUser).toHaveBeenCalledWith("test-access");
+    expect(mocks.getClaims).toHaveBeenCalledWith("test-access");
+    expect(mocks.updateUser).toHaveBeenCalledTimes(kind === "complete" ? 1 : 0);
+    expect(row.status).toBe("ACCEPTED");
+    expect(row.membership.status).toBe("ACTIVE");
+    expect(mocks.cookieSet).toHaveBeenCalledExactlyOnceWith(
+      CLUB_INVITATION_CONTEXT_COOKIE_NAME,
+      "",
+      {
+        httpOnly: true,
+        sameSite: "lax",
+        secure: false,
+        path: "/",
+        maxAge: 0,
+      },
+    );
+    expect(mocks.revalidatePath.mock.calls).toEqual([
+      [`/club/${SLUG}/admin/members`],
+      [`/club/${SLUG}/account`],
+      ["/club/select"],
+    ]);
+    expect(mocks.invitationUpdate.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.cookieSet.mock.invocationCallOrder[0]);
+    expect(mocks.cookieSet.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.revalidatePath.mock.invocationCallOrder[0]);
+    expect(mocks.revalidatePath.mock.invocationCallOrder.at(-1))
+      .toBeLessThan(mocks.redirect.mock.invocationCallOrder[0]);
+  });
+
+  it("sessionなしではUIを経由しなくても書き込めない", async () => {
+    mocks.getSession.mockResolvedValue({
+      data: { session: null },
+      error: null,
+    });
+    const result = await invoke(kind);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expect(mocks.invitationUpdate).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("他人には招待の終端状態も返さない", async () => {
+    row.status = "CANCELLED";
+    mocks.getUser.mockResolvedValue({
+      data: { user: user(OTHER_ID) },
+      error: null,
+    });
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims(kind === "existing" ? "password" : "otp", OTHER_ID) },
+      error: null,
+    });
+    const result = await invoke(kind);
+    expect(result.status).toBe("error");
+    expect(result.formError).not.toContain("取り消");
+    expect(mocks.invitationUpdate).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("Authの現在emailが変われば書き込めない", async () => {
+    mocks.getUser.mockResolvedValue({
+      data: { user: user(USER_ID, "changed@example.test") },
+      error: null,
+    });
+    const result = await invoke(kind);
+    expect(result.formError).toContain("メールアドレス");
+    expect(mocks.invitationUpdate).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it.each([undefined, "invalid-cookie", ""])("Cookie欠損・改変を拒否する %#", async (value) => {
+    cookieValue = value;
+    const result = await invoke(kind);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+  });
+
+  it.each(["tokenHash", "clubSlug"] as const)("形式が正しくても%s改変をDBで拒否する", async (key) => {
+    cookieValue = serializeClubInvitationContext({
+      ...invitationContext,
+      [key]: key === "tokenHash" ? "f".repeat(64) : "other-club",
+    });
+    const result = await invoke(kind);
+    expect(result.status).toBe("error");
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expect(mocks.invitationUpdate).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+  });
+
+  it("別タブで差し替えられたcontextでは処理しない", async () => {
+    const data = form(kind);
+    cookieValue = serializeClubInvitationContext(makeContext());
+    const result = await invoke(kind, data);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("Cookie期限切れでは処理しない", async () => {
+    const data = form(kind);
+    vi.setSystemTime(new Date(NOW.getTime() + 15 * 60_000));
+    expect((await invoke(kind, data)).status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+  });
+
+  it.each(["requestId", "contextId"])("%sのFileを文字列化して受理しない", async (field) => {
+    const data = form(kind);
+    data.set(field, new Blob([PRIVATE_DETAIL]), `${field}.txt`);
+    const result = await invoke(kind, data);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it.each(["requestId", "contextId"])("重複%sを拒否する", async (field) => {
+    const data = form(kind);
+    data.append(field, field === "requestId" ? REQUEST_ID : invitationContext.contextId);
+    expect((await invoke(kind, data)).status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "invalid", OTHER_ID])("欠損・不正・不一致requestIdを拒否する %#", async (value) => {
+    const data = form(kind);
+    data.delete("requestId");
+    if (value !== null) {
+      data.set("requestId", value);
+    }
+    const result = await invoke(kind, data);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("前回stateが不正なら安全なrequestIdだけを生成する", async () => {
+    const result = await invoke(kind, form(kind), {
+      ...state(),
+      requestId: PRIVATE_DETAIL,
+      values: { password: PASSWORD } as never,
+      formError: PRIVATE_DETAIL,
+    });
+    expect(isRequestId(result.requestId)).toBe(true);
+    expectSafe(result);
+    expect(mocks.service).not.toHaveBeenCalled();
+  });
+
+  it("FormDataではない値を拒否する", async () => {
+    const result = await invoke(kind, {} as FormData);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["CANCELLED", "取り消"],
+    ["EXPIRED", "有効期限"],
+    ["ACCEPTED", "承諾済み"],
+  ] as const)("本人の終端状態%sは安全な再開案内にする", async (status, message) => {
+    row.status = status;
+    const result = await invoke(kind);
+    expect(result.formError).toContain(message);
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("Service実行時にも最新の本人を再取得する", async () => {
+    const defaultUser = user();
+    mocks.getUser.mockImplementation(async () => ({
+      data: {
+        user: mocks.service.mock.calls.length === 0
+          ? defaultUser
+          : user(USER_ID, "changed@example.test"),
+      },
+      error: null,
+    }));
+    const result = await invoke(kind);
+    expect(result.status).toBe("error");
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expect(mocks.invitationUpdate).not.toHaveBeenCalled();
+  });
+
+  it("承諾直前にDB状態が変わった場合も最新状態で拒否する", async () => {
+    const transaction = mocks.transaction.getMockImplementation();
+    mocks.transaction.mockImplementation(async (...args: unknown[]) => {
+      row.status = "CANCELLED";
+      return transaction?.(...args);
+    });
+    const result = await invoke(kind);
+    expect(result.formError).toContain(kind === "complete"
+      ? "パスワードは設定されました"
+      : "取り消");
+    expect(mocks.invitationUpdate).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+  });
+
+  it("Auth本人とclaimsのsubが異なれば処理しない", async () => {
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims(kind === "existing" ? "password" : "otp", OTHER_ID) },
+      error: null,
+    });
+    const result = await invoke(kind);
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("Cookie処理で投げられた制御例外を失敗stateへ変換しない", async () => {
+    const error = navigationError("NEXT_HTTP_ERROR_FALLBACK;404");
+    mocks.cookies.mockRejectedValue(error);
+    await expect(invoke(kind)).rejects.toBe(error);
+  });
+
+  it.each([
+    "NEXT_HTTP_ERROR_FALLBACK;404",
+    "NEXT_REDIRECT;push;/club-login;303;",
+  ])("Serviceが返す制御例外を再送出する: %s", async (digest) => {
+    const error = navigationError(digest);
+    mocks.service.mockRejectedValue(error);
+    await expect(invoke(kind)).rejects.toBe(error);
+  });
+
+  it("秘密を含む例外・前回stateを公開stateやログへ反射しない", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.service.mockRejectedValue(new DomainError("INTERNAL", PRIVATE_DETAIL));
+    const result = await invoke(kind, form(kind), {
+      ...state(),
+      values: { password: PASSWORD } as never,
+      fieldErrors: { password: [PRIVATE_DETAIL] },
+      formError: PRIVATE_DETAIL,
+    });
+    expect(result.status).toBe("error");
+    expectSafe(result);
+    expect(log).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+  });
+});
+
+describe("経路と障害結果の保護", () => {
+  it.each(["otp", "unknown"])("%sでは既存Actionを選んでも初回設定を省略できない", async (method) => {
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims(method) },
+      error: null,
+    });
+    const result = await invoke("existing");
+    expect(result.formError).toContain("パスワードログイン");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("既存Actionでは送信されたPWを使用せず、Authが途中でOTPへ変わっても更新しない", async () => {
+    mocks.getClaims
+      .mockResolvedValueOnce({
+        data: { claims: claims("password") },
+        error: null,
+      })
+      .mockResolvedValue({
+        data: { claims: claims("otp") },
+        error: null,
+      });
+    const result = await invoke("existing", form("complete"));
+    expect(result.status).toBe("error");
+    expect(mocks.service).not.toHaveBeenCalled();
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("welcomeでもAMR不明ならServiceへ進めない", async () => {
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims("unknown") },
+      error: null,
+    });
+    const result = await invoke("complete");
+    expect(result.formError).toContain("パスワードログイン");
+    expect(mocks.service).not.toHaveBeenCalled();
+  });
+
+  it("本番のcontext削除にはSecure属性も引き継ぐ", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    await expect(invoke("complete")).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(mocks.cookieSet).toHaveBeenCalledWith(
+      CLUB_INVITATION_CONTEXT_COOKIE_NAME,
+      "",
+      expect.objectContaining({
+        httpOnly: true,
+        secure: true,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 0,
+      }),
+    );
+  });
+
+  it("welcome Actionでもpassword本人のPWを更新しない", async () => {
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims("password") },
+      error: null,
+    });
+    await expect(invoke("complete")).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it.each(["password", "confirmation"])("%sのFile・欠損・重複を受け付けない", async (field) => {
+    for (const variant of ["file", "missing", "duplicate"]) {
+      const data = form("complete");
+      if (variant === "file") {
+        data.set(field, new Blob([PRIVATE_DETAIL]), "secret.txt");
+      } else if (variant === "missing") {
+        data.delete(field);
+      } else {
+        data.append(field, PASSWORD);
+      }
+      const result = await invoke("complete", data);
+      expect(result.status).toBe("error");
+      expectSafe(result);
+    }
+    expect(mocks.service).not.toHaveBeenCalled();
+  });
+
+  it("入力エラーでもPW・確認値をstateへ保持しない", async () => {
+    const data = form("complete");
+    data.set("confirmation", "different-password2");
+    const result = await invoke("complete", data);
+    expect(result.fieldErrors.confirmation).toBeDefined();
+    expectSafe(result);
+    expect(JSON.stringify(result)).not.toContain("different-password2");
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+  });
+
+  it("DB失敗による部分成功ではcontextを残し、passwordでの再開を案内する", async () => {
+    mocks.transaction.mockRejectedValue(new Error(PRIVATE_DETAIL));
+    const result = await invoke("complete");
+    expect(result.formError).toContain("パスワードは設定されました");
+    expect(mocks.updateUser).toHaveBeenCalledTimes(1);
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expect(mocks.revalidatePath).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("Auth結果不明では自動再試行せずDB更新しない", async () => {
+    mocks.updateUser.mockRejectedValue(new Error(PRIVATE_DETAIL));
+    const result = await invoke("complete");
+    expect(result.formError).toContain("設定結果を確認できません");
+    expect(mocks.updateUser).toHaveBeenCalledTimes(1);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it.each([
+    ["same_password", "入力内容"],
+    ["reauthentication_needed", "本人確認"],
+  ])("Authの拒否%sを固定案内に変換する", async (code, message) => {
+    mocks.updateUser.mockResolvedValue({
+      data: { user: null },
+      error: new AuthApiError(PRIVATE_DETAIL, 422, code),
+    });
+    const result = await invoke("complete");
+    expect(result.formError).toContain(message);
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("同時に2回送信しても条件付きDB更新で承諾と所属更新は一回だけになる", async () => {
+    mocks.getClaims.mockResolvedValue({
+      data: { claims: claims("password") },
+      error: null,
+    });
+    const results = await Promise.allSettled([
+      invoke("existing"),
+      invoke("existing"),
+    ]);
+    const redirects = results.filter((result) => result.status === "rejected");
+    const failures = results.filter((result) => result.status === "fulfilled");
+    expect(redirects).toHaveLength(1);
+    expect(failures).toHaveLength(1);
+    expect(redirects[0]).toMatchObject({
+      reason: {
+        digest: expect.stringContaining("NEXT_REDIRECT"),
+      },
+    });
+    expect(failures[0]).toMatchObject({ value: { status: "error" } });
+    expect(mocks.membershipUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.updateUser).not.toHaveBeenCalled();
+    expect(mocks.cookieSet).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["cookie", "revalidation"])("DB承諾後の%s失敗を再承諾の案内にしない", async (stage) => {
+    if (stage === "cookie") {
+      mocks.cookieSet.mockImplementation(() => {
+        throw new Error(PRIVATE_DETAIL);
+      });
+    } else {
+      mocks.revalidatePath.mockImplementation(() => {
+        throw new Error(PRIVATE_DETAIL);
+      });
+    }
+    const result = await invoke("complete");
+    expect(row.status).toBe("ACCEPTED");
+    expect(result.formError).toContain("招待は承諾されました");
+    expect(mocks.service).toHaveBeenCalledTimes(1);
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expectSafe(result);
+  });
+
+  it("成功後の再検証での制御例外も再送出する", async () => {
+    const error = navigationError("NEXT_HTTP_ERROR_FALLBACK;404");
+    mocks.revalidatePath.mockImplementation(() => {
+      throw error;
+    });
+    await expect(invoke("complete")).rejects.toBe(error);
+  });
+
+  it("二重送信でも最新DB状態を確認し、承諾済みなら再更新しない", async () => {
+    await expect(invoke("complete")).rejects.toMatchObject({
+      digest: expect.stringContaining("NEXT_REDIRECT"),
+    });
+    cookieValue = serializeClubInvitationContext(invitationContext);
+    const result = await invoke("complete");
+    expect(result.formError).toContain("承諾済み");
+    expect(mocks.invitationUpdate).toHaveBeenCalledTimes(1);
+    expect(mocks.updateUser).toHaveBeenCalledTimes(1);
+  });
+
+  it("Serviceから不正slugが返ってもCookie削除や外部遷移を行わない", async () => {
+    mocks.service.mockResolvedValue({
+      outcome: "ACCEPTED",
+      clubSlug: "../../attacker",
+    });
+    const result = await invoke("complete");
+    expect(result.status).toBe("error");
+    expect(mocks.cookieSet).not.toHaveBeenCalled();
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+});
