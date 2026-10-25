@@ -1,479 +1,220 @@
-diff --git a/src/application/platform/support/get-platform-support.test.ts b/src/application/platform/support/get-platform-support.test.ts
+diff --git a/app/(club-app)/platform/support/actions.ts b/app/(club-app)/platform/support/actions.ts
 new file mode 100644
-index 0000000..8aa7c21
+index 0000000..3ae0e15
 --- /dev/null
-+++ b/src/application/platform/support/get-platform-support.test.ts
-@@ -0,0 +1,322 @@
-+// src/application/platform/support/get-platform-support.test.ts
-+// 実DB・Authを使わず、context優先・query再検証・限定DTO・部分開示防止を確認する。
++++ b/app/(club-app)/platform/support/actions.ts
+@@ -0,0 +1,203 @@
++// app/(club-app)/platform/support/actions.ts
++// 管理操作を毎回再認可し、単一フォーム値を検証して固定パスだけを再検証する。
++
++"use server";
++
++import { revalidatePath } from "next/cache";
++import { unstable_rethrow } from "next/navigation";
 +
 +import {
-+  afterEach,
-+  beforeEach,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+import type {
-+  PlatformAdminAccessContext, // Auth本人とPlatform管理者をまとめた認可context型
-+} from "@/app/(club-app)/platform/require-platform-admin";
-+import type {
-+  PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
-+} from "@/domain/platform/support/support-report-management-types";
-+import {
-+  getPlatformSupport, // 認可contextとqueryから限定一覧を取得するApplication Service関数
-+} from "./get-platform-support";
-+
-+const mocks = vi.hoisted( // import前にモックを準備するメソッド
-+  /**
-+   * DB・dotenvの評価を避けるため一覧Repositoryを置換するモックを用意する。
-+   */
-+  () => ({ // モック生成コールバック
-+    find: vi.fn(), // 一覧取得モックの生成メソッド
-+  }),
-+);
-+vi.mock( // Repository境界を置換するメソッド
-+  "@/src/infrastructure/prisma/repositories/platform-support-report-repository",
-+  /**
-+   * 実DBの代わりに、一覧取得結果のモックだけを公開する。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    findSupportReportsForPlatform: mocks.find, // 一覧Repositoryモックの関数参照
-+  }),
-+);
-+
-+const USER_ID = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
-+const CLUB_ID = "11111111-1111-4111-8111-111111111111";
-+const SECRET = "test-only-private-token@example.test";
-+const context: PlatformAdminAccessContext = { // サーバー認可contextの型
-+  userId: USER_ID,
-+  platformAdmin: {
-+    id: USER_ID,
-+    role: "DEVELOPER",
-+  },
-+};
-+const club = {
-+  id: CLUB_ID,
-+  name: "クラブ名",
-+  slug: "club-a",
-+};
-+
-+/**
-+ * 切り捨てず返す本文・メモ、保存時snapshot、nullable列を持つ報告を作る。
-+ */
-+function report(): PlatformSupportReport { // 報告fixture生成関数 / 報告表示型
-+  return {
-+    id: "22222222-2222-4222-8222-222222222222",
-+    createdAt: "2026-10-25T10:00:00.000Z",
-+    updatedAt: "2026-10-25T11:00:00.000Z",
-+    club,
-+    category: "BUG",
-+    status: "OPEN",
-+    message: "<script>保存済み全文</script>\n本文",
-+    pageUrl: "/club/club-a/account",
-+    userAgent: "保存時のブラウザー",
-+    reporterName: "保存時氏名",
-+    reporterEmail: "snapshot@example.test",
-+    reporterRole: "MEMBER",
-+    handler: {
-+      id: "handler-id",
-+      name: "担当者表示名",
-+    },
-+    statusChangedAt: null,
-+    resolvedAt: null,
-+    internalNote: "内部メモ\n全文を保持",
-+    notifiedAt: null,
-+    notificationFailed: true,
-+  };
-+}
-+
-+/**
-+ * 既存の一覧結果契約に沿った成功応答を用意する。
-+ */
-+function found() { // 一覧成功fixtureの生成関数
-+  return {
-+    outcome: "FOUND",
-+    reports: [report()], // 報告fixtureの生成関数
-+    clubs: [club],
-+    totalCount: 1,
-+    page: 1,
-+    pageSize: 50,
-+  };
-+}
-+
-+beforeEach( // 前処理を登録する関数
-+  /**
-+   * 応答と履歴を初期化し、実際の安全化処理を通るログだけを監視する。
-+   */
-+  () => { // 前処理コールバック
-+    vi.resetAllMocks(); // モック履歴・実装の初期化メソッド
-+    mocks.find.mockResolvedValue(found()); // 成功応答の設定メソッド / fixture生成関数
-+    vi.spyOn(console, "error").mockImplementation( // ログ監視と代替実装の設定メソッド
-+      /**
-+       * テスト中のログ実出力だけを抑制する。
-+       */
-+      () => undefined, // ログ抑制コールバック
-+    );
-+  },
-+);
-+afterEach( // 後処理を登録する関数
-+  /**
-+   * ログへ試験用秘密値が含まれないことを確認し、consoleを復元する。
-+   */
-+  () => { // 後処理コールバック
-+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(SECRET); // JSON化・モック取得・期待値生成・非包含検証メソッド
-+    vi.restoreAllMocks(); // consoleを復元するメソッド
-+  },
-+);
-+
-+it.each(["DEVELOPER", "SUPPORT"] as const)( // ロール別の試験定義メソッド / 読取専用リテラル型
-+  "%sのcontextを優先し、queryの本人情報・offset偽装を渡さない",
-+  /**
-+   * サーバーの本人情報と検証済みAND検索条件だけをRepositoryへ渡す。
-+   */
-+  async (role) => { // context優先の試験コールバック
-+    await getPlatformSupport({ // 一覧取得のApplication Service関数
-+      ...context,
-+      platformAdmin: {
-+        id: USER_ID,
-+        role,
-+      },
-+    }, { // 一覧取得Application Service関数
-+      clubId: CLUB_ID,
-+      status: "RESOLVED",
-+      category: "QUESTION",
-+      page: "2",
-+      userId: "other-user",
-+      platformAdminId: "other-user",
-+      skip: 0,
-+      pageSize: 9999,
-+      token: SECRET,
-+    });
-+    expect(mocks.find).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 呼出し引数の検証メソッド
-+      userId: USER_ID,
-+      platformAdminId: USER_ID,
-+      query: {
-+        clubId: CLUB_ID,
-+        status: "RESOLVED",
-+        category: "QUESTION",
-+        page: 2,
-+        pageSize: 50,
-+        skip: 50,
-+      },
-+    });
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "余分な結果と関係先の秘密列を除き、全文とsnapshotはそのまま返す",
-+  /**
-+   * Repository応答を丸ごと返さず、許可したDTOの全項目だけを再構築する。
-+   */
-+  async () => { // 限定DTOの試験コールバック
-+    const row = report(); // 報告fixtureの生成関数
-+    mocks.find.mockResolvedValue({ // 余分な列を混ぜた応答の設定メソッド
-+      ...found(), // 一覧成功fixtureの生成関数
-+      reports: [{
-+        ...row,
-+        token: SECRET,
-+        notifyError: SECRET,
-+        club: {
-+          ...club,
-+          secret: SECRET,
-+        },
-+        handler: {
-+          ...row.handler,
-+          email: SECRET,
-+        },
-+      }],
-+      clubs: [{
-+        ...club,
-+        secret: SECRET,
-+      }],
-+      cause: SECRET,
-+    });
-+    await expect(getPlatformSupport(context, {})).resolves.toEqual(found()); // 一覧取得・fixture生成関数 / 非同期結果の比較メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "担当者未設定と0件でも一覧を成功として返す",
-+  /**
-+   * nullable担当者と空配列をそれぞれ保持する。
-+   */
-+  async () => { // nullableと0件の試験コールバック
-+    const row = report(); // 報告fixtureの生成関数
-+    row.handler = null;
-+    mocks.find.mockResolvedValue({ // nullable担当者の応答設定メソッド
-+      ...found(), // 一覧成功fixtureの生成関数
-+      reports: [row],
-+    });
-+    await expect(getPlatformSupport(context, {})).resolves.toMatchObject({ // 一覧取得関数 / 非同期結果の部分一致比較メソッド
-+      reports: [row],
-+    });
-+    mocks.find.mockResolvedValue({ // 空一覧の応答を設定するメソッド
-+      ...found(), // 一覧成功fixtureの生成関数
-+      reports: [],
-+      clubs: [],
-+      totalCount: 0,
-+    });
-+    await expect(getPlatformSupport(context, {})).resolves.toMatchObject({ // 一覧取得関数 / 非同期結果の部分一致比較メソッド
-+      outcome: "FOUND",
-+      reports: [],
-+      clubs: [],
-+      totalCount: 0,
-+    });
-+  },
-+);
-+
-+it.each(["FORBIDDEN", "INVALID_QUERY", "READ_FAILED"])( // 固定失敗分類別の試験定義メソッド
-+  "%sでは部分的な一覧も返さない",
-+  /**
-+   * Repositoryが失敗に添えた本文・メモ・例外原文をすべて除去する。
-+   */
-+  async (outcome) => { // 固定失敗の試験コールバック
-+    mocks.find.mockResolvedValue({ // 部分DTOを含む失敗応答の設定メソッド
-+      ...found(), // 一覧成功fixtureの生成関数
-+      outcome,
-+      message: SECRET,
-+    });
-+    await expect(getPlatformSupport(context, {})).resolves.toEqual({ outcome }); // 一覧取得関数 / 非同期結果の比較メソッド
-+  },
-+);
-+
-+it.each([null, undefined, [], "query", { page: "0" }, { page: ["1"] }, { status: SECRET }])( // 入力値別の試験を定義するメソッド
-+  "不正queryを全件取得に丸めずDB前で拒否する %#",
-+  /**
-+   * 入力不正ではRepositoryへ進まず、固定分類だけを返す。
-+   */
-+  async (query) => { // 不正queryの試験コールバック
-+    await expect(getPlatformSupport(context, query)).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "INVALID_QUERY",
-+    });
-+    expect(mocks.find).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-+
-+it.each([null, {}, { // 入力値別の試験を定義するメソッド
-+  ...context,
-+  platformAdmin: {
-+    id: "other-user",
-+    role: "DEVELOPER",
-+  },
-+}, {
-+  ...context,
-+  platformAdmin: {
-+    id: USER_ID,
-+    role: "OWNER",
-+  },
-+}])(
-+  "不正な認可contextでは一覧Repositoryを呼ばない %#",
-+  /**
-+   * 一般会員や他人のPlatformAdminを組み合わせたcontextを拒否する。
-+   */
-+  async (value) => { // 不正contextの試験コールバック
-+    await expect(getPlatformSupport( // 一覧取得関数 / 非同期結果の期待値生成関数
-+      value as PlatformAdminAccessContext, // 不正contextを再現する型アサーション
-+      {},
-+    )).resolves.toEqual({ outcome: "FORBIDDEN" }); // 非同期結果の比較メソッド
-+    expect(mocks.find).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-+
-+it.each([null, { outcome: SECRET }, { // 入力値別の試験を定義するメソッド
-+  ...found(), // 一覧成功fixtureの生成関数
-+  reports: [report(), null], // 報告fixtureの生成関数
-+}])(
-+  "契約外の応答や途中のDTO変換失敗を部分開示しない %#",
-+  /**
-+   * 変換に失敗した一覧は全体をREAD_FAILEDにし、途中までの報告を返さない。
-+   */
-+  async (value) => { // 契約外結果の試験コールバック
-+    mocks.find.mockResolvedValue(value); // 不正応答を設定するメソッド
-+    await expect(getPlatformSupport(context, {})).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "READ_FAILED",
-+    });
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "例外原文とログ障害を外へ出さず、読取を再試行しない",
-+  /**
-+   * Repository例外とconsole例外が重なっても固定結果だけを返す。
-+   */
-+  async () => { // 例外の安全化を検証するコールバック
-+    mocks.find.mockRejectedValue(new Error(SECRET)); // エラー応答の設定メソッド / Errorコンストラクター
-+    vi.mocked(console.error).mockImplementation( // ログ監視対象の実装を置換するメソッド
-+      /**
-+       * ログ基盤の障害を試験用例外で再現する。
-+       */
-+      () => { // ログ障害のコールバック
-+        throw new Error(SECRET); // 試験用Errorコンストラクター
-+      },
-+    );
-+    await expect(getPlatformSupport(context, {})).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "READ_FAILED",
-+    });
-+    expect(mocks.find).toHaveBeenCalledTimes(1); // モック関数参照 / 再試行なしの検証メソッド
-+    expect(vi.mocked(console.error).mock.calls[0]).toEqual([ // モック取得・期待値生成・固定ログの比較メソッド
-+      "platform_support_operation_failed",
-+      {
-+        operation: "platformSupport.read",
-+        result: "READ_FAILED",
-+        errorCode: "INTERNAL",
-+      },
-+    ]);
-+  },
-+);
-diff --git a/src/application/platform/support/get-platform-support.ts b/src/application/platform/support/get-platform-support.ts
-new file mode 100644
-index 0000000..f5a355c
---- /dev/null
-+++ b/src/application/platform/support/get-platform-support.ts
-@@ -0,0 +1,134 @@
-+// src/application/platform/support/get-platform-support.ts
-+// 認可contextと検索条件を分離し、Platform一覧の限定DTOまたは固定失敗分類を返す。
-+
-+import "server-only";
-+
-+import type {
-+  PlatformAdminAccessContext, // Auth本人IDと有効なPlatform管理者情報をまとめた認可context型
++  requirePlatformAdmin, // Auth本人と有効なPlatform管理者を照合して認可contextを返す関数
 +} from "@/app/(club-app)/platform/require-platform-admin";
 +import {
-+  parseSupportReportQuery, // 一覧queryを検証し、検索条件を整形する関数
-+} from "@/domain/platform/support/support-report-query";
++  isSupportReportVersion, // ミリ秒付きUTC ISO形式のversion文字列を検証する関数
++  parseSupportReportNoteFormData, // メモFormDataの単一性・識別値・操作値を検証する関数
++  parseSupportReportStatusFormData, // status FormDataの単一性・識別値・操作値を検証する関数
++  type SupportReportManagementField, // 管理操作の識別値と操作値の項目名の型
++} from "@/domain/platform/support/support-report-management-form";
 +import type {
-+  PlatformSupportClub, // 一覧と絞り込み候補に使うクラブ情報の型
-+  PlatformSupportListResult, // 一覧取得の成功値と固定失敗分類の型
-+  PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
-+} from "@/domain/platform/support/support-report-management-types";
++  ActionState, // 値・項目別エラー・全体エラー・requestIdを持つ共通Action state型
++} from "@/domain/shared/action-state";
 +import {
-+  sanitizeLogContext, // ログへ出してよい安全な項目だけを返す関数
-+} from "@/src/infrastructure/logging/sanitize-log-context";
++  createRequestId, // 新しいrequestIdをUUID v4形式で生成する関数
++  isRequestId, // 値がUUID v4形式のrequestIdか検証する関数
++} from "@/domain/shared/request-id";
 +import {
-+  findSupportReportsForPlatform, // 本人と最新権限を照合し、一覧・件数・クラブ候補を取得する関数
-+} from "@/src/infrastructure/prisma/repositories/platform-support-report-repository";
++  updatePlatformSupportNote, // 認可contextとメモ入力から最小更新結果を返すApplication Service関数
++  updatePlatformSupportStatus, // 認可contextとstatus入力から最小更新結果を返すApplication Service関数
++} from "@/src/application/platform/support/update-platform-support";
 +
 +/**
-+ * 例外や本文を渡さず、一覧取得の固定失敗分類だけを記録する。
++ * 操作ごと・行ごとに独立して保持する、versionと最小成功情報だけのAction state型。
++ * status・内部メモはstateへ反射せず、入力欄の保持は後続フォームが担当する。
 + */
-+function logReadFailure(): void { // 一覧失敗を安全に記録する関数 / 戻り値なしの型
-+  try {
-+    console.error( // 固定の失敗情報を出力するメソッド
-+      "platform_support_operation_failed",
-+      sanitizeLogContext({ // 許可したログ項目だけを返す関数
-+        operation: "platformSupport.read",
-+        result: "READ_FAILED",
-+        errorCode: "INTERNAL",
-+      }),
-+    );
-+  } catch {
-+    // ログ障害で一覧読取を再試行したり、原文を外へ出したりしない。
++export type PlatformSupportActionState = ActionState< // 管理操作のstate型 / 共通Action state型
++  {
++    expectedUpdatedAt: string; // 次の操作に使うversionの文字列型
++  },
++  SupportReportManagementField, // 管理操作の項目名の型
++  {
++    outcome: "UPDATED" | "UNCHANGED"; // 保存済み・変更なしの分類型
++    reportId: string; // 操作した報告IDの文字列型
++    updatedAt: string; // 最新versionの文字列型
++    reloadRequired: boolean; // 保存後の再検証失敗を表す真偽値型
++    message: string; // 固定の成功案内の文字列型
 +  }
-+}
++>;
++
++const FAILED_MESSAGE = "更新できませんでした。時間をおいて再度お試しください。";
++const EXPIRED_MESSAGE = "フォームの有効期限が切れました。ページを再読み込みしてください。";
 +
 +/**
-+ * クラブ情報から表示に必要な3項目だけを新しいオブジェクトへ写す。
++ * 送信内容や例外を反射せず、許可したversionと固定エラーだけを返す。
 + */
-+function clubView(club: PlatformSupportClub): PlatformSupportClub { // クラブDTO変換関数 / クラブ情報型
++function errorState( // 管理操作のエラーstateを作る関数
++  requestId: string, // UUID v4のrequestIdの文字列型
++  expectedUpdatedAt: string, // 検証済みversionまたは空文字の型
++  formError: string | null, // 固定の全体エラーまたはnull型
++  fieldErrors: PlatformSupportActionState["fieldErrors"] = {}, // 管理項目別エラーの型
++): PlatformSupportActionState { // 管理操作のstate型
 +  return {
-+    id: club.id,
-+    name: club.name,
-+    slug: club.slug,
-+  };
-+}
-+
-+/**
-+ * 本文を切り捨てず、型契約で許可した表示列と担当者情報だけを返す。
-+ */
-+function reportView(report: PlatformSupportReport): PlatformSupportReport { // 報告DTO変換関数 / 報告表示型
-+  return {
-+    id: report.id,
-+    createdAt: report.createdAt,
-+    updatedAt: report.updatedAt,
-+    club: clubView(report.club), // クラブの限定DTOを作る関数
-+    category: report.category,
-+    status: report.status,
-+    message: report.message,
-+    pageUrl: report.pageUrl,
-+    userAgent: report.userAgent,
-+    reporterName: report.reporterName,
-+    reporterEmail: report.reporterEmail,
-+    reporterRole: report.reporterRole,
-+    handler: report.handler === null ? null : {
-+      id: report.handler.id,
-+      name: report.handler.name,
++    status: "error",
++    values: {
++      expectedUpdatedAt,
 +    },
-+    statusChangedAt: report.statusChangedAt,
-+    resolvedAt: report.resolvedAt,
-+    internalNote: report.internalNote,
-+    notifiedAt: report.notifiedAt,
-+    notificationFailed: report.notificationFailed,
++    fieldErrors,
++    formError,
++    requestId,
 +  };
 +}
 +
 +/**
-+ * 認可contextと生queryを受け取り、入力を再検証して全クラブの限定一覧を返す。
-+ * Auth検証は呼出し元、最新DB権限の再照合はRepositoryが担う。
++ * 認可、単一値の検証、bound ID照合、Service呼出し、保存後再検証を順に行う。
++ * 前stateは認可やversionの根拠にせず、requestIdの送信整合性だけを確認する。
 + */
-+export async function getPlatformSupport( // Platform一覧を取得するApplication Service関数
-+  context: PlatformAdminAccessContext, // サーバーで構築したPlatform認可context型
-+  input: unknown, // 未検証の検索条件の型
-+): Promise<PlatformSupportListResult> { // 一覧の成功値または固定失敗分類を返す非同期型
++async function updateSupportReport( // 管理Actionの共通実行関数
++  reportId: string, // サーバーでbindした対象報告IDの文字列型
++  previousState: PlatformSupportActionState, // 前回の管理操作state型
++  formData: FormData, // 単一値を検証するFormData型
++  kind: "STATUS" | "NOTE", // 操作種別を選ぶリテラル型
++): Promise<PlatformSupportActionState> { // 管理操作stateを返す非同期型
++  let requestId = createRequestId(); // エラー返却にも使えるUUID v4の生成関数
++  let expectedUpdatedAt = "";
 +  try {
++    const access = await requirePlatformAdmin(); // 毎回Auth本人と最新Platform権限を確認する関数
++    const previousId = (
++      typeof previousState === "object" &&
++      previousState !== null &&
++      !Array.isArray(previousState) // 前stateが配列か判定するメソッド
++    ) ? previousState.requestId : undefined;
++    if (isRequestId(previousId)) { // 前stateの識別子がUUID v4か検証する関数
++      requestId = previousId;
++    }
++    const submittedIds = formData instanceof FormData ? formData.getAll("requestId") : []; // FormData型の確認 / requestId全項目の取得メソッド
++    const versions = formData instanceof FormData ? formData.getAll("expectedUpdatedAt") : []; // FormData型の確認 / version全項目の取得メソッド
 +    if (
-+      !context ||
-+      typeof context.userId !== "string" ||
-+      context.userId.trim().length === 0 || // 本人ID前後の空白を除くメソッド
-+      !context.platformAdmin ||
-+      context.platformAdmin.id !== context.userId ||
-+      (
-+        context.platformAdmin.role !== "DEVELOPER" &&
-+        context.platformAdmin.role !== "SUPPORT"
-+      )
++      versions.length === 1 &&
++      isSupportReportVersion(versions[0]) // version文字列を検証する関数
 +    ) {
-+      return { outcome: "FORBIDDEN" };
++      expectedUpdatedAt = versions[0];
 +    }
-+    const validation = parseSupportReportQuery(input); // 生queryを共通契約で再検証する関数
++    if (
++      submittedIds.length !== 1 ||
++      !isRequestId(submittedIds[0]) || // hidden識別子がUUID v4か検証する関数
++      submittedIds[0] !== previousId
++    ) {
++      return errorState(requestId, expectedUpdatedAt, EXPIRED_MESSAGE); // 固定エラーstateを作る関数
++    }
++    const validation = kind === "STATUS"
++      ? parseSupportReportStatusFormData(formData) // statusの単一値・識別値・操作値を検証する関数
++      : parseSupportReportNoteFormData(formData); // メモの単一値・識別値・操作値を検証する関数
 +    if (!validation.success) {
-+      return { outcome: "INVALID_QUERY" };
++      return errorState(requestId, expectedUpdatedAt, null, validation.fieldErrors); // 検証済み項目エラーのstateを作る関数
 +    }
-+    const result = await findSupportReportsForPlatform({ // 最新権限を再照合して一覧を取得する関数
-+      userId: context.userId,
-+      platformAdminId: context.platformAdmin.id,
-+      query: validation.data,
-+    });
++    const value = validation.data;
++    if (value.reportId !== reportId) {
++      return errorState(requestId, expectedUpdatedAt, "報告の指定が不正です。"); // bound ID不一致の固定エラーstate生成関数
++    }
++    // 保存後に識別子生成が失敗して成功を取り消さないよう、次回用IDを先に準備する。
++    const nextRequestId = createRequestId(); // 次の独立操作に使うUUID v4の生成関数
++    const result = "status" in value
++      ? await updatePlatformSupportStatus(access, value) // 認可contextと検証済みstatusで更新するService関数
++      : await updatePlatformSupportNote(access, value); // 認可contextと検証済みメモで保存するService関数
 +    switch (result.outcome) {
-+      case "FOUND":
++      case "UPDATED":
++      case "UNCHANGED": {
++        if (
++          result.reportId !== reportId ||
++          !isSupportReportVersion(result.updatedAt) // 成功時のversionを検証する関数
++        ) {
++          return errorState(requestId, expectedUpdatedAt, FAILED_MESSAGE); // 不正成功結果を固定エラーへ限定する関数
++        }
++        let reloadRequired = false;
++        if (result.outcome === "UPDATED") {
++          try {
++            revalidatePath("/platform/support"); // 管理一覧の固定パスだけを再検証する関数
++          } catch (error) {
++            unstable_rethrow(error); // Next制御例外だけを再送出する関数
++            reloadRequired = true;
++          }
++        }
 +        return {
-+          outcome: "FOUND",
-+          reports: result.reports.map(reportView), // 限定DTO変換を適用するメソッド / 報告変換関数参照
-+          clubs: result.clubs.map(clubView), // 限定候補を作るメソッド / クラブ変換関数参照
-+          totalCount: result.totalCount,
-+          page: result.page,
-+          pageSize: result.pageSize,
++          status: "success",
++          values: {
++            expectedUpdatedAt: result.updatedAt,
++          },
++          fieldErrors: {},
++          formError: null,
++          requestId: nextRequestId,
++          data: {
++            outcome: result.outcome,
++            reportId: result.reportId,
++            updatedAt: result.updatedAt,
++            reloadRequired,
++            message: reloadRequired
++              ? "保存済みです。表示を更新できなかったため、未保存の内容を控えて再読み込みしてください。"
++              : result.outcome === "UNCHANGED"
++                ? "変更はありません。"
++                : "保存しました。",
++          },
 +        };
++      }
 +      case "FORBIDDEN":
-+      case "INVALID_QUERY":
-+        return { outcome: result.outcome };
++        return errorState(requestId, expectedUpdatedAt, "この操作を行う権限がありません。"); // 権限エラーstateの生成関数
++      case "NOT_FOUND":
++        return errorState(requestId, expectedUpdatedAt, "報告が見つかりません。再読み込みしてください。"); // 対象消失のエラーstate生成関数
++      case "CONFLICT":
++        return errorState( // 競合時の再読込案内を返すエラーstate生成関数
++          requestId,
++          expectedUpdatedAt,
++          "他の操作で更新されています。未保存の内容を控えて再読み込みしてください。",
++        );
++      case "INVALID_INPUT":
++        return errorState(requestId, expectedUpdatedAt, "入力内容を確認してください。"); // 入力エラーstateの生成関数
 +      default:
-+        logReadFailure(); // 失敗の固定分類だけを記録する関数
-+        return { outcome: "READ_FAILED" };
++        return errorState(requestId, expectedUpdatedAt, FAILED_MESSAGE); // 固定の失敗state生成関数
 +    }
-+  } catch {
-+    logReadFailure(); // 例外原文を渡さず固定分類を記録する関数
-+    return { outcome: "READ_FAILED" };
++  } catch (error) {
++    unstable_rethrow(error); // Auth・Service等のNext制御例外を再送出する関数
++    return errorState(requestId, expectedUpdatedAt, FAILED_MESSAGE); // 例外原文を含まない固定エラーstate生成関数
 +  }
 +}
-diff --git a/src/application/platform/support/update-platform-support.test.ts b/src/application/platform/support/update-platform-support.test.ts
++
++/**
++ * サーバーでbindした報告IDと独立state・FormDataから、再認可してstatusを更新する。
++ */
++export async function updateSupportReportStatusAction( // status更新のServer Action関数
++  reportId: string, // bindした対象報告IDの文字列型
++  previousState: PlatformSupportActionState, // 行・操作ごとの独立state型
++  formData: FormData, // ブラウザーが送信したFormData型
++): Promise<PlatformSupportActionState> { // 管理操作stateを返す非同期型
++  return updateSupportReport(reportId, previousState, formData, "STATUS"); // 再認可・検証・保存の共通実行関数
++}
++
++/**
++ * サーバーでbindした報告IDと独立state・FormDataから、再認可して内部メモを保存する。
++ */
++export async function updateSupportReportNoteAction( // メモ保存のServer Action関数
++  reportId: string, // bindした対象報告IDの文字列型
++  previousState: PlatformSupportActionState, // 行・操作ごとの独立state型
++  formData: FormData, // ブラウザーが送信したFormData型
++): Promise<PlatformSupportActionState> { // 管理操作stateを返す非同期型
++  return updateSupportReport(reportId, previousState, formData, "NOTE"); // 再認可・検証・保存の共通実行関数
++}
+diff --git a/tests/platform-support-actions.test.ts b/tests/platform-support-actions.test.ts
 new file mode 100644
-index 0000000..dd88ad1
+index 0000000..b66ce85
 --- /dev/null
-+++ b/src/application/platform/support/update-platform-support.test.ts
-@@ -0,0 +1,343 @@
-+// src/application/platform/support/update-platform-support.test.ts
-+// 実DB・Authを使わず、操作値の再検証・context優先・最小結果・安全なログを確認する。
++++ b/tests/platform-support-actions.test.ts
+@@ -0,0 +1,498 @@
++// tests/platform-support-actions.test.ts
++// Actionの直接呼出しで実認可・入力・固定再検証・保存後失敗を確認する。HTTP Origin保護の試験ではない。
 +
 +import {
 +  afterEach,
@@ -483,483 +224,490 @@ index 0000000..dd88ad1
 +  vi,
 +} from "vitest";
 +
-+import type {
-+  PlatformAdminAccessContext, // Auth本人とPlatform管理者をまとめた認可context型
-+} from "@/app/(club-app)/platform/require-platform-admin";
 +import {
-+  updatePlatformSupportNote, // contextとメモ入力から最小の更新結果を返すApplication Service関数
-+  updatePlatformSupportStatus, // contextとstatus入力から最小の更新結果を返すApplication Service関数
-+} from "./update-platform-support";
++  updateSupportReportNoteAction, // 再認可と単一値検証を行ってメモを保存するServer Action関数
++  updateSupportReportStatusAction, // 再認可と単一値検証を行ってstatusを更新するServer Action関数
++  type PlatformSupportActionState, // 行・操作ごとに独立させる管理操作のstate型
++} from "@/app/(club-app)/platform/support/actions";
++import {
++  isRequestId, // UUID v4形式のrequestIdを検証する関数
++} from "@/domain/shared/request-id";
 +
-+const mocks = vi.hoisted( // import評価前にモックを準備するメソッド
++const mocks = vi.hoisted( // モジュール評価前にモックを準備するメソッド
 +  /**
-+   * DB・dotenvを起動しないよう、2種類の更新Repositoryを置換する。
++   * 実認可は通し、Auth・DB・Service・Next APIの境界だけを置換する。
 +   */
 +  () => ({ // モック生成コールバック
-+    status: vi.fn(), // status更新モックの生成メソッド
-+    note: vi.fn(), // メモ更新モックの生成メソッド
++    getUser: vi.fn(), // Auth本人検証モックの生成メソッド
++    actor: vi.fn(), // 最新管理者読取モックの生成メソッド
++    status: vi.fn(), // status更新Serviceモックの生成メソッド
++    note: vi.fn(), // メモ更新Serviceモックの生成メソッド
++    revalidate: vi.fn(), // 再検証モックの生成メソッド
++    redirect: vi.fn(), // redirectモックの生成メソッド
++    notFound: vi.fn(), // notFoundモックの生成メソッド
++    rethrow: vi.fn(), // Next制御例外の再送出モックの生成メソッド
 +  }),
 +);
-+vi.mock( // 更新Repositoryの境界を置換するメソッド
-+  "@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository",
++vi.mock( // Supabase境界を置換するメソッド
++  "@/src/infrastructure/supabase/server",
 +  /**
-+   * 更新結果のモックだけを公開し、実DBや通知処理を起動しない。
++   * 実Authへ接続せず、getUserの応答だけを返すclientを作る。
 +   */
 +  () => ({ // モジュール置換コールバック
-+    updateSupportReportStatusForPlatform: mocks.status, // status更新モックの関数参照
-+    updateSupportReportNoteForPlatform: mocks.note, // メモ更新モックの関数参照
++    createClient:
++      /**
++       * Auth本人検証のモックだけを持つサーバーclientを返す。
++       */
++      async () => ({ // client生成の非同期コールバック
++        auth: {
++          getUser: mocks.getUser, // 本人検証モックの関数参照
++        },
++      }),
 +  }),
 +);
++vi.mock( // dotenv読込と実DB接続を防ぐ置換メソッド
++  "@/src/infrastructure/prisma/client",
++  /**
++   * 認可に必要なPlatformAdminの読取だけを公開する。
++   */
++  () => ({ // モジュール置換コールバック
++    prisma: {
++      platformAdmin: {
++        findFirst: mocks.actor, // 管理者読取モックの関数参照
++      },
++    },
++  }),
++);
++vi.mock( // Service境界を置換するメソッド
++  "@/src/application/platform/support/update-platform-support",
++  /**
++   * DB更新やメール送信を起動せず、操作別の結果を返す。
++   */
++  () => ({ // モジュール置換コールバック
++    updatePlatformSupportStatus: mocks.status, // status更新Serviceのモック関数参照
++    updatePlatformSupportNote: mocks.note, // メモ保存Serviceのモック関数参照
++  }),
++);
++vi.mock( // 再検証APIを置換するメソッド
++  "next/cache",
++  /**
++   * 実キャッシュを変更せず、固定パスへの呼出しだけを記録する。
++   */
++  () => ({ // モジュール置換コールバック
++    revalidatePath: mocks.revalidate, // 再検証モックの関数参照
++  }),
++);
++vi.mock( // Next制御APIを置換するメソッド
++  "next/navigation",
++  /**
++   * redirect・404の制御例外と、再送出の境界をテストできるようにする。
++   */
++  () => ({ // モジュール置換コールバック
++    redirect: mocks.redirect, // redirectモックの関数参照
++    notFound: mocks.notFound, // notFoundモックの関数参照
++    unstable_rethrow: mocks.rethrow, // 制御例外再送出モックの関数参照
++  }),
++);
++
++/**
++ * Nextが処理する制御例外を、通常のアプリ例外と区別する試験用クラス。
++ */
++class ControlError extends Error {} // 試験用制御例外クラス / Errorクラス
 +
 +const USER_ID = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
 +const REPORT_ID = "11111111-1111-4111-8111-111111111111";
 +const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
++const OTHER_ID = "33333333-3333-4333-8333-333333333333";
 +const VERSION = "2026-10-25T10:00:00.000Z";
-+const NEXT_VERSION = "2026-10-25T11:00:00.000Z";
-+const SECRET = "test-only-private-token@example.test";
-+const context: PlatformAdminAccessContext = { // サーバー認可contextの型
-+  userId: USER_ID,
-+  platformAdmin: {
-+    id: USER_ID,
-+    role: "DEVELOPER",
-+  },
-+};
-+const identity = {
-+  reportId: REPORT_ID,
-+  requestId: REQUEST_ID,
-+  expectedUpdatedAt: VERSION,
-+};
++const NEXT_VERSION = "2026-10-26T01:00:00.000Z";
++const SECRET = "test-only-private-password-token@example.test";
 +
-+beforeEach( // 前処理を登録する関数
++/**
++ * 行ごとの初期stateを作り、前stateには認可情報を含めない。
++ */
++function state(): PlatformSupportActionState { // 初期state生成関数 / 管理操作state型
++  return {
++    status: "idle",
++    values: {
++      expectedUpdatedAt: VERSION,
++    },
++    fieldErrors: {},
++    formError: null,
++    requestId: REQUEST_ID,
++  };
++}
++
++/**
++ * 行の識別値と操作別の単一項目を持つFormDataを生成する。
++ */
++function form(kind: "STATUS" | "NOTE"): FormData { // フォーム生成関数 / 操作名型 / FormData型
++  const data = new FormData(); // フォーム値を保持するコンストラクター
++  data.set("reportId", REPORT_ID); // 対象IDの設定メソッド
++  data.set("requestId", REQUEST_ID); // requestIdの設定メソッド
++  data.set("expectedUpdatedAt", VERSION); // versionの設定メソッド
++  data.set(kind === "STATUS" ? "status" : "internalNote", kind === "STATUS" ? "RESOLVED" : " メモ "); // 操作別の項目を設定するメソッド
++  return data;
++}
++
++beforeEach( // 各試験の準備を登録する関数
 +  /**
-+   * モック応答を初期化し、成功結果とログ監視を用意する。
++   * 本人・最新権限・更新結果を初期化し、制御例外の挙動を設定する。
 +   */
 +  () => { // 前処理コールバック
-+    vi.resetAllMocks(); // モック履歴・実装の初期化メソッド
-+    for (const repository of [mocks.status, mocks.note]) { // 更新Repositoryモックの関数参照
-+      repository.mockResolvedValue({ // 成功応答の設定メソッド
++    vi.resetAllMocks(); // モック実装と履歴の初期化メソッド
++    mocks.getUser.mockResolvedValue({ // Auth本人応答の設定メソッド
++      data: { user: { id: USER_ID } },
++      error: null,
++    });
++    mocks.actor.mockResolvedValue({ // 管理者応答の設定メソッド
++      id: USER_ID,
++      role: "DEVELOPER",
++      isActive: true,
++    });
++    for (const service of [mocks.status, mocks.note]) { // 操作別Serviceモックの関数参照
++      service.mockResolvedValue({ // 更新成功応答の設定メソッド
 +        outcome: "UPDATED",
 +        reportId: REPORT_ID,
 +        updatedAt: NEXT_VERSION,
 +      });
 +    }
-+    vi.spyOn(console, "error").mockImplementation( // ログ監視と代替実装の設定メソッド
++    mocks.redirect.mockImplementation( // redirectの実装設定メソッド
 +      /**
-+       * ログ内容を検査するため、実出力だけを抑制する。
++       * 実redirectのように制御例外で処理を中断する。
 +       */
-+      () => undefined, // ログ抑制のコールバック
++      () => { // redirectのコールバック
++        throw new ControlError("NEXT_REDIRECT"); // 試験用制御例外のコンストラクター
++      },
 +    );
++    mocks.notFound.mockImplementation( // notFoundの実装設定メソッド
++      /**
++       * 実notFoundのように制御例外で処理を中断する。
++       */
++      () => { // notFoundのコールバック
++        throw new ControlError("NEXT_NOT_FOUND"); // 試験用制御例外のコンストラクター
++      },
++    );
++    mocks.rethrow.mockImplementation( // 制御例外再送出の実装設定メソッド
++      /**
++       * 試験用Next制御例外だけを再送出し、通常例外は戻す。
++       */
++      (error: unknown) => { // 再送出コールバック / 不明値型
++        if (error instanceof ControlError) { // 制御例外クラスの判定
++          throw error;
++        }
++      },
++    );
++    for (const method of ["error", "warn", "log"] as const) { // ログメソッド名の読取専用リテラル型
++      vi.spyOn(console, method).mockImplementation( // ログ監視と代替実装の設定メソッド
++        /**
++         * 末尾で非出力を検証するため、ログの実出力を抑制する。
++         */
++        () => undefined, // ログ抑制コールバック
++      );
++    }
 +  },
 +);
 +afterEach( // 後処理を登録する関数
 +  /**
-+   * すべてのログで試験用秘密値の非出力を確認し、consoleを復元する。
++   * PW・本文・メモ・例外をログへ出さず、consoleを復元する。
 +   */
 +  () => { // 後処理コールバック
-+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toContain(SECRET); // JSON化・モック取得・期待値生成・非包含検証メソッド
-+    vi.restoreAllMocks(); // consoleを復元するメソッド
++    expect(console.error).not.toHaveBeenCalled(); // ログ関数参照 / 期待値生成・未呼出し検証メソッド
++    expect(console.warn).not.toHaveBeenCalled(); // 警告関数参照 / 期待値生成・未呼出し検証メソッド
++    expect(console.log).not.toHaveBeenCalled(); // 通常ログ関数参照 / 期待値生成・未呼出し検証メソッド
++    vi.restoreAllMocks(); // console実装の復元メソッド
 +  },
 +);
 +
-+for (const kind of ["STATUS", "NOTE"] as const) { // 操作名を固定する読取専用リテラル型
-+  const service = kind === "STATUS" ? updatePlatformSupportStatus : updatePlatformSupportNote; // 操作別Serviceの関数参照
-+  const repository = kind === "STATUS" ? mocks.status : mocks.note; // 操作別Repositoryモックの関数参照
-+  const otherRepository = kind === "STATUS" ? mocks.note : mocks.status; // 別操作のモック関数参照
-+  const input = {
-+    ...identity,
-+    status: "RESOLVED",
-+    internalNote: " メモ\n本文 ",
-+  };
++for (const kind of ["STATUS", "NOTE"] as const) { // 操作名の読取専用リテラル型
++  const action = kind === "STATUS" ? updateSupportReportStatusAction : updateSupportReportNoteAction; // 操作別Server Actionの関数参照
++  const service = kind === "STATUS" ? mocks.status : mocks.note; // 対応Serviceモックの関数参照
++  const other = kind === "STATUS" ? mocks.note : mocks.status; // 別操作のServiceモック関数参照
 +
-+  it.each(["DEVELOPER", "SUPPORT"] as const)( // ロール別の試験定義メソッド / 読取専用リテラル型
-+    `${kind}は%sのcontextと許可操作値だけをRepositoryへ渡す`,
++  it.each(["DEVELOPER", "SUPPORT"])( // 許可ロール別の試験定義メソッド
++    `${kind}は%s本人を毎回認可し、許可入力だけで保存・固定再検証する`,
 +    /**
-+     * 入力内の本人・対応者・クラブ・日時・通知列を無視し、選択した操作だけを呼ぶ。
++     * 実際の認可helperとRepositoryを通し、本人情報や更新列をhiddenから採用しない。
 +     */
-+    async (role) => { // context優先の試験コールバック
-+      await service({ // 操作別Application Service関数
-+        ...context,
++    async (role) => { // 許可ロールの試験コールバック
++      mocks.actor.mockResolvedValue({ // 管理者応答の設定メソッド
++        id: USER_ID,
++        role,
++        isActive: true,
++      });
++      const data = form(kind); // FormData生成関数
++      data.set(kind === "STATUS" ? "internalNote" : "status", SECRET); // 別操作の項目を混ぜる設定メソッド
++      for (const field of [
++        "userId",
++        "platformAdminId",
++        "handledByPlatformAdminId",
++        "clubId",
++        "returnTo",
++        "password",
++        "message",
++        "notifyError",
++      ]) {
++        data.set(field, SECRET); // 不正な追加項目を設定するメソッド
++      }
++      const result = await action(REPORT_ID, state(), data); // 操作別Action関数 / 初期state生成関数
++      expect(service).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 本人contextの検証メソッド
++        userId: USER_ID,
 +        platformAdmin: {
 +          id: USER_ID,
 +          role,
 +        },
 +      }, {
-+        ...input,
-+        userId: "other-user",
-+        platformAdminId: "other-user",
-+        handledByPlatformAdminId: "other-user",
-+        clubId: "other-club",
-+        membershipId: "other-member",
-+        message: SECRET,
-+        reporterEmail: SECRET,
-+        statusChangedAt: SECRET,
-+        resolvedAt: SECRET,
-+        notifyError: SECRET,
-+        updatedAt: SECRET,
++        reportId: REPORT_ID,
++        requestId: REQUEST_ID,
++        expectedUpdatedAt: VERSION,
++        ...(kind === "STATUS" ? { status: "RESOLVED" } : { internalNote: "メモ" }),
 +      });
-+      const operationValue = kind === "STATUS" ? {
-+        status: "RESOLVED",
-+      } : {
-+        internalNote: "メモ\n本文",
-+      };
-+      expect(repository).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 呼出し引数の検証メソッド
-+        userId: USER_ID,
-+        platformAdminId: USER_ID,
-+        ...identity,
-+        ...operationValue,
++      expect(result).toMatchObject({ // 期待値生成・成功stateの比較メソッド
++        status: "success",
++        values: { expectedUpdatedAt: NEXT_VERSION },
++        data: {
++          outcome: "UPDATED",
++          reportId: REPORT_ID,
++          updatedAt: NEXT_VERSION,
++          reloadRequired: false,
++        },
 +      });
-+      expect(otherRepository).not.toHaveBeenCalled(); // モック関数参照 / 別操作の未呼出し検証メソッド
-+      expect(console.error).not.toHaveBeenCalled(); // ログ関数参照 / 成功時の非出力検証メソッド
++      expect(isRequestId(result.requestId)).toBe(true); // UUID v4検証関数 / 期待値生成・真偽比較メソッド
++      expect(result.requestId).not.toBe(REQUEST_ID); // 期待値生成・識別子更新の比較メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値の非包含検証メソッド
++      expect(other).not.toHaveBeenCalled(); // モック関数参照 / 別操作の未呼出し検証メソッド
++      expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith("/platform/support"); // モック関数参照 / 固定パス検証メソッド
++      expect(mocks.getUser).toHaveBeenCalledTimes(1); // モック関数参照 / Auth再確認の検証メソッド
++      expect(mocks.redirect).not.toHaveBeenCalled(); // モック関数参照 / 成功時に遷移しないことの検証メソッド
 +    },
 +  );
 +
-+  it.each(["UPDATED", "UNCHANGED"])( // 成功分類別の試験定義メソッド
-+    `${kind}の%sでは報告IDとversionだけを返す`,
++  it.each(["未ログイン", "一般会員", "inactive"])( // 不許可の本人状態別の試験定義メソッド
++    `${kind}の直呼びを%sでは拒否する`,
 +    /**
-+     * Repositoryが成功応答へ添えた本文・内部メモ・例外情報を除く。
++     * 画面や前stateの権限情報に頼らず、未認証・権限なしを実helperで拒否する。
 +     */
-+    async (outcome) => { // 最小成功結果の試験コールバック
-+      repository.mockResolvedValue({ // 余分な項目を持つ成功応答の設定メソッド
++    async (mode) => { // 不許可認可の試験コールバック
++      if (mode === "未ログイン") {
++        mocks.getUser.mockResolvedValue({ // Auth本人応答を設定するメソッド
++          data: { user: null },
++          error: null,
++        }); // 未認証の応答設定メソッド
++      } else {
++        mocks.actor.mockResolvedValue(mode === "一般会員" ? null : { // 最新管理者の応答設定メソッド
++          id: USER_ID,
++          role: "SUPPORT",
++          isActive: false,
++        });
++      }
++      await expect(action(REPORT_ID, state(), form(kind))).rejects.toBeInstanceOf(ControlError); // Action・state・FormData生成関数 / 制御例外の検証メソッド / 例外クラス参照
++      expect(service).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++      expect(mocks.revalidate).not.toHaveBeenCalled(); // モック関数参照 / 再検証未呼出しの検証メソッド
++    },
++  );
++
++  it.each(["reportId", "requestId", "expectedUpdatedAt", "operation"])( // 項目別の試験定義メソッド
++    `${kind}は%sの重複・File送信を拒否する`,
++    /**
++     * 同じ値の重複であっても単一値の契約を満たさなければServiceを呼ばない。
++     */
++    async (field) => { // 単一値の試験コールバック
++      const key = field === "operation" ? kind === "STATUS" ? "status" : "internalNote" : field;
++      for (const file of [false, true]) {
++        const data = form(kind); // フォーム生成関数
++        if (file) {
++          data.set(key, new File([SECRET], "private.txt")); // 項目設定メソッド / Fileコンストラクター
++        } else {
++          data.append(key, data.get(key) as string); // 項目の追加・取得メソッド / 文字列型へのアサーション
++        }
++        const result = await action(REPORT_ID, state(), data); // Action関数 / 初期state生成関数
++        expect(result.status).toBe("error"); // 期待値生成・エラー状態の比較メソッド
++        expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
++      }
++      expect(service).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++    },
++  );
++
++  it.each(["target", "hidden", "version", "request"])( // 改ざん箇所別の試験定義メソッド
++    `${kind}はID・version・requestIdの不整合を拒否する %s`,
++    /**
++     * bound IDとhiddenの一致を要求し、日時やnonceの不正を固定エラーにする。
++     */
++    async (mode) => { // 不整合の試験コールバック
++      const data = form(kind); // フォーム生成関数
++      if (mode === "hidden") {
++        data.set("reportId", OTHER_ID); // hidden対象IDを変更するメソッド
++      }
++      if (mode === "version") {
++        data.set("expectedUpdatedAt", SECRET); // versionを不正にするメソッド
++      }
++      if (mode === "request") {
++        data.set("requestId", OTHER_ID); // requestIdを不一致にするメソッド
++      }
++      const result = await action(mode === "target" ? OTHER_ID : REPORT_ID, state(), data); // Action関数 / 初期state生成関数
++      expect(result.status).toBe("error"); // 期待値生成・エラー状態の比較メソッド
++      expect(service).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
++    },
++  );
++
++  it.each([null, [], {}, { requestId: SECRET }])( // 入力値別の試験を定義するメソッド
++    `${kind}は前stateの欠落・偽装を認可やnonceの根拠にしない %#`,
++    /**
++     * 前state不正では固定のフォーム期限切れを返し、認可だけは毎回実行する。
++     */
++    async (previous) => { // 不正な前stateの試験コールバック
++      const result = await action(REPORT_ID, previous as PlatformSupportActionState, form(kind)); // Action・フォーム生成関数 / state型へのアサーション
++      expect(result.status).toBe("error"); // 期待値生成・エラー状態の比較メソッド
++      expect(isRequestId(result.requestId)).toBe(true); // UUID検証関数 / 期待値生成・真偽比較メソッド
++      expect(service).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++      expect(mocks.getUser).toHaveBeenCalledTimes(1); // モック関数参照 / 毎回の認可検証メソッド
++    },
++  );
++
++  it.each(["FORBIDDEN", "NOT_FOUND", "CONFLICT", "INVALID_INPUT", "UPDATE_FAILED", "UNKNOWN"])( // 結果分類別の試験定義メソッド
++    `${kind}は%sを固定エラーにして再検証しない`,
++    /**
++     * Serviceの失敗に余分な本文やメモがあってもstateへ含めない。
++     */
++    async (outcome) => { // 失敗結果の試験コールバック
++      service.mockResolvedValue({ // Service結果の応答を設定するメソッド
 +        outcome,
-+        reportId: REPORT_ID,
-+        updatedAt: outcome === "UNCHANGED" ? VERSION : NEXT_VERSION,
 +        internalNote: SECRET,
-+        report: { message: SECRET },
 +        cause: SECRET,
-+      });
-+      await expect(service(context, input)).resolves.toEqual({ // 操作別Service関数 / 非同期結果の比較メソッド
-+        outcome,
-+        reportId: REPORT_ID,
-+        updatedAt: outcome === "UNCHANGED" ? VERSION : NEXT_VERSION,
-+      });
-+    },
-+  );
-+
-+  it.each(["FORBIDDEN", "NOT_FOUND", "CONFLICT", "INVALID_INPUT", "UPDATE_FAILED"])( // 固定失敗分類別の試験定義メソッド
-+    `${kind}の%sでは部分結果も返さない`,
-+    /**
-+     * 失敗応答は分類だけへ限定し、本文・メモ・versionを含めない。
-+     */
-+    async (outcome) => { // 固定失敗結果の試験コールバック
-+      repository.mockResolvedValue({ // 部分結果を持つ失敗応答の設定メソッド
-+        outcome,
-+        reportId: REPORT_ID,
-+        updatedAt: NEXT_VERSION,
-+        message: SECRET,
-+        internalNote: SECRET,
-+      });
-+      await expect(service(context, input)).resolves.toEqual({ outcome }); // 操作別Service関数 / 非同期結果の比較メソッド
-+      expect(repository).toHaveBeenCalledTimes(1); // モック関数参照 / 自動再試行なしの検証メソッド
-+    },
-+  );
-+
-+  it.each([null, {}, { // 入力値別の試験を定義するメソッド
-+    ...context,
-+    userId: " ",
-+  }, {
-+    ...context,
-+    platformAdmin: {
-+      id: "other-user",
-+      role: "DEVELOPER",
-+    },
-+  }, {
-+    ...context,
-+    platformAdmin: {
-+      id: USER_ID,
-+      role: "OWNER",
-+    },
-+  }])(
-+    `${kind}は不正contextで更新しない %#`,
-+    /**
-+     * 認可contextの欠落・不一致・一般会員はDB前で拒否する。
-+     */
-+    async (value) => { // 不正contextの試験コールバック
-+      await expect(service( // 操作別Service関数 / 非同期結果の期待値生成関数
-+        value as PlatformAdminAccessContext, // 不正contextを再現する型アサーション
-+        input,
-+      )).resolves.toEqual({ outcome: "FORBIDDEN" }); // 非同期結果の比較メソッド
-+      expect(repository).not.toHaveBeenCalled(); // モック関数参照 / DB未呼出しの検証メソッド
-+    },
-+  );
-+
-+  it.each([null, [], SECRET, {}, { // 入力値別の試験を定義するメソッド
-+    ...input,
-+    requestId: SECRET,
-+  }, {
-+    ...input,
-+    reportId: SECRET,
-+  }, {
-+    ...input,
-+    expectedUpdatedAt: SECRET,
-+  }])(
-+    `${kind}は識別値の不正を再検証し、DB・ログへ渡さない %#`,
-+    /**
-+     * 不正なrequestIdやversionを、固定ログの識別値としても利用しない。
-+     */
-+    async (value) => { // 不正識別値の試験コールバック
-+      await expect(service(context, value)).resolves.toEqual({ // 操作別Service関数 / 非同期結果の比較メソッド
-+        outcome: "INVALID_INPUT",
-+      });
-+      expect(repository).not.toHaveBeenCalled(); // モック関数参照 / DB未呼出しの検証メソッド
-+      expect(console.error).not.toHaveBeenCalled(); // ログ関数参照 / 不正入力の非出力検証メソッド
-+    },
-+  );
-+
-+  it.each([null, { outcome: SECRET }, { // 入力値別の試験を定義するメソッド
-+    outcome: "UPDATED",
-+    reportId: "other-report",
-+    updatedAt: NEXT_VERSION,
-+  }, {
-+    outcome: "UPDATED",
-+    reportId: REPORT_ID,
-+    updatedAt: SECRET,
-+  }])(
-+    `${kind}は契約外の返却値をUPDATE_FAILEDへ限定する %#`,
-+    /**
-+     * 未知分類・他の報告ID・不正versionを成功として公開しない。
-+     */
-+    async (value) => { // 契約外結果の試験コールバック
-+      repository.mockResolvedValue(value); // 不正な結果の応答設定メソッド
-+      await expect(service(context, input)).resolves.toEqual({ // 操作別Service関数 / 非同期結果の比較メソッド
-+        outcome: "UPDATE_FAILED",
-+      });
++      }); // 余分な列を持つ失敗応答の設定メソッド
++      const result = await action(REPORT_ID, state(), form(kind)); // Action・state・フォーム生成関数
++      expect(result.status).toBe("error"); // 期待値生成・エラー状態の比較メソッド
++      expect(mocks.revalidate).not.toHaveBeenCalled(); // モック関数参照 / 再検証未呼出しの検証メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
 +    },
 +  );
 +
 +  it( // 試験を登録する関数
-+    `${kind}は秘密値入り例外とログ障害でも固定分類を維持する`,
++    `${kind}は同status等のUNCHANGEDを成功とし、再検証しない`,
 +    /**
-+     * 例外原文をsanitizeへ渡さず、検証済みrequestIdと固定値だけを記録する。
++     * 変更なしではDBや表示の更新を追加せず、返されたversionを保持する。
 +     */
-+    async () => { // 例外安全化の試験コールバック
-+      repository.mockRejectedValue(new Error(SECRET)); // 失敗応答の設定メソッド / Errorコンストラクター
-+      vi.mocked(console.error).mockImplementation( // ログ監視対象を置換するメソッド
++    async () => { // 非更新の試験コールバック
++      service.mockResolvedValue({ // Service結果の応答を設定するメソッド
++        outcome: "UNCHANGED",
++        reportId: REPORT_ID,
++        updatedAt: VERSION,
++      }); // 非更新応答の設定メソッド
++      const result = await action(REPORT_ID, state(), form(kind)); // Action・state・フォーム生成関数
++      expect(result.status).toBe("success"); // 期待値生成・成功状態の比較メソッド
++      expect(result.values.expectedUpdatedAt).toBe(VERSION); // 期待値生成・version維持の比較メソッド
++      expect(mocks.revalidate).not.toHaveBeenCalled(); // モック関数参照 / 再検証未呼出しの検証メソッド
++    },
++  );
++
++  it( // 試験を登録する関数
++    `${kind}は保存後の再検証失敗でも成功と再読込案内を返す`,
++    /**
++     * 再検証障害で更新を再実行せず、新versionと保存済み状態を維持する。
++     */
++    async () => { // 保存後の失敗を検証するコールバック
++      mocks.revalidate.mockImplementationOnce( // 再検証失敗の実装設定メソッド
 +        /**
-+         * ログ基盤自体の障害を試験用例外で再現する。
++         * 通常の再検証障害を試験用例外で再現する。
 +         */
-+        () => { // ログ障害のコールバック
++        () => { // 再検証障害コールバック
 +          throw new Error(SECRET); // 試験用Errorコンストラクター
 +        },
 +      );
-+      await expect(service(context, input)).resolves.toEqual({ // 操作別Service関数 / 非同期結果の比較メソッド
-+        outcome: "UPDATE_FAILED",
-+      });
-+      expect(repository).toHaveBeenCalledTimes(1); // モック関数参照 / 再試行なしの検証メソッド
-+      expect(vi.mocked(console.error).mock.calls[0]).toEqual([ // モック取得・期待値生成・固定ログの比較メソッド
-+        "platform_support_operation_failed",
-+        {
-+          requestId: REQUEST_ID,
-+          operation: kind === "STATUS" ? "platformSupport.status" : "platformSupport.note",
-+          result: "UPDATE_FAILED",
-+          errorCode: "INTERNAL",
++      const result = await action(REPORT_ID, state(), form(kind)); // Action・state・フォーム生成関数
++      expect(result).toMatchObject({ // 期待値生成・保存済み状態の比較メソッド
++        status: "success",
++        values: { expectedUpdatedAt: NEXT_VERSION },
++        data: {
++          outcome: "UPDATED",
++          reloadRequired: true,
 +        },
-+      ]);
++      });
++      expect(result.data?.message).toContain("保存済み"); // 期待値生成・保存済み案内の包含検証メソッド
++      expect(service).toHaveBeenCalledTimes(1); // モック関数参照 / 保存再試行なしの検証メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
++      expect(mocks.redirect).not.toHaveBeenCalled(); // モック関数参照 / ページ全体遷移なしの検証メソッド
++    },
++  );
++
++  it.each(["service", "revalidate"])( // 制御例外の発生箇所別の試験定義メソッド
++    `${kind}は%sのNext制御例外を再送出する`,
++    /**
++     * Nextの画面遷移や404処理を、通常の固定エラーに変換しない。
++     */
++    async (stage) => { // 制御例外の試験コールバック
++      const error = new ControlError("NEXT_CONTROL"); // 制御例外のコンストラクター
++      if (stage === "service") {
++        service.mockRejectedValue(error); // 制御例外応答の設定メソッド
++      } else {
++        mocks.revalidate.mockImplementationOnce( // 再検証中の制御例外を設定するメソッド
++          /**
++           * 再検証中のNext制御例外を再現する。
++           */
++          () => { // 制御例外コールバック
++            throw error;
++          },
++        );
++      }
++      await expect(action(REPORT_ID, state(), form(kind))).rejects.toBe(error); // Action・state・フォーム生成関数 / 同じ例外の検証メソッド
++      expect(mocks.rethrow).toHaveBeenCalledWith(error); // モック関数参照 / 再送出呼出しの検証メソッド
++      expect(service).toHaveBeenCalledTimes(1); // モック関数参照 / 更新再試行なしの検証メソッド
++    },
++  );
++
++  it( // 試験を登録する関数
++    `${kind}は秘密値入りService例外を固定エラーにする`,
++    /**
++     * 例外原文や内部メモをstateへ含めず、再検証・再試行しない。
++     */
++    async () => { // 通常例外の試験コールバック
++      service.mockRejectedValue(new Error(SECRET)); // 失敗応答設定メソッド / Errorコンストラクター
++      const result = await action(REPORT_ID, state(), form(kind)); // Action・state・フォーム生成関数
++      expect(result.status).toBe("error"); // 期待値生成・エラー状態の比較メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
++      expect(mocks.revalidate).not.toHaveBeenCalled(); // モック関数参照 / 再検証未呼出しの検証メソッド
++      expect(service).toHaveBeenCalledTimes(1); // モック関数参照 / 更新再試行なしの検証メソッド
 +    },
 +  );
 +}
 +
-+it.each(["OPEN", "IN_PROGRESS", "ON_HOLD", "RESOLVED"])( // 許可status別の試験定義メソッド
-+  "%sを再検証し、メモ保存を呼ばない",
-+  /**
-+   * status値は変更せず渡し、状態日時の決定をRepositoryへ委ねる。
-+   */
-+  async (status) => { // 許可statusの試験コールバック
-+    await updatePlatformSupportStatus(context, { // status更新のApplication Service関数
-+      ...identity,
-+      status,
-+    });
-+    expect(mocks.status.mock.calls[0][0].status).toBe(status); // 期待値生成・statusの比較メソッド
-+    expect(mocks.note).not.toHaveBeenCalled(); // モック関数参照 / メモ更新未呼出しの検証メソッド
-+  },
-+);
++for (const kind of ["STATUS", "NOTE"] as const) { // 操作名の読取専用リテラル型
++  const action = kind === "STATUS" ? updateSupportReportStatusAction : updateSupportReportNoteAction; // 操作別Actionの関数参照
++  const service = kind === "STATUS" ? mocks.status : mocks.note; // 操作別Serviceモックの関数参照
 +
-+it.each([" メモ ", "", "　 \n", null, "あ".repeat(5000)])( // メモ境界別の試験定義メソッド / 文字列反復メソッド
-+  "メモをtrim・空欄nullへ正規化して渡す %#",
-+  /**
-+   * 上限以内のメモだけを渡し、対応者と状態日時の決定をRepositoryへ委ねる。
-+   */
-+  async (internalNote) => { // メモ正規化の試験コールバック
-+    await updatePlatformSupportNote(context, { // メモ保存のApplication Service関数
-+      ...identity,
-+      internalNote,
-+    });
-+    expect(mocks.note.mock.calls[0][0].internalNote).toBe(internalNote?.trim() || null); // 空白除去・期待値生成・メモ比較メソッド
-+    expect(mocks.status).not.toHaveBeenCalled(); // モック関数参照 / status更新未呼出しの検証メソッド
-+  },
-+);
++  it( // 試験を登録する関数
++    `${kind}は前stateのversion・エラー・成功情報を引き継がない`,
++    /**
++     * 前stateの値ではなく単一hidden値をServiceへ渡し、古いエラーやメモを返さない。
++     */
++    async () => { // 前state改ざんの試験コールバック
++      const previous = state(); // 初期stateの生成関数
++      previous.status = "success";
++      previous.values.expectedUpdatedAt = SECRET;
++      previous.formError = SECRET;
++      previous.fieldErrors.internalNote = [SECRET];
++      const result = await action(REPORT_ID, previous, form(kind)); // Action・フォーム生成関数
++      expect(service.mock.calls[0][1].expectedUpdatedAt).toBe(VERSION); // 期待値生成・hidden version優先の比較メソッド
++      expect(result.status).toBe("success"); // 期待値生成・成功状態の比較メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
++      expect(mocks.getUser).toHaveBeenCalledTimes(1); // モック関数参照 / 毎回の本人確認の検証メソッド
++    },
++  );
 +
-+it.each(["UNKNOWN", null, ["OPEN"]])( // 入力値別の試験を定義するメソッド
-+  "不正なstatus値は更新しない %#",
-+  /**
-+   * statusの型・許可値を共通契約で再検証する。
-+   */
-+  async (status) => { // 不正statusの試験コールバック
-+    await expect(updatePlatformSupportStatus(context, { // status更新関数 / 非同期結果の期待値生成関数
-+      ...identity,
-+      status,
-+    })).resolves.toEqual({ outcome: "INVALID_INPUT" }); // 非同期結果の比較メソッド
-+    expect(mocks.status).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-+
-+it.each([undefined, 1, {}, "あ".repeat(5001)])( // 不正メモ別の試験定義メソッド / 文字列反復メソッド
-+  "不正・上限超過のメモは切り捨てず拒否する %#",
-+  /**
-+   * メモを不正なままRepositoryへ渡さず、固定分類だけを返す。
-+   */
-+  async (internalNote) => { // 不正メモの試験コールバック
-+    await expect(updatePlatformSupportNote(context, { // メモ更新関数 / 非同期結果の期待値生成関数
-+      ...identity,
-+      internalNote,
-+    })).resolves.toEqual({ outcome: "INVALID_INPUT" }); // 非同期結果の比較メソッド
-+    expect(mocks.note).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-diff --git a/src/application/platform/support/update-platform-support.ts b/src/application/platform/support/update-platform-support.ts
-new file mode 100644
-index 0000000..2fd0f93
---- /dev/null
-+++ b/src/application/platform/support/update-platform-support.ts
-@@ -0,0 +1,142 @@
-+// src/application/platform/support/update-platform-support.ts
-+// Platform管理入力を再検証し、認可contextの本人情報で更新して最小の結果だけを返す。
-+
-+import "server-only";
-+
-+import type {
-+  PlatformAdminAccessContext, // Auth本人IDと有効なPlatform管理者情報をまとめた認可context型
-+} from "@/app/(club-app)/platform/require-platform-admin";
-+import {
-+  isSupportReportVersion, // ミリ秒付きUTC ISO形式のversion文字列を検証する関数
-+  validateSupportReportNoteInput, // 識別値とメモを検証・正規化する関数
-+  validateSupportReportStatusInput, // 識別値と更新先statusを検証する関数
-+} from "@/domain/platform/support/support-report-management-form";
-+import type {
-+  PlatformSupportUpdateResult, // status・内部メモ更新の成功値と固定失敗分類の型
-+} from "@/domain/platform/support/support-report-management-types";
-+import {
-+  sanitizeLogContext, // ログへ出してよい安全な項目だけを返す関数
-+} from "@/src/infrastructure/logging/sanitize-log-context";
-+import {
-+  updateSupportReportNoteForPlatform, // 本人contextとメモ入力からメモ・担当者を更新する関数
-+  updateSupportReportStatusForPlatform, // 本人contextとstatus入力から実変更時だけ管理列を更新する関数
-+} from "@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository";
-+
-+/**
-+ * 検証済みrequestIdと固定の操作名・失敗分類だけを記録し、ログ障害は外へ出さない。
-+ */
-+function logUpdateFailure( // 更新失敗を安全に記録する関数
-+  requestId: string, // 検証済みUUID v4の文字列型
-+  kind: "STATUS" | "NOTE", // 固定操作名を選ぶリテラル型
-+): void { // 戻り値を持たない型
-+  try {
-+    console.error( // 固定項目だけを出力するメソッド
-+      "platform_support_operation_failed",
-+      sanitizeLogContext({ // 許可したログ項目だけを返す関数
-+        requestId,
-+        operation: kind === "STATUS" ? "platformSupport.status" : "platformSupport.note",
-+        result: "UPDATE_FAILED",
-+        errorCode: "INTERNAL",
-+      }),
-+    );
-+  } catch {
-+    // ログ出力失敗による更新再試行や、保存済みデータの削除は行わない。
-+  }
-+}
-+
-+/**
-+ * contextと操作入力を分離し、許可入力だけを更新Repositoryへ渡して最小結果へ整える。
-+ */
-+async function updatePlatformSupport( // status・メモ更新の共通Application Service関数
-+  context: PlatformAdminAccessContext, // サーバーで構築したPlatform認可context型
-+  input: unknown, // 未検証の操作入力の型
-+  kind: "STATUS" | "NOTE", // 入力の検証と更新先を選ぶリテラル型
-+): Promise<PlatformSupportUpdateResult> { // 最小の更新結果を返す非同期型
-+  let requestId: string | undefined; // 検証後だけ記録するrequestIdの型
-+  try {
-+    if (
-+      !context ||
-+      typeof context.userId !== "string" ||
-+      context.userId.trim().length === 0 || // 本人ID前後の空白を除くメソッド
-+      !context.platformAdmin ||
-+      context.platformAdmin.id !== context.userId ||
-+      (
-+        context.platformAdmin.role !== "DEVELOPER" &&
-+        context.platformAdmin.role !== "SUPPORT"
-+      )
-+    ) {
-+      return { outcome: "FORBIDDEN" };
-+    }
-+    const validation = kind === "STATUS"
-+      ? validateSupportReportStatusInput(input) // 識別値とstatusを検証する関数
-+      : validateSupportReportNoteInput(input); // 識別値とメモを検証・正規化する関数
-+    if (!validation.success) {
-+      return { outcome: "INVALID_INPUT" };
-+    }
-+    const value = validation.data;
-+    requestId = value.requestId;
-+    const identity = {
-+      userId: context.userId,
-+      platformAdminId: context.platformAdmin.id,
-+      reportId: value.reportId,
-+      expectedUpdatedAt: value.expectedUpdatedAt,
-+      requestId: value.requestId,
-+    };
-+    const result = "status" in value
-+      ? await updateSupportReportStatusForPlatform({ // 本人contextと許可値でstatusを更新する関数
-+          ...identity,
-+          status: value.status,
-+        })
-+      : await updateSupportReportNoteForPlatform({ // 本人contextと許可値でメモを更新する関数
-+          ...identity,
-+          internalNote: value.internalNote,
-+        });
-+    switch (result.outcome) {
-+      case "UPDATED":
-+      case "UNCHANGED":
-+        if (
-+          result.reportId === value.reportId &&
-+          isSupportReportVersion(result.updatedAt) // 返却versionが正しいUTC ISO形式か検証する関数
-+        ) {
-+          return {
-+            outcome: result.outcome,
-+            reportId: result.reportId,
-+            updatedAt: result.updatedAt,
-+          };
-+        }
-+        break;
-+      case "FORBIDDEN":
-+      case "NOT_FOUND":
-+      case "CONFLICT":
-+      case "INVALID_INPUT":
-+        return { outcome: result.outcome };
-+    }
-+    logUpdateFailure(requestId, kind); // 検証済み識別値と固定分類を記録する関数
-+    return { outcome: "UPDATE_FAILED" };
-+  } catch {
-+    if (requestId !== undefined) {
-+      logUpdateFailure(requestId, kind); // 例外原文を渡さず固定分類だけを記録する関数
-+    }
-+    return { outcome: "UPDATE_FAILED" };
-+  }
-+}
-+
-+/**
-+ * 認可contextとstatus入力を受け取り、余分な入力・結果を除いて更新結果を返す。
-+ */
-+export async function updatePlatformSupportStatus( // status更新のApplication Service関数
-+  context: PlatformAdminAccessContext, // サーバーで構築したPlatform認可context型
-+  input: unknown, // 未検証のstatus入力の型
-+): Promise<PlatformSupportUpdateResult> { // 固定分類の更新結果を返す非同期型
-+  return updatePlatformSupport(context, input, "STATUS"); // 共通の検証・更新・結果整形関数
-+}
-+
-+/**
-+ * 認可contextとメモ入力を受け取り、正規化したメモだけを保存して最小結果を返す。
-+ */
-+export async function updatePlatformSupportNote( // メモ保存のApplication Service関数
-+  context: PlatformAdminAccessContext, // サーバーで構築したPlatform認可context型
-+  input: unknown, // 未検証のメモ入力の型
-+): Promise<PlatformSupportUpdateResult> { // 固定分類の更新結果を返す非同期型
-+  return updatePlatformSupport(context, input, "NOTE"); // 共通の検証・更新・結果整形関数
++  it.each(["auth", "database"])( // 認可処理の障害箇所別の試験定義メソッド
++    `${kind}は%sの通常例外を原文なしの固定エラーにする`,
++    /**
++     * Authや権限DBの障害では更新を呼ばず、Next制御例外との区別を維持する。
++     */
++    async (stage) => { // 認可基盤障害の試験コールバック
++      const boundary = stage === "auth" ? mocks.getUser : mocks.actor; // 障害を発生させるモック関数参照
++      boundary.mockRejectedValue(new Error(SECRET)); // 失敗応答の設定メソッド / Errorコンストラクター
++      const result = await action(REPORT_ID, state(), form(kind)); // Action・state・フォーム生成関数
++      expect(result.status).toBe("error"); // 期待値生成・エラー状態の比較メソッド
++      expect(JSON.stringify(result)).not.toContain(SECRET); // JSON化・期待値生成・秘密値非包含の検証メソッド
++      expect(service).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++      expect(mocks.revalidate).not.toHaveBeenCalled(); // モック関数参照 / 再検証未呼出しの検証メソッド
++    },
++  );
 +}
