@@ -1,15 +1,220 @@
-diff --git a/app/(club-app)/platform-login/actions.ts b/app/(club-app)/platform-login/actions.ts
+diff --git a/app/(club-app)/platform-login/PlatformLoginForm.tsx b/app/(club-app)/platform-login/PlatformLoginForm.tsx
 new file mode 100644
-index 0000000..53b273a
+index 0000000..59bb284
 --- /dev/null
-+++ b/app/(club-app)/platform-login/actions.ts
-@@ -0,0 +1,295 @@
-+// app/(club-app)/platform-login/actions.ts
-+// クラブ所属を参照せず、Platform専用のログイン・ローカルログアウトを行う。
++++ b/app/(club-app)/platform-login/PlatformLoginForm.tsx
+@@ -0,0 +1,131 @@
++// app/(club-app)/platform-login/PlatformLoginForm.tsx
++// PWをReact stateや表示値へ保持せず、Platform専用Actionへ送信する。
 +
-+"use server";
++"use client";
 +
-+import "server-only";
++import {
++  useActionState,
++  useId,
++} from "react";
++
++import {
++  FieldErrorList, // 項目別エラー配列を表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
++import {
++  FormErrorAlert, // フォーム全体のエラーを表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import type {
++  PlatformLoginActionState, // パスワードを含めない公開ログインstate型
++} from "@/domain/platform/platform-login-form";
++
++import {
++  platformLoginAction, // 入力・試行制限・Auth・最新Platform権限を確認するServer Action関数
++} from "./actions";
++
++/**
++ * サーバーで生成した、パスワードを含めない初期stateを受け取るprops型。
++ */
++type PlatformLoginFormProps = { // ログインフォームのprops型
++  initialState: PlatformLoginActionState; // 公開ログインstate型
++};
++
++/**
++ * Platform専用Actionに接続し、項目エラーとpendingを表示するログインフォーム。
++ * パスワードinputにはvalue・defaultValueを指定しない。
++ */
++export function PlatformLoginForm({ // PlatformログインフォームのComponent関数
++  initialState,
++}: PlatformLoginFormProps) { // ログインフォームのprops型
++  const [state, formAction, isPending] = useActionState( // Action stateと送信処理・pendingを取得するhook関数
++    platformLoginAction, // Platform専用ログインServer Action関数の参照
++    initialState,
++  );
++  const id = useId(); // フォームごとに安定した識別子を生成するhook関数
++  const emailId = `${id}-email`;
++  const passwordId = `${id}-password`;
++  const requestErrorsId = `${id}-request-errors`;
++  const emailErrors = state.fieldErrors.email ?? [];
++  const passwordErrors = state.fieldErrors.password ?? [];
++
++  return ( // formActionは専用ログインActionへ送信する関数。JSX属性の説明を近接位置へ置く
++    <form
++      action={formAction}
++      noValidate
++      aria-busy={isPending}
++      className="space-y-6"
++    >
++      <input
++        type="hidden"
++        name="requestId"
++        value={state.requestId}
++      />
++      {/* フォーム全体のエラーを表示するFormErrorAlert */}
++      <FormErrorAlert message={state.formError} />
++      {/* requestId検証エラーを表示するFieldErrorList */}
++      <FieldErrorList
++        id={requestErrorsId}
++        errors={state.fieldErrors.requestId}
++      />
++
++      <div className="space-y-2">
++        <label
++          htmlFor={emailId}
++          className="block text-sm font-medium"
++        >
++          メールアドレス
++        </label>
++        <input
++          id={emailId}
++          name="email"
++          type="email"
++          inputMode="email"
++          autoComplete="username"
++          defaultValue={state.values.email}
++          required
++          disabled={isPending}
++          aria-invalid={emailErrors.length > 0}
++          aria-describedby={emailErrors.length > 0 ? `${emailId}-errors` : undefined}
++          className="w-full rounded-md border px-3 py-2"
++        />
++        {/* メールの項目エラーを表示するFieldErrorList */}
++        <FieldErrorList
++          id={`${emailId}-errors`}
++          errors={emailErrors}
++        />
++      </div>
++
++      <div className="space-y-2">
++        <label
++          htmlFor={passwordId}
++          className="block text-sm font-medium"
++        >
++          パスワード
++        </label>
++        <input
++          id={passwordId}
++          name="password"
++          type="password"
++          autoComplete="current-password"
++          required
++          disabled={isPending}
++          aria-invalid={passwordErrors.length > 0}
++          aria-describedby={passwordErrors.length > 0 ? `${passwordId}-errors` : undefined}
++          className="w-full rounded-md border px-3 py-2"
++        />
++        {/* パスワードの項目エラーを表示するFieldErrorList */}
++        <FieldErrorList
++          id={`${passwordId}-errors`}
++          errors={passwordErrors}
++        />
++      </div>
++
++      <button
++        type="submit"
++        disabled={isPending}
++        className="w-full rounded-md bg-blue-600 px-4 py-2 font-medium text-white disabled:opacity-50"
++      >
++        {isPending ? "ログイン中..." : "ログイン"}
++      </button>
++    </form>
++  );
++}
+diff --git a/app/(club-app)/platform-login/PlatformLogoutButton.tsx b/app/(club-app)/platform-login/PlatformLogoutButton.tsx
+new file mode 100644
+index 0000000..f3e6902
+--- /dev/null
++++ b/app/(club-app)/platform-login/PlatformLogoutButton.tsx
+@@ -0,0 +1,66 @@
++// app/(club-app)/platform-login/PlatformLogoutButton.tsx
++// ログインPageと後続のPlatform layoutで使う、本人用のログアウトボタン。
++
++"use client";
++
++import {
++  useActionState,
++} from "react";
++import {
++  unstable_rethrow,
++} from "next/navigation";
++
++import {
++  FormErrorAlert, // フォーム全体のエラーを表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  platformLogoutAction, // 現在のlocalセッションだけを終了して固定ログイン先へ戻すAction関数
++} from "./actions";
++
++/**
++ * ログアウトの固定エラーだけを保持する、秘密値を含めないstate型。
++ */
++type PlatformLogoutState = { // ログアウト結果の型
++  formError: string | null; // 公開する固定エラー文字列またはnullの型
++};
++
++/**
++ * 本人用ログアウトを実行し、Next制御例外は維持して一般例外だけを固定文面にする。
++ */
++async function submitLogout(): Promise<PlatformLogoutState> { // ログアウト送信関数 / 固定エラーstateの非同期結果型
++  try {
++    await platformLogoutAction(); // 現在のlocalセッションを終了するServer Action関数
++    return { formError: null };
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外だけを再送出する関数
++    return { formError: "ログアウトできませんでした。もう一度お試しください。" };
++  }
++}
++
++/**
++ * 権限が失効した本人も操作できるログアウトボタン。pending中の二重送信を抑える。
++ */
++export function PlatformLogoutButton() { // Platformログアウト用のComponent関数
++  const [state, formAction, isPending] = useActionState<PlatformLogoutState>( // ログアウト結果と送信処理・pendingを取得するhook関数
++    submitLogout, // 固定エラーを返すログアウト送信関数の参照
++    { formError: null },
++  );
++
++  return ( // formActionはlogout送信関数。JSX属性の説明を近接する有効位置へ置く
++    <form
++      action={formAction}
++      aria-busy={isPending}
++      className="space-y-3"
++    >
++      {/* ログアウト失敗の固定文面を表示するFormErrorAlert */}
++      <FormErrorAlert message={state.formError} />
++      <button
++        type="submit"
++        disabled={isPending}
++        className="rounded-md border px-4 py-2 font-medium disabled:opacity-50"
++      >
++        {isPending ? "ログアウト中..." : "ログアウト"}
++      </button>
++    </form>
++  );
++}
+diff --git a/app/(club-app)/platform-login/page.tsx b/app/(club-app)/platform-login/page.tsx
+new file mode 100644
+index 0000000..f5a4f2d
+--- /dev/null
++++ b/app/(club-app)/platform-login/page.tsx
+@@ -0,0 +1,100 @@
++// app/(club-app)/platform-login/page.tsx
++// Platform専用ログイン画面。クラブ所属や招待状態を遷移条件にしない。
 +
 +import {
 +  redirect,
@@ -17,607 +222,205 @@ index 0000000..53b273a
 +} from "next/navigation";
 +
 +import {
-+  parsePlatformLoginFormData, // 単一email・password・requestIdを検証する関数
-+  type PlatformLoginActionState, // パスワードを含めないログインAction state型
-+  type PlatformLoginField, // ログイン入力の項目名型
++  PLATFORM_LOGIN_INITIAL_VALUES, // パスワードを含めないログイン初期表示値
++  type PlatformLoginActionState, // パスワードを含めない公開ログインstate型
 +} from "@/domain/platform/platform-login-form";
-+import type {
-+  FieldErrors, // フォーム項目別のエラーメッセージを格納する型
++import {
++  createInitialActionState, // フォームの共通初期stateを作成する関数
 +} from "@/domain/shared/action-state";
 +import {
-+  DomainError, // 画面表示可能な固定コード・メッセージを持つエラークラス
-+} from "@/domain/shared/domain-error";
-+import {
-+  createRequestId, // 新しいUUID v4形式のrequestIdを生成する関数
-+} from "@/domain/shared/request-id";
-+import {
-+  checkLoginRateLimit, // 共通ログイン試行ログで短時間の連続試行を制限する関数
-+} from "@/lib/security/login-rate-limit";
-+import {
-+  saveLoginSubmissionLog, // ハッシュ化した識別値とログイン試行結果を保存する関数
-+} from "@/lib/security/login-submission-log";
-+import {
-+  getRequestMeta, // ヘッダーからIPとユーザーエージェントを取得する関数
-+} from "@/lib/security/request";
-+import {
-+  sanitizeLogContext, // ログへ出してよい安全な項目だけを返す関数
-+} from "@/src/infrastructure/logging/sanitize-log-context";
-+import {
-+  findActivePlatformAdminByUserId, // 本人の有効なDEVELOPERまたはSUPPORTだけを取得する関数
++  findActivePlatformAdminByUserId, // Auth本人の有効なDEVELOPERまたはSUPPORTだけを取得する関数
 +} from "@/src/infrastructure/prisma/repositories/platform-admin-repository";
 +import {
 +  createClient, // Cookieを使うサーバー用Supabaseクライアントを作成する関数
 +} from "@/src/infrastructure/supabase/server";
 +
-+const INVALID_MESSAGE = "メールアドレスまたはパスワードが正しくありません。";
-+const FAILED_MESSAGE = "ログインを完了できませんでした。時間をおいて再度お試しください。";
-+const LIMIT_MESSAGE = "短時間に複数回送信されています。少し時間をおいて再度お試しください。";
++import {
++  PlatformLoginForm, // Platform専用のログイン入力フォームComponent
++} from "./PlatformLoginForm";
++import {
++  PlatformLogoutButton, // 自分のlocalセッションを終了するボタンComponent
++} from "./PlatformLogoutButton";
 +
 +/**
-+ * サーバー用Supabaseクライアント生成関数の非同期戻り値を表す型。
++ * Auth本人と最新Platform権限を確認し、有効な管理者だけを固定の管理画面へ送る。
++ * 未認証・一般会員・inactiveはログイン画面に留め、勝手にログアウトしない。
 + */
-+type PlatformAuthClient = Awaited<ReturnType<typeof createClient>>; // 非同期戻り値からクライアント型を取り出す型
++export default async function PlatformLoginPage() { // PlatformログインPageの非同期Component関数
++  let hasSession = false;
++  let isActiveAdmin = false;
++  let loadError: string | null = null; // 公開する固定エラー文字列またはnullの型
 +
-+/**
-+ * 共通のログイン試行制限で返される判定とハッシュ値の型。
-+ */
-+type PlatformRateLimit = Awaited<ReturnType<typeof checkLoginRateLimit>>; // 非同期の制限判定結果を展開する型
-+
-+/**
-+ * メールだけを表示値に含めるエラーstateを構築し、前stateや秘密値をコピーしない。
-+ */
-+function loginError( // ログイン用の公開エラーstate構築関数
-+  email: string, // 表示用メールの文字列型
-+  requestId: string, // 操作識別値の文字列型
-+  message: string, // 固定の公開メッセージの文字列型
-+  fieldErrors: FieldErrors<PlatformLoginField> = {}, // ログイン項目別のエラー型
-+): PlatformLoginActionState { // パスワードを含めないログインAction state型
-+  return {
-+    status: "error",
-+    values: {
-+      email,
-+    },
-+    fieldErrors,
-+    formError: message,
-+    requestId,
-+  };
-+}
-+
-+/**
-+ * 例外原文や個人情報を受け取らず、固定operationと分類だけを安全なログに出す。
-+ */
-+function reportFailure( // 固定分類による運用ログ出力関数
-+  operation: string, // サーバー内の固定操作名の文字列型
-+  requestId: string, // 検証済みまたは新規生成した操作識別値の文字列型
-+): void { // 値を返さないvoid型
-+  console.error( // 固定メッセージと安全な項目だけを出力するメソッド
-+    "Platform認証処理に失敗しました。",
-+    sanitizeLogContext({ // ログ許可項目だけを返す関数
-+      operation,
-+      requestId,
-+      result: "FAILED",
-+      errorCode: "INTERNAL",
-+    }),
-+  );
-+}
-+
-+/**
-+ * 試行結果を共通DBへ保存し、失敗時は秘密値を記録せずfalseを返す。
-+ * HPログインと試行数を共有する。UA・生IP・メール原文は呼出し側から渡さない。
-+ */
-+async function saveAttempt( // ログイン試行の安全な記録関数
-+  input: Parameters<typeof saveLoginSubmissionLog>[0], // 共通試行ログ保存関数の入力型
-+  requestId: string, // 操作識別値の文字列型
-+): Promise<boolean> { // 記録成功の真偽値を返す非同期結果型
 +  try {
-+    await saveLoginSubmissionLog(input); // 共通ログイン試行ログの保存関数
-+    return true;
-+  } catch (error) {
-+    unstable_rethrow(error); // Next制御例外だけを再送出する関数
-+    reportFailure("platform.login.log", requestId); // 固定分類によるログ出力関数
-+    return false;
-+  }
-+}
-+
-+/**
-+ * 現在のCookieに対応するローカルセッションだけを終了し、失敗は固定分類で記録する。
-+ */
-+async function endLocalSession( // ローカルセッション終了関数
-+  client: PlatformAuthClient, // サーバー用Supabaseクライアントの型
-+  requestId: string, // 操作識別値の文字列型
-+): Promise<boolean> { // 終了成功の真偽値を返す非同期結果型
-+  try {
-+    const { error } = await client.auth.signOut({ // 現在のセッションだけを終了するAuthメソッド
-+      scope: "local",
-+    });
-+    if (!error) {
-+      return true;
-+    }
-+  } catch (error) {
-+    unstable_rethrow(error); // Next制御例外だけを再送出する関数
-+  }
-+  reportFailure("platform.auth.sign-out", requestId); // 固定分類によるログ出力関数
-+  return false;
-+}
-+
-+/**
-+ * 単一ログイン入力を検証し、試行制限・Auth・最新Platform権限を確認して固定先へ進む。
-+ * 記録失敗でも成功へ進まず、認証後の拒否・障害ではローカルセッション終了を試みる。
-+ */
-+export async function platformLoginAction( // Platform専用ログインのServer Action関数
-+  previousState: PlatformLoginActionState, // 前回の公開Action state型
-+  formData: FormData, // ブラウザー送信値のFormData型
-+): Promise<PlatformLoginActionState> { // 公開Action stateの非同期結果型
-+  const parsed = parsePlatformLoginFormData(formData); // 単一ログイン入力の検証関数
-+  if (!parsed.success) {
-+    return loginError( // 公開エラーstateの構築関数
-+      parsed.values.email,
-+      createRequestId(), // 新しい操作識別値の生成関数
-+      "入力内容を確認してください。",
-+      parsed.fieldErrors,
-+    );
-+  }
-+  const {
-+    email,
-+    password,
-+    requestId,
-+  } = parsed.data;
-+  if (requestId !== previousState?.requestId) {
-+    return loginError( // 公開エラーstateの構築関数
-+      email,
-+      createRequestId(), // 新しい操作識別値の生成関数
-+      "フォームを開き直して再度お試しください。",
-+    );
-+  }
-+
-+  let rateLimit: PlatformRateLimit; // 共通の試行制限判定結果型
-+  try {
-+    const { ip } = await getRequestMeta(); // リクエストヘッダーからIPを取得する関数
-+    rateLimit = await checkLoginRateLimit({ // IP・メールを内部でハッシュ化して制限を確認する関数
-+      ip,
-+      email,
-+    });
-+  } catch (error) {
-+    unstable_rethrow(error); // Next制御例外だけを再送出する関数
-+    reportFailure("platform.login.rate-limit", requestId); // 固定分類によるログ出力関数
-+    return loginError(email, requestId, FAILED_MESSAGE); // 公開エラーstateの構築関数
-+  }
-+
-+  if (!rateLimit.allowed) {
-+    const recorded = await saveAttempt( // ハッシュ化識別値とブロック結果の記録関数
-+      {
-+        ipHash: rateLimit.ipHash,
-+        emailHash: rateLimit.emailHash,
-+        result: "BLOCKED",
-+        reason: rateLimit.reason ?? "RATE_LIMITED",
-+      },
-+      requestId,
-+    );
-+    return loginError(email, requestId, recorded ? LIMIT_MESSAGE : FAILED_MESSAGE); // 公開エラーstateの構築関数
-+  }
-+
-+  let client: PlatformAuthClient | undefined; // サーバー用クライアントまたは未作成の型
-+  let outcome: "ALLOWED" | "DENIED" | "FAILED" = "FAILED"; // 認可完了・拒否・障害の内部分類型
-+  let reason: string | null = "AUTH_PROCESSING_FAILED"; // 固定の試行分類またはnullの型
-+  let needsCleanup = false;
-+  try {
-+    client = await createClient(); // サーバー用Supabaseクライアントの作成関数
-+    needsCleanup = true;
++    const supabase = await createClient(); // サーバー用Supabaseクライアント作成関数
 +    const {
-+      data,
++      data: { user },
 +      error,
-+    } = await client.auth.signInWithPassword({ // Authサーバーでメール・PWを検証するメソッド
-+      email,
-+      password,
-+    });
++    } = await supabase.auth.getUser(); // Authサーバーで現在の本人を検証するメソッド
 +    if (
-+      error ||
-+      !data.user ||
-+      typeof data.user.id !== "string" ||
-+      data.user.id.length === 0
++      !error &&
++      user &&
++      typeof user.id === "string" &&
++      user.id.trim().length > 0 // 本人IDの空白を除いた長さを調べるメソッド
 +    ) {
-+      // 明確な認証失敗だけなら既存セッションを終了しない。不完全な成功は終了対象とする。
-+      needsCleanup = !error || Boolean(data.user); // Auth応答のユーザー有無を真偽値にする関数
-+      outcome = "DENIED";
-+      reason = "INVALID_CREDENTIALS";
-+    } else {
-+      const admin = await findActivePlatformAdminByUserId(data.user.id); // Auth本人の最新Platform権限を取得する関数
-+      if (
-+        admin &&
-+        admin.id === data.user.id
-+      ) {
-+        outcome = "ALLOWED";
-+        reason = null;
-+      } else {
-+        outcome = "DENIED";
-+        reason = "NOT_PLATFORM_ADMIN";
-+      }
++      hasSession = true;
++      const admin = await findActivePlatformAdminByUserId(user.id); // 最新の本人Platform権限を取得する関数
++      isActiveAdmin = admin?.id === user.id;
 +    }
 +  } catch (error) {
 +    unstable_rethrow(error); // Next制御例外だけを再送出する関数
-+    reportFailure("platform.login.authenticate", requestId); // 固定分類によるログ出力関数
++    loadError = "ログイン状態を確認できませんでした。時間をおいて再度お試しください。";
 +  }
 +
-+  if (
-+    outcome !== "ALLOWED" &&
-+    needsCleanup &&
-+    client
-+  ) {
-+    if (!await endLocalSession(client, requestId)) { // 現在のローカルセッションだけを終了する関数
-+      outcome = "FAILED";
-+    }
++  if (isActiveAdmin) {
++    redirect("/platform/support"); // 固定のPlatform管理画面へ移動して処理を中断する関数
 +  }
 +
-+  const recorded = await saveAttempt( // ハッシュ化した識別値と最終試行結果の記録関数
-+    {
-+      ipHash: rateLimit.ipHash,
-+      emailHash: rateLimit.emailHash,
-+      result: outcome === "ALLOWED" ? "SUCCESS" : "FAILED",
-+      reason,
-+    },
-+    requestId,
-+  );
-+  if (!recorded) {
-+    if (
-+      outcome === "ALLOWED" &&
-+      client
-+    ) {
-+      await endLocalSession(client, requestId); // 記録できなかったログインのローカル終了関数
-+    }
-+    return loginError(email, requestId, FAILED_MESSAGE); // 公開エラーstateの構築関数
-+  }
-+  if (outcome === "FAILED") {
-+    return loginError(email, requestId, FAILED_MESSAGE); // 公開エラーstateの構築関数
-+  }
-+  if (outcome === "DENIED") {
-+    return loginError(email, requestId, INVALID_MESSAGE); // 権限の有無を区別しない公開エラーstate構築関数
-+  }
-+  redirect("/platform/support"); // 固定のPlatform管理画面へ移動して処理を中断する関数
-+}
++  const initialState: PlatformLoginActionState = createInitialActionState({ // 公開ログインstate型 / 共通初期stateの生成関数
++    ...PLATFORM_LOGIN_INITIAL_VALUES,
++  });
 +
-+/**
-+ * Platform権限の有無を問わず、自分の現在セッションだけを終了して固定ログイン先へ戻す。
-+ */
-+export async function platformLogoutAction(): Promise<void> { // Platform専用ログアウトAction関数 / 値を返さない非同期結果型
-+  const requestId = createRequestId(); // サーバー側で操作識別値を生成する関数
-+  let client: PlatformAuthClient; // サーバー用Supabaseクライアントの型
-+  try {
-+    client = await createClient(); // サーバー用Supabaseクライアント作成関数
-+  } catch (error) {
-+    unstable_rethrow(error); // Next制御例外だけを再送出する関数
-+    reportFailure("platform.logout.client", requestId); // 固定分類によるログ出力関数
-+    throw new DomainError( // 原文・causeを含めない固定エラーのコンストラクター
-+      "EXTERNAL_SERVICE",
-+      "ログアウトできませんでした。もう一度お試しください。",
-+    );
-+  }
-+  if (!await endLocalSession(client, requestId)) { // 現在のローカルセッションだけを終了する関数
-+    throw new DomainError( // 原文・causeを含めない固定エラーのコンストラクター
-+      "EXTERNAL_SERVICE",
-+      "ログアウトできませんでした。もう一度お試しください。",
-+    );
-+  }
-+  redirect("/platform-login"); // 固定の専用ログイン先へ移動する関数
-+}
-diff --git a/domain/platform/platform-login-form.test.ts b/domain/platform/platform-login-form.test.ts
-new file mode 100644
-index 0000000..2b7568d
---- /dev/null
-+++ b/domain/platform/platform-login-form.test.ts
-@@ -0,0 +1,158 @@
-+// domain/platform/platform-login-form.test.ts
-+// ログイン入力の単一値制約と、パスワードを画面へ返さない契約を確認する。
-+
-+import {
-+  expect,
-+  expectTypeOf,
-+  it,
-+} from "vitest";
-+
-+import {
-+  createInitialActionState, // フォームの共通初期stateを作成する関数
-+} from "@/domain/shared/action-state";
-+import {
-+  isRequestId, // UUID v4のrequestIdを検証する関数
-+} from "@/domain/shared/request-id";
-+import {
-+  buildPlatformLoginFormValues, // メールだけの公開表示値を構築する関数
-+  parsePlatformLoginFormData, // 単一email・password・requestIdを検証する関数
-+  PLATFORM_LOGIN_INITIAL_VALUES, // パスワードを含めないログイン初期表示値
-+  type PlatformLoginActionState, // ログイン画面へ返すAction state型
-+  type PlatformLoginFormValues, // メールだけの公開入力型
-+} from "./platform-login-form";
-+
-+const REQUEST_ID = "44444444-4444-4444-8444-444444444444";
-+const PASSWORD = "  Private-password1!  ";
-+
-+/**
-+ * 正規化前メールと加工しないパスワードを持つ、試験用FormDataを作る。
-+ */
-+function form(): FormData { // 試験用フォーム生成関数 / ブラウザー送信値のFormData型
-+  const data = new FormData(); // FormDataコンストラクター
-+  data.set("email", "　ＡＤＭＩＮ＠ＥＸＡＭＰＬＥ．ＴＥＳＴ　"); // フォーム項目設定メソッド
-+  data.set("password", PASSWORD); // パスワード項目設定メソッド
-+  data.set("requestId", REQUEST_ID); // 操作識別値の設定メソッド
-+  return data;
-+}
-+
-+it( // 試験を登録する関数
-+  "メールだけ正規化し、パスワードの前後の空白を保持する",
-+  /**
-+   * メール形式の検証と正規化を分け、Auth用パスワードを加工しないことを確認する。
-+   */
-+  () => { // 認証入力の試験コールバック
-+    const data = form(); // 試験用フォーム生成関数
-+    data.set("returnTo", "https://foreign.example.test"); // 余分な項目の設定メソッド
-+    data.set("role", "DEVELOPER"); // 偽造権限の設定メソッド
-+    expect(parsePlatformLoginFormData(data)).toEqual({ // FormData検証関数 / 期待値生成・等値比較メソッド
-+      success: true,
-+      data: {
-+        email: "admin@example.test",
-+        password: PASSWORD,
-+        requestId: REQUEST_ID,
-+      },
-+    });
-+    expect(buildPlatformLoginFormValues(data)).toEqual({ // 表示値構築関数 / 期待値生成・等値比較メソッド
-+      email: "admin@example.test",
-+    });
-+    expect(data.get("password")).toBe(PASSWORD); // 項目読取メソッド / 期待値生成・等値比較メソッド
-+  },
-+);
-+
-+it.each(["email", "password", "requestId"] as const)( // 項目別試験定義メソッド / 読取専用リテラル型
-+  "%sの欠落・重複・Fileを受け入れない",
-+  /**
-+   * 全必須項目の改ざんを、成功値や秘密値を含まない失敗へ変換する。
-+   */
-+  (field) => { // 項目別の試験コールバック
-+    for (const mode of ["missing", "duplicate", "file"]) {
-+      const data = form(); // 試験用フォーム生成関数
-+      if (mode === "missing") {
-+        data.delete(field); // 必須項目の削除メソッド
-+      } else if (mode === "duplicate") {
-+        data.append(field, String(data.get(field))); // 同名項目追加 / 値の文字列化 / 項目読取メソッド
-+      } else {
-+        data.set(field, new File([PASSWORD], "private.txt")); // 項目設定メソッド / Fileコンストラクター
-+      }
-+      const result = parsePlatformLoginFormData(data); // ログイン入力検証関数
-+      expect(result.success).toBe(false); // 期待値生成・拒否の比較メソッド
-+      if (!result.success) {
-+        expect(result.fieldErrors[field]).toBeDefined(); // 期待値生成・項目エラーの存在確認メソッド
-+        expect(JSON.stringify(result)).not.toContain(PASSWORD); // JSON文字列化 / 期待値生成・秘密値の非反射確認メソッド
-+        expect(Object.keys(result.values)).toEqual(["email"]); // キー列挙 / 期待値生成・公開項目の比較メソッド
-+      }
-+    }
-+  },
-+);
-+
-+it.each(["", "invalid", "admin@", "admin@example.test another@example.test"])( // 不正メール別の試験定義メソッド
-+  "不正メールを正規化だけで成功にしない %#",
-+  /**
-+   * 正規化後にもメール形式を検証することを確認する。
-+   */
-+  (email) => { // 不正メールの試験コールバック
-+    const data = form(); // 試験用フォーム生成関数
-+    data.set("email", email); // メール項目設定メソッド
-+    expect(parsePlatformLoginFormData(data).success).toBe(false); // 入力検証関数 / 期待値生成・拒否の比較メソッド
-+  },
-+);
-+
-+it.each(["", "invalid", "44444444-4444-7444-8444-444444444444"])( // 不正requestId別の試験定義メソッド
-+  "不正requestIdを認証前に拒否する %#",
-+  /**
-+   * 欠落・任意文字列・UUID v4以外を受け入れない。
-+   */
-+  (requestId) => { // 不正識別値の試験コールバック
-+    const data = form(); // 試験用フォーム生成関数
-+    data.set("requestId", requestId); // 識別値の設定メソッド
-+    const result = parsePlatformLoginFormData(data); // ログイン入力検証関数
-+    expect(result.success).toBe(false); // 期待値生成・拒否の比較メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "空パスワードを拒否し、空白文字列は勝手に加工しない",
-+  /**
-+   * 既存ログインと同じく空文字だけを拒否し、認証文字列の解釈をAuthへ委ねる。
-+   */
-+  () => { // パスワード境界の試験コールバック
-+    const data = form(); // 試験用フォーム生成関数
-+    data.set("password", ""); // 空パスワードの設定メソッド
-+    expect(parsePlatformLoginFormData(data).success).toBe(false); // 入力検証関数 / 期待値生成・拒否の比較メソッド
-+    data.set("password", " "); // 空白パスワードの設定メソッド
-+    const result = parsePlatformLoginFormData(data); // 入力検証関数
-+    expect(result.success).toBe(true); // 期待値生成・成功の比較メソッド
-+    if (result.success) {
-+      expect(result.data.password).toBe(" "); // 期待値生成・パスワード非加工の比較メソッド
-+    }
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "FormData以外でも秘密値を含まない失敗値を返す",
-+  /**
-+   * 型付きAPIを不正に呼び出しても、固定項目エラーだけを返すことを確認する。
-+   */
-+  () => { // 不正入力全体の試験コールバック
-+    const result = parsePlatformLoginFormData(null as unknown as FormData); // 入力検証関数 / 不明値・FormData型への意図的アサーション
-+    expect(result.success).toBe(false); // 期待値生成・拒否の比較メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "初期stateを共通化し、公開型へパスワードやセッションを含めない",
-+  /**
-+   * 初期表示・requestIdと、公開Action stateの最小型を確認する。
-+   */
-+  () => { // 公開型と初期stateの試験コールバック
-+    const state: PlatformLoginActionState = createInitialActionState({ // 公開ログインstate型 / 共通初期state生成関数
-+      ...PLATFORM_LOGIN_INITIAL_VALUES,
-+    });
-+    expect(isRequestId(state.requestId)).toBe(true); // UUID検証関数 / 期待値生成・比較メソッド
-+    expect(state.values).toEqual({ email: "" }); // 期待値生成・初期値の等値比較メソッド
-+    expectTypeOf<keyof PlatformLoginFormValues>() // 公開表示値のキー型を検査する関数
-+      .toEqualTypeOf<"email">(); // 公開項目のリテラル型一致メソッド
-+    expectTypeOf<PlatformLoginActionState["data"]>() // 公開stateの付加データ型を検査する関数
-+      .toEqualTypeOf<undefined>(); // セッション等のデータがない未定義型との一致検証メソッド
-+  },
-+);
-diff --git a/domain/platform/platform-login-form.ts b/domain/platform/platform-login-form.ts
-new file mode 100644
-index 0000000..8399b6c
---- /dev/null
-+++ b/domain/platform/platform-login-form.ts
-@@ -0,0 +1,138 @@
-+// domain/platform/platform-login-form.ts
-+// Platformログインの単一入力を検証し、画面返却値からパスワードを分離する。
-+
-+import { z } from "zod";
-+
-+import type {
-+  ActionState, // フォーム送信後のステイト型
-+  FieldErrors, // フォームの項目別エラーメッセージを格納する型
-+} from "@/domain/shared/action-state";
-+import {
-+  normalizeEmail, // メールアドレスをNFKC・trim・小文字化で正規化する関数
-+} from "@/domain/shared/email";
-+import {
-+  isRequestId, // UUID v4のrequestIdを検証する関数。認証・認可には使わない
-+} from "@/domain/shared/request-id";
-+
-+/**
-+ * ログイン画面へ返してよい入力値の型。パスワードを含めない。
-+ */
-+export type PlatformLoginFormValues = { // 公開するログイン入力値の型
-+  email: string; // メールアドレスの文字列型
-+};
-+
-+/**
-+ * ログイン入力で検証する項目名の型。
-+ */
-+export type PlatformLoginField = "email" | "password" | "requestId"; // ログイン項目名のリテラル型
-+
-+/**
-+ * パスワードやAuthセッション情報を含めず、画面へ返すAction state型。
-+ */
-+export type PlatformLoginActionState = ActionState< // 共通のフォーム送信後ステイト型
-+  PlatformLoginFormValues, // メールだけの公開入力値の型
-+  PlatformLoginField // ログイン項目名の型
-+>;
-+
-+/**
-+ * Auth呼出しまでの内部処理だけで扱う、検証済みログイン情報の型。
-+ */
-+export type PlatformLoginCredentials = { // 内部用の検証済み認証入力型
-+  email: string; // 正規化済みメールの文字列型
-+  password: string; // 加工しないパスワードの文字列型
-+  requestId: string; // UUID v4の追跡用文字列型
-+};
-+
-+/**
-+ * 入力検証の成功と、秘密値を含めない失敗を分ける型。
-+ */
-+export type PlatformLoginValidationResult = // ログイン入力の検証結果型
-+  | {
-+      success: true; // 検証成功のリテラル型
-+      data: PlatformLoginCredentials; // 内部認証入力の型
-+    }
-+  | {
-+      success: false; // 検証失敗のリテラル型
-+      values: PlatformLoginFormValues; // メールだけの公開入力型
-+      fieldErrors: FieldErrors<PlatformLoginField>; // ログイン項目別のエラー型
-+    };
-+
-+/**
-+ * 後続のログインフォームで使う、パスワードを含めない初期表示値。
-+ */
-+export const PLATFORM_LOGIN_INITIAL_VALUES: Readonly<PlatformLoginFormValues> = { // 読取専用の公開入力型
-+  email: "",
-+};
-+
-+const emailSchema = z.email(); // メール形式を検証するZodスキーマ生成関数
-+
-+/**
-+ * 同名項目が単一文字列のときだけ値を返し、欠落・重複・Fileを拒否する。
-+ */
-+function singleString( // フォームの単一文字列読取関数
-+  formData: FormData, // ブラウザー送信値のFormData型
-+  field: PlatformLoginField, // ログイン項目名の型
-+): string | undefined { // 文字列または未定義の型
-+  const entries = formData instanceof FormData ? formData.getAll(field) : []; // FormData型確認 / 同名値の取得メソッド
 +  return (
-+    entries.length === 1 &&
-+    typeof entries[0] === "string"
-+  ) ? entries[0] : undefined;
-+}
++    <main className="mx-auto w-full max-w-md px-4 py-12">
++      <div className="space-y-6">
++        <header className="space-y-2 text-center">
++          <h1 className="text-2xl font-bold">Platformログイン</h1>
++          <p className="text-sm text-gray-600">
++            運営者用アカウントでログインしてください。
++          </p>
++        </header>
 +
++        {loadError ? (
++          <p
++            role="alert"
++            className="text-sm text-red-700"
++          >
++            {loadError}
++          </p>
++        ) : null}
++
++        {hasSession ? (
++          <div className="space-y-3 rounded-md border p-4 text-sm">
++            <p>別のアカウントでログインするか、現在のセッションをログアウトしてください。</p>
++            {/* 自分のセッション終了だけを実行するPlatformLogoutButton */}
++            <PlatformLogoutButton />
++          </div>
++        ) : null}
++
++        {/* メールとPWを専用Actionへ送るPlatformLoginForm */}
++        <PlatformLoginForm initialState={initialState} />
++      </div>
++    </main>
++  );
++}
+diff --git a/proxy.ts b/proxy.ts
+index 6a3178d..a75a235 100644
+--- a/proxy.ts
++++ b/proxy.ts
+@@ -25,25 +25,35 @@ import {
+ } from "@/src/infrastructure/supabase/middleware";
+ 
+ //招待手続き中の大切な情報が、ブラウザの履歴や外部のサイトに漏洩（漏れるの）を絶対に防ぐためのセキュリティ強化関数
+-function protectInvitationResponse(response: NextResponse): NextResponse {
 +/**
-+ * メールだけを正規化して表示用値へ変換し、パスワードを読み戻さない。
++ * 【追加】招待関連の応答にno-store・no-referrerを設定して返す。
 + */
-+export function buildPlatformLoginFormValues( // 公開表示値の構築関数
-+  formData: FormData, // ブラウザー送信値のFormData型
-+): PlatformLoginFormValues { // メールだけの公開入力型
-+  const email = singleString(formData, "email"); // 単一文字列の読取関数
-+  return {
-+    email: email === undefined ? "" : normalizeEmail(email), // メールの正規化関数
-+  };
-+}
-+
++function protectInvitationResponse(response: NextResponse): NextResponse { // 【追加】招待応答保護関数 / Nextの応答型
+   response.headers.set("Cache-Control", "no-store");//一時保存しない
+   response.headers.set("Referrer-Policy", "no-referrer");//移動するときに、「どこからリンクを踏んでやってきたか（元のURL）」を相手先のサイトに一切教えないようにする
+   return response;
+ }
+ 
+ //別々で作られた2つのレスポンス（返事）の間で、Cookieの設定情報を引き継ぐために上書きさせるための関数
+-function copySessionCookies(
+-  source: NextResponse,
+-  destination: NextResponse,
+-): void {
 +/**
-+ * 単一email・password・requestIdを検証し、パスワードの空白や内容は変更しない。
-+ * requestIdの前stateとの一致確認はAction側で行う。
++ * 【追加】セッション更新応答のCookieを、属性ごと別の応答へ引き継ぐ。
 + */
-+export function parsePlatformLoginFormData( // ログインFormDataの検証関数
-+  formData: FormData, // ブラウザー送信値のFormData型
-+): PlatformLoginValidationResult { // ログイン入力の検証結果型
-+  const values = buildPlatformLoginFormValues(formData); // 公開表示値の構築関数
-+  const password = singleString(formData, "password"); // 単一文字列の読取関数
-+  const requestId = singleString(formData, "requestId"); // 単一文字列の読取関数
-+  const fieldErrors: FieldErrors<PlatformLoginField> = {}; // ログイン項目別のエラー型
-+
-+  if (!emailSchema.safeParse(values.email).success) { // メール形式の安全な検証メソッド
-+    fieldErrors.email = ["正しいメールアドレスを入力してください。"];
-+  }
-+  if (
-+    password === undefined ||
-+    password.length === 0
-+  ) {
-+    fieldErrors.password = ["パスワードを入力してください。"];
-+  }
-+  if (!isRequestId(requestId)) { // UUID v4のrequestId検証関数
-+    fieldErrors.requestId = ["フォームを開き直してください。"];
-+  }
-+  if (
-+    Object.keys(fieldErrors).length > 0 || // エラー項目の列挙メソッド
-+    password === undefined ||
-+    !isRequestId(requestId) // UUID v4のrequestId検証関数
-+  ) {
-+    return {
-+      success: false,
-+      values,
-+      fieldErrors,
-+    };
-+  }
-+  return {
-+    success: true,
-+    data: {
-+      email: values.email,
-+      password,
-+      requestId,
-+    },
-+  };
-+}
-diff --git a/tests/platform-login-actions.test.ts b/tests/platform-login-actions.test.ts
++function copySessionCookies( // 【追加】セッションCookieの引継ぎ関数
++  source: NextResponse, // 【追加】Cookie引継ぎ元のNext応答型
++  destination: NextResponse, // 【追加】Cookie引継ぎ先のNext応答型
++): void { // 【追加】値を返さないvoid型
+   for (const cookie of source.cookies.getAll()) {//sourceが持っているクッキーを全て取り出してdestinationへ上書きする
+-    destination.cookies.set(cookie);
++    destination.cookies.set(cookie); // 【追加】引継ぎ先へCookieと属性を設定するメソッド
+   }
+ }
+ 
+ //ユーザーが招待リンクをクリックした時に、URLのパラメータをチェックし、安全な15分限定のCookieに変換して、綺麗なURLへリダイレクト（転送）させる司令塔関数
+-export async function proxy(
+-  request: NextRequest,
++/**
++ * 【追加】セッションCookieを更新し、招待入口だけでcontextの整理とURL除去を行う。
++ * Platform経路はセッション更新応答をそのまま返し、認可や独自redirectを行わない。
++ */
++export async function proxy( // 【追加】リクエストに応じたセッション更新・招待入口処理の関数
++  request: NextRequest, // 【追加】受信リクエストを表すNextの型
+ ) {
+   const pathname = request.nextUrl.pathname;
+   const isEntry = (//現在どちらのURLかを判定する
+@@ -64,7 +74,7 @@ export async function proxy(
+ 
+   //以下、古いクッキーが残っている場合のお掃除処理
+   //クッキーからクッキーの名前を得る
+-  const previousCookie = request.cookies.get(
++  const previousCookie = request.cookies.get( // 【追加】既存の招待Cookieを取得するメソッド
+     CLUB_INVITATION_CONTEXT_COOKIE_NAME,//"club-invitation-context"
+   );
+   const clearContext = (
+@@ -81,7 +91,7 @@ export async function proxy(
+   //もし背景データの掃除がtrueならクッキーの名前を削除する
+   if (clearContext) {
+     // 後続のServer Componentにも失効済みcontextを渡さない。
+-    request.cookies.delete(CLUB_INVITATION_CONTEXT_COOKIE_NAME);//"club-invitation-context"
++    request.cookies.delete(CLUB_INVITATION_CONTEXT_COOKIE_NAME);//"club-invitation-context" / 【追加】失効済みCookieの削除メソッド
+   }
+ 
+   const response = await updateSession(request);//ユーザーがページを移動するたびに、ログイン状態（セッション）を自動で最新に更新し、クッキー（Cookie）の有効期限をのばすための関数
+@@ -116,7 +126,7 @@ export async function proxy(
+   destination.hash = "";//ハッシュも消す
+ 
+   if (!context) {//クラブ招待の背景データやURLをクリックしてから登録までの有効期限を作成する関数がfalseの場合、
+-    destination.searchParams.set("error", "invalid-invitation");
++    destination.searchParams.set("error", "invalid-invitation"); // 【追加】固定エラーのqueryを設定するメソッド
+   }
+ 
+   const redirect = NextResponse.redirect(destination);//画面を切り替える準備
+@@ -135,10 +145,15 @@ export async function proxy(
+ }
+ 
+ //ミドルウェア（Middleware）によるセキュリティ検問（Cookieの処理やログインチェックなど）を、どのURLで実行するか
++/**
++ * 【追加】セッション更新が必要な経路を静的なmatcherで指定する。
++ */
+ export const config = {
+   matcher: [
+     "/admin/:path*",
+     "/club-login/:path*",
++    "/platform/:path*", // 【追加】Platform管理画面のセッション更新経路
++    "/platform-login/:path*", // 【追加】Platformログインのセッション更新経路
+     "/club/:path*",
+     "/auth/:path*",
+     "/welcome",
+diff --git a/tests/platform-entry.test.ts b/tests/platform-entry.test.ts
 new file mode 100644
-index 0000000..eb80a42
+index 0000000..bf8c43c
 --- /dev/null
-+++ b/tests/platform-login-actions.test.ts
-@@ -0,0 +1,510 @@
-+// tests/platform-login-actions.test.ts
-+// 実DB・Auth・Cookie・メールを使わず、専用認証Actionの許可・拒否・障害を確認する。
++++ b/tests/platform-entry.test.ts
+@@ -0,0 +1,151 @@
++// tests/platform-entry.test.ts
++// 実NextRequest/Responseとmatcher評価器を使い、Platform経路のCookie引継ぎだけを確認する。
 +
 +import {
-+  afterEach,
++  NextRequest,
++  NextResponse,
++} from "next/server";
++import {
++  unstable_doesMiddlewareMatch,
++} from "next/experimental/testing/server";
++import {
 +  beforeEach,
 +  expect,
 +  it,
@@ -625,96 +428,219 @@ index 0000000..eb80a42
 +} from "vitest";
 +
 +import {
-+  platformLoginAction, // Platform専用ログインAction関数
-+  platformLogoutAction, // 現在のローカルセッションだけを終了するAction関数
-+} from "@/app/(club-app)/platform-login/actions";
-+import type {
-+  PlatformLoginActionState, // パスワードを含めないログインAction state型
-+} from "@/domain/platform/platform-login-form";
++  config, // セッション更新が必要な経路の静的matcher設定
++  proxy, // セッション更新・招待入口処理を行う関数
++} from "@/proxy";
 +import {
-+  DomainError, // 画面表示可能な固定コード・メッセージを持つエラークラス
-+} from "@/domain/shared/domain-error";
-+import {
-+  isRequestId, // UUID v4のrequestIdを検証する関数
-+} from "@/domain/shared/request-id";
++  CLUB_INVITATION_CONTEXT_COOKIE_NAME, // 招待背景データを保存するCookie名
++} from "@/src/infrastructure/security/club-invitation-context";
 +
-+const mocks = vi.hoisted( // import前にモックを生成するメソッド
++const mocks = vi.hoisted( // import前のモック生成メソッド
 +  /**
-+   * 認証・権限・試行記録・遷移の境界を置換するモックを作る。
++   * 実Authへ接続せず、セッション更新の呼出しを観測するモックを作る。
 +   */
 +  () => ({ // モック生成コールバック関数
-+    meta: vi.fn(), // ヘッダー取得モックの生成メソッド
-+    limit: vi.fn(), // 試行制限モックの生成メソッド
-+    save: vi.fn(), // 試行ログ保存モックの生成メソッド
-+    client: vi.fn(), // クライアント生成モックの生成メソッド
-+    signIn: vi.fn(), // パスワード認証モックの生成メソッド
-+    signOut: vi.fn(), // ローカルログアウトモックの生成メソッド
-+    admin: vi.fn(), // Platform管理者読取モックの生成メソッド
-+    redirect: vi.fn(), // 画面遷移モックの生成メソッド
++    updateSession: vi.fn(), // セッション更新モックの生成メソッド
 +  }),
 +);
 +
-+vi.mock( // ヘッダー取得モジュールの置換メソッド
-+  "@/lib/security/request",
++vi.mock( // セッション更新モジュールの置換メソッド
++  "@/src/infrastructure/supabase/middleware",
 +  /**
-+   * 実ヘッダーを読まず、試験用リクエスト情報を返す。
++   * Cookie処理は実Next APIで確認し、Auth SDKだけを実行しない。
 +   */
-+  () => ({ getRequestMeta: mocks.meta }), // メタ情報取得モックを公開するコールバック関数
++  () => ({ updateSession: mocks.updateSession }), // 更新関数を置換するコールバック関数
 +);
-+vi.mock( // 試行制限モジュールの置換メソッド
-+  "@/lib/security/login-rate-limit",
++
++/**
++ * request側の更新、chunk Cookie、削除Cookieを持つ更新応答を作る。
++ */
++function refreshedResponse( // セッション更新応答の試験用生成関数
++  request: NextRequest, // 受信リクエストを表すNextの型
++): NextResponse { // 返却応答を表すNextの型
++  request.cookies.set("sb-test-auth-token.0", "new-first"); // 後続Page向けのCookie更新メソッド
++  const response = NextResponse.next({ request }); // リクエストを引き継ぐNext応答生成メソッド
++  response.cookies.set("sb-test-auth-token.0", "new-first", { // ブラウザー向けCookie設定メソッド
++    httpOnly: true,
++    secure: true,
++    sameSite: "lax",
++    path: "/",
++    maxAge: 3600,
++  });
++  response.cookies.set("sb-test-auth-token.1", "new-second", { // chunk Cookieの設定メソッド
++    httpOnly: true,
++    secure: true,
++    sameSite: "strict",
++    path: "/auth",
++  });
++  response.cookies.set("sb-test-auth-token.2", "", { // 削除Cookieの設定メソッド
++    path: "/",
++    maxAge: 0,
++  });
++  return response;
++}
++
++beforeEach( // 前処理を登録する関数
 +  /**
-+   * saltや実DBへ接続せず、試行制限の判定を差し替える。
++   * 試験間でセッション更新モックの状態を持ち越さない。
 +   */
-+  () => ({ checkLoginRateLimit: mocks.limit }), // 制限判定モックを公開するコールバック関数
++  () => { // 前処理のコールバック関数
++    vi.resetAllMocks(); // モック初期化メソッド
++  },
 +);
-+vi.mock( // 試行記録モジュールの置換メソッド
-+  "@/lib/security/login-submission-log",
++
++it.each([ // matcher対象経路の試験メソッド
++  "/platform",
++  "/platform/support",
++  "/platform/support/reports/test",
++  "/platform-login",
++  "/platform-login?returnTo=https%3A%2F%2Fforeign.example.test",
++  "/platform-login/nested",
++  "/admin/settings",
++  "/club-login/reset-password",
++  "/club/club-a/events",
++  "/welcome",
++  "/auth/confirm",
++  "/club-invitations/accept",
++])(
++  "セッション更新matcherが%sを対象にする",
 +  /**
-+   * DBへの書込みを行わず、保存値を検証できるようにする。
++   * インストール済みNext 16.2.6の実exportで静的matcherを評価する。
 +   */
-+  () => ({ saveLoginSubmissionLog: mocks.save }), // 試行記録モックを公開するコールバック関数
++  (url) => { // 対象経路の試験コールバック
++    expect(unstable_doesMiddlewareMatch({ // Next matcher評価関数 / 期待値生成関数
++      config,
++      url,
++    })).toBe(true); // matcher評価結果の比較メソッド
++  },
 +);
-+vi.mock( // Authクライアントモジュールの置換メソッド
-+  "@/src/infrastructure/supabase/server",
++
++it.each([ // matcher対象外経路の試験メソッド
++  "/",
++  "/api/contact",
++  "/platforming",
++  "/platform-loginish",
++  "/platform-admin/login",
++  "/welcome/unrelated",
++  "/club-invitations/unrelated",
++])(
++  "matcherを無関係な%sへ拡大しない",
 +  /**
-+   * 実Cookie・Authを操作せず、認証応答を置換する。
++   * 新規2パターンの境界と、既存の対象外経路を維持することを確認する。
 +   */
-+  () => ({ createClient: mocks.client }), // クライアント生成モックを公開するコールバック関数
++  (url) => { // 対象外経路の試験コールバック
++    expect(unstable_doesMiddlewareMatch({ // Next matcher評価関数 / 期待値生成関数
++      config,
++      url,
++    })).toBe(false); // matcher評価結果の比較メソッド
++  },
 +);
-+vi.mock( // 管理者Repositoryモジュールの置換メソッド
-+  "@/src/infrastructure/prisma/repositories/platform-admin-repository",
++
++it.each(["/platform-login", "/platform/support"])( // Platform経路別の試験メソッド
++  "%sはGET・POSTともCookie更新応答をそのまま返し、招待や認可処理へ分岐しない",
 +  /**
-+   * 所属を作成せず、有効管理者の読取結果を差し替える。
++   * 更新Cookieの属性・削除・chunkを保ち、Platform経路で招待Cookieを変更しない。
 +   */
-+  () => ({ findActivePlatformAdminByUserId: mocks.admin }), // 権限読取モックを公開するコールバック関数
++  async (pathname) => { // Platform経路の非同期試験コールバック
++    for (const method of ["GET", "POST"]) {
++      const request = new NextRequest( // 実Nextリクエストのコンストラクター
++        `https://app.example.test${pathname}?clubSlug=club-a&token=ignored`,
++        { method },
++      );
++      request.cookies.set(CLUB_INVITATION_CONTEXT_COOKIE_NAME, "invalid-old-context"); // 既存招待Cookieの設定メソッド
++      const response = refreshedResponse(request); // 試験用セッション更新応答の生成関数
++      mocks.updateSession.mockResolvedValueOnce(response); // 更新応答の設定メソッド
++      const result = await proxy(request); // 実Proxy関数
++      expect(result).toBe(response); // 期待値生成・応答の同一性比較メソッド
++      expect(result.cookies.getAll()).toEqual(response.cookies.getAll()); // Cookie取得 / 期待値生成・全属性比較メソッド
++      expect(result.headers.get("Location")).toBeNull(); // ヘッダー取得 / 期待値生成・redirectなしの比較メソッド
++      expect(result.cookies.has(CLUB_INVITATION_CONTEXT_COOKIE_NAME)).toBe(false); // Cookie存在確認 / 期待値生成・招待Cookie非設定比較メソッド
++      expect(request.cookies.get(CLUB_INVITATION_CONTEXT_COOKIE_NAME)?.value).toBe("invalid-old-context"); // Cookie取得 / 期待値生成・既存context不変の比較メソッド
++      expect(request.cookies.get("sb-test-auth-token.0")?.value).toBe("new-first"); // Cookie取得 / 期待値生成・後続Page用更新の比較メソッド
++      expect(mocks.updateSession).toHaveBeenLastCalledWith(request); // 更新関数参照 / 期待値生成・呼出し引数比較メソッド
++    }
++  },
 +);
-+vi.mock( // Next navigationモジュールの置換メソッド
-+  "next/navigation",
+diff --git a/tests/platform-login-forms.test.ts b/tests/platform-login-forms.test.ts
+new file mode 100644
+index 0000000..83c6958
+--- /dev/null
++++ b/tests/platform-login-forms.test.ts
+@@ -0,0 +1,298 @@
++// tests/platform-login-forms.test.ts
++// nodeでhook境界と静的propsを確認する。実DOM・自動入力・Cookie・React schedulerは再現しない。
++
++import {
++  cloneElement,
++  isValidElement,
++  type ReactElement,
++  type ReactNode,
++} from "react";
++import {
++  renderToStaticMarkup,
++} from "react-dom/server";
++import {
++  beforeEach,
++  expect,
++  it,
++  vi,
++} from "vitest";
++
++import {
++  PlatformLoginForm, // Platform専用ログインフォームComponent
++} from "@/app/(club-app)/platform-login/PlatformLoginForm";
++import {
++  PlatformLogoutButton, // 本人用localログアウトボタンComponent
++} from "@/app/(club-app)/platform-login/PlatformLogoutButton";
++import type {
++  PlatformLoginActionState, // PWを含めない公開ログインstate型
++} from "@/domain/platform/platform-login-form";
++
++const mocks = vi.hoisted( // import前のモック生成メソッド
 +  /**
-+   * 遷移はモックにし、制御例外の再送出にはNext公開APIを使う。
++   * hookの返却値と専用Actionを観測するモックを作る。
 +   */
-+  async (original) => ({ // 元モジュールを読む非同期コールバック関数
-+    ...await original<typeof import("next/navigation")>(), // 元モジュール読込関数 / Next navigationモジュールの型
-+    redirect: mocks.redirect, // 遷移モック関数の参照
++  () => ({ // モック生成コールバック関数
++    actionState: vi.fn(), // hookモックの生成メソッド
++    id: vi.fn(), // useIdモックの生成メソッド
++    login: vi.fn(), // ログインActionモックの生成メソッド
++    logout: vi.fn(), // ログアウトActionモックの生成メソッド
++    dispatch: vi.fn(), // form送信関数モックの生成メソッド
++  }),
++);
++
++vi.mock( // Reactモジュールの部分置換メソッド
++  "react",
++  /**
++   * 要素生成は実Reactを使い、hookの値だけを明示的に与える。
++   */
++  async (original) => ({ // 元Reactモジュールを読む非同期コールバック関数
++    ...await original<typeof import("react")>(), // 元モジュール読込関数 / Reactモジュールの型
++    useActionState: mocks.actionState, // Action state hookモック関数の参照
++    useId: mocks.id, // ID生成hookモック関数の参照
++  }),
++);
++vi.mock( // 専用Actionモジュールの置換メソッド
++  "@/app/(club-app)/platform-login/actions",
++  /**
++   * 本物のAuth・DB処理を実行せず、専用Actionとの接続を確認する。
++   */
++  () => ({ // Action置換のコールバック関数
++    platformLoginAction: mocks.login, // ログインActionモック関数の参照
++    platformLogoutAction: mocks.logout, // ログアウトActionモック関数の参照
 +  }),
 +);
 +
 +const REQUEST_ID = "44444444-4444-4444-8444-444444444444";
-+const USER_ID = "11111111-1111-4111-8111-111111111111";
-+const EMAIL = "admin@example.test";
-+const PASSWORD = "  Private-password1!  ";
-+const PRIVATE = "private-db-token-cookie";
-+const IP = "192.0.2.17";
-+const UA = "private-user-agent";
++const PRIVATE = "private-password-token-cookie";
 +
 +/**
-+ * 画面の初期stateを作り、前state由来の余分な値を使わないことを検証可能にする。
++ * PWを含めないログインフォームstateを作る。
 + */
-+function state(): PlatformLoginActionState { // 初期state生成関数 / 公開ログインstate型
++function state(): PlatformLoginActionState { // state生成関数 / 公開ログインstate型
 +  return {
 +    status: "idle",
-+    values: { email: "" },
++    values: { email: "admin@example.test" },
 +    fieldErrors: {},
 +    formError: null,
 +    requestId: REQUEST_ID,
@@ -722,404 +648,489 @@ index 0000000..eb80a42
 +}
 +
 +/**
-+ * 単一項目のログイン送信値を生成する。
++ * React要素から指定したnativeタグのpropsだけを取り出す。
++ * Componentの再描画やブラウザーイベントは実行しない。
 + */
-+function form(): FormData { // 送信値生成関数 / FormData型
-+  const data = new FormData(); // FormDataコンストラクター
-+  data.set("email", " ＡＤＭＩＮ＠ＥＸＡＭＰＬＥ．ＴＥＳＴ "); // メール項目の設定メソッド
-+  data.set("password", PASSWORD); // パスワード項目の設定メソッド
-+  data.set("requestId", REQUEST_ID); // 識別値の設定メソッド
-+  return data;
-+}
-+
-+/**
-+ * redirectが処理を中断することを試験用例外で再現する。
-+ */
-+function redirected(): never { // 遷移制御の再現関数 / 正常終了しないnever型
-+  throw new Error("NEXT_REDIRECT"); // 固定制御例外のErrorコンストラクター
-+}
-+
-+/**
-+ * 試行ログ・運用ログに、個人情報やパスワード・例外原文が含まれないことを確認する。
-+ */
-+function expectSafeLogs(): void { // ログ非開示の検証関数 / 値を返さないvoid型
-+  const output = JSON.stringify([ // 呼出し記録をJSON化するメソッド
-+    mocks.save.mock.calls,
-+    vi.mocked(console.error).mock.calls, // consoleモックの型を取得するメソッド
-+  ]);
-+  for (const value of [EMAIL, PASSWORD, PRIVATE, IP, UA]) {
-+    expect(output).not.toContain(value); // 期待値生成・秘密値非反射の比較メソッド
++function nodes( // native要素のprops収集関数
++  node: ReactNode, // 描画可能なReact要素の型
++  tag: string, // 対象タグ名の文字列型
++): Record<string, unknown>[] { // 文字列キーと不明値のprops辞書配列型
++  if (Array.isArray(node)) { // 配列を判定するメソッド
++    const found: Record<string, unknown>[] = []; // props辞書の配列型
++    for (const child of node) {
++      found.push(...nodes(child, tag)); // 配列追加メソッド / native要素のprops収集関数
++    }
++    return found;
 +  }
++  if (!isValidElement<Record<string, unknown>>(node)) { // React要素判定関数 / props辞書の型
++    return [];
++  }
++  return [
++    ...(node.type === tag ? [node.props] : []),
++    ...nodes(node.props.children as ReactNode, tag), // props収集関数 / 子要素のReactNode型アサーション
++  ];
 +}
 +
 +/**
-+ * Nextの公開APIから実際の制御例外を取得し、動作を再現する試験へ渡す。
++ * Action接続はpropsで別に検証し、静的HTML化ではformの送信関数を取り除く。
 + */
-+async function nextControl(): Promise<unknown> { // 制御例外取得関数 / 不明値の非同期結果型
-+  const navigation = await vi.importActual<typeof import("next/navigation")>( // 元モジュール読込メソッド / navigationモジュールの型
-+    "next/navigation",
-+  );
-+  try {
-+    navigation.redirect("/platform-login"); // Next制御例外を生成する関数
-+  } catch (error) {
-+    return error;
-+  }
-+  throw new Error("Nextの制御例外を取得できません。"); // 試験前提の違反を示す固定Errorコンストラクター
++function html( // 静的HTML生成関数
++  node: ReactElement<Record<string, unknown>>, // props辞書を持つReact要素の型
++): string { // HTML文字列の型
++  return renderToStaticMarkup(cloneElement(node, { action: undefined })); // HTML変換関数 / React要素の複製関数
 +}
 +
-+beforeEach( // 前処理を登録する関数
++/**
++ * hookへ渡されたlogout送信関数を取り出す。
++ */
++function logoutSubmit(): () => Promise<{ formError: string | null }> { // 送信関数取得関数 / 固定エラーを非同期に返す関数型
++  PlatformLogoutButton(); // hook接続を評価するログアウトComponent関数
++  return mocks.actionState.mock.calls[0][0];
++}
++
++beforeEach( // 試験前処理を登録する関数
 +  /**
-+   * 所属なしの有効管理者と成功応答を初期状態とし、console出力を試験内へ閉じる。
++   * idle状態と固定IDを返すhookモックを用意する。
 +   */
-+  () => { // 試験前処理のコールバック関数
-+    vi.resetAllMocks(); // モック状態の初期化メソッド
-+    vi.spyOn(console, "error").mockImplementation( // consoleを試験用に置換するメソッド
-+      /**
-+       * 運用ログを外へ出さず、呼出し履歴だけを残す。
-+       */
-+      () => undefined, // 出力を行わないコールバック関数
-+    );
-+    mocks.meta.mockResolvedValue({ // ヘッダー応答を設定するメソッド
-+      ip: IP,
-+      userAgent: UA,
-+    });
-+    mocks.limit.mockResolvedValue({ // ハッシュ化後の制限判定を設定するメソッド
-+      allowed: true,
-+      reason: null,
-+      ipHash: "ip-hash",
-+      emailHash: "email-hash",
-+    });
-+    mocks.save.mockResolvedValue(undefined); // 試行記録成功を設定するメソッド
-+    mocks.client.mockResolvedValue({ // クライアント応答を設定するメソッド
-+      auth: {
-+        signInWithPassword: mocks.signIn, // 認証モック関数の参照
-+        signOut: mocks.signOut, // セッション終了モック関数の参照
-+      },
-+    });
-+    mocks.signIn.mockResolvedValue({ // 認証成功を設定するメソッド
-+      data: {
-+        user: {
-+          id: USER_ID,
-+          role: "OWNER",
-+        },
-+        session: { access_token: PRIVATE },
-+      },
-+      error: null,
-+    });
-+    mocks.signOut.mockResolvedValue({ error: null }); // セッション終了成功を設定するメソッド
-+    mocks.admin.mockResolvedValue({ // 有効管理者を設定するメソッド
-+      id: USER_ID,
-+      role: "DEVELOPER",
-+    });
-+    mocks.redirect.mockImplementation(redirected); // 遷移モック実装の設定メソッド / 固定制御例外生成関数の参照
++  () => { // 前処理のコールバック関数
++    vi.resetAllMocks(); // モック初期化メソッド
++    mocks.actionState.mockReturnValue([state(), mocks.dispatch, false]); // state生成関数 / hook返却値の設定メソッド
++    mocks.id.mockReturnValue("platform-1"); // useId返却値の設定メソッド
++    mocks.logout.mockResolvedValue(undefined); // ログアウト成功の設定メソッド
 +  },
 +);
 +
-+afterEach( // 後処理を登録する関数
++it( // 試験を登録する関数
++  "専用Actionに接続し、PWをvalue・defaultValue・stateへ保持しない",
 +  /**
-+   * consoleの実装を元に戻し、他の試験へモックを持ち越さない。
++   * requestIdとメールだけを表示値へ反映し、PWは非制御inputとして送信する。
 +   */
-+  () => { // 後処理のコールバック関数
-+    expectSafeLogs(); // 試行ログと運用ログの秘密値非反射を確認する関数
-+    vi.restoreAllMocks(); // spyを元の実装へ戻すメソッド
++  () => { // 接続と秘密値非保持の試験コールバック
++    const initial = state(); // 初期state生成関数
++    const tree = PlatformLoginForm({ initialState: initial }); // ログインフォームComponent関数
++    expect(mocks.actionState).toHaveBeenCalledExactlyOnceWith(mocks.login, initial); // hook参照・Action参照 / 期待値生成・引数比較メソッド
++    expect(nodes(tree, "form")[0].action).toBe(mocks.dispatch); // props収集関数 / 送信関数参照 / 期待値生成・比較メソッド
++    const inputs = nodes(tree, "input"); // inputのprops収集関数
++    const password = inputs.find( // 対象inputを検索するメソッド
++      /**
++       * パスワード項目のpropsを選ぶ。
++       */
++      (input) => input.name === "password", // input検索のコールバック関数
++    );
++    expect(password?.type).toBe("password"); // 期待値生成・input種別比較メソッド
++    expect(password?.autoComplete).toBe("current-password"); // 期待値生成・自動入力属性比較メソッド
++    expect(password).not.toHaveProperty("value"); // 期待値生成・保持値非設定の比較メソッド
++    expect(password).not.toHaveProperty("defaultValue"); // 期待値生成・初期PW非設定の比較メソッド
++    expect(password).not.toHaveProperty("onChange"); // 期待値生成・PW状態更新なしの比較メソッド
++    expect(html(tree)).toContain('name="requestId"'); // HTML生成関数 / 期待値生成・識別値項目比較メソッド
++    expect(html(tree)).not.toContain(PRIVATE); // HTML生成関数 / 期待値生成・秘密値非表示比較メソッド
++  },
++);
++
++it.each([false, true])( // pending状態別の試験メソッド
++  "ログインpending=%sでは入力と送信のdisabledを揃える",
++  /**
++   * hookのpendingをフォームと入力・送信ボタンに反映する。
++   */
++  (pending) => { // pending別の試験コールバック
++    mocks.actionState.mockReturnValue([state(), mocks.dispatch, pending]); // state生成関数 / hook返却値の設定メソッド
++    const tree = PlatformLoginForm({ initialState: state() }); // Component関数 / 初期state生成関数
++    expect(nodes(tree, "form")[0]["aria-busy"]).toBe(pending); // props収集関数 / 期待値生成・pending比較メソッド
++    for (const input of nodes(tree, "input")) { // inputのprops収集関数
++      if (input.type !== "hidden") {
++        expect(input.disabled).toBe(pending); // 期待値生成・disabled比較メソッド
++      }
++    }
++    expect(nodes(tree, "button")[0].disabled).toBe(pending); // props収集関数 / 期待値生成・disabled比較メソッド
++    expect(html(tree)).toContain(pending ? "ログイン中..." : "ログイン"); // HTML生成関数 / 期待値生成・送信文面比較メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "メール・PW・requestId・全体エラーを表示し、更新後の識別値を送る",
++  /**
++   * Actionからのエラーを固定stateの項目に対応させ、入力とのaria関連付けを確認する。
++   */
++  () => { // 項目エラーの試験コールバック
++    const current = state(); // 初期state生成関数
++    current.status = "error";
++    current.values.email = "normalized@example.test";
++    current.requestId = "55555555-5555-4555-8555-555555555555";
++    current.formError = "入力内容を確認してください。";
++    current.fieldErrors = {
++      email: ["メールの形式を確認してください。"],
++      password: ["パスワードを入力してください。"],
++      requestId: ["フォームを開き直してください。"],
++    };
++    mocks.actionState.mockReturnValue([current, mocks.dispatch, false]); // エラーstateの設定メソッド
++    const tree = PlatformLoginForm({ initialState: state() }); // Component関数 / 初期state生成関数
++    const output = html(tree); // 静的HTML生成関数
++    for (const message of [
++      current.formError,
++      ...(current.fieldErrors.email ?? []),
++      ...(current.fieldErrors.password ?? []),
++      ...(current.fieldErrors.requestId ?? []),
++    ]) {
++      expect(output).toContain(message); // 期待値生成・エラー文面包含比較メソッド
++    }
++    const inputs = nodes(tree, "input"); // inputのprops収集関数
++    for (const input of inputs) {
++      if (input.type !== "hidden") {
++        expect(input["aria-invalid"]).toBe(true); // 期待値生成・エラー属性比較メソッド
++        expect(output).toContain(`id="${input["aria-describedby"]}"`); // 期待値生成・関連付け先の包含比較メソッド
++      } else {
++        expect(input.value).toBe(current.requestId); // 期待値生成・最新識別値比較メソッド
++      }
++    }
++    expect(output).toContain("normalized@example.test"); // 期待値生成・メール表示比較メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "複数フォームのlabelとエラーIDを混同しない",
++  /**
++   * useIdによる異なる識別子を各フォームの入力とlabelへ反映する。
++   */
++  () => { // ID独立性の試験コールバック
++    mocks.id.mockReturnValueOnce("platform-a").mockReturnValueOnce("platform-b"); // 各フォームのID設定メソッド
++    const first = PlatformLoginForm({ initialState: state() }); // Component関数 / 初期state生成関数
++    const second = PlatformLoginForm({ initialState: state() }); // Component関数 / 初期state生成関数
++    expect(html(first)).toContain('for="platform-a-email"'); // HTML生成関数 / 期待値生成・label関連付け比較メソッド
++    expect(html(second)).toContain('for="platform-b-email"'); // HTML生成関数 / 期待値生成・label関連付け比較メソッド
++  },
++);
++
++it.each([false, true])( // logout pending状態別の試験メソッド
++  "ログアウトpending=%sを表示し、専用送信へ接続する",
++  /**
++   * logoutのpendingを反映し、元のクラブ用Actionへ接続しないことを確認する。
++   */
++  (pending) => { // logout pending別の試験コールバック
++    mocks.actionState.mockReturnValue([{ formError: null }, mocks.dispatch, pending]); // logout hook返却値の設定メソッド
++    const tree = PlatformLogoutButton(); // ログアウトComponent関数
++    expect(nodes(tree, "form")[0].action).toBe(mocks.dispatch); // props収集関数 / 送信関数参照 / 期待値生成・比較メソッド
++    expect(nodes(tree, "button")[0].disabled).toBe(pending); // props収集関数 / 期待値生成・disabled比較メソッド
++    expect(html(tree)).toContain(pending ? "ログアウト中..." : "ログアウト"); // HTML生成関数 / 期待値生成・文面比較メソッド
++    expect(mocks.logout).not.toHaveBeenCalled(); // Action参照 / 期待値生成・表示だけで未実行の比較メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "logout送信だけが専用Actionを実行し、成功は空エラーにする",
++  /**
++   * ボタンの描画ではなく、登録した送信関数を呼ぶことでActionを実行する。
++   */
++  async () => { // logout成功の非同期試験コールバック
++    mocks.actionState.mockReturnValue([{ formError: null }, mocks.dispatch, false]); // logout hook返却値の設定メソッド
++    const result = await logoutSubmit()(); // 送信関数取得関数と取得した非同期送信関数の呼出し
++    expect(mocks.logout).toHaveBeenCalledExactlyOnceWith(); // Action参照 / 期待値生成・引数なし単一呼出し比較メソッド
++    expect(result).toEqual({ formError: null }); // 期待値生成・成功state比較メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "logout失敗は原文を保持せず固定文面を表示する",
++  /**
++   * Server Actionの一般例外を固定stateへ変換し、再描画時のalertを確認する。
++   */
++  async () => { // logout失敗の非同期試験コールバック
++    mocks.actionState.mockReturnValue([{ formError: null }, mocks.dispatch, false]); // logout hook返却値の設定メソッド
++    mocks.logout.mockRejectedValue(new Error(PRIVATE)); // Action例外の設定メソッド / Errorコンストラクター
++    const result = await logoutSubmit()(); // 送信関数取得関数と非同期送信関数の呼出し
++    expect(result.formError).toBe("ログアウトできませんでした。もう一度お試しください。"); // 期待値生成・固定文面比較メソッド
++    mocks.actionState.mockReturnValue([result, mocks.dispatch, false]); // エラー表示用hook返却値の設定メソッド
++    const output = html(PlatformLogoutButton()); // HTML生成関数 / ログアウトComponent関数
++    expect(output).toContain('role="alert"'); // 期待値生成・alert包含比較メソッド
++    expect(output).not.toContain(PRIVATE); // 期待値生成・原文非表示比較メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "logoutのNext制御例外を一般エラーへ変換しない",
++  /**
++   * Client側の送信ラッパーでもNext公開APIの制御例外を保持する。
++   */
++  async () => { // 制御例外の非同期試験コールバック
++    mocks.actionState.mockReturnValue([{ formError: null }, mocks.dispatch, false]); // logout hook返却値の設定メソッド
++    const navigation = await vi.importActual<typeof import("next/navigation")>( // 元モジュール読込メソッド / navigationモジュールの型
++      "next/navigation",
++    );
++    let control: unknown; // Next制御例外を保持する不明値型
++    try {
++      navigation.redirect("/platform-login"); // Next制御例外を生成する関数
++    } catch (error) {
++      control = error;
++    }
++    mocks.logout.mockRejectedValue(control); // 制御例外を返す設定メソッド
++    await expect(logoutSubmit()()).rejects.toBe(control); // 送信関数取得・非同期送信関数 / 期待値生成・例外同一性比較メソッド
++  },
++);
+diff --git a/tests/platform-login-pages.test.ts b/tests/platform-login-pages.test.ts
+new file mode 100644
+index 0000000..2db3377
+--- /dev/null
++++ b/tests/platform-login-pages.test.ts
+@@ -0,0 +1,263 @@
++// tests/platform-login-pages.test.ts
++// 実Auth・DB・Cookieを使わず、Pageの本人確認・固定遷移・非開示・再ログイン導線を確認する。
++
++import {
++  createElement,
++} from "react";
++import {
++  renderToStaticMarkup,
++} from "react-dom/server";
++import {
++  beforeEach,
++  expect,
++  it,
++  vi,
++} from "vitest";
++
++import PlatformLoginPage from "@/app/(club-app)/platform-login/page"; // Platform専用ログインPage関数
++import {
++  isRequestId, // UUID v4形式のrequestIdを検証する関数
++} from "@/domain/shared/request-id";
++
++const mocks = vi.hoisted( // import前のモック生成メソッド
++  /**
++   * Pageが使うAuth・DB・Client Component・遷移だけを置換する。
++   */
++  () => ({ // モック生成コールバック関数
++    client: vi.fn(), // クライアント生成モックの作成メソッド
++    getUser: vi.fn(), // Auth本人確認モックの作成メソッド
++    signOut: vi.fn(), // 自動ログアウトがないことを観測するモックの作成メソッド
++    admin: vi.fn(), // 管理者読取モックの作成メソッド
++    login: vi.fn(), // ログインフォームモックの作成メソッド
++    logout: vi.fn(), // ログアウトボタンモックの作成メソッド
++    redirect: vi.fn(), // 遷移モックの作成メソッド
++  }),
++);
++
++vi.mock( // Authクライアントモジュールの置換メソッド
++  "@/src/infrastructure/supabase/server",
++  /**
++   * 実Cookieを読むクライアント生成を置換する。
++   */
++  () => ({ createClient: mocks.client }), // クライアント置換のコールバック関数
++);
++vi.mock( // Repositoryモジュールの置換メソッド
++  "@/src/infrastructure/prisma/repositories/platform-admin-repository",
++  /**
++   * 実DBを使わず、有効管理者の応答を置換する。
++   */
++  () => ({ findActivePlatformAdminByUserId: mocks.admin }), // Repository置換のコールバック関数
++);
++vi.mock( // ログインフォームモジュールの置換メソッド
++  "@/app/(club-app)/platform-login/PlatformLoginForm",
++  /**
++   * Client hookを実行せず、Pageが渡す初期stateを観測する。
++   */
++  () => ({ PlatformLoginForm: mocks.login }), // フォーム置換のコールバック関数
++);
++vi.mock( // ログアウトボタンモジュールの置換メソッド
++  "@/app/(club-app)/platform-login/PlatformLogoutButton",
++  /**
++   * ログアウトを実行せず、ボタンの表示条件だけを観測する。
++   */
++  () => ({ PlatformLogoutButton: mocks.logout }), // ボタン置換のコールバック関数
++);
++vi.mock( // Next navigationの置換メソッド
++  "next/navigation",
++  /**
++   * 遷移だけを置換し、制御例外の再送出にはNextの公開APIを使う。
++   */
++  async (original) => ({ // 元モジュールを読み込む非同期コールバック関数
++    ...await original<typeof import("next/navigation")>(), // 元モジュール読込関数 / navigationモジュールの型
++    redirect: mocks.redirect, // 遷移モック関数の参照
++  }),
++);
++
++const USER_ID = "11111111-1111-4111-8111-111111111111";
++const PRIVATE = "private@example.test token-cookie-secret";
++
++/**
++ * Pageが返した要素を静的HTMLへ変換し、ブラウザー動作とは区別して検証する。
++ */
++async function html(): Promise<string> { // HTML生成関数 / 文字列の非同期結果型
++  return renderToStaticMarkup(await PlatformLoginPage()); // 静的HTML変換関数 / 非同期Page関数
++}
++
++/**
++ * redirectの中断を試験用の固定例外で表す。
++ */
++function redirected(): never { // 遷移の再現関数 / 正常終了しないnever型
++  throw new Error("NEXT_REDIRECT"); // 試験用Errorコンストラクター
++}
++
++beforeEach( // 試験前処理を登録する関数
++  /**
++   * 未認証を初期状態とし、Client部品を副作用のないマーカーへ置換する。
++   */
++  () => { // 前処理のコールバック関数
++    vi.resetAllMocks(); // モック状態の初期化メソッド
++    mocks.client.mockResolvedValue({ // Authクライアント応答の設定メソッド
++      auth: {
++        getUser: mocks.getUser, // 本人確認モック関数の参照
++        signOut: mocks.signOut, // セッション終了モック関数の参照
++      },
++    });
++    mocks.getUser.mockResolvedValue({ // 未認証応答の設定メソッド
++      data: { user: null },
++      error: null,
++    });
++    mocks.admin.mockResolvedValue(null); // 管理権限なしの設定メソッド
++    mocks.redirect.mockImplementation(redirected); // 遷移モック実装の設定メソッド / 遷移再現関数の参照
++    mocks.login.mockImplementation( // Clientフォームの置換実装を設定するメソッド
++      /**
++       * hookやActionを動かさず、フォームの存在だけをHTMLへ出す。
++       */
++      () => createElement("form", { "data-platform-login": true }), // フォーム生成コールバック / React要素の生成関数
++    );
++    mocks.logout.mockImplementation( // Clientボタンの置換実装を設定するメソッド
++      /**
++       * ログアウトを呼ばず、操作ボタンの存在だけを表示する。
++       */
++      () => createElement("button", { type: "button" }, "本人ログアウト"), // ボタン生成コールバック / React要素の生成関数
++    );
++  },
++);
++
++it( // 試験を登録する関数
++  "未認証はフォームを表示し、所属や管理者を読まずに新規requestIdを渡す",
++  /**
++   * ログイン用の公開初期値だけを渡し、クラブFooterやPWを出力しない。
++   */
++  async () => { // 未認証Pageの非同期試験コールバック
++    const output = await html(); // Pageの静的HTML生成関数
++    expect(output).toContain("Platformログイン"); // 期待値生成・見出しの包含比較メソッド
++    expect(output).toContain("data-platform-login"); // 期待値生成・フォームの包含比較メソッド
++    expect(output).not.toContain("本人ログアウト"); // 期待値生成・ログアウト非表示の比較メソッド
++    expect(output).not.toContain("<footer"); // 期待値生成・Footer非表示の比較メソッド
++    expect(mocks.admin).not.toHaveBeenCalled(); // Repository参照 / 期待値生成・未呼出し比較メソッド
++    const initial = mocks.login.mock.calls[0][0].initialState;
++    expect(initial.values).toEqual({ email: "" }); // 期待値生成・初期表示値の比較メソッド
++    expect(initial.status).toBe("idle"); // 期待値生成・初期stateの比較メソッド
++    expect(isRequestId(initial.requestId)).toBe(true); // UUID検証関数 / 期待値生成・比較メソッド
++    await html(); // 次のPage表示の静的HTML生成関数
++    expect(mocks.login.mock.calls[1][0].initialState.requestId).not.toBe(initial.requestId); // 期待値生成・フォーム識別値の独立性比較メソッド
 +  },
 +);
 +
 +it.each(["DEVELOPER", "SUPPORT"] as const)( // 許可ロール別の試験メソッド / 読取専用リテラル型
-+  "%sは所属を参照せず、固定support先へ進む",
++  "%sは所属なしでも固定supportへ移動する",
 +  /**
-+   * 認証・最新権限・ハッシュ化ログの順序と、任意遷移・偽造権限の不採用を確認する。
++   * Auth本人IDだけをRepositoryへ渡し、固定先へ遷移することを確認する。
 +   */
-+  async (role) => { // 許可ロール別の非同期試験コールバック
-+    mocks.admin.mockResolvedValue({ // 管理者ロールの応答設定メソッド
++  async (role) => { // 管理者Pageの非同期試験コールバック
++    mocks.getUser.mockResolvedValue({ // 本人確認成功を設定するメソッド
++      data: {
++        user: {
++          id: USER_ID,
++          email: PRIVATE,
++        },
++      },
++      error: null,
++    });
++    mocks.admin.mockResolvedValue({ // 有効管理者を設定するメソッド
 +      id: USER_ID,
 +      role,
 +    });
-+    const data = form(); // 送信値生成関数
-+    data.set("returnTo", "https://foreign.example.test"); // 任意遷移先の設定メソッド
-+    data.set("clubId", "foreign-club"); // 任意クラブIDの設定メソッド
-+    data.set("role", "DEVELOPER"); // 偽造ロールの設定メソッド
-+    await expect(platformLoginAction(state(), data)).rejects.toThrow("NEXT_REDIRECT"); // Action・state生成関数 / 期待値生成・制御例外の比較メソッド
-+    expect(mocks.limit).toHaveBeenCalledExactlyOnceWith({ // 制限関数参照 / 期待値生成・引数比較メソッド
-+      ip: IP,
-+      email: EMAIL,
-+    });
-+    expect(mocks.signIn).toHaveBeenCalledExactlyOnceWith({ // Auth関数参照 / 期待値生成・引数比較メソッド
-+      email: EMAIL,
-+      password: PASSWORD,
-+    });
-+    expect(mocks.admin).toHaveBeenCalledExactlyOnceWith(USER_ID); // 権限関数参照 / 期待値生成・本人ID比較メソッド
-+    expect(mocks.save).toHaveBeenCalledExactlyOnceWith({ // 記録関数参照 / 期待値生成・許可列比較メソッド
-+      ipHash: "ip-hash",
-+      emailHash: "email-hash",
-+      result: "SUCCESS",
-+      reason: null,
-+    });
-+    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith("/platform/support"); // 遷移関数参照 / 期待値生成・固定先比較メソッド
++    await expect(PlatformLoginPage()).rejects.toThrow("NEXT_REDIRECT"); // Page関数 / 期待値生成・制御例外の比較メソッド
++    expect(mocks.admin).toHaveBeenCalledExactlyOnceWith(USER_ID); // Repository参照 / 期待値生成・本人ID比較メソッド
++    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith("/platform/support"); // 遷移参照 / 期待値生成・固定先比較メソッド
 +    expect(mocks.signOut).not.toHaveBeenCalled(); // セッション終了参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.limit.mock.invocationCallOrder[0]).toBeLessThan(mocks.signIn.mock.invocationCallOrder[0]); // 期待値生成・制限判定が認証より先であることの比較メソッド
 +  },
 +);
 +
-+it.each(["email", "password", "requestId"] as const)( // 項目別試験メソッド / 読取専用リテラル型
-+  "%sの改ざんはAuth・試行記録より前に拒否する",
-+  /**
-+   * 重複・File・欠落を直接Actionへ送り、前stateの余分な値も反映しないことを確認する。
-+   */
-+  async (field) => { // 入力改ざんの非同期コールバック
-+    for (const mode of ["duplicate", "file", "missing"]) {
-+      const data = form(); // 送信値生成関数
-+      if (mode === "duplicate") {
-+        data.append(field, String(data.get(field))); // 同名値追加 / 文字列化 / 項目読取メソッド
-+      } else if (mode === "file") {
-+        data.set(field, new File([PRIVATE], "input.txt")); // 項目設定メソッド / Fileコンストラクター
-+      } else {
-+        data.delete(field); // 項目削除メソッド
-+      }
-+      const result = await platformLoginAction({ // ログインAction関数
-+        ...state(), // 初期state生成関数
-+        values: {
-+          email: EMAIL,
-+          password: PASSWORD,
-+        },
-+        data: { access_token: PRIVATE },
-+      } as unknown as PlatformLoginActionState, data); // 改ざん再現用の不明値型・公開state型アサーション
-+      expect(result.status).toBe("error"); // 期待値生成・エラー比較メソッド
-+      expect(Object.keys(result.values)).toEqual(["email"]); // キー列挙 / 期待値生成・公開項目比較メソッド
-+      expect(JSON.stringify(result)).not.toContain(PASSWORD); // JSON化 / 期待値生成・秘密値非反射比較メソッド
-+      expect(JSON.stringify(result)).not.toContain(PRIVATE); // JSON化 / 期待値生成・秘密値非反射比較メソッド
-+    }
-+    expect(mocks.client).not.toHaveBeenCalled(); // Auth参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.limit).not.toHaveBeenCalled(); // 制限参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.save).not.toHaveBeenCalled(); // 記録参照 / 期待値生成・未呼出し比較メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "前stateと異なるrequestIdを拒否し、新しいIDを返す",
-+  /**
-+   * 有効なUUIDでも別フォームの操作識別値を採用しない。
-+   */
-+  async () => { // 識別値不一致の非同期コールバック
-+    const data = form(); // 送信値生成関数
-+    data.set("requestId", "55555555-5555-4555-8555-555555555555"); // 別フォーム識別値の設定メソッド
-+    const result = await platformLoginAction(state(), data); // Action関数 / 初期state生成関数
-+    expect(result.status).toBe("error"); // 期待値生成・エラー比較メソッド
-+    expect(isRequestId(result.requestId)).toBe(true); // UUID検証関数 / 期待値生成・比較メソッド
-+    expect(result.requestId).not.toBe(REQUEST_ID); // 期待値生成・識別値更新比較メソッド
-+    expect(mocks.limit).not.toHaveBeenCalled(); // 制限参照 / 期待値生成・未呼出し比較メソッド
-+  },
-+);
-+
-+it.each([false, true])( // ブロックログ保存成否ごとの試験メソッド
-+  "試行制限時は認証せずBLOCKEDを記録する（記録失敗=%s）",
-+  /**
-+   * 制限超過時はAuthへ進まず、記録の例外原文も漏らさない。
-+   */
-+  async (logFails) => { // 制限超過の非同期コールバック
-+    mocks.limit.mockResolvedValue({ // ブロック応答の設定メソッド
-+      allowed: false,
-+      reason: "TOO_MANY_FAILED_LOGIN_BY_EMAIL",
-+      ipHash: "ip-hash",
-+      emailHash: "email-hash",
-+    });
-+    if (logFails) {
-+      mocks.save.mockRejectedValue(new Error(PRIVATE)); // 記録障害の設定メソッド / Errorコンストラクター
-+    }
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.status).toBe("error"); // 期待値生成・エラー比較メソッド
-+    expect(mocks.client).not.toHaveBeenCalled(); // Auth参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.save).toHaveBeenCalledWith({ // 記録参照 / 期待値生成・引数比較メソッド
-+      ipHash: "ip-hash",
-+      emailHash: "email-hash",
-+      result: "BLOCKED",
-+      reason: "TOO_MANY_FAILED_LOGIN_BY_EMAIL",
-+    });
-+  },
-+);
-+
-+it.each(["meta", "limit", "client", "signIn", "admin"] as const)( // 障害箇所別の試験メソッド / 読取専用リテラル型
-+  "%sの障害を成功へ丸めず、秘密値を返さない",
-+  /**
-+   * 設定・接続・Auth・権限DBの各障害で固定エラーを返し、必要ならlocal終了を試みる。
-+   */
-+  async (operation) => { // 障害箇所別の非同期コールバック
-+    mocks[operation].mockRejectedValue(new Error(PRIVATE)); // 障害応答の設定メソッド / Errorコンストラクター
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.status).toBe("error"); // 期待値生成・エラー比較メソッド
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE); // JSON化 / 期待値生成・原文非反射の比較メソッド
-+    expect(mocks.redirect).not.toHaveBeenCalled(); // 遷移参照 / 期待値生成・未呼出し比較メソッド
-+    if (
-+      operation === "meta" ||
-+      operation === "limit"
-+    ) {
-+      expect(mocks.signIn).not.toHaveBeenCalled(); // Auth参照 / 期待値生成・未呼出し比較メソッド
-+    }
-+    if (
-+      operation === "signIn" ||
-+      operation === "admin"
-+    ) {
-+      expect(mocks.signOut).toHaveBeenCalledWith({ scope: "local" }); // 終了関数参照 / 期待値生成・スコープ比較メソッド
-+    }
-+  },
-+);
-+
-+it.each([ // 不許可管理者応答別の試験メソッド
++it.each([ // 拒否応答別の試験メソッド
 +  null,
 +  {
-+    id: "foreign-admin",
++    id: "foreign-user",
 +    role: "DEVELOPER",
 +  },
 +])(
-+  "非管理者・inactive・本人不一致はlocal終了し、一般エラーを返す %#",
++  "一般会員・inactive・本人不一致はループせず、再ログインと本人logoutを表示する %#",
 +  /**
-+   * Auth成功だけでは許可せず、有効な本人PlatformAdminが必要なことを確認する。
++   * 拒否応答でも本人の既存セッションを終了せず、個人情報を表示しない。
 +   */
-+  async (admin) => { // 権限拒否の非同期コールバック
-+    mocks.admin.mockResolvedValue(admin); // 管理者読取応答の設定メソッド
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.formError).toBe("メールアドレスまたはパスワードが正しくありません。"); // 期待値生成・権限非開示の固定文比較メソッド
-+    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith({ scope: "local" }); // 終了関数参照 / 期待値生成・local終了比較メソッド
++  async (admin) => { // 非管理者Pageの非同期試験コールバック
++    mocks.getUser.mockResolvedValue({ // 有効セッションを設定するメソッド
++      data: {
++        user: {
++          id: USER_ID,
++          email: PRIVATE,
++        },
++      },
++      error: null,
++    });
++    mocks.admin.mockResolvedValue(admin); // 拒否対象のRepository応答を設定するメソッド
++    const output = await html(); // Pageの静的HTML生成関数
++    expect(output).toContain("本人ログアウト"); // 期待値生成・操作導線の包含比較メソッド
++    expect(output).toContain("data-platform-login"); // 期待値生成・再ログイン導線の包含比較メソッド
++    expect(output).not.toContain(PRIVATE); // 期待値生成・個人情報非表示の比較メソッド
++    expect(output).not.toContain(USER_ID); // 期待値生成・本人ID非表示の比較メソッド
 +    expect(mocks.redirect).not.toHaveBeenCalled(); // 遷移参照 / 期待値生成・未呼出し比較メソッド
++    expect(mocks.signOut).not.toHaveBeenCalled(); // セッション終了参照 / 期待値生成・未呼出し比較メソッド
 +  },
 +);
 +
 +it( // 試験を登録する関数
-+  "認証失敗では既存セッションを勝手に終了しない",
++  "Authエラーとuserが併存しても権限を取得しない",
 +  /**
-+   * 明確な認証失敗を一般エラーで返し、権限読取やログアウトを行わない。
++   * 不完全な本人確認結果をログイン済みとして扱わず、エラー原文も表示しない。
 +   */
-+  async () => { // 認証失敗の非同期コールバック
-+    mocks.signIn.mockResolvedValue({ // 認証失敗応答の設定メソッド
-+      data: { user: null },
++  async () => { // Auth拒否の非同期試験コールバック
++    mocks.getUser.mockResolvedValue({ // Authエラー応答の設定メソッド
++      data: { user: { id: USER_ID } },
 +      error: { message: PRIVATE },
 +    });
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.formError).toBe("メールアドレスまたはパスワードが正しくありません。"); // 期待値生成・固定文比較メソッド
-+    expect(mocks.signOut).not.toHaveBeenCalled(); // 終了参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.admin).not.toHaveBeenCalled(); // 権限参照 / 期待値生成・未呼出し比較メソッド
++    const output = await html(); // Pageの静的HTML生成関数
++    expect(output).toContain("data-platform-login"); // 期待値生成・フォームの包含比較メソッド
++    expect(output).not.toContain(PRIVATE); // 期待値生成・原文非表示の比較メソッド
++    expect(mocks.admin).not.toHaveBeenCalled(); // Repository参照 / 期待値生成・未呼出し比較メソッド
 +  },
 +);
 +
-+it( // 試験を登録する関数
-+  "成功ログの記録障害でも成功遷移せず、local終了を試みる",
++it.each(["client", "getUser", "admin"] as const)( // 障害箇所別の試験メソッド / 読取専用リテラル型
++  "%sの例外は固定文面にし、秘密値や管理情報を出さない",
 +  /**
-+   * Auth・権限が成功しても、試行記録に失敗した場合は固定エラーで中断する。
++   * 一般障害を認可成功へ変換せず、復帰可能なログイン画面にする。
 +   */
-+  async () => { // 記録障害の非同期コールバック
-+    mocks.save.mockRejectedValue(new Error(PRIVATE)); // 記録失敗の設定メソッド / Errorコンストラクター
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.status).toBe("error"); // 期待値生成・エラー比較メソッド
-+    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith({ scope: "local" }); // 終了参照 / 期待値生成・スコープ比較メソッド
-+    expect(mocks.redirect).not.toHaveBeenCalled(); // 遷移参照 / 期待値生成・未呼出し比較メソッド
-+  },
-+);
-+
-+it.each(["returned", "thrown"] as const)( // 終了障害の形式別試験メソッド / 読取専用リテラル型
-+  "権限拒否後の終了失敗（%s）を成功にしない",
-+  /**
-+   * SDKがエラーを返す場合と例外を投げる場合の両方を安全に処理する。
-+   */
-+  async (mode) => { // 終了障害の非同期コールバック
-+    mocks.admin.mockResolvedValue(null); // 権限拒否の設定メソッド
-+    if (mode === "returned") {
-+      mocks.signOut.mockResolvedValue({ error: { message: PRIVATE } }); // SDKエラー応答の設定メソッド
-+    } else {
-+      mocks.signOut.mockRejectedValue(new Error(PRIVATE)); // SDK例外の設定メソッド / Errorコンストラクター
-+    }
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.status).toBe("error"); // 期待値生成・エラー比較メソッド
-+    expect(mocks.redirect).not.toHaveBeenCalled(); // 遷移参照 / 期待値生成・未呼出し比較メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "logoutは権限確認せず自分のlocalセッションだけを終了する",
-+  /**
-+   * inactiveや一般会員も自身のlogoutが可能で、他端末のセッションに触れない。
-+   */
-+  async () => { // ログアウト成功の非同期コールバック
-+    mocks.admin.mockResolvedValue(null); // 権限なしの設定メソッド
-+    await expect(platformLogoutAction()).rejects.toThrow("NEXT_REDIRECT"); // logout関数 / 期待値生成・制御例外の比較メソッド
-+    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith({ scope: "local" }); // 終了参照 / 期待値生成・スコープ比較メソッド
-+    expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith("/platform-login"); // 遷移参照 / 期待値生成・固定先比較メソッド
-+    expect(mocks.admin).not.toHaveBeenCalled(); // 権限参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.limit).not.toHaveBeenCalled(); // 制限参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.save).not.toHaveBeenCalled(); // 記録参照 / 期待値生成・未呼出し比較メソッド
-+  },
-+);
-+
-+it.each(["client", "returned", "thrown"] as const)( // logout障害形式別の試験メソッド / 読取専用リテラル型
-+  "logoutの%s障害で固定例外を返し、完了先へ進まない",
-+  /**
-+   * セッション終了に失敗した場合は、原文やcauseを含まないDomainErrorを返す。
-+   */
-+  async (mode) => { // logout障害の非同期コールバック
-+    if (mode === "client") {
-+      mocks.client.mockRejectedValue(new Error(PRIVATE)); // 接続障害の設定メソッド / Errorコンストラクター
-+    } else if (mode === "returned") {
-+      mocks.signOut.mockResolvedValue({ error: { message: PRIVATE } }); // SDKエラー応答の設定メソッド
-+    } else {
-+      mocks.signOut.mockRejectedValue(new Error(PRIVATE)); // SDK例外の設定メソッド / Errorコンストラクター
-+    }
-+    const result = platformLogoutAction(); // logout関数
-+    await expect(result).rejects.toBeInstanceOf(DomainError); // 期待値生成・クラス比較メソッド / ドメインエラークラス参照
-+    await expect(result).rejects.toMatchObject({ // 期待値生成・固定結果の部分一致比較メソッド
-+      code: "EXTERNAL_SERVICE",
-+      publicMessage: "ログアウトできませんでした。もう一度お試しください。",
-+      cause: undefined,
++  async (operation) => { // 障害時Pageの非同期試験コールバック
++    mocks.getUser.mockResolvedValue({ // 有効セッションを設定するメソッド
++      data: { user: { id: USER_ID } },
++      error: null,
 +    });
++    mocks[operation].mockRejectedValue(new Error(PRIVATE)); // 障害応答設定メソッド / 試験用Errorコンストラクター
++    const output = await html(); // Pageの静的HTML生成関数
++    expect(output).toContain("ログイン状態を確認できませんでした。"); // 期待値生成・固定文面の包含比較メソッド
++    expect(output).not.toContain(PRIVATE); // 期待値生成・原文非表示の比較メソッド
 +    expect(mocks.redirect).not.toHaveBeenCalled(); // 遷移参照 / 期待値生成・未呼出し比較メソッド
++    expect(mocks.signOut).not.toHaveBeenCalled(); // セッション終了参照 / 期待値生成・未呼出し比較メソッド
 +  },
 +);
 +
-+it.each(["meta", "limit", "client", "signIn", "admin", "save", "signOut"] as const)( // 制御例外発生箇所別の試験メソッド / 読取専用リテラル型
-+  "%sのNext制御例外を固定エラーに変換しない",
++it.each(["client", "getUser", "admin"] as const)( // 制御例外発生箇所別の試験メソッド / 読取専用リテラル型
++  "%sのNext制御例外を一般障害へ変換しない",
 +  /**
-+   * Nextの公開redirect APIが生成した制御例外を同一の値で再送出する。
++   * Next公開APIの制御例外を同一の値で再送出することを確認する。
 +   */
-+  async (operation) => { // 制御例外の非同期コールバック
-+    const control = await nextControl(); // Next公開APIから実際の制御例外を取得する関数
-+    mocks[operation].mockRejectedValue(control); // 各境界から制御例外を返すモック設定メソッド
-+    if (operation === "signOut") {
-+      mocks.admin.mockResolvedValue(null); // 拒否後の終了処理へ進める設定メソッド
++  async (operation) => { // 制御例外の非同期試験コールバック
++    const navigation = await vi.importActual<typeof import("next/navigation")>( // 元モジュール読込メソッド / navigationモジュールの型
++      "next/navigation",
++    );
++    let control: unknown; // Next制御例外を保持する不明値型
++    try {
++      navigation.redirect("/platform/support"); // 実際のNext制御例外を生成する関数
++    } catch (error) {
++      control = error;
 +    }
-+    await expect(platformLoginAction(state(), form())).rejects.toBe(control); // Action・初期state・送信値の生成関数 / 期待値生成・例外同一性比較メソッド
-+  },
-+);
-+
-+it.each([ // 不完全な認証応答の試験メソッド
-+  { user: null },
-+  { user: { id: "" } },
-+  {
-+    user: { id: USER_ID },
-+    error: true,
-+  },
-+])(
-+  "不完全なAuth成功や矛盾した応答で権限を取得しない %#",
-+  /**
-+   * ユーザー欠落・空ID・エラー併存の応答では、作られた可能性のあるsessionを終了する。
-+   */
-+  async (response) => { // 不完全な認証応答の非同期コールバック
-+    mocks.signIn.mockResolvedValue({ // 不完全なAuth応答を設定するメソッド
-+      data: { user: response.user },
-+      error: "error" in response ? { message: PRIVATE } : null,
++    mocks.getUser.mockResolvedValue({ // 有効セッションを設定するメソッド
++      data: { user: { id: USER_ID } },
++      error: null,
 +    });
-+    const result = await platformLoginAction(state(), form()); // Action・初期state・送信値の生成関数
-+    expect(result.status).toBe("error"); // 期待値生成・拒否比較メソッド
-+    expect(mocks.admin).not.toHaveBeenCalled(); // 権限参照 / 期待値生成・未呼出し比較メソッド
-+    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith({ scope: "local" }); // 終了参照 / 期待値生成・スコープ比較メソッド
-+  },
-+);
-+
-+it.each(["client", "signOut"] as const)( // logout制御例外発生箇所別の試験メソッド / 読取専用リテラル型
-+  "logoutの%s制御例外を固定障害へ丸めない",
-+  /**
-+   * logout側のCookie取得・終了処理でもNext制御例外を維持する。
-+   */
-+  async (operation) => { // logout制御例外の非同期コールバック
-+    const control = await nextControl(); // Next公開APIから実際の制御例外を取得する関数
-+    mocks[operation].mockRejectedValue(control); // 制御例外を返すモック設定メソッド
-+    await expect(platformLogoutAction()).rejects.toBe(control); // logout関数 / 期待値生成・例外同一性比較メソッド
++    mocks[operation].mockRejectedValue(control); // 制御例外応答の設定メソッド
++    await expect(PlatformLoginPage()).rejects.toBe(control); // Page関数 / 期待値生成・例外同一性の比較メソッド
 +  },
 +);
