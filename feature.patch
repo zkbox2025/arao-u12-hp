@@ -1,188 +1,92 @@
-diff --git a/src/infrastructure/prisma/repositories/platform-support-report-repository.ts b/src/infrastructure/prisma/repositories/platform-support-report-repository.ts
+diff --git a/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository.ts b/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository.ts
 new file mode 100644
-index 0000000..13f17bd
+index 0000000..8cff3cc
 --- /dev/null
-+++ b/src/infrastructure/prisma/repositories/platform-support-report-repository.ts
-@@ -0,0 +1,243 @@
-+// src/infrastructure/prisma/repositories/platform-support-report-repository.ts
-+// 最新のPlatform権限を照合し、全クラブのサポート報告を読み取り専用で取得する。
++++ b/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository.ts
+@@ -0,0 +1,215 @@
++// src/infrastructure/prisma/repositories/platform-support-report-mutation-repository.ts
++// 最新のPlatform権限とversionを照合し、statusまたは内部メモの許可列だけを更新する。
 +
 +import "server-only";
 +
-+import type { Prisma } from "@prisma/client";
++import { Prisma } from "@prisma/client";
 +
 +import {
-+  parseSupportReportQuery, // 一覧queryを検証し、検索条件を整形する関数
-+  type PlatformSupportQuery, // 検証済みの一覧検索条件の型
-+} from "@/domain/platform/support/support-report-query";
++  validateSupportReportNoteInput, // サポート報告のメモを検証する関数
++  validateSupportReportStatusInput, // サポート報告のステータスを検証する関数
++  type SupportReportNoteInput, // 識別値と正規化メモを結合した入力型
++  type SupportReportStatusInput, // 識別値と更新先ステータスを結合した入力型
++} from "@/domain/platform/support/support-report-management-form";
++import {
++  buildSupportReportNoteUpdate, // メモ更新に必要な限定列を作成する関数
++  buildSupportReportStatusUpdate, // status変更の要否を判断し、変更する限定列を作成する関数
++  type SupportReportNoteUpdate, // メモと担当者だけの更新列型
++  type SupportReportStatusUpdate, // status実変更時だけ書き込む列の型
++} from "@/domain/platform/support/support-report-management-policy";
 +import type {
-+  PlatformSupportClub, // 一覧と絞り込み候補に使うクラブ情報の型
-+  PlatformSupportListResult, // 一覧取得の成功値と固定失敗分類の型
-+  PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
++  PlatformSupportUpdateResult, // status・内部メモ更新の成功値と固定失敗分類の型
 +} from "@/domain/platform/support/support-report-management-types";
 +import {
 +  prisma, // 共有のPrismaClientインスタンス
 +} from "@/src/infrastructure/prisma/client";
 +
 +/**
-+ * Authで検証した本人ID、認可時の管理者ID、検証済み検索条件を渡す入力型。
-+ * roleやisActiveは受け取らず、読取のたびにDBで再確認する。
++ * Authで確認した本人IDと、認可contextのPlatformAdmin IDを渡す権限照合用の型。
 + */
-+export type FindSupportReportsForPlatformInput = { // Platform一覧取得の入力型
-+  userId: string; // Authで検証した本人IDの文字列型
-+  platformAdminId: string; // 認可時に本人と照合した管理者IDの文字列型
-+  query: PlatformSupportQuery; // 検証済み一覧条件の型
++type PlatformSupportMutationScope = { // Platform管理操作の本人照合用の型
++  userId: string; // Authで確認した本人IDの文字列型
++  platformAdminId: string; // 認可contextから渡す管理者IDの文字列型
 +};
 +
-+const clubSelect = {
-+  id: true,
-+  name: true,
-+  slug: true,
-+} satisfies Prisma.ClubSelect; // クラブの取得列を制限するPrisma型
-+
-+const reportSelect = {
-+  id: true,
-+  createdAt: true,
-+  updatedAt: true,
-+  club: {
-+    select: clubSelect,
-+  },
-+  category: true,
-+  status: true,
-+  message: true,
-+  pageUrl: true,
-+  userAgent: true,
-+  reporterName: true,
-+  reporterEmail: true,
-+  reporterRole: true,
-+  handledByPlatformAdmin: {
-+    select: {
-+      id: true,
-+      name: true,
-+    },
-+  },
-+  statusChangedAt: true,
-+  resolvedAt: true,
-+  internalNote: true,
-+  notifiedAt: true,
-+  notifyError: true,
-+} satisfies Prisma.SupportReportSelect; // 報告と関係先の取得列を制限するPrisma型
++/**
++ * 本人照合用の情報と、status変更の識別値・更新先をまとめた入力型。
++ */
++export type UpdateSupportReportStatusForPlatformInput = // status更新Repositoryの入力型
++  PlatformSupportMutationScope & SupportReportStatusInput; // 本人照合型 / 検証済みstatus入力型
 +
 +/**
-+ * 限定selectで取得する報告行と、その関係先のDB型。
++ * 本人照合用の情報と、メモ保存の識別値・正規化メモをまとめた入力型。
 + */
-+type ReportRow = Prisma.SupportReportGetPayload<{ // selectから取得行の型を導出するPrisma型
-+  select: typeof reportSelect; // 取得列定義の型
-+}>;
++export type UpdateSupportReportNoteForPlatformInput = // メモ更新Repositoryの入力型
++  PlatformSupportMutationScope & SupportReportNoteInput; // 本人照合型 / 検証済みメモ入力型
 +
 +/**
-+ * 型付き呼出しでも検索条件を再検証し、ページサイズ・offsetの偽装を拒否する。
++ * 受け取った本人情報と操作値を再検証し、同一transactionで認可・競合確認・更新を行う。
++ * DB競合は上書き再試行せずCONFLICT、その他の例外は原文を含まない固定分類で返す。
 + */
-+function validateQuery(query: PlatformSupportQuery): PlatformSupportQuery | null { // 検索条件の再検証関数 / 一覧条件型
-+  if (
-+    typeof query !== "object" ||
-+    query === null ||
-+    Array.isArray(query) || // 配列を判定するメソッド
-+    typeof query.page !== "number"
-+  ) {
-+    return null;
-+  }
-+  const validation = parseSupportReportQuery({ // 生queryの契約へ戻して共通検証する関数
-+    clubId: query.clubId === null ? undefined : query.clubId,
-+    status: query.status === null ? undefined : query.status,
-+    category: query.category === null ? undefined : query.category,
-+    page: String(query.page), // 数値ページを文字列に変換する関数
-+  });
-+  if (
-+    !validation.success ||
-+    query.pageSize !== validation.data.pageSize ||
-+    query.skip !== validation.data.skip
-+  ) {
-+    return null;
-+  }
-+  return validation.data;
-+}
-+
-+/**
-+ * クラブ行をid・name・slugだけの公開DTOへ写し、余分な列を渡さない。
-+ */
-+function clubView(club: PlatformSupportClub): PlatformSupportClub { // クラブDTOの変換関数 / クラブ情報型
-+  return {
-+    id: club.id,
-+    name: club.name,
-+    slug: club.slug,
-+  };
-+}
-+
-+/**
-+ * DB行を明示的な限定DTOへ変換し、日時はUTC ISO、通知エラーは有無だけを返す。
-+ */
-+function reportView(row: ReportRow): PlatformSupportReport { // 報告DTOの変換関数 / DB行型 / 報告表示型
-+  return {
-+    id: row.id,
-+    createdAt: row.createdAt.toISOString(), // 作成日時をUTC ISO文字列に変換するメソッド
-+    updatedAt: row.updatedAt.toISOString(), // 更新日時をUTC ISO文字列に変換するメソッド
-+    club: clubView(row.club), // クラブの限定DTOを作る関数
-+    category: row.category,
-+    status: row.status,
-+    message: row.message,
-+    pageUrl: row.pageUrl,
-+    userAgent: row.userAgent,
-+    reporterName: row.reporterName,
-+    reporterEmail: row.reporterEmail,
-+    reporterRole: row.reporterRole,
-+    handler: row.handledByPlatformAdmin === null ? null : {
-+      id: row.handledByPlatformAdmin.id,
-+      name: row.handledByPlatformAdmin.name,
-+    },
-+    statusChangedAt: row.statusChangedAt?.toISOString() ?? null, // 状態変更日時のUTC ISO変換メソッド
-+    resolvedAt: row.resolvedAt?.toISOString() ?? null, // 解決日時のUTC ISO変換メソッド
-+    internalNote: row.internalNote,
-+    notifiedAt: row.notifiedAt?.toISOString() ?? null, // 通知受付日時のUTC ISO変換メソッド
-+    notificationFailed: row.notifyError !== null,
-+  };
-+}
-+
-+/**
-+ * 本人・管理者IDと最新の有効ロールを同一transaction内で照合し、一覧・件数・候補を返す。
-+ * 読取のスナップショットを揃え、所属・プランで絞らず、DB例外の原文を返さない。
-+ */
-+export async function findSupportReportsForPlatform( // Platform向け一覧取得関数
-+  input: FindSupportReportsForPlatformInput, // 本人と管理者ID・検証済み検索条件の入力型
-+): Promise<PlatformSupportListResult> { // 固定分類の一覧結果を返す非同期型
++async function mutateSupportReport( // status・メモ更新の共通実行関数
++  input: PlatformSupportMutationScope, // 本人・管理者IDを持つ入力型
++  kind: "STATUS" | "NOTE", // 再検証する操作を指定するリテラル型
++): Promise<PlatformSupportUpdateResult> { // 固定分類の更新結果を返す非同期型
 +  try {
 +    if (
 +      typeof input !== "object" ||
 +      input === null ||
 +      typeof input.userId !== "string" ||
-+      input.userId.trim().length === 0 || // 空白を除いた本人IDを調べるメソッド
++      input.userId.trim().length === 0 || // 本人IDの前後の空白を除くメソッド
 +      input.platformAdminId !== input.userId
 +    ) {
 +      return { outcome: "FORBIDDEN" };
 +    }
-+    const query = validateQuery(input.query); // 型付き検索条件を再検証する関数
-+    if (!query) {
-+      return { outcome: "INVALID_QUERY" };
++    const userId = input.userId;
++    const platformAdminId = input.platformAdminId;
++    const validation = kind === "STATUS"
++      ? validateSupportReportStatusInput(input) // 識別値とstatusの検証関数
++      : validateSupportReportNoteInput(input); // 識別値とメモの検証・正規化関数
++    if (!validation.success) {
++      return { outcome: "INVALID_INPUT" };
 +    }
-+    const where: Prisma.SupportReportWhereInput = {}; // 報告のAND検索条件を表すPrisma型
-+    if (query.clubId !== null) {
-+      where.clubId = query.clubId;
-+    }
-+    if (query.status !== null) {
-+      where.status = query.status;
-+    }
-+    if (query.category !== null) {
-+      where.category = query.category;
-+    }
++    const value = validation.data;
++    const expectedUpdatedAt = new Date(value.expectedUpdatedAt); // 検証済みversionをDateへ変換するコンストラクター
 +
-+    return await prisma.$transaction( // 同一スナップショットで読取を行うメソッド
++    return await prisma.$transaction( // 認可から条件付き更新までを原子的に行うメソッド
 +      /**
-+       * 最新権限が有効な本人だけに、限定列の一覧・件数・全候補を返す。
++       * 最新の本人権限を確認し、対象versionが一致する場合だけ許可列を更新する。
 +       */
-+      async (transaction): Promise<PlatformSupportListResult> => { // transaction用コールバック / 一覧結果の非同期型
-+        const actor = await transaction.platformAdmin.findFirst({ // 本人の現在の管理者情報を取得するメソッド
++      async (transaction): Promise<PlatformSupportUpdateResult> => { // transactionコールバック / 更新結果の非同期型
++        const actor = await transaction.platformAdmin.findFirst({ // 最新のPlatform管理者を取得するメソッド
 +          where: {
-+            id: input.userId,
++            id: userId,
 +            isActive: true,
 +            role: {
 +              in: ["DEVELOPER", "SUPPORT"],
@@ -196,8 +100,8 @@ index 0000000..13f17bd
 +        });
 +        if (
 +          !actor ||
-+          actor.id !== input.userId ||
-+          actor.id !== input.platformAdminId ||
++          actor.id !== userId ||
++          actor.id !== platformAdminId ||
 +          actor.isActive !== true ||
 +          (
 +            actor.role !== "DEVELOPER" &&
@@ -206,230 +110,449 @@ index 0000000..13f17bd
 +        ) {
 +          return { outcome: "FORBIDDEN" };
 +        }
-+        const rows = await transaction.supportReport.findMany({ // 条件に一致する報告を50件まで取得するメソッド
-+          where,
-+          select: reportSelect,
-+          orderBy: [
-+            { createdAt: "desc" },
-+            { id: "desc" },
-+          ],
-+          take: query.pageSize,
-+          skip: query.skip,
-+        });
-+        const totalCount = await transaction.supportReport.count({ where }); // 同じ条件の総件数を取得するメソッド
-+        const clubs = await transaction.club.findMany({ // 報告を持つ全クラブの候補を取得するメソッド
++        const report = await transaction.supportReport.findFirst({ // 更新判断に必要な対象列だけを取得するメソッド
 +          where: {
-+            supportReports: {
-+              some: {},
-+            },
++            id: value.reportId,
 +          },
-+          select: clubSelect,
-+          orderBy: [
-+            { name: "asc" },
-+            { id: "asc" },
-+          ],
++          select: {
++            id: true,
++            status: true,
++            updatedAt: true,
++          },
 +        });
++        if (
++          !report ||
++          report.id !== value.reportId
++        ) {
++          return { outcome: "NOT_FOUND" };
++        }
++        if (report.updatedAt.getTime() !== expectedUpdatedAt.getTime()) { // 現在と送信versionのミリ秒を比較するメソッド
++          return { outcome: "CONFLICT" };
++        }
++        const now = new Date(); // 状態日時に使うサーバー現在時刻のDateコンストラクター
++        let data: SupportReportStatusUpdate | SupportReportNoteUpdate; // 操作ごとの限定更新列型
++        if ("status" in value) {
++          const decision = buildSupportReportStatusUpdate( // 同statusの非更新または限定更新列を作る関数
++            report.status,
++            value.status,
++            actor.id,
++            now,
++          );
++          if (decision.outcome === "UNCHANGED") {
++            return {
++              outcome: "UNCHANGED",
++              reportId: report.id,
++              updatedAt: report.updatedAt.toISOString(), // 変更していないversionをUTC ISO化するメソッド
++            };
++          }
++          data = decision.data;
++        } else {
++          data = buildSupportReportNoteUpdate(value.internalNote, actor.id); // メモと担当者だけの更新列を作る関数
++        }
++        // 同じミリ秒内の更新や時計の後退でも、古いversionを再利用できないよう進める。
++        const updatedAt = new Date(Math.max( // version用Dateコンストラクター / 大きい値を選ぶメソッド
++          now.getTime(), // 現在時刻をミリ秒で取得するメソッド
++          report.updatedAt.getTime() + 1, // 保存済みversionより1ミリ秒後を求めるメソッド
++        ));
++        const updated = await transaction.supportReport.updateMany({ // ID・version一致時だけ書き込むメソッド
++          where: {
++            id: value.reportId,
++            updatedAt: expectedUpdatedAt,
++          },
++          data: {
++            ...data,
++            updatedAt,
++          },
++        });
++        if (updated.count === 0) {
++          const existing = await transaction.supportReport.findFirst({ // 更新0件の場合に対象の存在だけを再確認するメソッド
++            where: {
++              id: value.reportId,
++            },
++            select: {
++              id: true,
++            },
++          });
++          return {
++            outcome: existing?.id === value.reportId ? "CONFLICT" : "NOT_FOUND",
++          };
++        }
++        if (updated.count !== 1) {
++          throw new Error("管理更新の件数が不正です。"); // transactionをrollbackさせる固定Errorコンストラクター
++        }
 +        return {
-+          outcome: "FOUND",
-+          reports: rows.map(reportView), // 報告DTO変換関数を各行へ適用するメソッド
-+          clubs: clubs.map(clubView), // クラブDTO変換関数を各候補へ適用するメソッド
-+          totalCount,
-+          page: query.page,
-+          pageSize: query.pageSize,
++          outcome: "UPDATED",
++          reportId: value.reportId,
++          updatedAt: updatedAt.toISOString(), // 保存したversionをUTC ISO文字列へ変換するメソッド
 +        };
 +      },
 +      {
-+        isolationLevel: "RepeatableRead",
++        isolationLevel: Prisma.TransactionIsolationLevel.Serializable, // Prismaの直列化可能な分離レベル値
 +      },
 +    );
-+  } catch {
-+    // DB接続情報・本文・snapshot・内部メモ・例外原文を結果やログへ出さない。
-+    return { outcome: "READ_FAILED" };
++  } catch (error) {
++    if (
++      error instanceof Prisma.PrismaClientKnownRequestError && // Prismaの既知DBエラークラスを判定する
++      error.code === "P2034"
++    ) {
++      return { outcome: "CONFLICT" };
++    }
++    // 本文・内部メモ・snapshot・接続情報・例外原文を結果やログへ渡さない。
++    return { outcome: "UPDATE_FAILED" };
 +  }
 +}
-diff --git a/tests/platform-support-report-repository.test.ts b/tests/platform-support-report-repository.test.ts
++
++/**
++ * 本人contextとstatus入力を受け取り、実変更時だけstatus・担当者・状態日時を更新する。
++ */
++export async function updateSupportReportStatusForPlatform( // Platform向けstatus更新関数
++  input: UpdateSupportReportStatusForPlatformInput, // 本人contextとstatus入力の型
++): Promise<PlatformSupportUpdateResult> { // 固定分類の更新結果を返す非同期型
++  return mutateSupportReport(input, "STATUS"); // 認可・競合確認を含む共通更新関数
++}
++
++/**
++ * 本人contextとメモ入力を受け取り、状態日時を維持したままメモと担当者を更新する。
++ */
++export async function updateSupportReportNoteForPlatform( // Platform向けメモ保存関数
++  input: UpdateSupportReportNoteForPlatformInput, // 本人contextとメモ入力の型
++): Promise<PlatformSupportUpdateResult> { // 固定分類の更新結果を返す非同期型
++  return mutateSupportReport(input, "NOTE"); // 認可・競合確認を含む共通更新関数
++}
+diff --git a/tests/platform-support-report-mutation-repository.test.ts b/tests/platform-support-report-mutation-repository.test.ts
 new file mode 100644
-index 0000000..0a0c727
+index 0000000..3ed8282
 --- /dev/null
-+++ b/tests/platform-support-report-repository.test.ts
-@@ -0,0 +1,631 @@
-+// tests/platform-support-report-repository.test.ts
-+// 実DB・dotenv・Authを起動せず、Platform一覧の権限境界・取得条件・限定DTOを検証する。
++++ b/tests/platform-support-report-mutation-repository.test.ts
+@@ -0,0 +1,729 @@
++// tests/platform-support-report-mutation-repository.test.ts
++// 実DB・dotenv・Authを使わず、管理更新の認可・条件付き書込・限定列・rollbackを確認する。
 +
-+import type { Prisma } from "@prisma/client";
-+import { afterEach, beforeEach, expect, it, vi } from "vitest";
++import { Prisma } from "@prisma/client";
++import {
++  afterEach,
++  beforeEach,
++  expect,
++  it,
++  vi,
++} from "vitest";
 +
 +import {
-+  parseSupportReportQuery, // 一覧queryを検証し、検索条件を整形する関数
-+} from "@/domain/platform/support/support-report-query";
-+import {
-+  findSupportReportsForPlatform, // 最新権限を照合してPlatform一覧を取得する関数
-+  type FindSupportReportsForPlatformInput, // 本人・管理者IDと検索条件の入力型
-+} from "@/src/infrastructure/prisma/repositories/platform-support-report-repository";
++  updateSupportReportNoteForPlatform, // 本人contextとメモ入力から限定列を保存する関数
++  updateSupportReportStatusForPlatform, // 本人contextとstatus入力から実変更時だけ管理列を更新する関数
++  type UpdateSupportReportNoteForPlatformInput, // 本人照合情報とメモ保存入力をまとめた型
++  type UpdateSupportReportStatusForPlatformInput, // 本人照合情報とstatus変更入力をまとめた型
++} from "@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository";
++import type {
++  SupportReportStatus, // サポート報告ステータスの型
++} from "@/types/prisma";
 +
-+const mocks = vi.hoisted( // モジュール評価前にモックを準備するメソッド
++const mocks = vi.hoisted( // import評価前にモックを準備するメソッド
 +  /**
-+   * 読取transactionと必要なdelegateだけを用意し、実接続を防ぐ。
++   * 実接続を防ぐtransactionと、必要なモデル操作だけを置換するモックを用意する。
 +   */
 +  () => ({ // モック生成コールバック
 +    transaction: vi.fn(), // transaction用モック関数の生成メソッド
-+    actor: vi.fn(), // 本人管理者読取モックの生成メソッド
-+    reports: vi.fn(), // 一覧読取モックの生成メソッド
-+    count: vi.fn(), // 件数読取モックの生成メソッド
-+    clubs: vi.fn(), // 候補読取モックの生成メソッド
++    actor: vi.fn(), // 管理者読取モック関数の生成メソッド
++    report: vi.fn(), // 報告読取モック関数の生成メソッド
++    update: vi.fn(), // 条件付き更新モック関数の生成メソッド
 +  }),
 +);
 +
-+vi.mock( // dotenv読込を含む共有clientを置換するメソッド
++vi.mock( // dotenv読込と実DB接続を防ぐモジュール置換メソッド
 +  "@/src/infrastructure/prisma/client",
 +  /**
-+   * 共有clientから直接モデルを読めないよう、transactionだけを公開する。
++   * モデルの直接操作を公開せず、transaction内だけで更新を実行できるようにする。
 +   */
 +  () => ({ // モジュール置換コールバック
 +    prisma: {
-+      $transaction: mocks.transaction, // transaction用のモック関数参照
++      $transaction: mocks.transaction, // transaction用モック関数参照
 +    },
 +  }),
 +);
 +
 +const USER_ID = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
-+const CLUB_ID = "11111111-1111-4111-8111-111111111111";
-+const PRIVATE_ERROR = "test-only-private-db-detail";
-+const club = {
-+  id: CLUB_ID,
-+  name: "所属不要のクラブ",
-+  slug: "club-a",
-+};
-+const clubSelection = {
-+  id: true,
-+  name: true,
-+  slug: true,
-+};
++const REPORT_ID = "11111111-1111-4111-8111-111111111111";
++const REQUEST_ID = "22222222-2222-4222-8222-222222222222";
++const NOW = new Date("2026-10-25T11:00:00.000Z"); // サーバー現在時刻を固定するDateコンストラクター
++const INITIAL_VERSION = "2026-10-25T10:00:00.000Z";
++const PRIVATE_DETAIL = "test-only-private-db-error";
++const statuses = ["OPEN", "IN_PROGRESS", "ON_HOLD", "RESOLVED"] as const; // 全statusの読取専用リテラル型
 +
 +/**
-+ * 生queryを既存の契約で検証し、認可済み呼出しを想定した入力を作る。
++ * 許可列以外の不変も確認するため、報告行の保存状態を模した型。
 + */
-+function input(raw: unknown = {}): FindSupportReportsForPlatformInput { // 入力生成関数 / 不明値型 / Repository入力型
-+  const result = parseSupportReportQuery(raw); // 共通query検証関数
-+  if (!result.success) {
-+    throw new Error("試験用queryが不正です。"); // 試験準備の失敗を表すErrorコンストラクター
-+  }
++type StoredReport = { // テスト内の保存行の型
++  id: string; // 報告IDの文字列型
++  updatedAt: Date; // versionを保持するDate型
++  status: SupportReportStatus; // 報告ステータスの型
++  handledByPlatformAdminId: string | null; // 対応者IDまたは未設定の型
++  statusChangedAt: Date | null; // 状態変更日時または未設定の型
++  resolvedAt: Date | null; // 解決日時または未設定の型
++  internalNote: string | null; // 保存済みメモまたは未設定の型
++  message: string; // 本文の文字列型
++  clubId: string; // 所属クラブIDの文字列型
++  membershipId: string | null; // 報告時所属IDまたは削除済みの型
++  reporterName: string | null; // 報告時氏名または未設定の型
++  reporterEmail: string | null; // 報告時メールまたは未設定の型
++  notifiedAt: Date | null; // 通知受付日時または未受付の型
++  notifyError: string | null; // 通知エラーまたは未設定の型
++};
++
++let stored: StoredReport | null; // 現在の保存行または削除済みの型
++let actor: unknown; // 型を偽装した不正応答も渡せる管理者応答の型
++let tail: Promise<unknown>; // モックtransactionを直列化する非同期型
++
++/**
++ * DBの報告状態を用意し、更新対象外の本文・snapshot・通知列も保持する。
++ */
++function report(): StoredReport { // 初期DB行の生成関数 / 保存行の型
++  return {
++    id: REPORT_ID,
++    updatedAt: new Date(INITIAL_VERSION), // 初期versionのDateコンストラクター
++    status: "OPEN",
++    handledByPlatformAdminId: "previous-handler",
++    statusChangedAt: new Date("2026-10-24T09:00:00.000Z"), // 変更前の状態日時のDateコンストラクター
++    resolvedAt: null,
++    internalNote: "以前の内部メモ",
++    message: "本文を変更しない",
++    clubId: "club-without-membership",
++    membershipId: null,
++    reporterName: "保存時氏名",
++    reporterEmail: "snapshot@example.test",
++    notifiedAt: new Date("2026-10-25T10:30:00.000Z"), // 通知受付日時のDateコンストラクター
++    notifyError: null,
++  };
++}
++
++/**
++ * statusと識別値に、サーバー由来の本人情報を加えた入力を作る。
++ */
++function statusInput( // status試験入力の生成関数
++  status: SupportReportStatus = "RESOLVED", // 更新先ステータスの型
++): UpdateSupportReportStatusForPlatformInput { // status更新Repositoryの入力型
 +  return {
 +    userId: USER_ID,
 +    platformAdminId: USER_ID,
-+    query: result.data,
++    reportId: REPORT_ID,
++    expectedUpdatedAt: INITIAL_VERSION,
++    requestId: REQUEST_ID,
++    status,
 +  };
 +}
 +
 +/**
-+ * 型付きのDB行を用意し、本文とsnapshotを現在の所属情報から独立させる。
++ * 識別値と本人情報を保ち、内部メモの保存入力を作る。
 + */
-+function row() { // 一覧のDB行を作る試験用関数
++function noteInput( // メモ試験入力の生成関数
++  internalNote: string | null = " 新しい内部メモ ", // 保存する文字列またはnull型
++): UpdateSupportReportNoteForPlatformInput { // メモ更新Repositoryの入力型
 +  return {
-+    id: "22222222-2222-4222-8222-222222222222",
-+    createdAt: new Date("2026-10-25T00:00:00.000Z"), // 作成日時のDateコンストラクター
-+    updatedAt: new Date("2026-10-25T01:00:00.000Z"), // 更新日時のDateコンストラクター
-+    club,
-+    category: "BUG",
-+    status: "OPEN",
-+    message: "<script>保存済み本文</script>\n改行も保持",
-+    pageUrl: "/club/club-a/account",
-+    userAgent: "保存済みブラウザー情報",
-+    reporterName: "報告時の氏名",
-+    reporterEmail: "snapshot@example.test",
-+    reporterRole: "MEMBER",
-+    handledByPlatformAdmin: {
-+      id: "handler-id",
-+      name: "担当者表示名",
-+      email: "must-not-return@example.test",
-+    },
-+    statusChangedAt: new Date("2026-10-25T00:30:00.000Z"), // 状態変更日時のDateコンストラクター
-+    resolvedAt: null,
-+    internalNote: "内部メモ\n全文を保持",
-+    notifiedAt: null,
-+    notifyError: PRIVATE_ERROR,
-+    membershipId: "must-not-return",
++    userId: USER_ID,
++    platformAdminId: USER_ID,
++    reportId: REPORT_ID,
++    expectedUpdatedAt: INITIAL_VERSION,
++    requestId: REQUEST_ID,
++    internalNote,
 +  };
 +}
 +
-+beforeEach( // 各試験の前処理を登録する関数
++/**
++ * 本物のPrisma既知エラーを作り、codeだけを持つ任意の例外と区別する。
++ */
++function prismaError(code: string) { // 既知エラーの生成関数 / コードの文字列型
++  return new Prisma.PrismaClientKnownRequestError(PRIVATE_DETAIL, { // Prisma既知エラーのコンストラクター
++    code,
++    clientVersion: "test",
++  });
++}
++
++beforeEach( // 試験ごとの準備を登録する関数
 +  /**
-+   * DB応答と履歴を初期化し、transaction内だけに読取delegateを渡す。
++   * DBなしの保存状態を初期化し、SQLの代替ではなくCAS条件とrollback境界だけを模す。
 +   */
 +  () => { // 前処理コールバック
 +    vi.resetAllMocks(); // モック実装と履歴を初期化するメソッド
-+    mocks.actor.mockResolvedValue({ // 最新管理者の応答を設定するメソッド
++    vi.useFakeTimers(); // 時刻を固定できるタイマーへ切り替えるメソッド
++    vi.setSystemTime(NOW); // サーバー時刻を設定するメソッド
++    stored = report(); // 初期DB行の生成関数
++    actor = {
 +      id: USER_ID,
 +      role: "DEVELOPER",
 +      isActive: true,
-+    });
-+    mocks.reports.mockResolvedValue([row()]); // 一覧応答の設定メソッド / DB行生成関数
-+    mocks.count.mockResolvedValue(1); // 件数応答を設定するメソッド
-+    mocks.clubs.mockResolvedValue([club]); // クラブ候補の応答を設定するメソッド
-+    mocks.transaction.mockImplementation( // transactionの実装を設定するメソッド
++    };
++    tail = Promise.resolve(); // transaction直列化の初期Promiseを作るメソッド
++    mocks.actor.mockImplementation( // 管理者読取のモック実装を設定するメソッド
 +      /**
-+       * 渡されたtransactionコールバックを、読取専用の代替clientで実行する。
++       * 呼出し時点の最新管理者応答を参照共有せず返す。
 +       */
-+      async (callback: (transaction: unknown) => Promise<unknown>) => callback({ // transactionコールバック型 / 非同期型 / 関数呼出し
-+        platformAdmin: {
-+          findFirst: mocks.actor, // 管理者読取モックの関数参照
-+        },
-+        supportReport: {
-+          findMany: mocks.reports, // 一覧読取モックの関数参照
-+          count: mocks.count, // 件数読取モックの関数参照
-+        },
-+        club: {
-+          findMany: mocks.clubs, // クラブ候補読取モックの関数参照
-+        },
-+      }),
++      async () => structuredClone(actor), // 非同期コールバック / 応答を複製する関数
 +    );
-+    vi.spyOn(console, "error").mockImplementation( // ログ監視と代替実装設定メソッド
++    mocks.report.mockImplementation( // 報告読取のモック実装を設定するメソッド
 +      /**
-+       * 試験中のログを抑制し、後処理で未出力を検証する。
++       * 指定されたIDの保存行だけを返し、存在しない場合はnullにする。
 +       */
-+      () => undefined, // ログ抑制用コールバック
++      async ({ where }: { // 報告読取コールバック / 条件オブジェクトの型
++        where: { id: string }; // 報告IDを持つ条件型
++      }) => stored?.id === where.id ? structuredClone(stored) : null, // 保存行を複製する関数
 +    );
-+    vi.spyOn(console, "warn").mockImplementation( // ログ監視と代替実装設定メソッド
++    mocks.update.mockImplementation( // 条件付き更新のモック実装を設定するメソッド
 +      /**
-+       * 警告ログの代替実装として出力を抑制する。
++       * IDとversionが一致する場合だけ渡された列を変更し、更新件数を返す。
 +       */
-+      () => undefined, // 警告抑制用コールバック
++      async ({ where, data }: { // 更新コールバック / 更新条件と値の型
++        where: { // 条件付き更新の検索型
++          id: string; // 対象IDの文字列型
++          updatedAt: Date; // 期待versionのDate型
++        };
++        data: Partial<StoredReport>; // 保存行の一部だけを変更する型
++      }) => {
++        if (
++          !stored ||
++          stored.id !== where.id ||
++          stored.updatedAt.getTime() !== where.updatedAt.getTime() // versionをミリ秒で比較するメソッド
++        ) {
++          return { count: 0 };
++        }
++        Object.assign(stored, structuredClone(data)); // 限定更新列を保存行へ反映するメソッド / 複製関数
++        return { count: 1 };
++      },
 +    );
-+    vi.spyOn(console, "log").mockImplementation( // ログ監視と代替実装設定メソッド
++    mocks.transaction.mockImplementation( // transaction実行のモックを設定するメソッド
 +      /**
-+       * 通常ログの代替実装として出力を抑制する。
++       * コールバックを直列化し、例外時だけ保存状態を戻して原子性の境界を検証する。
 +       */
-+      () => undefined, // 通常ログ抑制用コールバック
++      ( // transaction実行のコールバック
++        operation: (transaction: unknown) => Promise<unknown>, // transaction実行関数型 / 非同期型
++        options: unknown, // transaction設定の不明値型
++      ) => {
++        expect(options).toEqual({ // 期待値生成・分離レベルの比較メソッド
++          isolationLevel: "Serializable",
++        });
++        /**
++         * transaction前の状態を保存し、モデル操作の例外時に復元する。
++         */
++        async function execute() { // transaction本体を実行する関数
++          const before = structuredClone(stored); // 保存状態を複製する関数
++          try {
++            return await operation({ // Repositoryのtransactionコールバックを呼ぶ関数
++              platformAdmin: {
++                findFirst: mocks.actor, // 管理者読取のモック関数参照
++              },
++              supportReport: {
++                findFirst: mocks.report, // 報告読取のモック関数参照
++                updateMany: mocks.update, // 条件付き更新のモック関数参照
++              },
++            });
++          } catch (error) {
++            stored = before;
++            throw error;
++          }
++        }
++        const result = tail.then(execute); // transactionを直列実行するメソッド / 実行関数参照
++        tail = result.catch( // 次のtransactionを実行できるよう拒否を消費するメソッド
++          /**
++           * 前transactionの失敗を直列化用の待機列へ残さない。
++           */
++          () => undefined, // 失敗を消費するコールバック
++        );
++        return result;
++      },
 +    );
++    for (const method of ["error", "warn", "log"] as const) { // consoleメソッド名の読取専用リテラル型
++      vi.spyOn(console, method).mockImplementation( // ログ出力の監視・代替実装設定メソッド
++        /**
++         * 非出力を後で検証するためにconsoleの実出力を抑制する。
++         */
++        () => undefined, // ログを抑制するコールバック
++      );
++    }
 +  },
 +);
 +
-+afterEach( // 各試験の後処理を登録する関数
++afterEach( // 試験の後処理を登録する関数
 +  /**
-+   * 成功・失敗にかかわらずログ非出力を確認し、consoleを復元する。
++   * 全経路で機密ログの非出力を確認し、タイマーとconsoleを復元する。
 +   */
 +  () => { // 後処理コールバック
 +    expect(console.error).not.toHaveBeenCalled(); // ログ関数参照 / 期待値生成・未呼出し検証メソッド
 +    expect(console.warn).not.toHaveBeenCalled(); // 警告関数参照 / 期待値生成・未呼出し検証メソッド
 +    expect(console.log).not.toHaveBeenCalled(); // 通常ログ関数参照 / 期待値生成・未呼出し検証メソッド
-+    vi.restoreAllMocks(); // 監視対象の実装を復元するメソッド
++    vi.useRealTimers(); // 実タイマーへ戻すメソッド
++    vi.restoreAllMocks(); // consoleの実装を復元するメソッド
 +  },
 +);
 +
-+it.each(["DEVELOPER", "SUPPORT"])( // 許可ロール別の試験定義メソッド
-+  "%sはMembership・AppUser・プランなしで横断読取できる",
++for (const current of statuses) {
++  it.each(statuses)( // 遷移先ごとの試験定義メソッド
++    `${current}から%sへの遷移で許可された列だけを更新する`,
++    /**
++     * 全16通りの遷移について、非更新・担当者・状態日時・解決日時を検証する。
++     */
++    async (next) => { // status遷移の試験コールバック
++      stored!.status = current;
++      stored!.resolvedAt = current === "RESOLVED"
++        ? new Date("2026-10-24T09:00:00.000Z") // 既存解決日時のDateコンストラクター
++        : null;
++      const before = structuredClone(stored!); // 更新前の保存行を複製する関数
++      const result = await updateSupportReportStatusForPlatform(statusInput(next)); // status更新関数 / 入力生成関数
++      if (current === next) {
++        expect(result).toEqual({ // 期待値生成・非更新結果の比較メソッド
++          outcome: "UNCHANGED",
++          reportId: REPORT_ID,
++          updatedAt: INITIAL_VERSION,
++        });
++        expect(stored).toEqual(before); // 期待値生成・全列不変の比較メソッド
++        expect(mocks.update).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++        return;
++      }
++      expect(result).toEqual({ // 期待値生成・成功結果の比較メソッド
++        outcome: "UPDATED",
++        reportId: REPORT_ID,
++        updatedAt: NOW.toISOString(), // サーバー日時をUTC ISO化するメソッド
++      });
++      expect(mocks.update).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 更新条件・列の検証メソッド
++        where: {
++          id: REPORT_ID,
++          updatedAt: new Date(INITIAL_VERSION), // 期待versionのDateコンストラクター
++        },
++        data: {
++          status: next,
++          handledByPlatformAdminId: USER_ID,
++          statusChangedAt: NOW,
++          resolvedAt: next === "RESOLVED" ? NOW : null,
++          updatedAt: NOW,
++        },
++      });
++      expect(stored).toEqual({ // 期待値生成・対象外の列も含む保存状態の比較メソッド
++        ...before,
++        status: next,
++        handledByPlatformAdminId: USER_ID,
++        statusChangedAt: NOW,
++        resolvedAt: next === "RESOLVED" ? NOW : null,
++        updatedAt: NOW,
++      });
++    },
++  );
++}
++
++it.each(["DEVELOPER", "SUPPORT"])( // 両許可ロールの試験定義メソッド
++  "%s本人だけを照合し、所属なしでメモ更新できる",
 +  /**
-+   * 認可を最初に行い、同一transactionの一覧・件数・候補だけを使うことを確認する。
++   * 認可条件・限定select・処理順を確認し、MembershipやAppUserを利用しない。
 +   */
-+  async (role) => { // 許可ロールの試験コールバック
-+    mocks.actor.mockResolvedValue({ // 最新管理者の応答を設定するメソッド
++  async (role) => { // 管理者本人の試験コールバック
++    actor = {
 +      id: USER_ID,
 +      role,
 +      isActive: true,
++    };
++    await expect(updateSupportReportNoteForPlatform(noteInput())).resolves.toEqual({ // メモ更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: "UPDATED",
++      reportId: REPORT_ID,
++      updatedAt: NOW.toISOString(), // 更新日時をUTC ISO化するメソッド
 +    });
-+    const result = await findSupportReportsForPlatform(input()); // 一覧取得関数 / 入力生成関数
-+    expect(result.outcome).toBe("FOUND"); // 結果の期待値生成・比較メソッド
-+    expect(mocks.actor).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 呼出し引数検証メソッド
++    expect(mocks.actor).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 本人権限の条件検証メソッド
 +      where: {
 +        id: USER_ID,
 +        isActive: true,
@@ -443,444 +566,391 @@ index 0000000..0a0c727
 +        isActive: true,
 +      },
 +    });
-+    expect(mocks.transaction.mock.calls[0][1]).toEqual({ // 期待値生成・transaction設定の比較メソッド
-+      isolationLevel: "RepeatableRead",
++    expect(mocks.report).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / 報告の限定select検証メソッド
++      where: {
++        id: REPORT_ID,
++      },
++      select: {
++        id: true,
++        status: true,
++        updatedAt: true,
++      },
 +    });
 +    expect(mocks.actor.mock.invocationCallOrder[0]) // 呼出し順序の期待値生成関数
-+      .toBeLessThan(mocks.reports.mock.invocationCallOrder[0]); // 認可が一覧取得に先行することを比較するメソッド
-+    expect(mocks.reports.mock.calls[0][0]).toMatchObject({ // 期待値生成・一覧取得条件の比較メソッド
-+      where: {},
-+      take: 50,
-+      skip: 0,
-+      orderBy: [
-+        { createdAt: "desc" },
-+        { id: "desc" },
-+      ],
-+    });
-+    expect(mocks.count).toHaveBeenCalledExactlyOnceWith({ where: {} }); // モック関数参照 / 件数条件の検証メソッド
-+    expect(mocks.clubs).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / クラブ候補条件の検証メソッド
-+      where: {
-+        supportReports: {
-+          some: {},
-+        },
-+      },
-+      select: clubSelection,
-+      orderBy: [
-+        { name: "asc" },
-+        { id: "asc" },
-+      ],
++      .toBeLessThan(mocks.report.mock.invocationCallOrder[0]); // 権限確認の先行を比較するメソッド
++    expect(stored).toEqual({ // 期待値生成・メモ限定更新の比較メソッド
++      ...report(), // 初期DB行の生成関数
++      internalNote: "新しい内部メモ",
++      handledByPlatformAdminId: USER_ID,
++      updatedAt: NOW,
 +    });
 +  },
 +);
 +
-+it.each([ // 入力値別の試験を定義するメソッド
-+  null,
-+  {
-+    id: USER_ID,
-+    role: "DEVELOPER",
-+    isActive: false,
-+  },
-+  {
-+    id: USER_ID,
-+    role: "SUPPORT",
-+    isActive: false,
-+  },
-+  {
-+    id: USER_ID,
-+    role: "OWNER",
-+    isActive: true,
-+  },
-+  {
-+    id: USER_ID,
-+    role: "FUTURE_ROLE",
-+    isActive: true,
-+  },
-+  {
-+    id: "other-user",
-+    role: "DEVELOPER",
-+    isActive: true,
-+  },
-+])(
-+  "一般会員・inactive・異なる本人・未知ロールから一覧と候補を隠す %#",
++it.each([" メモ\n本文 ", "", "　 \t\n", null, "あ".repeat(5000), "😀".repeat(2500)])( // メモ境界別の試験定義メソッド / 文字列反復メソッド
++  "メモの空・null・上限を正規化し、状態日時を維持する %#",
 +  /**
-+   * DBの最新応答が不許可なら、報告・件数・クラブ候補を一切読まない。
++   * 解決済みのメモでも状態日時を変更せず、対応者は本人へ更新する。
 +   */
-+  async (actor) => { // 不許可応答を検証するコールバック
-+    mocks.actor.mockResolvedValue(actor); // 不許可応答を設定するメソッド
-+    await expect(findSupportReportsForPlatform(input())).resolves.toEqual({ // 一覧取得・入力生成関数 / 非同期結果の検証メソッド
-+      outcome: "FORBIDDEN",
++  async (note) => { // メモ境界の試験コールバック
++    stored!.status = "RESOLVED";
++    stored!.resolvedAt = new Date("2026-10-24T09:00:00.000Z"); // 既存解決日時のDateコンストラクター
++    const before = structuredClone(stored!); // 保存前の全列を複製する関数
++    await expect(updateSupportReportNoteForPlatform(noteInput(note))).resolves.toMatchObject({ // メモ更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: "UPDATED",
 +    });
-+    expect(mocks.reports).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+    expect(mocks.count).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+    expect(mocks.clubs).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "保存された認可contextが古くても次回の権限失効を反映する",
-+  /**
-+   * 同じ入力を再利用しても、以前の成功やroleを権限根拠にしない。
-+   */
-+  async () => { // 古いcontextを検証するコールバック
-+    const context = input(); // 入力生成関数
-+    await findSupportReportsForPlatform(context); // 初回の一覧取得関数
-+    mocks.actor.mockResolvedValue(null); // 権限失効後の応答を設定するメソッド
-+    await expect(findSupportReportsForPlatform(context)).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "FORBIDDEN",
++    const internalNote = note?.trim() || null; // メモ前後の空白を除くメソッド
++    expect(mocks.update.mock.calls[0][0].data).toEqual({ // 期待値生成・限定更新列の比較メソッド
++      internalNote,
++      handledByPlatformAdminId: USER_ID,
++      updatedAt: NOW,
 +    });
-+    expect(mocks.reports).toHaveBeenCalledTimes(1); // モック関数参照 / 呼出し回数の検証メソッド
-+  },
-+);
-+
-+it.each(["", " ", null, undefined, 1])( // 入力値別の試験を定義するメソッド
-+  "不正な本人IDはtransaction前に拒否する %#",
-+  /**
-+   * 型を偽装した本人IDでもDBへ渡さない。
-+   */
-+  async (userId) => { // 不正な本人IDの試験コールバック
-+    const value = { // 型偽装用の入力
-+      ...input(), // 入力生成関数
-+      userId,
-+      platformAdminId: userId,
-+    } as unknown as FindSupportReportsForPlatformInput; // 不明値型を経由する入力型へのアサーション
-+    await expect(findSupportReportsForPlatform(value)).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "FORBIDDEN",
-+    });
-+    expect(mocks.transaction).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "本人IDと管理者IDが異なるcontextをDBへ渡さない",
-+  /**
-+   * 他人のPlatformAdmin情報と組み合わせたcontextを拒否する。
-+   */
-+  async () => { // 他人の管理者IDを検証するコールバック
-+    await expect(findSupportReportsForPlatform({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      ...input(), // 入力生成関数
-+      platformAdminId: "other-user",
-+    })).resolves.toEqual({ outcome: "FORBIDDEN" }); // 非同期結果の等値比較メソッド
-+    expect(mocks.transaction).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
-+
-+it.each([ // 入力値別の試験を定義するメソッド
-+  {},
-+  { clubId: CLUB_ID },
-+  { status: "OPEN" },
-+  { status: "IN_PROGRESS" },
-+  { status: "ON_HOLD" },
-+  { status: "RESOLVED" },
-+  { category: "BUG" },
-+  { category: "QUESTION" },
-+  { category: "REQUEST" },
-+  { category: "OTHER" },
-+  {
-+    clubId: CLUB_ID,
-+    status: "RESOLVED",
-+    category: "QUESTION",
-+  },
-+])(
-+  "各filterと組合せを一覧と件数に同じAND条件で渡す %#",
-+  /**
-+   * 省略した条件だけを外し、候補には選択中のfilterを適用しない。
-+   */
-+  async (raw) => { // 検索条件を検証するコールバック
-+    await findSupportReportsForPlatform(input(raw)); // 一覧取得・入力生成関数
-+    expect(mocks.reports.mock.calls[0][0].where).toEqual(raw); // 期待値生成・一覧条件の比較メソッド
-+    expect(mocks.count).toHaveBeenCalledExactlyOnceWith({ where: raw }); // モック関数参照 / 件数条件の検証メソッド
-+    expect(mocks.clubs.mock.calls[0][0].where).toEqual({ // 期待値生成・候補条件の比較メソッド
-+      supportReports: {
-+        some: {},
-+      },
++    expect(stored).toEqual({ // 期待値生成・対象外の列も含む比較メソッド
++      ...before,
++      internalNote,
++      handledByPlatformAdminId: USER_ID,
++      updatedAt: NOW,
 +    });
 +  },
 +);
 +
-+it.each([ // 入力値別の試験を定義するメソッド
-+  { page: 0 },
-+  { page: 10001 },
-+  { page: 1.5 },
-+  { page: "1" },
-+  { pageSize: 100 },
-+  { skip: -1 },
-+  { skip: 500000 },
-+  { status: "INVALID" },
-+  { status: ["OPEN"] },
-+  { category: "INVALID" },
-+  { clubId: "invalid" },
-+])(
-+  "型付きqueryの不正値・offset偽装は全件取得へ丸めない %#",
-+  /**
-+   * 正規化済み入力でも検索条件を再検証し、不正ならDBを呼ばない。
-+   */
-+  async (override) => { // 不正な検索条件の試験コールバック
-+    const value = input(); // 入力生成関数
-+    value.query = {
-+      ...value.query,
-+      ...override,
-+    } as typeof value.query; // 正規化済み検索条件型への偽装
-+    await expect(findSupportReportsForPlatform(value)).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "INVALID_QUERY",
-+    });
-+    expect(mocks.transaction).not.toHaveBeenCalled(); // モック関数参照 / 未呼出しの検証メソッド
-+  },
-+);
++for (const mutation of [updateSupportReportStatusForPlatform, updateSupportReportNoteForPlatform]) { // status・メモ更新関数の参照
++  const base = mutation === updateSupportReportStatusForPlatform ? statusInput() : noteInput(); // 更新関数参照 / 操作別の入力生成関数
 +
-+it.each([null, undefined, [], 1])( // 入力値別の試験を定義するメソッド
-+  "検索条件オブジェクトの欠落・型不正を拒否する %#",
-+  /**
-+   * query本体の型を偽装しても安全な固定分類だけを返す。
-+   */
-+  async (query) => { // 不正なquery本体の試験コールバック
-+    const value = input(); // 入力生成関数
-+    value.query = query as unknown as typeof value.query; // 不明値型を経由する検索条件型への偽装
-+    await expect(findSupportReportsForPlatform(value)).resolves.toEqual({ // 一覧取得関数 / 非同期結果の比較メソッド
-+      outcome: "INVALID_QUERY",
-+    });
-+  },
-+);
++  it.each([ // 入力値別の試験を定義するメソッド
++    null,
++    {
++      id: USER_ID,
++      role: "DEVELOPER",
++      isActive: false,
++    },
++    {
++      id: USER_ID,
++      role: "SUPPORT",
++      isActive: false,
++    },
++    {
++      id: USER_ID,
++      role: "OWNER",
++      isActive: true,
++    },
++    {
++      id: USER_ID,
++      role: "FUTURE_ROLE",
++      isActive: true,
++    },
++    {
++      id: "other-user",
++      role: "DEVELOPER",
++      isActive: true,
++    },
++  ])( // 管理者応答別の試験定義メソッド
++    `${mutation.name}は最新権限がない場合に対象を読まず拒否する %#`,
++    /**
++     * 無効化・削除・他人・一般会員・未知ロールが、対象の存在や内容を取得できない。
++     */
++    async (value) => { // 不許可管理者の試験コールバック
++      actor = value;
++      const before = structuredClone(stored); // 保存行を複製する関数
++      await expect(mutation({ // 操作別更新関数 / 非同期結果の比較メソッド
++        ...base,
++        status: "RESOLVED",
++        internalNote: "メモ",
++      })).resolves.toEqual({ outcome: "FORBIDDEN" }); // 非同期結果の等値比較メソッド
++      expect(mocks.report).not.toHaveBeenCalled(); // モック関数参照 / 対象未読取の検証メソッド
++      expect(mocks.update).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++      expect(stored).toEqual(before); // 期待値生成・全列不変の比較メソッド
++    },
++  );
 +
-+it.each([ // 入力値別の試験を定義するメソッド
-+  {
-+    page: "1",
-+    skip: 0,
-+    count: 0,
-+    returned: 0,
-+  },
-+  {
-+    page: "1",
-+    skip: 0,
-+    count: 51,
-+    returned: 50,
-+  },
-+  {
-+    page: "2",
-+    skip: 50,
-+    count: 51,
-+    returned: 1,
-+  },
-+  {
-+    page: "3",
-+    skip: 100,
-+    count: 51,
-+    returned: 0,
-+  },
-+  {
-+    page: "10000",
-+    skip: 499950,
-+    count: 500001,
-+    returned: 50,
-+  },
-+])(
-+  "0件・50件境界・2ページ・範囲外・最大ページの取得契約 %#",
-+  /**
-+   * SQLへの固定件数・offset・同時刻時の順序指定と、DBの総件数の返却を確認する。
-+   */
-+  async ({ page, skip, count, returned }) => { // ページ境界の試験コールバック
-+    mocks.reports.mockResolvedValue(Array.from( // 一覧応答設定メソッド / 配列生成メソッド
-+      { length: returned },
-+      /**
-+       * 同じ作成日時の行を、DBが返すID降順として用意する。
-+       */
-+      (_, index) => ({ // 連番付き行の生成コールバック
-+        ...row(), // 試験用DB行生成関数
-+        id: String(100 - index), // 降順のID文字列を生成する関数
-+      }),
-+    ));
-+    mocks.count.mockResolvedValue(count); // 総件数の応答を設定するメソッド
-+    if (count === 0) {
-+      mocks.clubs.mockResolvedValue([]); // 報告を持つクラブがない場合の応答設定メソッド
-+    }
-+    const result = await findSupportReportsForPlatform(input({ page })); // 一覧取得・入力生成関数
-+    expect(mocks.reports.mock.calls[0][0]).toMatchObject({ // 期待値生成・取得条件の比較メソッド
-+      take: 50,
-+      skip,
-+      orderBy: [
-+        { createdAt: "desc" },
-+        { id: "desc" },
-+      ],
-+    });
-+    expect(result).toMatchObject({ // 期待値生成・ページ情報の比較メソッド
-+      outcome: "FOUND",
-+      totalCount: count,
-+      page: Number(page), // ページ文字列を数値へ変換する関数
-+      pageSize: 50,
-+    });
-+    if (result.outcome === "FOUND") {
-+      expect(result.reports).toHaveLength(returned); // 期待値生成・返却件数の比較メソッド
-+      if (count === 0) {
-+        expect(result.clubs).toEqual([]); // 期待値生成・候補なしの比較メソッド
-+      }
-+      if (returned > 0) {
-+        expect(result.reports[0].id).toBe("100"); // 期待値生成・DB順序維持の比較メソッド
-+      }
-+    }
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "全文・snapshot・管理情報を保持し、限定列だけをDTOへ返す",
-+  /**
-+   * 日時のISO化と余分な列の除去、notifyErrorの真偽値化を検証する。
-+   */
-+  async () => { // 限定DTOの試験コールバック
-+    mocks.clubs.mockResolvedValue([{ // 候補応答の設定メソッド
-+      ...club,
-+      email: "must-not-return@example.test",
-+      planType: "STARTER",
-+    }]);
-+    const result = await findSupportReportsForPlatform(input()); // 一覧取得・入力生成関数
-+    expect(result).toEqual({ // 期待値生成・DTO全体の比較メソッド
-+      outcome: "FOUND",
-+      reports: [{
-+        id: "22222222-2222-4222-8222-222222222222",
-+        createdAt: "2026-10-25T00:00:00.000Z",
-+        updatedAt: "2026-10-25T01:00:00.000Z",
-+        club,
-+        category: "BUG",
++  it( // 試験を登録する関数
++    `${mutation.name}はversion不一致を同statusでも拒否する`,
++    /**
++     * 通知結果保存によるversion変化も含め、上書きせず再取得を要求する。
++     */
++    async () => { // version競合の試験コールバック
++      stored!.updatedAt = new Date("2026-10-25T10:30:00.000Z"); // 通知保存後を模したversionのDateコンストラクター
++      await expect(mutation({ // 操作別更新関数 / 非同期結果の比較メソッド
++        ...base,
 +        status: "OPEN",
-+        message: row().message, // 試験用DB行生成関数
-+        pageUrl: "/club/club-a/account",
-+        userAgent: "保存済みブラウザー情報",
-+        reporterName: "報告時の氏名",
-+        reporterEmail: "snapshot@example.test",
-+        reporterRole: "MEMBER",
-+        handler: {
-+          id: "handler-id",
-+          name: "担当者表示名",
-+        },
-+        statusChangedAt: "2026-10-25T00:30:00.000Z",
-+        resolvedAt: null,
-+        internalNote: "内部メモ\n全文を保持",
-+        notifiedAt: null,
-+        notificationFailed: true,
-+      }],
-+      clubs: [club],
-+      totalCount: 1,
-+      page: 1,
-+      pageSize: 50,
++        internalNote: "メモ",
++      })).resolves.toEqual({ outcome: "CONFLICT" }); // 非同期結果の等値比較メソッド
++      expect(mocks.update).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++    },
++  );
++
++  it( // 試験を登録する関数
++    `${mutation.name}は削除済み報告をNOT_FOUNDにする`,
++    /**
++     * 初回の対象確認で存在しない場合は書き込みを行わない。
++     */
++    async () => { // 対象削除の試験コールバック
++      stored = null;
++      await expect(mutation({ // 操作別更新関数 / 非同期結果の比較メソッド
++        ...base,
++        status: "RESOLVED",
++        internalNote: "メモ",
++      })).resolves.toEqual({ outcome: "NOT_FOUND" }); // 非同期結果の等値比較メソッド
++      expect(mocks.update).not.toHaveBeenCalled(); // モック関数参照 / 更新未呼出しの検証メソッド
++    },
++  );
++}
++
++it.each([null, undefined, "input", {}, { // 不正な本人情報別の試験定義メソッド
++  ...statusInput(), // status入力の生成関数
++  userId: " ",
++  platformAdminId: " ",
++}, {
++  ...statusInput(), // status入力の生成関数
++  platformAdminId: "other-user",
++}])(
++  "本人情報の欠落・他人との組合せはDBを呼ばず拒否する %#",
++  /**
++   * 型付きAPIへ不正なcontextを直接渡しても例外原文や対象情報を返さない。
++   */
++  async (value) => { // 不正contextの試験コールバック
++    await expect(updateSupportReportStatusForPlatform( // status更新関数 / 非同期結果の期待値生成関数
++      value as UpdateSupportReportStatusForPlatformInput, // 意図的に型を偽装する入力型アサーション
++    )).resolves.toEqual({ outcome: "FORBIDDEN" }); // 非同期結果の等値比較メソッド
++    expect(mocks.transaction).not.toHaveBeenCalled(); // モック関数参照 / DB未呼出し検証メソッド
++  },
++);
++
++it.each([ // 入力値別の試験を定義するメソッド
++  { reportId: "invalid" },
++  { requestId: "invalid" },
++  { expectedUpdatedAt: "invalid" },
++  { expectedUpdatedAt: "2026-10-25T10:00:00Z" },
++  { status: "UNKNOWN" },
++  { status: ["RESOLVED"] },
++])(
++  "status識別値と操作値を再検証してDB前で拒否する %#",
++  /**
++   * 識別値・version・statusの改ざんを固定分類へ変換する。
++   */
++  async (override) => { // 不正status入力の試験コールバック
++    const value = { // 改ざんした入力
++      ...statusInput(), // status入力の生成関数
++      ...override,
++    } as UpdateSupportReportStatusForPlatformInput; // 不正値を再現する入力型アサーション
++    await expect(updateSupportReportStatusForPlatform(value)).resolves.toEqual({ // status更新関数 / 非同期結果の比較メソッド
++      outcome: "INVALID_INPUT",
 +    });
-+    const select: Prisma.SupportReportSelect = mocks.reports.mock.calls[0][0].select; // Prismaの報告取得列型
-+    expect(select).toEqual({ // 期待値生成・取得列の厳密比較メソッド
-+      id: true,
-+      createdAt: true,
-+      updatedAt: true,
-+      club: { select: clubSelection },
-+      category: true,
-+      status: true,
-+      message: true,
-+      pageUrl: true,
-+      userAgent: true,
-+      reporterName: true,
-+      reporterEmail: true,
-+      reporterRole: true,
-+      handledByPlatformAdmin: {
-+        select: {
-+          id: true,
-+          name: true,
-+        },
-+      },
-+      statusChangedAt: true,
-+      resolvedAt: true,
-+      internalNote: true,
-+      notifiedAt: true,
-+      notifyError: true,
-+    });
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE_ERROR); // JSON文字列化メソッド / 期待値生成・非包含検証メソッド
++    expect(mocks.transaction).not.toHaveBeenCalled(); // モック関数参照 / DB未呼出し検証メソッド
++  },
++);
++
++it.each([undefined, 1, {}, [], "あ".repeat(5001), "😀".repeat(2501)])( // 不正メモ別の試験定義メソッド / 文字列反復メソッド
++  "非文字列・上限超過のメモを切り捨てず拒否する %#",
++  /**
++   * 型付きメモAPIの直接呼出しでも、超過・型不正はDBへ渡さない。
++   */
++  async (internalNote) => { // 不正メモ入力の試験コールバック
++    await expect(updateSupportReportNoteForPlatform({ // メモ更新関数 / 非同期結果の期待値生成関数
++      ...noteInput(), // メモ入力の生成関数
++      internalNote: internalNote as string, // 不正値を再現する文字列型へのアサーション
++    })).resolves.toEqual({ outcome: "INVALID_INPUT" }); // 非同期結果の等値比較メソッド
++    expect(mocks.transaction).not.toHaveBeenCalled(); // モック関数参照 / DB未呼出し検証メソッド
 +  },
 +);
 +
 +it( // 試験を登録する関数
-+  "削除済み担当者とnullable項目、通知成功と解決日時を扱う",
++  "入力へ混入した担当者・日時・本文・通知・クラブ列を保存しない",
 +  /**
-+   * nullを保ったまま関係先の欠落を許容し、存在する日時だけISO化する。
++   * 正規化した操作値とサーバー由来の管理列以外がupdateManyへ渡らないことを確認する。
 +   */
-+  async () => { // nullable項目の試験コールバック
-+    mocks.reports.mockResolvedValue([{ // DB応答を設定するメソッド
-+      ...row(), // 試験用DB行生成関数
-+      handledByPlatformAdmin: null,
-+      pageUrl: null,
-+      userAgent: null,
-+      reporterName: null,
-+      reporterEmail: null,
-+      reporterRole: null,
-+      statusChangedAt: null,
-+      internalNote: null,
-+      resolvedAt: new Date("2026-10-25T02:00:00.000Z"), // 解決日時のDateコンストラクター
-+      notifiedAt: new Date("2026-10-25T01:30:00.000Z"), // 通知受付日時のDateコンストラクター
-+      notifyError: null,
-+    }]);
-+    const result = await findSupportReportsForPlatform(input()); // 一覧取得・入力生成関数
-+    expect(result.outcome).toBe("FOUND"); // 期待値生成・結果分類の比較メソッド
-+    if (result.outcome === "FOUND") {
-+      expect(result.reports[0]).toMatchObject({ // 期待値生成・nullable項目の比較メソッド
-+        handler: null,
-+        pageUrl: null,
-+        userAgent: null,
-+        reporterName: null,
-+        reporterEmail: null,
-+        reporterRole: null,
-+        statusChangedAt: null,
-+        internalNote: null,
-+        resolvedAt: "2026-10-25T02:00:00.000Z",
-+        notifiedAt: "2026-10-25T01:30:00.000Z",
-+        notificationFailed: false,
-+      });
-+    }
-+  },
-+);
-+
-+it.each(["transaction", "actor", "reports", "count", "clubs"] as const)( // 失敗箇所別の試験定義メソッド / リテラル型
-+  "%sの例外原文を固定失敗分類へ変換し、部分的な結果を返さない",
-+  /**
-+   * どの読取段階で失敗しても例外原文や個人情報を返さず、ログへも出さない。
-+   */
-+  async (stage) => { // 例外の安全化を検証するコールバック
-+    mocks[stage].mockRejectedValue(new Error(PRIVATE_ERROR)); // エラー応答設定メソッド / Errorコンストラクター
-+    await expect(findSupportReportsForPlatform(input())).resolves.toEqual({ // 一覧取得・入力生成関数 / 非同期結果の比較メソッド
-+      outcome: "READ_FAILED",
-+    });
-+  },
-+);
-+
-+it( // 試験を登録する関数
-+  "複数クラブの報告と候補をプランで除外しない",
-+  /**
-+   * 異なるクラブの行をそのままDTO化し、フィルター選択肢にも含める。
-+   */
-+  async () => { // 横断読取の試験コールバック
-+    const otherClub = {
-+      id: "33333333-3333-4333-8333-333333333333",
-+      name: "別クラブ",
-+      slug: "club-b",
++  async () => { // 更新列の偽装を検証するコールバック
++    const before = structuredClone(stored); // 初期の保存行を複製する関数
++    const value = {
++      ...noteInput(), // メモ入力の生成関数
++      status: "RESOLVED",
++      handledByPlatformAdminId: "other-user",
++      updatedAt: new Date("2099-01-01T00:00:00.000Z"), // 偽装したversionのDateコンストラクター
++      statusChangedAt: NOW,
++      resolvedAt: NOW,
++      message: "偽装本文",
++      reporterName: "偽装氏名",
++      clubId: "other-club",
++      membershipId: "other-member",
++      notifyError: "偽装通知エラー",
++      notifiedAt: null,
 +    };
-+    mocks.reports.mockResolvedValue([ // 複数クラブの一覧応答を設定するメソッド
-+      {
-+        ...row(), // 試験用DB行生成関数
-+        club: {
-+          ...club,
-+          planType: "STARTER",
-+        },
++    await updateSupportReportNoteForPlatform(value); // メモ保存関数
++    expect(stored).toEqual({ // 期待値生成・許可列以外の不変を比較するメソッド
++      ...before,
++      internalNote: "新しい内部メモ",
++      handledByPlatformAdminId: USER_ID,
++      updatedAt: NOW,
++    });
++    expect(mocks.update.mock.calls[0][0].data).toEqual({ // 期待値生成・書込列の厳密比較メソッド
++      internalNote: "新しい内部メモ",
++      handledByPlatformAdminId: USER_ID,
++      updatedAt: NOW,
++    });
++  },
++);
++
++it.each([true, false])( // 入力値別の試験を定義するメソッド
++  "条件付き更新0件は対象の存在=%sでCONFLICT・NOT_FOUNDに分ける",
++  /**
++   * 先の読取後に競合や削除が起きても、0件を成功や無条件更新に変えない。
++   */
++  async (exists) => { // 更新0件の試験コールバック
++    mocks.update.mockResolvedValueOnce({ count: 0 }); // 更新0件の応答を設定するメソッド
++    mocks.report.mockResolvedValueOnce(report()).mockResolvedValueOnce( // 初回と再確認の応答設定メソッド / 初期行生成関数
++      exists ? { id: REPORT_ID } : null,
++    );
++    const before = structuredClone(stored); // 初期の保存行を複製する関数
++    await expect(updateSupportReportStatusForPlatform(statusInput())).resolves.toEqual({ // status更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: exists ? "CONFLICT" : "NOT_FOUND",
++    });
++    expect(mocks.report.mock.calls[1][0]).toEqual({ // 期待値生成・存在再確認の比較メソッド
++      where: {
++        id: REPORT_ID,
 +      },
-+      {
-+        ...row(), // 試験用DB行生成関数
-+        id: "other-report",
-+        club: {
-+          ...otherClub,
-+          planType: "PRO",
-+        },
++      select: {
++        id: true,
 +      },
++    });
++    expect(mocks.update).toHaveBeenCalledTimes(1); // モック関数参照 / 書込再試行なしの検証メソッド
++    expect(stored).toEqual(before); // 期待値生成・全列不変の比較メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "更新件数不整合は書込後でもthrowによりrollbackする",
++  /**
++   * 不正な更新件数を固定失敗へ変換し、transaction内の変更が残らないことを確認する。
++   */
++  async () => { // rollback境界の試験コールバック
++    const before = structuredClone(stored); // 更新前の状態を複製する関数
++    const update = mocks.update.getMockImplementation()!; // 更新モックの実装を取得するメソッド
++    mocks.update.mockImplementationOnce( // 次の更新だけを置換するメソッド
++      /**
++       * 一旦状態を変更したうえで、不正な複数件更新の応答を返す。
++       */
++      async (args) => { // 不正な件数の試験用コールバック
++        await update(args); // 元の条件付き更新モック関数
++        return { count: 2 };
++      },
++    );
++    await expect(updateSupportReportStatusForPlatform(statusInput())).resolves.toEqual({ // status更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: "UPDATE_FAILED",
++    });
++    expect(stored).toEqual(before); // 期待値生成・rollback後の比較メソッド
++  },
++);
++
++it.each(["actor", "report", "update", "transaction"] as const)( // 失敗箇所別の試験定義メソッド / リテラル型
++  "%sの例外を原文や個人情報を含まない固定分類へ変換する",
++  /**
++   * 読取・更新・transaction失敗でも原文を結果へ含めず、成功や無条件再試行に変えない。
++   */
++  async (stage) => { // DB例外の試験コールバック
++    mocks[stage].mockRejectedValue(new Error(PRIVATE_DETAIL)); // 失敗応答の設定メソッド / Errorコンストラクター
++    await expect(updateSupportReportStatusForPlatform(statusInput())).resolves.toEqual({ // status更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: "UPDATE_FAILED",
++    });
++    expect(mocks.transaction).toHaveBeenCalledTimes(1); // モック関数参照 / 再試行なしの検証メソッド
++  },
++);
++
++it.each(["P2034", "P2003"])( // Prisma競合・FK失敗別の試験定義メソッド
++  "%sはrollbackして固定分類にし、自動上書き再試行しない",
++  /**
++   * 直列化失敗はCONFLICT、担当者削除等のFK失敗は原因を断定せずUPDATE_FAILEDとする。
++   */
++  async (code) => { // 競合・FK失敗の試験コールバック
++    const before = structuredClone(stored); // 更新前の状態を複製する関数
++    const update = mocks.update.getMockImplementation()!; // 更新モック実装の取得メソッド
++    mocks.update.mockImplementationOnce( // 次の更新でDB例外を模す設定メソッド
++      /**
++       * 書込後の失敗を再現し、transaction全体が戻ることを確認する。
++       */
++      async (args) => { // 書込後の例外用コールバック
++        await update(args); // 元の条件付き更新モック関数
++        throw prismaError(code); // 本物のPrisma既知エラーの生成関数
++      },
++    );
++    await expect(updateSupportReportStatusForPlatform(statusInput())).resolves.toEqual({ // status更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: code === "P2034" ? "CONFLICT" : "UPDATE_FAILED",
++    });
++    expect(stored).toEqual(before); // 期待値生成・rollback後の状態比較メソッド
++    expect(mocks.transaction).toHaveBeenCalledTimes(1); // モック関数参照 / 再試行なしの検証メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "codeだけを持つ偽のPrisma競合エラーを採用しない",
++  /**
++   * 任意のDB例外に付いたcodeを信頼せず、一般失敗へ限定する。
++   */
++  async () => { // 偽の既知エラーを検証するコールバック
++    mocks.transaction.mockRejectedValue({ // 任意の例外応答を設定するメソッド
++      code: "P2034",
++      message: PRIVATE_DETAIL,
++    }); // 任意の例外応答の設定メソッド
++    await expect(updateSupportReportNoteForPlatform(noteInput())).resolves.toEqual({ // メモ更新・入力生成関数 / 非同期結果の比較メソッド
++      outcome: "UPDATE_FAILED",
++    });
++  },
++);
++
++it( // 試験を登録する関数
++  "同一versionのstatusとメモが競合しても片方だけ成功する",
++  /**
++   * モックの直列化でCAS条件を確認する。実DBの同時実行制御の証明は後続統合試験で行う。
++   */
++  async () => { // 同時送信を検証するコールバック
++    const [status, note] = await Promise.all([ // 両更新の結果を待つメソッド
++      updateSupportReportStatusForPlatform(statusInput()), // status更新・入力生成関数
++      updateSupportReportNoteForPlatform(noteInput()), // メモ更新・入力生成関数
 +    ]);
-+    mocks.clubs.mockResolvedValue([club, otherClub]); // 全候補の応答を設定するメソッド
-+    mocks.count.mockResolvedValue(2); // 総件数の応答を設定するメソッド
-+    const result = await findSupportReportsForPlatform(input()); // 一覧取得・入力生成関数
-+    expect(result.outcome).toBe("FOUND"); // 期待値生成・成功分類の比較メソッド
-+    if (result.outcome === "FOUND") {
-+      expect(result.reports[0].club).toEqual(club); // 期待値生成・最初のクラブ情報の比較メソッド
-+      expect(result.reports[1].club).toEqual(otherClub); // 期待値生成・別クラブ情報の比較メソッド
-+      expect(result.clubs).toEqual([club, otherClub]); // 期待値生成・候補全体の比較メソッド
-+      expect(result.totalCount).toBe(2); // 期待値生成・総件数の比較メソッド
-+    }
++    expect(status.outcome).toBe("UPDATED"); // 期待値生成・先行成功の比較メソッド
++    expect(note.outcome).toBe("CONFLICT"); // 期待値生成・後行競合の比較メソッド
++    expect(stored!.internalNote).toBe("以前の内部メモ"); // 期待値生成・競合でのメモ不変の比較メソッド
++    expect(mocks.update).toHaveBeenCalledTimes(1); // モック関数参照 / 書込回数の検証メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "同じミリ秒の更新でもversionを進め、古いversionを再利用させない",
++  /**
++   * 初回のversionと現在時刻が等しくても1ミリ秒進め、再送の上書きを防ぐ。
++   */
++  async () => { // ミリ秒境界の試験コールバック
++    stored!.updatedAt = new Date(NOW); // 現在時刻と同じversionを作るDateコンストラクター
++    const value = {
++      ...noteInput(), // メモ入力の生成関数
++      expectedUpdatedAt: NOW.toISOString(), // 期待versionのUTC ISO化メソッド
++    };
++    await expect(updateSupportReportNoteForPlatform(value)).resolves.toEqual({ // メモ更新関数 / 非同期結果の比較メソッド
++      outcome: "UPDATED",
++      reportId: REPORT_ID,
++      updatedAt: "2026-10-25T11:00:00.001Z",
++    });
++    await expect(updateSupportReportNoteForPlatform(value)).resolves.toEqual({ // メモ更新関数 / 非同期結果の比較メソッド
++      outcome: "CONFLICT",
++    });
++    expect(mocks.update).toHaveBeenCalledTimes(1); // モック関数参照 / 追加書込なしの検証メソッド
++  },
++);
++
++it( // 試験を登録する関数
++  "同じcontextでも次回の権限失効を反映する",
++  /**
++   * 前回の成功や受け取ったcontextを、現在の管理者権限の代用にしない。
++   */
++  async () => { // 権限失効を検証するコールバック
++    const value = statusInput("OPEN"); // 同statusの入力を生成する関数
++    await expect(updateSupportReportStatusForPlatform(value)).resolves.toMatchObject({ // status更新関数 / 非同期結果の比較メソッド
++      outcome: "UNCHANGED",
++    });
++    actor = null;
++    await expect(updateSupportReportStatusForPlatform(value)).resolves.toEqual({ // status更新関数 / 非同期結果の比較メソッド
++      outcome: "FORBIDDEN",
++    });
++    expect(mocks.report).toHaveBeenCalledTimes(1); // モック関数参照 / 失効後の対象未読取の検証メソッド
++    expect(mocks.update).not.toHaveBeenCalled(); // モック関数参照 / 全経路での未更新検証メソッド
 +  },
 +);
