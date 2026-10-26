@@ -3,6 +3,8 @@
 
 import {
   createElement,
+  isValidElement,
+  type ReactElement,
   type ReactNode,
 } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -16,6 +18,9 @@ import {
 
 import PlatformLayout from "@/app/(club-app)/platform/layout"; // Platform専用認可と管理UIを提供するlayout Component
 import PlatformSupportPage, { dynamic } from "@/app/(club-app)/platform/support/page"; // 再認可して管理一覧を表示するPage Component / 毎回要求時に描画する設定
+import {
+  SupportReportTable, // 【追加】検索条件ごとに編集領域を分けるテーブルComponent
+} from "@/app/(club-app)/platform/support/SupportReportTable";
 import type {
   PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
 } from "@/domain/platform/support/support-report-management-types";
@@ -31,7 +36,29 @@ const mocks = vi.hoisted( // importより前にモックを準備するメソッ
     redirect: vi.fn(), // redirectモックの生成メソッド
     notFound: vi.fn(), // notFoundモックの生成メソッド
     rethrow: vi.fn(), // Next制御例外再送出モックの生成メソッド
+    operations: vi.fn(), // 【追加】行の操作Componentを観測するモック生成メソッド
+    statusAction: vi.fn(), // 【追加】status Actionのモック生成メソッド
+    noteAction: vi.fn(), // 【追加】メモActionのモック生成メソッド
     logout: vi.fn(), // ClientログアウトComponentモックの生成メソッド
+  }),
+);
+vi.mock( // 【追加】行のClient hookを実行せず接続値を観測する置換メソッド
+  "@/app/(club-app)/platform/support/SupportReportOperations",
+  /**
+   * 【追加】操作Componentだけを置換し、既存テーブルの安全な表示は実装を通す。
+   */
+  () => ({ // 【追加】編集Componentのモジュール置換コールバック
+    SupportReportOperations: mocks.operations, // 【追加】行の操作Componentモック関数
+  }),
+);
+vi.mock( // 【追加】bound IDを実Auth・DBなしで検査するAction置換メソッド
+  "@/app/(club-app)/platform/support/actions",
+  /**
+   * 【追加】Pageからbindした引数だけを観測し、更新処理を実行しない。
+   */
+  () => ({ // 【追加】Actionモジュール置換コールバック
+    updateSupportReportStatusAction: mocks.statusAction, // 【追加】status Actionのモック関数
+    updateSupportReportNoteAction: mocks.noteAction, // 【追加】メモActionのモック関数
   }),
 );
 vi.mock( // Auth境界を置換するメソッド
@@ -117,7 +144,7 @@ vi.mock( // SSRでLinkの固定hrefを観測するモジュール置換メソッ
 /**
  * Nextが処理するredirect・404の制御例外を模す試験用クラス。
  */
-class ControlError extends Error {} // 制御例外クラス / Errorクラス
+class ControlError extends Error { } // 制御例外クラス / Errorクラス
 
 const USER_ID = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
 const CLUB_ID = "11111111-1111-4111-8111-111111111111";
@@ -351,7 +378,7 @@ it.each([{ page: "0" }, { page: ["1", "2"] }, { clubId: SECRET }, { status: SECR
 );
 
 it( // 試験を登録する関数
-  "50件の全文・snapshot・管理情報を日本時間で読取専用表示する",
+  "50件の全文・snapshot・管理情報を表示し、行ごとに独立Actionを接続する",
   /**
    * ページ内の全行とdetailsを描画し、snapshot・通知分類・nullable担当者を表示する。
    */
@@ -382,8 +409,22 @@ it( // 試験を登録する関数
     expect(html).toContain("未割当"); // 期待値生成・null担当者表示の検証メソッド
     expect(html).toContain("担当者表示名"); // 期待値生成・担当者表示の検証メソッド
     expect(html).toContain("通知失敗"); // 期待値生成・通知分類の検証メソッド
-    expect(html).not.toContain("<textarea"); // 期待値生成・編集UIなしの検証メソッド
-    expect(html).not.toContain('method="post"'); // 期待値生成・書込フォームなしの検証メソッド
+    expect(mocks.operations).toHaveBeenCalledTimes(50); // 【追加】行ごとの接続件数を検証するメソッド
+    const props = mocks.operations.mock.calls[0][0];
+    expect(props.report).toEqual({ // 【追加】編集Componentへ渡す限定列を検証するメソッド
+      id: "50",
+      status: "OPEN",
+      updatedAt: report().updatedAt, // 【追加】保存済みversionを持つfixture生成関数
+      internalNote: report().internalNote, // 【追加】保存済みメモを持つfixture生成関数
+    });
+    expect(props.statusInitialState.requestId).not.toBe(props.noteInitialState.requestId); // 【追加】操作別UUIDの独立性を検証するメソッド
+    const other = mocks.operations.mock.calls[1][0];
+    expect(props.statusInitialState.requestId).not.toBe(other.statusInitialState.requestId); // 【追加】行別UUIDの独立性を検証するメソッド
+    const data = new FormData(); // 【追加】送信データのコンストラクター
+    await props.statusAction(props.statusInitialState, data); // 【追加】bind済みstatus Action関数
+    await props.noteAction(props.noteInitialState, data); // 【追加】bind済みメモAction関数
+    expect(mocks.statusAction).toHaveBeenCalledWith("50", props.statusInitialState, data); // 【追加】固定報告IDの検証メソッド
+    expect(mocks.noteAction).toHaveBeenCalledWith("50", props.noteInitialState, data); // 【追加】固定報告IDの検証メソッド
   },
 );
 
@@ -586,3 +627,31 @@ it( // 試験を登録する関数
     expect(html).not.toContain("<table"); // 期待値生成・部分一覧非開示の検証メソッド
   },
 );
+
+
+it("同条件の再検証はkeyを維持し、確認後のフィルター・ページ移動は編集領域を分ける",  // 【追加】試験を登録する関数
+  /**
+   * 【追加】「同条件の再検証はkeyを維持し、確認後のフィルター・ページ移動は編集領域を分ける」をhook・Action境界で検証する。
+   */
+  async () => { // 【追加】処理を渡すコールバック関数
+    /**
+     * 【追加】Pageを描画し、検証済み条件で作られたテーブルkeyだけを取り出す。
+     */
+    async function key(query: Record<string, string> = {}) { // 【追加】定義した処理を実行する関数 / キーと値の辞書型 / 文字列型
+      const element = await PlatformSupportPage({ searchParams: Promise.resolve(query) }); // 【追加】PlatformSupportPageを実行する関数 / 非同期処理の開始メソッド
+      const children = element.props.children as ReactNode[]; // 【追加】Reactで描画可能なノード型
+      const table = children.find( // 【追加】条件に一致する値の検索メソッド
+        /**
+         * 【追加】指定した表示文言と一致するbuttonを探す。
+         */
+        (child) => isValidElement(child) && child.type === SupportReportTable); // 【追加】処理を渡すコールバック関数 / React要素の判定関数
+      expect(table).toBeDefined(); // 【追加】対象の存在を検証メソッド / 期待値を生成する関数
+      return (table as ReactElement).key; // 【追加】ReactElementの型
+    }
+    const initial = await key(); // 【追加】keyを実行する関数
+    expect(await key()).toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
+    expect(await key({ status: "OPEN" })).not.toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
+    expect(await key({ page: "2" })).not.toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
+    mocks.read.mockResolvedValue({ outcome: "READ_FAILED" }); // 【追加】非同期モックの成功値設定メソッド
+    expect(await key()).toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
+  });

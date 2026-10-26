@@ -1,557 +1,806 @@
-diff --git a/app/(club-app)/platform/layout.tsx b/app/(club-app)/platform/layout.tsx
+diff --git a/app/(club-app)/platform/support/SupportReportOperations.tsx b/app/(club-app)/platform/support/SupportReportOperations.tsx
 new file mode 100644
-index 0000000..0f0ecf8
+index 0000000..f80bc2a
 --- /dev/null
-+++ b/app/(club-app)/platform/layout.tsx
-@@ -0,0 +1,58 @@
-+// app/(club-app)/platform/layout.tsx
-+// Platform専用の認可・管理見出し・ログアウトを提供し、クラブ用の共通UIを含めない。
++++ b/app/(club-app)/platform/support/SupportReportOperations.tsx
+@@ -0,0 +1,450 @@
++// app/(club-app)/platform/support/SupportReportOperations.tsx
++// 行ごとの独立したstatus・メモActionと、version共有・下書き保持・再読取操作を提供する。
 +
-+import type { ReactNode } from "react";
-+import Link from "next/link";
-+import { unstable_rethrow } from "next/navigation";
++"use client";
 +
 +import {
-+  PlatformLogoutButton, // 現在のlocalセッションを終了するPlatformログアウト用Component
-+} from "@/app/(club-app)/platform-login/PlatformLogoutButton";
++  startTransition,
++  useActionState,
++  useEffect,
++  useId,
++  useRef,
++  useState,
++  type ChangeEvent,
++  type FormEvent,
++} from "react";
 +import {
-+  requirePlatformAdmin, // Auth本人と有効なPlatform管理者を照合して認可contextを返す関数
-+} from "./require-platform-admin";
++  unstable_rethrow,
++  useRouter,
++} from "next/navigation";
++
++import {
++  FieldErrorList, // 項目ごとのエラーメッセージ配列を赤字の箇条書きで表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
++import {
++  FormErrorAlert, // フォーム全体のエラーをアラートとして表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  useUnsavedChangesGuard, // 未保存内容があるページからの移動を確認する共通hook
++} from "@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard";
++import {
++  ToastMessage, // 固定の通知文を一定時間だけ表示するComponent
++} from "@/components/admin/ToastMessage";
++import {
++  SUPPORT_REPORT_STATUS_OPTIONS, // ステータスの値と表示ラベル一覧
++} from "@/domain/platform/support/support-report-query";
++import {
++  SUPPORT_REPORT_NOTE_MAX_LENGTH, // 内部メモのUTF-16コード単位の最大長
++} from "@/domain/platform/support/support-report-management-form";
++import type {
++  PlatformSupportReport, // 本文・snapshot・管理情報を含む限定報告DTOの型
++} from "@/domain/platform/support/support-report-management-types";
++import type {
++  PlatformSupportActionState, // versionと最小成功情報だけを持つ管理操作state型
++} from "./actions";
 +
 +/**
-+ * Platform配下だけを包む専用layout。Page側でも独立して最新の認可を行う。
++ * サーバーで報告IDへbindした2種類のActionと、それぞれ独立した初期stateをまとめる型。
 + */
-+export default async function PlatformLayout({ // Platform専用layoutのComponent関数
-+  children,
-+}: { // layoutのprops型
-+  children: ReactNode; // 配下の画面を表すReactノード型
-+}) {
-+  try {
-+    await requirePlatformAdmin(); // Platform本人と最新権限を確認する関数
-+  } catch (error) {
-+    unstable_rethrow(error); // redirect・404等のNext制御例外を再送出する関数
-+    return (
-+      <main className="mx-auto max-w-3xl space-y-4 p-6">
-+        <h1 className="text-xl font-bold">Platform管理</h1>
-+        <p role="alert">管理権限を確認できませんでした。時間をおいて再度お試しください。</p>
-+        {/* 現在の本人セッションだけを終了するComponent */}
-+        <PlatformLogoutButton />
-+      </main>
++export type SupportReportActions = { // 行に接続するActionとstateの型
++  statusInitialState: PlatformSupportActionState; // statusの独立初期state型
++  noteInitialState: PlatformSupportActionState; // メモの独立初期state型
++  statusAction: ( // status更新を呼ぶ関数型
++    state: PlatformSupportActionState, // 前回のstatus state型
++    data: FormData, // statusの送信FormData型
++  ) => Promise<PlatformSupportActionState>; // 管理操作stateを返す非同期型
++  noteAction: ( // メモ保存を呼ぶ関数型
++    state: PlatformSupportActionState, // 前回のメモstate型
++    data: FormData, // メモの送信FormData型
++  ) => Promise<PlatformSupportActionState>; // 管理操作stateを返す非同期型
++};
++
++/**
++ * フォームに必要な報告情報だけを受け取り、行の保持状態を親へ通知するprops型。
++ */
++type Props = SupportReportActions & { // 行のAction型と追加propsの型
++  report: Pick<PlatformSupportReport, "id" | "updatedAt" | "status" | "internalNote">; // 編集対象列だけの限定型
++  onProtect: (dirty: boolean) => void; // 行の保持とdirty状態を通知する関数型
++};
++
++/**
++ * 下書きの基準versionを、最新表示versionから分離して持つ編集モデル型。
++ */
++type EditModel = { // 行内の編集状態の型
++  sourceVersion: string; // 最後に読んだサーバーpropsのversion型
++  version: string; // status操作が使う最新versionの型
++  noteVersion: string; // 下書きの基準versionの型
++  status: PlatformSupportReport["status"]; // 保存済みstatusの型
++  note: string; // 入力中のメモ文字列型
++  baseNote: string; // 下書きの比較元となる保存済みメモ型
++};
++
++/**
++ * 保存済みの限定列から、下書きと最新versionが一致した初期編集モデルを作る。
++ */
++function editModel(report: Props["report"]): EditModel { // 編集モデル生成関数 / 限定報告型 / 編集モデル型
++  return {
++    sourceVersion: report.updatedAt,
++    version: report.updatedAt,
++    noteVersion: report.updatedAt,
++    status: report.status,
++    note: report.internalNote ?? "",
++    baseNote: report.internalNote ?? "",
++  };
++}
++
++/**
++ * dirtyな行が存在する間だけマウントし、全行がcleanになったら監視を解除する。
++ * 保存中も他行の下書きを保護するため、markSubmittingによる全体の抑止は使わない。
++ */
++export function SupportReportUnsavedGuard() { // 全体の未保存移動確認Component関数
++  const { markDirty } = useUnsavedChangesGuard(false); // 共通の移動確認hook関数
++  useEffect( // マウントした確認用Componentをdirtyにするhook関数
++    /**
++     * 共通hookのdirty監視を有効にする。clean時の解除はComponentのunmountで行う。
++     */
++    () => { // dirty監視を開始するeffectコールバック
++      markDirty(); // 未保存状態を共通hookへ通知する関数
++    },
++    [markDirty], // dirty通知関数の参照
++  );
++  return null;
++}
++
++/**
++ * status即時送信とメモ保存を別stateで扱い、同じ行の操作だけを送信中ロックする。
++ */
++export function SupportReportOperations({ // 行の管理操作Component関数
++  report,
++  statusInitialState,
++  noteInitialState,
++  statusAction,
++  noteAction,
++  onProtect,
++}: Props) { // 行の管理操作props型
++  const router = useRouter(); // 最新RSC情報を再取得するためのrouter hook関数
++  const statusId = useId(); // status欄の独立IDを作るhook関数
++  const noteId = useId(); // メモ欄の独立IDを作るhook関数
++  const sending = useRef(false); // 再描画前の二重送信も防ぐref hook関数
++  const [model, setModel] = useState<EditModel>(editModel(report)); // 編集状態hook関数 / 編集モデル型 / モデル生成関数
++  const [selection, setSelection] = useState<string | null>(null); // 送信中の選択表示を持つ状態hook関数 / 文字列またはnull型
++  const dirty = model.note !== model.baseNote;
++  // 他者の更新で新しいpropsが来ても、dirtyな下書きと基準versionはそのまま保持する。
++  if (report.updatedAt > model.sourceVersion) {
++    const next = editModel(report); // 最新保存情報のモデル生成関数
++    // 成功応答より古いRSCが遅れて届いても、行内の最新versionとstatusを巻き戻さない。
++    setModel({ // 同じComponentのprops追従用状態更新関数
++      ...(report.updatedAt < model.version ? model : next),
++      sourceVersion: report.updatedAt,
++      ...(dirty ? {
++        note: model.note,
++        baseNote: model.baseNote,
++        noteVersion: model.noteVersion,
++      } : {}),
++    });
++  }
++
++  /**
++   * 通信の通常例外を固定エラーへ変換し、Next制御例外は再送出する。
++   */
++  async function execute( // 操作別Actionを安全に実行する関数
++    previous: PlatformSupportActionState, // 操作ごとの前state型
++    data: FormData, // 送信するFormData型
++    kind: "STATUS" | "NOTE", // 操作種別のリテラル型
++  ): Promise<PlatformSupportActionState> { // 管理操作stateを返す非同期型
++    const expected = String(data.get("expectedUpdatedAt")); // フォーム取得メソッド / 送信versionの文字列化関数
++    const note = String(data.get("internalNote") ?? "").trim(); // フォーム取得・文字列化・メモ正規化のメソッド
++    const status = String(data.get("status")); // フォーム取得メソッド / 送信statusの文字列化関数
++    try {
++      const result = await (kind === "STATUS" ? statusAction : noteAction)(previous, data); // 操作別のbound Server Action関数
++      if (result.status === "success" &&
++        result.data) {
++        const version = result.data.updatedAt;
++        setModel( // 成功時の行内versionと保存済み状態を更新する関数
++          /**
++           * 自分のstatus更新時だけ下書きversionも安全に進め、他者の更新は追い越さない。
++           */
++          (current) => ({ // 成功後モデルの更新コールバック
++            ...current,
++            version: version > current.version ? version : current.version,
++            status: kind === "STATUS" &&
++              version >= current.version
++              ? status as EditModel["status"] // 許可入力を経由した保存済みstatus型
++              : current.status,
++            ...(kind === "NOTE" ? {
++              note,
++              baseNote: note,
++              noteVersion: version,
++            } : {
++              noteVersion: current.noteVersion === expected &&
++                version >= current.version
++                ? version : current.noteVersion,
++            }),
++          }),
++        );
++        onProtect(kind === "NOTE" ? false : dirty); // 自分の保存後も行と他行の下書きを保持する通知関数
++      }
++      return result;
++    } catch (error) {
++      unstable_rethrow(error); // Nextの制御例外を再送出する関数
++      return {
++        status: "error",
++        values: { expectedUpdatedAt: expected },
++        fieldErrors: {},
++        formError: "更新結果を確認できませんでした。下書きを保持したまま最新情報を取得してください。",
++        requestId: previous.requestId,
++      };
++    } finally {
++      sending.current = false;
++      setSelection(null); // 送信中の仮選択を解除する状態更新関数
++    }
++  }
++
++  const [statusState, dispatchStatus, statusPending] = useActionState<PlatformSupportActionState, FormData>( // status用の独立state hook関数 / 管理state型 / FormData型
++    /**
++     * status Actionへ独立した前stateとFormDataを渡す。
++     */
++    (previous, data) => execute(previous, data, "STATUS"), // status送信コールバック / 共通Action実行関数
++    statusInitialState,
++  );
++  const [noteState, dispatchNote, notePending] = useActionState<PlatformSupportActionState, FormData>( // メモ用の独立state hook関数 / 管理state型 / FormData型
++    /**
++     * メモActionへ独立した前stateとFormDataを渡す。
++     */
++    (previous, data) => execute(previous, data, "NOTE"), // メモ送信コールバック / 共通Action実行関数
++    noteInitialState,
++  );
++  const pending = statusPending ||
++    notePending;
++
++  /**
++   * fieldsetが無効になる前にFormDataを取得し、同じ行の送信だけを直ちにロックする。
++   */
++  function submit(form: HTMLFormElement, kind: "STATUS" | "NOTE") { // 送信開始関数 / フォーム要素型 / 操作種別型
++    if (pending ||
++      sending.current) {
++      return;
++    }
++    const data = new FormData(form); // 有効なフォーム項目を取得するFormDataコンストラクター
++    data.set("expectedUpdatedAt", kind === "STATUS" ? model.version : model.noteVersion); // 操作ごとの基準versionを設定するメソッド
++    sending.current = true;
++    onProtect(dirty); // 再検証で行が消えても保持するための通知関数
++    if (kind === "STATUS") {
++      setSelection(String(data.get("status"))); // フォーム値の取得・文字列化関数 / 仮選択の状態更新関数
++    }
++    startTransition( // useActionStateの送信contextを作るReact関数
++      /**
++       * 対応する独立Action queueへ送信データを渡す。
++       */
++      () => { // 送信開始のtransitionコールバック
++        if (kind === "STATUS") {
++          dispatchStatus(data); // status用queueへの送信関数
++        } else {
++          dispatchNote(data); // メモ用queueへの送信関数
++        }
++      },
 +    );
 +  }
++
++  /**
++   * セレクト変更からstatusフォームを即時送信する。
++   */
++  function changeStatus(event: ChangeEvent<HTMLSelectElement>) { // status変更handler関数 / select変更イベント型
++    if (event.currentTarget.form) {
++      submit(event.currentTarget.form, "STATUS"); // statusフォームの即時送信関数
++    }
++  }
++
++  /**
++   * Enter等の通常submitを止め、内部メモを含むnative GET遷移を起こさない。
++   */
++  function submitForm(event: FormEvent<HTMLFormElement>, kind: "STATUS" | "NOTE") { // submit handler関数 / formイベント型 / 操作種別型
++    event.preventDefault(); // native submitを停止するメソッド
++    submit(event.currentTarget, kind); // 指定操作の送信開始関数
++  }
++
 +  return (
-+    <div className="min-h-screen bg-slate-50 text-slate-900">
-+      <header className="border-b bg-white px-4 py-4">
-+        <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4">
-+          <p className="text-lg font-bold">Platform管理</p>
-+          <nav
-+            aria-label="Platform管理メニュー"
-+            className="flex flex-wrap items-center gap-4"
++    <div
++      className="min-w-72 space-y-4"
++      aria-busy={pending}
++    >
++      <form
++        method="post"
++        onSubmit={
++          /**
++           * statusフォームの通常submitも即時送信と同じロックへ通す。
++           */
++          (event) => submitForm(event, "STATUS") // submit handler / 共通送信関数
++        }
++      >
++        <fieldset
++          disabled={pending}
++          className="space-y-2"
++        >
++          <legend>ステータス変更</legend>
++          <input
++            type="hidden"
++            name="reportId"
++            value={report.id}
++          />
++          <input
++            type="hidden"
++            name="requestId"
++            value={statusState.requestId}
++          />
++          <input
++            type="hidden"
++            name="expectedUpdatedAt"
++            value={model.version}
++          />
++          {/* 全体エラーと項目エラーを安全なテキストで表示するComponent */}
++          <FormErrorAlert message={statusState.formError} />
++          <label htmlFor={statusId}>ステータス</label>
++          <select
++            id={statusId}
++            name="status"
++            value={selection ?? model.status}
++            onChange={changeStatus /* status変更を即時送信するhandler関数 */}
++            aria-describedby={`${statusId}-error`}
 +          >
-+            {/* 固定の管理一覧へ移動するNext Link Component */}
-+            <Link
-+              href="/platform/support"
-+              className="underline"
-+            >サポート報告</Link>
-+            {/* 権限や報告データをpropsとして渡さないログアウトComponent */}
-+            <PlatformLogoutButton />
-+          </nav>
-+        </div>
-+      </header>
-+      <main className="mx-auto w-full max-w-7xl space-y-6 px-4 py-6">{children}</main>
++            {SUPPORT_REPORT_STATUS_OPTIONS.map( // status選択肢を表示するメソッド
++              /**
++               * 共通の許可status値と表示ラベルをoptionへ設定する。
++               */
++              (option) => ( // option生成のコールバック
++                <option
++                  key={option.value}
++                  value={option.value}
++                >{option.label}</option>
++              ),
++            )}
++          </select>
++          {/* status項目の検証エラーを表示するComponent */}
++          <FieldErrorList
++            id={`${statusId}-error`}
++            errors={statusState.fieldErrors.status}
++          />
++        </fieldset>
++      </form>
++      <form
++        method="post"
++        onSubmit={
++          /**
++           * メモの保存ボタンからだけメモActionを実行する。
++           */
++          (event) => submitForm(event, "NOTE") // submit handler / 共通送信関数
++        }
++      >
++        <fieldset
++          disabled={pending}
++          className="space-y-2"
++        >
++          <legend>内部メモ</legend>
++          <input
++            type="hidden"
++            name="reportId"
++            value={report.id}
++          />
++          <input
++            type="hidden"
++            name="requestId"
++            value={noteState.requestId}
++          />
++          <input
++            type="hidden"
++            name="expectedUpdatedAt"
++            value={model.noteVersion}
++          />
++          {/* メモ保存全体の固定エラーを表示するComponent */}
++          <FormErrorAlert message={noteState.formError} />
++          <label htmlFor={noteId}>内部メモ</label>
++          <textarea
++            id={noteId}
++            name="internalNote"
++            value={model.note}
++            maxLength={SUPPORT_REPORT_NOTE_MAX_LENGTH}
++            aria-describedby={`${noteId}-error`}
++            onChange={
++              /**
++               * 入力値を保持し、親へ未保存状態を通知する。
++               */
++              (event) => { // メモ変更handlerコールバック
++                const note = event.currentTarget.value;
++                setModel({ // 下書きを更新する状態更新関数
++                  ...model,
++                  note,
++                }); // 下書きを更新する状態更新関数
++                onProtect(note !== model.baseNote); // 行の保持とdirty状態を通知する関数
++              }
++            }
++            className="w-full rounded border p-2"
++          />
++          {/* メモ項目の検証エラーを表示するComponent */}
++          <FieldErrorList
++            id={`${noteId}-error`}
++            errors={noteState.fieldErrors.internalNote}
++          />
++          <button
++            type="submit"
++            disabled={pending}
++          >{pending ? "処理中…" : "メモを保存"}</button>
++        </fieldset>
++      </form>
++      {/* hidden識別値・version等の検証エラーも見落とさず表示するComponent */}
++      <FieldErrorList
++        id={`${statusId}-identity`}
++        errors={[
++          ...(statusState.fieldErrors.reportId ?? []),
++          ...(statusState.fieldErrors.requestId ?? []),
++          ...(statusState.fieldErrors.expectedUpdatedAt ?? []),
++          ...(noteState.fieldErrors.reportId ?? []),
++          ...(noteState.fieldErrors.requestId ?? []),
++          ...(noteState.fieldErrors.expectedUpdatedAt ?? []),
++        ]}
++      />
++      {model.noteVersion !== model.version &&
++        <p role="status">新しい更新があります。下書きの基準日時は保持しています。</p>}
++      <button
++        type="button"
++        disabled={pending}
++        onClick={
++          /**
++           * 下書きはそのままで、サーバーの最新情報だけを再取得する。
++           */
++          () => router.refresh() // 最新RSC情報を再取得するrouterメソッド
++        }
++      >最新情報を取得（下書きを保持）</button>
++      <button
++        type="button"
++        disabled={pending ||
++          report.updatedAt < model.version}
++        onClick={
++          /**
++           * 明示的な確認後だけ下書きを破棄し、取得済みの内容・versionで再編集する。
++           */
++          () => { // 取得済み内容への復帰handler
++            if (dirty &&
++              !window.confirm("未保存のメモを破棄して、取得済みの内容で再編集しますか？")) { // 下書き破棄を確認するブラウザ関数
++              return;
++            }
++            setModel(editModel(report)); // 取得済みモデルへの復帰関数 / 編集モデル生成関数
++            onProtect(false); // dirty状態の解除を通知する関数
++          }
++        }
++      >取得済みの内容で再編集</button>
++      {[statusState, noteState].map( // 操作ごとの独立した固定通知を表示するメソッド
++        /**
++         * 成功通知だけをrequestIdで再マウントし、行自体は再マウントしない。
++         */
++        (state) => state.status === "success" && // 処理を渡すコールバック関数
++          state.data ? ( // 成功通知の描画コールバック
++          // 固定の成功案内を表示するToastMessage Component
++          <ToastMessage
++            key={state.requestId}
++            message={state.data.message}
++          />
++        ) : null,
++      )}
 +    </div>
 +  );
 +}
-diff --git a/app/(club-app)/platform/support/SupportReportFilters.tsx b/app/(club-app)/platform/support/SupportReportFilters.tsx
-new file mode 100644
-index 0000000..d73353a
---- /dev/null
-+++ b/app/(club-app)/platform/support/SupportReportFilters.tsx
-@@ -0,0 +1,126 @@
-+// app/(club-app)/platform/support/SupportReportFilters.tsx
-+// 単一GET項目で検索し、絞り込み時は必ず1ページ目へ戻すServer Component。
-+
-+import {
-+  SUPPORT_REPORT_CATEGORY_OPTIONS, // 不具合・サポート報告のカテゴリ値と表示ラベル一覧
-+} from "@/domain/club/support/support-report-form";
-+import type {
-+  PlatformSupportClub, // 絞り込み候補に使うクラブ情報の型
-+} from "@/domain/platform/support/support-report-management-types";
-+import {
-+  SUPPORT_REPORT_STATUS_OPTIONS, // 報告ステータスの値と表示ラベル一覧
-+  type PlatformSupportQuery, // 検証済みの一覧検索条件の型
-+} from "@/domain/platform/support/support-report-query";
-+
-+/**
-+ * 検証済み検索条件と、報告を持つクラブ候補だけを受け取るフィルターのprops型。
-+ */
-+type Props = { // フィルターComponentのprops型
-+  query: PlatformSupportQuery; // 検証済み一覧検索条件の型
-+  clubs: PlatformSupportClub[]; // クラブ候補の配列型
-+};
-+
-+/**
-+ * クラブ・status・categoryをGET送信し、pageを1へ戻す読取専用フィルター。
-+ */
-+export function SupportReportFilters({ query, clubs }: Props) { // 検索フォームComponent関数 / props型
-+  const missingClub = query.clubId !== null && !clubs.some( // クラブ候補の一致を確認するメソッド
-+    /**
-+     * 選択中のクラブIDと候補のIDを比較する。
-+     */
-+    (club) => club.id === query.clubId, // 候補照合のコールバック
-+  );
-+  return (
-+    <form
-+      action="/platform/support"
-+      method="get"
-+      className="flex flex-wrap items-end gap-4 rounded-lg border bg-white p-4"
-+    >
-+      <input
-+        type="hidden"
-+        name="page"
-+        value="1"
-+      />
-+      <label
-+        htmlFor="support-club"
-+        className="grid gap-1"
-+      >
-+        クラブ
-+        <select
-+          id="support-club"
-+          name="clubId"
-+          defaultValue={query.clubId ?? ""}
-+          className="rounded border p-2"
-+        >
-+          <option value="">すべてのクラブ</option>
-+          {missingClub && <option value={query.clubId ?? ""}>選択中のクラブ（報告なし）</option>}
-+          {clubs.map( // 候補ごとのoptionを作るメソッド
-+            /**
-+             * クラブ名をReactのテキストとして表示する。
-+             */
-+            (club) => ( // option生成のコールバック
-+              <option
-+                key={club.id}
-+                value={club.id}
-+              >{club.name}</option>
-+            ),
-+          )}
-+        </select>
-+      </label>
-+      <label
-+        htmlFor="support-status"
-+        className="grid gap-1"
-+      >
-+        ステータス
-+        <select
-+          id="support-status"
-+          name="status"
-+          defaultValue={query.status ?? ""}
-+          className="rounded border p-2"
-+        >
-+          <option value="">すべてのステータス</option>
-+          {SUPPORT_REPORT_STATUS_OPTIONS.map( // ステータス選択肢を作るメソッド
-+            /**
-+             * 検証契約と同じステータス値・ラベルを表示する。
-+             */
-+            (option) => ( // option生成のコールバック
-+              <option
-+                key={option.value}
-+                value={option.value}
-+              >{option.label}</option>
-+            ),
-+          )}
-+        </select>
-+      </label>
-+      <label
-+        htmlFor="support-category"
-+        className="grid gap-1"
-+      >
-+        カテゴリ
-+        <select
-+          id="support-category"
-+          name="category"
-+          defaultValue={query.category ?? ""}
-+          className="rounded border p-2"
-+        >
-+          <option value="">すべてのカテゴリ</option>
-+          {SUPPORT_REPORT_CATEGORY_OPTIONS.map( // カテゴリ選択肢を作るメソッド
-+            /**
-+             * 検証契約と同じカテゴリ値・ラベルを表示する。
-+             */
-+            (option) => ( // option生成のコールバック
-+              <option
-+                key={option.value}
-+                value={option.value}
-+              >{option.label}</option>
-+            ),
-+          )}
-+        </select>
-+      </label>
-+      <button
-+        type="submit"
-+        className="rounded bg-slate-900 px-4 py-2 text-white"
-+      >絞り込む</button>
-+    </form>
-+  );
-+}
 diff --git a/app/(club-app)/platform/support/SupportReportTable.tsx b/app/(club-app)/platform/support/SupportReportTable.tsx
-new file mode 100644
-index 0000000..8cf9bdc
---- /dev/null
+index f2d998f..a248541 100644
+--- a/app/(club-app)/platform/support/SupportReportTable.tsx
 +++ b/app/(club-app)/platform/support/SupportReportTable.tsx
-@@ -0,0 +1,174 @@
-+// app/(club-app)/platform/support/SupportReportTable.tsx
-+// snapshot・全文・管理情報をReactのテキストだけで表示する読取専用テーブル。
+@@ -1,6 +1,10 @@
+ // app/(club-app)/platform/support/SupportReportTable.tsx
+ // プラットフォームページでサポート報告を50件分一覧で表示するテーブル
+ 
++"use client"; // 【追加】下書きを保持する一覧のClient境界
 +
-+import {
-+  getClubMemberRoleLabel, // クラブ内の報告者ロールを日本語の表示ラベルへ変換する関数
-+} from "@/domain/club/club-member-role";
-+import {
-+  SUPPORT_REPORT_CATEGORY_OPTIONS, // 報告カテゴリの値と表示ラベル一覧
-+} from "@/domain/club/support/support-report-form";
-+import type {
-+  PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
-+} from "@/domain/platform/support/support-report-management-types";
-+import {
-+  SUPPORT_REPORT_STATUS_OPTIONS, // 報告ステータスの値と表示ラベル一覧
-+} from "@/domain/platform/support/support-report-query";
-+import {
-+  formatClubDateTime, // UTC日時を指定したタイムゾーンの日本語日時へ変換する関数
-+} from "@/domain/shared/date-time/club-date-time";
++import { useState } from "react";
 +
-+/**
-+ * 保存済みUTC ISO日時を日本時間で表示し、未設定や不正日時は固定表記にする。
-+ */
-+function displayDate(value: string | null): string { // 日時表示の変換関数 / 文字列またはnull型 / 文字列型
-+  if (value === null) {
-+    return "—";
-+  }
-+  try {
-+    return formatClubDateTime(new Date(value), "Asia/Tokyo"); // 指定timezoneの日時変換関数 / Dateコンストラクター
-+  } catch {
-+    return "日時不明";
-+  }
-+}
+ import {
+   getClubMemberRoleLabel, // クラブ内の報告者ロールを日本語の表示ラベルへ変換する関数
+ } from "@/domain/club/club-member-role";
+@@ -17,6 +21,19 @@ import {
+   formatClubDateTime, // UTC日時を指定したタイムゾーンの日本語日時へ変換する関数
+ } from "@/domain/shared/date-time/club-date-time";
+ 
++import {
++  SupportReportOperations, // 【追加】行ごとの独立Action・下書き・versionを管理するComponent
++  SupportReportUnsavedGuard, // 【追加】dirtyな行がある間だけ移動確認を行うComponent
++  type SupportReportActions, // 【追加】bound Actionと独立初期stateの型
++} from "./SupportReportOperations";
 +
 +/**
-+ * 報告1件のsnapshotと全文を表示する。保存されたURLはhrefへ変換しない。
++ * 【追加】限定DTOと、報告IDへbindしたAction・独立初期stateをまとめた行の型。
 + */
-+function ReportRow({ report }: { // 報告行Component関数 / props型
-+  report: PlatformSupportReport; // 限定報告DTOの型
-+}) {
-+  const status = SUPPORT_REPORT_STATUS_OPTIONS.find( // ステータスの表示ラベルを検索するメソッド
-+    /**
-+     * 現在の保存済みステータスに一致する選択肢を探す。
-+     */
-+    (option) => option.value === report.status, // ステータス照合コールバック
-+  )?.label ?? "不明";
-+  const category = SUPPORT_REPORT_CATEGORY_OPTIONS.find( // カテゴリの表示ラベルを検索するメソッド
-+    /**
-+     * 現在の保存済みカテゴリに一致する選択肢を探す。
-+     */
-+    (option) => option.value === report.category, // カテゴリ照合コールバック
-+  )?.label ?? "不明";
-+  const role = report.reporterRole === null ? "未設定" : getClubMemberRoleLabel(report.reporterRole); // 報告時ロールを表示ラベルへ変換する関数
-+  const createdAt = displayDate(report.createdAt); // 受付日時の表示変換関数
-+  const updatedAt = displayDate(report.updatedAt); // 更新日時の表示変換関数
-+  const statusChangedAt = displayDate(report.statusChangedAt); // 状態変更日時の表示変換関数
-+  const resolvedAt = displayDate(report.resolvedAt); // 解決日時の表示変換関数
-+  const notifiedAt = displayDate(report.notifiedAt); // 通知受付日時の表示変換関数
-+  const notification = report.notifiedAt !== null
-+    ? "通知受付済み"
-+    : report.notificationFailed ? "通知失敗" : "通知未受付";
-+  return (
-+    <tr className="border-t align-top">
-+      <td className="space-y-2 p-3">
-+        <p>受付：{createdAt}</p>
-+        <p>更新：{updatedAt}</p>
-+      </td>
-+      <td className="p-3">
-+        <p className="font-medium">{report.club.name}</p>
-+        <p className="break-all text-slate-600">{report.club.slug}</p>
-+      </td>
-+      <td className="space-y-2 p-3">
-+        <p>{category}</p>
-+        <p>{status}</p>
-+      </td>
-+      <td className="space-y-2 p-3">
-+        <p>{report.reporterName ?? "氏名未設定"}</p>
-+        <p className="break-all">{report.reporterEmail ?? "メール未設定"}</p>
-+        <p>{role}</p>
-+      </td>
-+      <td className="space-y-2 p-3">
-+        <p>対応者：{report.handler === null ? "未割当" : report.handler.name ?? "氏名未設定"}</p>
-+        <p>状態変更：{statusChangedAt}</p>
-+        <p>解決：{resolvedAt}</p>
-+        <p>{notification}</p>
-+        <p>通知受付：{notifiedAt}</p>
-+      </td>
-+      <td className="min-w-72 max-w-xl p-3">
-+        <details>
-+          <summary className="cursor-pointer font-medium">本文・内部メモ・環境情報</summary>
-+          <dl className="mt-3 space-y-2 break-all">
-+            <dt className="font-medium">報告ID</dt>
-+            <dd>{report.id}</dd>
-+            <dt className="font-medium">本文</dt>
-+            <dd className="whitespace-pre-wrap">{report.message}</dd>
-+            <dt className="font-medium">内部メモ</dt>
-+            <dd className="whitespace-pre-wrap">{report.internalNote ?? "未設定"}</dd>
-+            <dt className="font-medium">User-Agent</dt>
-+            <dd className="whitespace-pre-wrap">{report.userAgent ?? "未設定"}</dd>
-+            <dt className="font-medium">報告ページURL</dt>
-+            <dd className="whitespace-pre-wrap">{report.pageUrl ?? "未設定"}</dd>
-+          </dl>
-+        </details>
-+      </td>
-+    </tr>
-+  );
-+}
-+
-+/**
-+ * 限定報告DTOをテーブルへ表示し、横スクロールと日本時間の明示を提供する。
-+ */
-+export function SupportReportTable({ reports }: { // 読取専用テーブルComponent関数 / props型
-+  reports: PlatformSupportReport[]; // 限定報告DTOの配列型
-+}) {
-+  return (
-+    <section
-+      aria-label="サポート報告一覧"
-+      className="space-y-2"
-+    >
-+      <p className="text-sm text-slate-600">表示時刻：日本時間（Asia/Tokyo）</p>
-+      <div
-+        className="overflow-x-auto rounded-lg border bg-white"
-+        role="region"
-+        aria-label="報告テーブルの横スクロール"
-+        tabIndex={0}
-+      >
-+        <table className="w-full min-w-5xl text-left text-sm">
-+          <caption className="sr-only">サポート報告と報告時情報・対応状況</caption>
-+          <thead className="bg-slate-100">
-+            <tr>
-+              <th
-+                scope="col"
-+                className="p-3"
-+              >受付・更新日時</th>
-+              <th
-+                scope="col"
-+                className="p-3"
-+              >クラブ</th>
-+              <th
-+                scope="col"
-+                className="p-3"
-+              >カテゴリ・ステータス</th>
-+              <th
-+                scope="col"
-+                className="p-3"
-+              >報告時の情報</th>
-+              <th
-+                scope="col"
-+                className="p-3"
-+              >対応・通知情報</th>
-+              <th
-+                scope="col"
-+                className="p-3"
-+              >内容全文</th>
-+            </tr>
-+          </thead>
-+          <tbody>
-+            {reports.map( // 各報告の表示行を作るメソッド
-+              /**
-+               * 報告IDを安定したkeyとして読取専用の行を表示する。
-+               */
-+              (report) => ( // 行生成のコールバック
-+                // 報告1件を表示するReportRow Component
-+                <ReportRow
-+                  key={report.id}
-+                  report={report}
-+                />
-+              ),
-+            )}
-+          </tbody>
-+        </table>
-+      </div>
-+    </section>
-+  );
-+}
-diff --git a/app/(club-app)/platform/support/page.tsx b/app/(club-app)/platform/support/page.tsx
-new file mode 100644
-index 0000000..e20f2f9
---- /dev/null
-+++ b/app/(club-app)/platform/support/page.tsx
-@@ -0,0 +1,158 @@
-+// app/(club-app)/platform/support/page.tsx
-+// Page自身で再認可し、検証済み条件で50件ずつ読み取るPlatformサポート管理画面。
-+
-+import Link from "next/link";
-+import { notFound, unstable_rethrow } from "next/navigation";
-+
-+import {
-+  requirePlatformAdmin, // Auth本人と有効なPlatform管理者を照合して認可contextを返す関数
-+} from "@/app/(club-app)/platform/require-platform-admin";
-+import {
-+  parseSupportReportQuery, // 一覧queryを検証し、検索条件を整形する関数
-+  PLATFORM_SUPPORT_MAX_PAGE, // 一覧queryで許可する最大ページ番号
-+  type PlatformSupportQuery, // 検証済みの一覧検索条件の型
-+} from "@/domain/platform/support/support-report-query";
-+import type {
-+  PlatformSupportListResult, // 一覧取得の成功値と固定失敗分類の型
-+} from "@/domain/platform/support/support-report-management-types";
-+import {
-+  getPlatformSupport, // 認可contextと生queryから限定一覧DTOまたは固定失敗分類を返すService関数
-+} from "@/src/application/platform/support/get-platform-support";
-+import {
-+  SupportReportFilters, // 検証済み条件とクラブ候補から単一GETフォームを表示するComponent
-+} from "./SupportReportFilters";
-+import {
-+  SupportReportTable, // snapshot・全文・管理情報を安全なテキストで表示する読取専用Component
-+} from "./SupportReportTable";
-+
-+/**
-+ * 権限と一覧データを要求ごとに確認し、管理情報を静的な共有結果へ保存しない設定。
-+ */
-+export const dynamic = "force-dynamic";
-+
-+/**
-+ * Next.jsの非同期searchParamsを受け取る管理一覧Pageのprops型。
-+ */
-+type Props = { // 一覧Pageのprops型
-+  searchParams: Promise<Record<string, string | string[] | undefined>>; // 生queryの辞書を返す非同期型
++export type SupportReportRow = SupportReportActions & { // 【追加】行のAction型と一覧用DTOの型
++  report: PlatformSupportReport; // 【追加】限定報告DTOの型
 +};
 +
-+/**
-+ * 検証済みフィルターだけを引き継ぎ、固定の管理パスへページ送りURLを作る。
-+ */
-+function pageHref(query: PlatformSupportQuery, page: number): string { // ページ送りURL生成関数 / 検証済み条件型 / ページ番号型 / 文字列型
-+  const params = new URLSearchParams(); // 検索値をエンコードするURLSearchParamsコンストラクター
-+  for (const key of ["clubId", "status", "category"] as const) { // 引継ぎ対象キーの読取専用リテラル型
-+    if (query[key] !== null) {
-+      params.set(key, query[key]); // 検証済みフィルターを設定するメソッド
-+    }
-+  }
-+  params.set("page", String(page)); // ページ文字列の設定メソッド / 数値の文字列化関数
-+  return `/platform/support?${params.toString()}`; // URL queryへエンコードするメソッド
-+}
-+
-+/**
-+ * 検索条件の不正を固定文面で示し、任意入力を表示・再利用せずリセット先を提供する。
-+ */
-+function InvalidQuery() { // 不正query表示のComponent関数
-+  return (
-+    <section className="space-y-4">
-+      <h1 className="text-2xl font-bold">サポート報告</h1>
-+      <p role="alert">検索条件が不正です。条件をリセットして検索し直してください。</p>
-+      {/* 生queryを引き継がない固定パスへのNext Link Component */}
-+      <Link
-+        href="/platform/support"
-+        className="underline"
-+      >条件をリセット</Link>
-+    </section>
+ /**
+  * 値を日本時間で表示する関数
+  */
+@@ -25,7 +42,7 @@ function displayDate(value: string | null): string { // 日時表示の変換関
+     return "—";
+   }
+   try {
+-    return formatClubDateTime(new Date(value), "Asia/Tokyo"); // UTC日時を指定したタイムゾーンの日本語日時へ変換する関数
++    return formatClubDateTime(new Date(value), "Asia/Tokyo"); // UTC日時を指定したタイムゾーンの日本語日時へ変換する関数 / 【追加】Dateオブジェクトを生成するコンストラクター
+   } catch {
+     return "日時不明";
+   }
+@@ -35,9 +52,16 @@ function displayDate(value: string | null): string { // 日時表示の変換関
+  * プラットフォームページでサポート報告1件の全文を表示する関数
+  * 保存されたURLはhrefへ変換しない。
+  */
+-function ReportRow({ report }: {
+-  report: PlatformSupportReport; // サポート報告の管理ページで１件のサポート報告に必要なデータの型
++function ReportRow({ // 【追加】定義した処理を実行する関数
++  row,
++  onProtect,
++  outside,
++}: { // 【追加】行表示と編集操作を接続するComponent関数
++  row: SupportReportRow; // 【追加】DTOとbound Actionを持つ行の型
++  onProtect: (dirty: boolean) => void; // 【追加】下書き状態と行の保持を通知する関数型
++  outside: boolean; // 【追加】現在の一覧条件から外れた行かを表す型
+ }) {
++  const { report } = row; // 【追加】限定DTOを表示と編集に分離する
+   const status = SUPPORT_REPORT_STATUS_OPTIONS.find( // ステータスの表示ラベルを検索するメソッド
+     /**
+      * 現在の保存済みステータスに一致する選択肢を探す。
+@@ -102,6 +126,22 @@ function ReportRow({ report }: {
+           </dl>
+         </details>
+       </td>
++      {/* 【追加】行のkeyを変えず、編集stateを保持する管理操作欄 */}
++      <td className="p-3">
++        {outside &&
++          <p role="status">この行は現在の一覧条件から外れています。操作内容を保持しています。表示情報は更新前の場合があります。</p>}
++        {/* 【追加】編集対象列だけを渡す行の管理操作Component */}
++        <SupportReportOperations
++          {...row}
++          report={{
++            id: report.id,
++            status: report.status,
++            updatedAt: report.updatedAt,
++            internalNote: report.internalNote,
++          }}
++          onProtect={onProtect /* 【追加】下書き状態を親へ通知する関数 */}
++        />
++      </td>
+     </tr>
+   );
+ }
+@@ -109,14 +149,48 @@ function ReportRow({ report }: {
+ /**
+  * プラットフォームページでサポート報告を50件分一覧で表示するテーブル
+  */
+-export function SupportReportTable({ reports }: { // 読取専用テーブルComponent関数 / props型
+-  reports: PlatformSupportReport[]; // サポート報告の管理ページで１件のサポート報告に必要なデータの型
++export function SupportReportTable({ rows }: { // 【修正】下書きを行IDで保持する管理テーブルComponent関数
++  rows: SupportReportRow[]; // 【追加】限定DTO・Action・初期stateを持つ行の配列型
+ }) {
++  const [protectedRows, setProtectedRows] = useState<Record<string, { // 【追加】保持する行とdirty状態のhook関数 / 辞書型
++    row: SupportReportRow; // 【追加】保持対象行の型
++    dirty: boolean; // 【追加】未保存メモの有無の型
++  }>>({});
++  const ids = new Set(rows.map( // 【追加】現在の一覧IDを集めるSetコンストラクター / 配列変換メソッド
++    /**
++     * 【追加】受信した行から安定した報告IDを取得する。
++     */
++    (row) => row.report.id, // 【追加】報告ID取得コールバック
++  ));
++  const retained = Object.values(protectedRows).filter( // 【追加】保持行の列挙・条件外の行を選ぶメソッド
++    /**
++     * 【追加】再検証で一覧から消えた保持行だけを選ぶ。
++     */
++    (entry) => !ids.has(entry.row.report.id), // 【追加】保持行の選択コールバック / ID集合の検索メソッド
 +  );
++  const visibleRows = [...rows, ...retained.map( // 【追加】通常行の後に保持行を並べる配列変換メソッド
++    /**
++     * 【追加】条件外でも同じkeyで描画できるよう、保持した行を返す。
++     */
++    (entry) => entry.row, // 【追加】保持行の抽出コールバック
++  )];
++  const dirty = Object.values(protectedRows).some( // 【追加】保持行の列挙と未保存有無を確認するメソッド
++    /**
++     * 【追加】1行でも未保存なら画面全体の移動確認を有効にする。
++     */
++    (entry) => entry.dirty, // 【追加】dirty状態の判定コールバック
++  );
++  if (visibleRows.length === 0) {
++    return null; // 【追加】空一覧でもComponent自体は親からunmountしない
++  }
+   return (
+     <section
+       aria-label="サポート報告一覧"
+       className="space-y-2"
+     >
++      {/* 【追加】他行保存中も未保存メモを保護する移動確認Component */}
++      {dirty &&
++        <SupportReportUnsavedGuard />}
+       <p className="text-sm text-slate-600">表示時刻：日本時間（Asia/Tokyo）</p>
+       <div
+         className="overflow-x-auto rounded-lg border bg-white"
+@@ -152,18 +226,41 @@ export function SupportReportTable({ reports }: { // 読取専用テーブルCom
+                 scope="col"
+                 className="p-3"
+               >内容全文</th>
++              {/* 【追加】独立した行の編集欄 */}
++              <th
++                scope="col"
++                className="p-3"
++              >管理操作</th>
+             </tr>
+           </thead>
+           <tbody>
+-            {reports.map( // 各報告の表示行を作るメソッド
++            {visibleRows.map( // 【追加】報告IDをkeyに通常行と保持行を描画するメソッド
+               /**
+-               * 報告IDを安定したkeyとして読取専用の行を表示する。
++               * 【追加】同じ行のstateを維持し、親へdirty状態と保持対象を通知する。
+                */
+-              (report) => ( // 行生成のコールバック
+-                // 報告1件を表示するReportRow Component
++              (row) => ( // 【追加】管理行を生成するコールバック
++                // 【追加】一覧と保持対象の行を表示するComponent
+                 <ReportRow
+-                  key={report.id}
+-                  report={report}
++                  key={row.report.id}
++                  row={row}
++                  outside={!ids.has(row.report.id) /* 【追加】現在の一覧IDの集合を検索するメソッド */}
++                  onProtect={
++                    /**
++                     * 【追加】入力・送信を開始した行を、再検証後も同じkeyで保持する。
++                     */
++                    (dirty) => setProtectedRows( // 【追加】dirty通知コールバック / 保持行の状態更新関数
++                      /**
++                       * 【追加】別の行の下書き状態を残したまま対象行だけを更新する。
++                       */
++                      (current) => ({ // 【追加】保持行の更新コールバック
++                        ...current,
++                        [row.report.id]: {
++                          row,
++                          dirty,
++                        },
++                      }),
++                    )
++                  }
+                 />
+               ),
+             )}
+diff --git a/app/(club-app)/platform/support/page.tsx b/app/(club-app)/platform/support/page.tsx
+index 710f2a6..c4bf002 100644
+--- a/app/(club-app)/platform/support/page.tsx
++++ b/app/(club-app)/platform/support/page.tsx
+@@ -3,7 +3,10 @@
+ // Page自身で再認可し、検証済み条件で50件ずつ読み取るPlatformサポート管理画面。
+ 
+ import Link from "next/link";
+-import { notFound, unstable_rethrow } from "next/navigation";
++import {
++  notFound,
++  unstable_rethrow,
++} from "next/navigation";
+ 
+ import {
+   requirePlatformAdmin, // Auth本人と有効なPlatform管理者を照合して認可contextを返す関数
+@@ -23,15 +26,48 @@ import {
+   SupportReportFilters, // プラットフォームページのサポート報告一覧をクラブやステータス、カテゴリで絞り込みをするプルダウンの関数
+ } from "./SupportReportFilters";
+ import {
++  type SupportReportRow, // 【追加】限定DTOとbound Action・初期stateを持つ行の型
+   SupportReportTable, //プラットフォームページでサポート報告を50件分一覧で表示するテーブル
+ } from "./SupportReportTable";
+ 
++import {
++  createRequestId, // 【追加】新しいrequestIdをUUID v4形式で生成する関数
++} from "@/domain/shared/request-id";
++import {
++  updateSupportReportStatusAction, // 【追加】毎回再認可してstatusを更新するServer Action関数
++  updateSupportReportNoteAction, // 【追加】毎回再認可して内部メモを保存するServer Action関数
++  type PlatformSupportActionState, // 【追加】versionと最小成功情報だけの管理操作state型
++} from "./actions";
++
++/**
++ * 【追加】行・操作ごとに別のrequestIdを持つ初期stateを作る。
++ */
++function initialState(version: string): PlatformSupportActionState { // 【追加】初期state生成関数 / version文字列型 / 管理state型
++  return {
++    status: "idle",
++    values: { expectedUpdatedAt: version },
++    fieldErrors: {},
++    formError: null,
++    requestId: createRequestId(), // 【追加】独立UUID v4を生成する関数
++  };
 +}
 +
 +/**
-+ * Page単独でも再認可し、query検証後だけ読取Serviceを呼ぶ。更新UIは後続粒度で接続する。
++ * 【追加】同じ検索条件の再検証では編集行を残し、確認後の条件・ページ移動では破棄するkey。
 + */
-+export default async function PlatformSupportPage({ searchParams }: Props) { // 管理一覧PageのComponent関数 / props型
-+  let query: PlatformSupportQuery | null = null; // 検証後だけ保持する一覧条件の型
-+  let result: PlatformSupportListResult | null = null; // 認可後だけ保持する一覧結果の型
-+  try {
-+    const access = await requirePlatformAdmin(); // layoutに依存せず本人と最新Platform権限を確認する関数
-+    const validation = parseSupportReportQuery(await searchParams); // 非同期queryを検証して整形する関数
-+    if (validation.success) {
-+      query = validation.data;
-+      result = await getPlatformSupport(access, { // 認可contextと許可した生queryだけを渡すService関数
-+        clubId: query.clubId ?? "",
-+        status: query.status ?? "",
-+        category: query.category ?? "",
-+        page: String(query.page), // ページ番号を生query形式へ戻す文字列化関数
-+      });
-+    }
-+  } catch (error) {
-+    unstable_rethrow(error); // 認可と取得のNext制御例外を再送出する関数
-+    return (
-+      <section className="space-y-4">
-+        <h1 className="text-2xl font-bold">サポート報告</h1>
-+        <p role="alert">管理情報を取得できませんでした。時間をおいて再度お試しください。</p>
-+      </section>
-+    );
-+  }
-+  if (result?.outcome === "FORBIDDEN") {
-+    notFound(); // 読取時に権限が失効していた場合に404で処理を中断する関数
-+  }
-+  if (query === null || result?.outcome === "INVALID_QUERY") {
-+    return <InvalidQuery />; // 不正な検索条件の固定表示Component
-+  }
-+  if (result?.outcome !== "FOUND") {
-+    return (
-+      <section className="space-y-4">
-+        <h1 className="text-2xl font-bold">サポート報告</h1>
-+        <p role="alert">報告を取得できませんでした。時間をおいて再読み込みしてください。</p>
-+      </section>
-+    );
-+  }
-+  const totalPages = Math.max(1, Math.ceil(result.totalCount / query.pageSize)); // 総ページ数の切上げ・下限設定メソッド
-+  const previousPage = Math.min(query.page - 1, totalPages); // 存在する前ページ番号を選ぶメソッド
-+  const hasNext =
-+    query.page < totalPages &&
-+    query.page < PLATFORM_SUPPORT_MAX_PAGE;
-+  const previousHref = query.page > 1 ? pageHref(query, previousPage) : null; // 前ページURLの生成関数
-+  const nextHref = hasNext ? pageHref(query, query.page + 1) : null; // 次ページURLの生成関数
-+  return (
-+    <section className="space-y-5">
-+      <h1 className="text-2xl font-bold">サポート報告</h1>
-+      <p className="text-sm text-slate-600">全クラブの報告を新しい順に50件ずつ表示します。</p>
-+      {/* 検証済み条件と限定クラブ候補だけを渡す検索Component */}
-+      <SupportReportFilters
-+        query={query}
-+        clubs={result.clubs}
++function tableKey(query: PlatformSupportQuery): string { // 【追加】一覧の表示単位を識別する関数 / 検証済み検索型 / 文字列型
++  return [query.clubId ?? "", query.status ?? "", query.category ?? "", query.page].join(":"); // 【追加】検証済み条件だけを連結するメソッド
++}
++
+ /**
+  * リクエストがあるたびに毎回新しくサーバーで処理を実行して画面を動的に作る
+  */
+ export const dynamic = "force-dynamic";
+ 
+ 
++/**
++ * 【追加】Nextの非同期queryを受け取る一覧Pageのprops型。
++ */
+ type Props = { // 一覧Pageのprops型
+   searchParams: Promise<Record<string, string | string[] | undefined>>; // 生queryの辞書を返す非同期型
+ };
+@@ -39,14 +75,14 @@ type Props = { // 一覧Pageのprops型
+ /**
+  * 検索条件とページをURL末尾に組み込み、URLを生成する関数
+  */
+-function pageHref(query: PlatformSupportQuery, page: number): string { 
+-  const params = new URLSearchParams(); 
++function pageHref(query: PlatformSupportQuery, page: number): string { // 【追加】ページURL生成関数 / 検証済み検索型 / 数値型 / 文字列型
++  const params = new URLSearchParams(); // 【追加】検索パラメーター生成コンストラクター
+   for (const key of ["clubId", "status", "category"] as const) { // 引継ぎ対象キーの読取専用リテラル型
+     if (query[key] !== null) {
+       params.set(key, query[key]); //URLの末尾に付けるための検索文字列（クエリパラメータ）を自動的に組み立てている処理
+     }
+   }
+-  params.set("page", String(page)); //URLの末尾に付けるためのページを自動的に組み立てている処理
++  params.set("page", String(page)); //URLの末尾に付けるためのページを自動的に組み立てている処理 / 【追加】ページ番号の文字列化関数
+   return `/platform/support?${params.toString()}`; // URL queryへエンコードするメソッド
+ }
+ 
+@@ -86,7 +122,7 @@ export default async function PlatformSupportPage({ searchParams }: Props) { //
+       });
+     }
+   } catch (error) {
+-    unstable_rethrow(error); 
++    unstable_rethrow(error); // 【追加】Nextの制御例外を再送出する関数
+     return (
+       <section className="space-y-4">
+         <h1 className="text-2xl font-bold">サポート報告</h1>
+@@ -95,7 +131,7 @@ export default async function PlatformSupportPage({ searchParams }: Props) { //
+     );
+   }
+   if (result?.outcome === "FORBIDDEN") {//閲覧禁止
+-    notFound(); 
++    notFound(); // 【追加】認可拒否を404へ変換する関数
+   }
+   if (query === null || result?.outcome === "INVALID_QUERY") {
+     return <InvalidQuery />; // 検索条件の不正の表示関数（リセット先を提供する）
+@@ -105,6 +141,11 @@ export default async function PlatformSupportPage({ searchParams }: Props) { //
+       <section className="space-y-4">
+         <h1 className="text-2xl font-bold">サポート報告</h1>
+         <p role="alert">報告を取得できませんでした。時間をおいて再読み込みしてください。</p>
++        {/* 【追加】再認可後の取得失敗でも既存下書きを消さない管理テーブルComponent */}
++        <SupportReportTable
++          key={tableKey(query) /* 【追加】再検証と明示的な条件移動を区別するkey生成関数 */}
++          rows={[]}
++        />
+       </section>
+     );
+   }
+@@ -115,6 +156,18 @@ export default async function PlatformSupportPage({ searchParams }: Props) { //
+     query.page < PLATFORM_SUPPORT_MAX_PAGE;
+   const previousHref = query.page > 1 ? pageHref(query, previousPage) : null; // 前ページURLの生成関数（検索条件とページをURL末尾に組み込み、URLを生成する関数）
+   const nextHref = hasNext ? pageHref(query, query.page + 1) : null; // 次ページURLの生成関数（検索条件とページをURL末尾に組み込み、URLを生成する関数）
++  const rows: SupportReportRow[] = result.reports.map( // 【追加】DTOから編集可能な行を作るメソッド / 行の配列型
++    /**
++     * 【追加】IDへActionをbindし、statusとメモそれぞれに独立stateを渡す。
++     */
++    (report) => ({ // 【追加】行の生成コールバック
++      report,
++      statusInitialState: initialState(report.updatedAt), // 【追加】statusの独立state生成関数
++      noteInitialState: initialState(report.updatedAt), // 【追加】メモの独立state生成関数
++      statusAction: updateSupportReportStatusAction.bind(null, report.id), // 【追加】status Actionの対象IDを固定するbindメソッド
++      noteAction: updateSupportReportNoteAction.bind(null, report.id), // 【追加】メモActionの対象IDを固定するbindメソッド
++    }),
++  );
+   return (
+     <section className="space-y-5">
+       <h1 className="text-2xl font-bold">サポート報告</h1>
+@@ -127,10 +180,12 @@ export default async function PlatformSupportPage({ searchParams }: Props) { //
+       <p>全{result.totalCount}件・{query.page}ページ目（全{totalPages}ページ）</p>
+       {result.reports.length === 0 ? (
+         <p role="status">このページに表示する報告はありません。</p>
+-      ) : (
+-        // 読取専用の報告一覧Component
+-        <SupportReportTable reports={result.reports} />
+-      )}
++      ) : null}
++      {/* 【追加】0件でも同じkeyで残し、再検証で消えた未保存行を保持するComponent */}
++      <SupportReportTable
++        key={tableKey(query) /* 【追加】再検証と明示的な条件移動を区別するkey生成関数 */}
++        rows={rows}
 +      />
-+      <p>全{result.totalCount}件・{query.page}ページ目（全{totalPages}ページ）</p>
-+      {result.reports.length === 0 ? (
-+        <p role="status">このページに表示する報告はありません。</p>
-+      ) : (
-+        // 読取専用の報告一覧Component
-+        <SupportReportTable reports={result.reports} />
-+      )}
-+      <nav
-+        aria-label="サポート報告のページ送り"
-+        className="flex flex-wrap gap-4"
-+      >
-+        {previousHref !== null && (
-+          // 検証済み条件を維持する前ページへのNext Link Component
-+          <Link
-+            href={previousHref}
-+            rel="prev"
-+            className="underline"
-+          >前のページ</Link>
-+        )}
-+        {nextHref !== null && (
-+          // 検証済み条件を維持する次ページへのNext Link Component
-+          <Link
-+            href={nextHref}
-+            rel="next"
-+            className="underline"
-+          >次のページ</Link>
-+        )}
-+      </nav>
-+    </section>
-+  );
-+}
-diff --git a/tests/platform-support-pages.test.ts b/tests/platform-support-pages.test.ts
+       <nav
+         aria-label="サポート報告のページ送り"
+         className="flex flex-wrap gap-4"
+diff --git a/tests/platform-support-forms.test.ts b/tests/platform-support-forms.test.ts
 new file mode 100644
-index 0000000..73ec3e6
+index 0000000..e51d9cf
 --- /dev/null
-+++ b/tests/platform-support-pages.test.ts
-@@ -0,0 +1,588 @@
-+// tests/platform-support-pages.test.ts
-+// 実Auth・DBなしでPageとlayoutの実認可、安全な全文表示、GET検索・ページ送りを確認する。
++++ b/tests/platform-support-forms.test.ts
+@@ -0,0 +1,782 @@
++// tests/platform-support-forms.test.ts
++// hook・Action境界のnode試験。実DOM・React scheduler・ブラウザーの離脱確認は再現しない。
 +
 +import {
-+  createElement,
++  isValidElement,
 +  type ReactNode,
 +} from "react";
-+import { renderToStaticMarkup } from "react-dom/server";
 +import {
 +  afterEach,
 +  beforeEach,
@@ -560,575 +809,900 @@ index 0000000..73ec3e6
 +  vi,
 +} from "vitest";
 +
-+import PlatformLayout from "@/app/(club-app)/platform/layout"; // Platform専用認可と管理UIを提供するlayout Component
-+import PlatformSupportPage, { dynamic } from "@/app/(club-app)/platform/support/page"; // 再認可して管理一覧を表示するPage Component / 毎回要求時に描画する設定
++import {
++  SupportReportOperations, // 行のstatus・メモの独立送信Component
++  SupportReportUnsavedGuard, // dirtyの間だけ共通の移動確認を使うComponent
++  type SupportReportActions, // 行に接続するActionと独立初期stateの型
++} from "@/app/(club-app)/platform/support/SupportReportOperations";
++import {
++  SupportReportTable, // 下書きのある行をIDで保持するテーブルComponent
++  type SupportReportRow, // 限定DTOとbound Action・初期stateの型
++} from "@/app/(club-app)/platform/support/SupportReportTable";
 +import type {
-+  PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
-+} from "@/domain/platform/support/support-report-management-types";
++  PlatformSupportActionState, // 管理操作の最小結果state型
++} from "@/app/(club-app)/platform/support/actions";
 +
-+const mocks = vi.hoisted( // importより前にモックを準備するメソッド
++const mocks = vi.hoisted( // import前のモック準備メソッド
 +  /**
-+   * 認可helperは実装を通し、Auth・DB・Service・Next遷移・Clientだけを置換する。
++   * import前にhook・router・移動確認の独立モックを準備する。
 +   */
-+  () => ({ // モック生成コールバック
-+    getUser: vi.fn(), // Auth本人読取モックの生成メソッド
-+    actor: vi.fn(), // 管理者読取モックの生成メソッド
-+    read: vi.fn(), // 一覧Serviceモックの生成メソッド
-+    redirect: vi.fn(), // redirectモックの生成メソッド
-+    notFound: vi.fn(), // notFoundモックの生成メソッド
-+    rethrow: vi.fn(), // Next制御例外再送出モックの生成メソッド
-+    logout: vi.fn(), // ClientログアウトComponentモックの生成メソッド
-+  }),
-+);
-+vi.mock( // Auth境界を置換するメソッド
-+  "@/src/infrastructure/supabase/server",
-+  /**
-+   * Cookieや実Authを読まず、getUserの応答だけを返すclientを用意する。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    createClient:
-+      /**
-+       * 本人確認用のモックだけを持つサーバーclientを返す。
-+       */
-+      async () => ({ // サーバーclient生成コールバック
-+        auth: {
-+          getUser: mocks.getUser, // 本人確認モックの関数参照
-+        },
-+      }),
-+  }),
-+);
-+vi.mock( // dotenvと実DBの起動を防ぐ置換メソッド
-+  "@/src/infrastructure/prisma/client",
-+  /**
-+   * 最新Platform権限の読取だけをモックで公開する。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    prisma: {
-+      platformAdmin: {
-+        findFirst: mocks.actor, // 管理者読取モックの関数参照
-+      },
-+    },
-+  }),
-+);
-+vi.mock( // 読取Service境界を置換するメソッド
-+  "@/src/application/platform/support/get-platform-support",
-+  /**
-+   * 認可されたPageが渡す値と、結果分類による非開示を観測する。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    getPlatformSupport: mocks.read, // 一覧Serviceモックの関数参照
-+  }),
-+);
-+vi.mock( // Client Component境界を置換するメソッド
-+  "@/app/(club-app)/platform-login/PlatformLogoutButton",
-+  /**
-+   * React hookやログアウトActionを実行せず、layoutとの接続だけを観測する。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    PlatformLogoutButton: mocks.logout, // ログアウトComponentモックの関数参照
-+  }),
-+);
-+vi.mock( // Next遷移境界を置換するメソッド
-+  "next/navigation",
-+  /**
-+   * redirect・404・制御例外再送出を観測可能にする。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    redirect: mocks.redirect, // redirectモックの関数参照
-+    notFound: mocks.notFound, // notFoundモックの関数参照
-+    unstable_rethrow: mocks.rethrow, // 制御例外再送出モックの関数参照
-+  }),
-+);
-+vi.mock( // SSRでLinkの固定hrefを観測するモジュール置換メソッド
-+  "next/link",
-+  /**
-+   * Client navigationを実行せず、HTMLのアンカーだけを描画する。
-+   */
-+  () => ({ // モジュール置換コールバック
-+    default:
-+      /**
-+       * Linkのhref・rel・子要素をDOMなしで検査できる形にする。
-+       */
-+      ({ href, rel, children }: { // Link代替Component関数 / props型
-+        href: string; // 固定または生成済みURLの文字列型
-+        rel?: string; // ページ送り種別の任意文字列型
-+        children: ReactNode; // Link内のReactノード型
-+      }) => createElement("a", { // アンカーのReact要素を生成する関数
-+        href,
-+        rel,
-+      }, children), // React要素生成関数
-+  }),
-+);
-+
-+/**
-+ * Nextが処理するredirect・404の制御例外を模す試験用クラス。
-+ */
-+class ControlError extends Error {} // 制御例外クラス / Errorクラス
-+
-+const USER_ID = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
-+const CLUB_ID = "11111111-1111-4111-8111-111111111111";
-+const SECRET = "test-only-private-db-token";
-+const club = {
-+  id: CLUB_ID,
-+  name: "所属していないクラブ",
-+  slug: "club-a",
-+};
-+
-+/**
-+ * 報告時snapshotと、日本時間では翌日になる日時を持つDTOを作る。
-+ */
-+function report(): PlatformSupportReport { // 報告fixture生成関数 / 限定報告DTO型
-+  return {
-+    id: "22222222-2222-4222-8222-222222222222",
-+    createdAt: "2026-10-25T15:00:00.000Z",
-+    updatedAt: "2026-10-25T16:00:00.000Z",
-+    club,
-+    category: "BUG",
-+    status: "OPEN",
-+    message: "保存済み本文\n全文を表示",
-+    pageUrl: "/club/club-a/account?token=stored-value",
-+    userAgent: "報告時のブラウザー",
-+    reporterName: "報告時の氏名",
-+    reporterEmail: "snapshot@example.test",
-+    reporterRole: "MEMBER",
-+    handler: {
-+      id: "handler-id",
-+      name: "担当者表示名",
-+    },
-+    statusChangedAt: "2026-10-25T16:00:00.000Z",
-+    resolvedAt: null,
-+    internalNote: "内部メモ\n全文を表示",
-+    notifiedAt: null,
-+    notificationFailed: true,
-+  };
-+}
-+
-+/**
-+ * 一覧取得成功の固定応答を用意する。
-+ */
-+function found() { // 成功fixture生成関数
-+  return {
-+    outcome: "FOUND",
-+    reports: [report()], // 報告fixture生成関数
-+    clubs: [club],
-+    totalCount: 1,
-+    page: 1,
-+    pageSize: 50,
-+  };
-+}
-+
-+/**
-+ * PromiseのqueryをPageへ渡し、Server ComponentのHTMLを検査する。
-+ */
-+async function page( // Page描画の試験用関数
-+  query: Record<string, string | string[] | undefined> = {}, // Nextの生query辞書型
-+): Promise<string> { // HTML文字列を返す非同期型
-+  return renderToStaticMarkup(await PlatformSupportPage({ // SSR描画関数 / 管理一覧Page関数
-+    searchParams: Promise.resolve(query), // 非同期queryを用意するメソッド
++  () => ({ // 処理を渡すコールバック関数
++    state: vi.fn(), // モック関数の生成メソッド
++    ref: vi.fn(), // モック関数の生成メソッド
++    id: vi.fn(), // モック関数の生成メソッド
++    effect: vi.fn(), // モック関数の生成メソッド
++    actionState: vi.fn(), // モック関数の生成メソッド
++    refresh: vi.fn(), // モック関数の生成メソッド
++    dirty: vi.fn(), // モック関数の生成メソッド
++    submitting: vi.fn(), // モック関数の生成メソッド
++    guard: vi.fn(), // モック関数の生成メソッド
++    confirm: vi.fn(), // モック関数の生成メソッド
 +  }));
-+}
-+
-+beforeEach( // 前処理を登録する関数
++vi.mock("react",  // モジュール置換メソッド
 +  /**
-+   * 有効な本人・管理者・一覧応答を用意し、Nextの制御例外を再現する。
++   * 指定したモジュールだけを置き換え、実環境を操作せず接続を観測する。
 +   */
-+  () => { // 前処理コールバック
-+    vi.resetAllMocks(); // モック実装と履歴の初期化メソッド
-+    mocks.getUser.mockResolvedValue({ // Auth本人応答の設定メソッド
-+      data: { user: { id: USER_ID } },
-+      error: null,
-+    });
-+    mocks.actor.mockResolvedValue({ // 最新管理者応答の設定メソッド
-+      id: USER_ID,
-+      role: "DEVELOPER",
-+      isActive: true,
-+    });
-+    mocks.read.mockResolvedValue(found()); // 一覧応答の設定メソッド / fixture生成関数
-+    mocks.logout.mockImplementation( // Client代替の実装を設定するメソッド
++  async (original) => ({ // 処理を渡すコールバック関数
++    ...await original<typeof import("react")>(), // 実際のReactモジュールを取得する関数
++    useState: mocks.state,
++    useRef: mocks.ref,
++    useId: mocks.id,
++    useEffect: mocks.effect,
++    useActionState: mocks.actionState,
++    startTransition:
 +      /**
-+       * ログアウト操作を実行せず、接続確認用のボタンだけを描画する。
++       * 受け取った送信開始処理を即座に実行する。
 +       */
-+      () => createElement("button", { type: "button" }, "ログアウト"), // Componentコールバック / React要素生成関数
-+    );
-+    for (const method of [mocks.redirect, mocks.notFound]) { // Next制御モックの関数参照
-+      method.mockImplementation( // 制御例外の実装設定メソッド
-+        /**
-+         * Nextの画面遷移・404と同じく例外で処理を中断する。
-+         */
-+        () => { // 制御例外コールバック
-+          throw new ControlError("NEXT_CONTROL"); // 制御例外のコンストラクター
-+        },
-+      );
-+    }
-+    mocks.rethrow.mockImplementation( // 再送出の実装設定メソッド
++      (callback: () => void) => callback(), // 処理を渡すコールバック関数 / 戻り値を使わない型 / 受け取った処理を実行する関数
++  }));
++vi.mock("next/navigation",  // モジュール置換メソッド
++  /**
++   * 指定したモジュールだけを置き換え、実環境を操作せず接続を観測する。
++   */
++  () => ({ // 処理を渡すコールバック関数
++    useRouter:
 +      /**
-+       * Next用の制御例外だけを再送出し、通常例外は戻す。
++       * 手動再取得だけを観測するrouterを返す。
 +       */
-+      (error: unknown) => { // 再送出コールバック / 不明値型
-+        if (error instanceof ControlError) { // 制御例外クラスの判定
++      () => ({ refresh: mocks.refresh }), // 処理を渡すコールバック関数
++    unstable_rethrow:
++      /**
++       * 試験用のNext制御例外だけを再送出する。
++       */
++      (error: unknown) => { // 処理を渡すコールバック関数 / 検証前の未知値の型
++        if (error === CONTROL) {
 +          throw error;
 +        }
 +      },
-+    );
-+    for (const method of ["error", "warn", "log"] as const) { // ログメソッド名の読取専用リテラル型
-+      vi.spyOn(console, method).mockImplementation( // ログ監視と代替実装の設定メソッド
-+        /**
-+         * 後処理で非出力を確認するため、ログの実出力を抑制する。
-+         */
-+        () => undefined, // ログ抑制コールバック
-+      );
-+    }
-+  },
-+);
-+afterEach( // 後処理を登録する関数
++  }));
++vi.mock("@/app/(club-app)/club/admin/_hooks/useUnsavedChangesGuard",  // モジュール置換メソッド
 +  /**
-+   * 表示や認可の例外原文をログへ出さず、consoleを復元する。
++   * 指定したモジュールだけを置き換え、実環境を操作せず接続を観測する。
 +   */
-+  () => { // 後処理コールバック
-+    expect(console.error).not.toHaveBeenCalled(); // ログ関数参照 / 期待値生成・非出力検証メソッド
-+    expect(console.warn).not.toHaveBeenCalled(); // 警告関数参照 / 期待値生成・非出力検証メソッド
-+    expect(console.log).not.toHaveBeenCalled(); // 通常ログ関数参照 / 期待値生成・非出力検証メソッド
-+    vi.restoreAllMocks(); // consoleを復元するメソッド
-+  },
-+);
++  () => ({ // 処理を渡すコールバック関数
++    useUnsavedChangesGuard: mocks.guard,
++  }));
++// Toast自身のタイマーは既存実装へ委ね、通知propsとkeyを観測する。
++vi.mock("@/components/admin/ToastMessage",  // モジュール置換メソッド
++  /**
++   * 指定したモジュールだけを置き換え、実環境を操作せず接続を観測する。
++   */
++  () => ({ // 処理を渡すコールバック関数
++    ToastMessage:
++      /**
++       * 通知用propsとkeyの検査に実タイマーを混ぜない。
++       */
++      () => null, // 処理を渡すコールバック関数
++  }));
 +
-+it.each(["DEVELOPER", "SUPPORT"])( // 許可ロール別の試験定義メソッド
-+  "%sはクラブ所属なしでlayoutとPageに入り、Pageでも再認可される",
-+  /**
-+   * クラブ用モデルを持たないDBモックで、2箇所の独立認可と専用logout接続を確認する。
-+   */
-+  async (role) => { // 両ロールの試験コールバック
-+    mocks.actor.mockResolvedValue({ // 最新管理者応答を設定するメソッド
-+      id: USER_ID,
-+      role,
-+      isActive: true,
-+    }); // 管理者応答の設定メソッド
-+    const html = renderToStaticMarkup(await PlatformLayout({ // SSR描画関数 / 専用layout関数
-+      children: createElement("p", null, "配下の画面"), // 子のReact要素生成関数
-+    }));
-+    expect(html).toContain("Platform管理"); // 期待値生成・専用見出しの検証メソッド
-+    expect(html).toContain('href="/platform/support"'); // 期待値生成・固定supportリンクの検証メソッド
-+    expect(html).toContain("ログアウト"); // 期待値生成・logout接続の検証メソッド
-+    expect(html).not.toContain("<footer"); // 期待値生成・クラブFooter非表示の検証メソッド
-+    expect(html).not.toContain('href="/club/'); // 期待値生成・クラブリンク非表示の検証メソッド
-+    expect(mocks.logout.mock.calls[0][0]).toEqual({}); // 期待値生成・Clientへ認可データを渡さないことの比較メソッド
-+    const content = await page(); // Page描画関数
-+    expect(content).toContain("保存済み本文"); // 期待値生成・本文表示の検証メソッド
-+    expect(mocks.getUser).toHaveBeenCalledTimes(2); // モック関数参照 / Page自身でも認可することの検証メソッド
-+    expect(dynamic).toBe("force-dynamic"); // 期待値生成・要求時描画設定の比較メソッド
-+  },
-+);
++/**
++ * Componentごとに保持するhookの値と現在の読取位置を表す型。
++ */
++type Frame = { // Componentごとのhook領域の型
++  values: unknown[]; // 検証前の未知値の型
++  cursor: number; // 数値型
++};
++/**
++ * hookの保存値とActionのpending状態を表す型。
++ */
++type Cell = { // hook値とpending状態の型
++  value: unknown; // 検証前の未知値の型
++  pending: boolean; // 真偽値型
++};
++/**
++ * 行の編集Componentが受け取る実装上のprops型。
++ */
++type Props = Parameters<typeof SupportReportOperations>[0]; // 行の編集props型 / 関数引数の組を取り出す型
++/**
++ * JSXのpropsを安全に調べるための未知値の辞書型。
++ */
++type NativeProps = Record<string, unknown>; // JSX要素propsの辞書型 / キーと値の辞書型 / 文字列型 / 検証前の未知値の型
 +
-+it.each(["未ログイン", "一般会員", "inactive"])( // 拒否対象別の試験定義メソッド
-+  "%sはPage単独とlayoutの両方で拒否する",
-+  /**
-+   * layoutの実行有無に依存せず、認可helperの最新DB条件を通して拒否する。
-+   */
-+  async (mode) => { // 不許可認可の試験コールバック
-+    if (mode === "未ログイン") {
-+      mocks.getUser.mockResolvedValue({ // Auth本人応答を設定するメソッド
-+        data: { user: null },
-+        error: null,
-+      }); // 未認証応答の設定メソッド
-+    } else {
-+      mocks.actor.mockResolvedValue(mode === "一般会員" ? null : { // 管理者応答の設定メソッド
-+        id: USER_ID,
-+        role: "SUPPORT",
-+        isActive: false,
-+      });
-+    }
-+    await expect(page()).rejects.toBeInstanceOf(ControlError); // Page描画関数 / 制御例外の検証メソッド / 例外クラス参照
-+    await expect(PlatformLayout({ children: "機密の子画面" })).rejects.toBeInstanceOf(ControlError); // layout関数 / 制御例外の検証メソッド / 例外クラス参照
-+    expect(mocks.read).not.toHaveBeenCalled(); // モック関数参照 / Service未呼出しの検証メソッド
-+  },
-+);
++const frames = new Map<string, Frame>(); // hook領域を保持するMapコンストラクター / 文字列型 / Componentごとのhook領域の型
++let active: Frame; // Componentごとのhook領域の型
++let tasks: Promise<unknown>[]; // 非同期結果の型 / 検証前の未知値の型
++let ids = 0;
++const NativeFormData = globalThis.FormData; // fixture複写元のnative FormDataコンストラクター参照
++const CONTROL = new Error("test-only-next-control"); // 試験用の例外を作るErrorコンストラクター
++const V1 = "2026-10-26T00:00:00.000Z";
++const V2 = "2026-10-26T00:00:01.000Z";
++const V3 = "2026-10-26T00:00:02.000Z";
 +
-+it( // 試験を登録する関数
-+  "検証済みの全filterとページだけをService・ページ送りへ渡す",
-+  /**
-+   * GETフォームはpage=1へ戻し、前後リンクでは同じ絞り込み条件だけを維持する。
-+   */
-+  async () => { // 検索条件の試験コールバック
-+    mocks.read.mockResolvedValue({ // 一覧応答を設定するメソッド
-+      ...found(), // 成功fixture生成関数
-+      totalCount: 151,
-+      page: 2,
-+    }); // 一覧応答の設定メソッド / fixture生成関数
-+    const html = await page({ // Page描画関数
-+      clubId: CLUB_ID,
-+      status: "RESOLVED",
-+      category: "QUESTION",
-+      page: "2",
-+      returnTo: SECRET,
-+      userId: SECRET,
-+    });
-+    expect(mocks.read).toHaveBeenCalledExactlyOnceWith({ // モック関数参照 / Service引数の検証メソッド
-+      userId: USER_ID,
-+      platformAdmin: {
-+        id: USER_ID,
-+        role: "DEVELOPER",
-+      },
-+    }, {
-+      clubId: CLUB_ID,
-+      status: "RESOLVED",
-+      category: "QUESTION",
-+      page: "2",
-+    });
-+    expect(html).toContain('method="get"'); // 期待値生成・GETフォームの検証メソッド
-+    expect(html).toContain('name="page" value="1"'); // 期待値生成・pageリセットの検証メソッド
-+    expect(html).toContain(`clubId=${CLUB_ID}&amp;status=RESOLVED&amp;category=QUESTION&amp;page=1`); // 期待値生成・前ページ条件の検証メソッド
-+    expect(html).toContain(`clubId=${CLUB_ID}&amp;status=RESOLVED&amp;category=QUESTION&amp;page=3`); // 期待値生成・次ページ条件の検証メソッド
-+    expect(html).not.toContain(SECRET); // 期待値生成・任意query非反射の検証メソッド
-+    expect(html).toContain('value="RESOLVED" selected=""'); // 期待値生成・選択中statusの検証メソッド
-+  },
-+);
++/**
++ * Componentごとのhook領域を再利用して、イベント後の再描画を明示する。
++ */
++function run<T>(key: string, component: () => T): T { // Componentごとのhook領域で指定した描画を実行する関数 / 文字列型 / Tの型
++  active = frames.get(key) ?? { // キーの値取得メソッド
++    values: [],
++    cursor: 0,
++  };
++  active.cursor = 0;
++  frames.set(key, active); // キーの値設定メソッド
++  return component(); // 指定された描画を実行する関数
++}
 +
-+it.each([{ page: "0" }, { page: ["1", "2"] }, { clubId: SECRET }, { status: SECRET }])( // 入力値別の試験を定義するメソッド
-+  "不正queryを全件取得に丸めず、原文も反射しない %#",
-+  /**
-+   * queryの重複・配列・不正値ではServiceへ進まず、固定のリセット先だけを表示する。
-+   */
-+  async (query) => { // 不正queryの試験コールバック
-+    const html = await page(query); // Page描画関数
-+    expect(html).toContain("検索条件が不正"); // 期待値生成・不正条件表示の検証メソッド
-+    expect(html).not.toContain(SECRET); // 期待値生成・原文非反射の検証メソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // モック関数参照 / Service未呼出しの検証メソッド
-+  },
-+);
++/**
++ * hook呼出し順に値を保持する。Reactの並列描画・DOM状態は模倣しない。
++ */
++function slot(initial: () => unknown): unknown { // hook呼出し順に値を保存する関数 / 検証前の未知値の型
++  const index = active.cursor++;
++  if (!(index in active.values)) {
++    active.values[index] = initial(); // hookの初期値を生成する関数
++  }
++  return active.values[index];
++}
 +
-+it( // 試験を登録する関数
-+  "50件の全文・snapshot・管理情報を日本時間で読取専用表示する",
-+  /**
-+   * ページ内の全行とdetailsを描画し、snapshot・通知分類・nullable担当者を表示する。
-+   */
-+  async () => { // 表示項目の試験コールバック
-+    mocks.read.mockResolvedValue({ // 50件の応答設定メソッド
-+      ...found(), // 成功fixture生成関数
-+      totalCount: 51,
-+      reports: Array.from( // 報告配列を生成するメソッド
-+        { length: 50 },
-+        /**
-+         * 報告IDが重複しない、作成日時の降順を保ったfixtureを生成する。
-+         */
-+        (_, index) => ({ // 報告fixture生成のコールバック
-+          ...report(), // 報告fixture生成関数
-+          id: String(50 - index), // 識別用の数値を文字列化する関数
-+          handler: index === 0 ? null : {
-+            id: "handler-id",
-+            name: "担当者表示名",
-+          },
-+        }),
-+      ),
-+    });
-+    const html = await page(); // Page描画関数
-+    expect(html.match(/<details>/g)).toHaveLength(50); // 文字列検索・期待値生成・件数検証メソッド
-+    expect(html).toContain("2026年10月26日（月） 00:00"); // 期待値生成・日本時間表示の検証メソッド
-+    expect(html).toContain("報告時の氏名"); // 期待値生成・snapshot表示の検証メソッド
-+    expect(html).toContain("snapshot@example.test"); // 期待値生成・snapshotメールの検証メソッド
-+    expect(html).toContain("未割当"); // 期待値生成・null担当者表示の検証メソッド
-+    expect(html).toContain("担当者表示名"); // 期待値生成・担当者表示の検証メソッド
-+    expect(html).toContain("通知失敗"); // 期待値生成・通知分類の検証メソッド
-+    expect(html).not.toContain("<textarea"); // 期待値生成・編集UIなしの検証メソッド
-+    expect(html).not.toContain('method="post"'); // 期待値生成・書込フォームなしの検証メソッド
-+  },
-+);
++/**
++ * JSXの型とpropsを調べ、Componentを実行せず指定した要素だけを取り出す。
++ */
++function nodes(node: ReactNode, type: unknown): NativeProps[] { // JSXから指定した要素のpropsを取り出す関数 / Reactで描画可能なノード型 / 検証前の未知値の型 / JSX要素propsの辞書型
++  if (Array.isArray(node)) { // 配列かどうかを判定する組込みメソッド
++    return node.flatMap( // 子要素の探索結果を平坦化メソッド
++      /**
++       * 子要素を探索して、条件に合う要素の配列を返す。
++       */
++      (child) => nodes(child, type)); // 処理を渡すコールバック関数 / JSXから指定した要素のpropsを取り出す関数
++  }
++  if (!isValidElement<NativeProps>(node)) { // React要素の判定関数 / JSX要素propsの辞書型
++    return [];
++  }
++  return [
++    ...(node.type === type ? [node.props] : []),
++    ...nodes(node.props.children as ReactNode, type), // JSXから指定した要素のpropsを取り出す関数 / Reactで描画可能なノード型
++  ];
++}
 +
-+it( // 試験を登録する関数
-+  "XSS文字列・保存済みURL・メモをHTMLとして解釈せず全文表示する",
-+  /**
-+   * 本文・UA・URL等をReactのテキストとしてエスケープし、外部リンクを作らない。
-+   */
-+  async () => { // XSS非実行の試験コールバック
-+    const attack = '<script>alert("xss")</script>';
-+    mocks.read.mockResolvedValue({ // 不信な保存値を含む応答設定メソッド
-+      ...found(), // 成功fixture生成関数
-+      reports: [{
-+        ...report(), // 報告fixture生成関数
-+        message: `${attack}\n全文の末尾`,
-+        internalNote: attack,
-+        userAgent: attack,
-+        pageUrl: "javascript:alert(1)",
-+        reporterName: attack,
-+        club: {
-+          ...club,
-+          name: attack,
-+        },
-+      }],
-+    });
-+    const html = await page(); // Page描画関数
-+    expect(html).not.toContain("<script>"); // 期待値生成・scriptタグ非出現の検証メソッド
-+    expect(html).toContain("&lt;script&gt;"); // 期待値生成・エスケープ表示の検証メソッド
-+    expect(html).toContain("全文の末尾"); // 期待値生成・全文非切捨ての検証メソッド
-+    expect(html).toContain("javascript:alert(1)"); // 期待値生成・URL文字列表示の検証メソッド
-+    expect(html).not.toContain('href="javascript:'); // 期待値生成・保存URLの非リンク化検証メソッド
-+  },
-+);
++/**
++ * 行の編集Componentだけを再描画する。props追従による自己更新を次の描画へ反映する。
++ */
++function view(props: Props): ReactNode { // 編集Componentを同じhook領域で再描画する関数 / 行の編集props型 / Reactで描画可能なノード型
++  run(props.report.id,  // Componentごとのhook領域で指定した描画を実行する関数
++    /**
++     * 指定されたComponentを対応するhook領域で描画する。
++     */
++    () => SupportReportOperations(props)); // 処理を渡すコールバック関数 / 行のstatus・メモの独立送信Component関数
++  return run(props.report.id,  // Componentごとのhook領域で指定した描画を実行する関数
++    /**
++     * 指定されたComponentを対応するhook領域で描画する。
++     */
++    () => SupportReportOperations(props)); // 処理を渡すコールバック関数 / 行のstatus・メモの独立送信Component関数
++}
 +
-+it.each(["READ_FAILED", "INVALID_QUERY", "FORBIDDEN"])( // 失敗分類別の試験定義メソッド
-+  "%sでは部分DTOを表示しない",
-+  /**
-+   * 失敗応答に報告が混入しても、分類に従って固定文面または404だけを返す。
-+   */
-+  async (outcome) => { // 部分非開示の試験コールバック
-+    mocks.read.mockResolvedValue({ // 一覧応答を設定するメソッド
-+      ...found(), // 成功fixture生成関数
++/**
++ * 行・操作ごとに異なるrequestIdを持つ最小初期stateを作る。
++ */
++function state(id = "status-request"): PlatformSupportActionState { // 操作別の最小初期stateを作る関数 / 管理操作の最小結果state型
++  return {
++    status: "idle",
++    values: { expectedUpdatedAt: V1 },
++    fieldErrors: {},
++    formError: null,
++    requestId: id,
++  };
++}
++
++/**
++ * 最小成功結果を作る。本文やsnapshotをAction結果へ混入させない。
++ */
++function success(version = V2, outcome: "UPDATED" | "UNCHANGED" = "UPDATED"): // 最小成功結果を作る関数
++  PlatformSupportActionState { // 管理操作の最小結果state型
++  return {
++    ...state("rotated-request"), // 操作別の最小初期stateを作る関数
++    status: "success",
++    values: { expectedUpdatedAt: version },
++    data: {
 +      outcome,
-+      reports: [{ message: SECRET }],
-+    }); // 失敗応答の設定メソッド / fixture生成関数
-+    if (outcome === "FORBIDDEN") {
-+      await expect(page()).rejects.toBeInstanceOf(ControlError); // Page描画関数 / 制御例外の検証メソッド / 例外クラス参照
-+    } else {
-+      const html = await page(); // Page描画関数
-+      expect(html).not.toContain(SECRET); // 期待値生成・部分DTO非開示の検証メソッド
-+      expect(html).not.toContain("<table"); // 期待値生成・一覧非表示の検証メソッド
-+      expect(html).toContain('role="alert"'); // 期待値生成・固定エラー表示の検証メソッド
++      reportId: "report-a",
++      updatedAt: version,
++      reloadRequired: false,
++      message: "更新しました。",
++    },
++  };
++}
++
++/**
++ * 2つのActionを独立モックにした、1行の最小propsを作る。
++ */
++function props(id = "report-a"): Props { // 独立Actionと初期stateを持つ行propsの生成関数 / 行の編集props型
++  return {
++    report: {
++      id,
++      updatedAt: V1,
++      status: "OPEN",
++      internalNote: "元のメモ",
++    },
++    statusInitialState: state(`${id}-status`), // 操作別の最小初期stateを作る関数
++    noteInitialState: state(`${id}-note`), // 操作別の最小初期stateを作る関数
++    statusAction: vi.fn().mockResolvedValue(success()), // 非同期モックの成功値設定メソッド / モック関数の生成メソッド / 最小成功結果を作る関数
++    noteAction: vi.fn().mockResolvedValue(success()), // 非同期モックの成功値設定メソッド / モック関数の生成メソッド / 最小成功結果を作る関数
++    onProtect: vi.fn(), // モック関数の生成メソッド
++  };
++}
++
++/**
++ * native formの代わりに、hidden・select・textareaの値をFormData fixtureへ移す。
++ */
++function data(form: NativeProps): FormData { // フォーム値を送信fixtureへ移す関数 / JSX要素propsの辞書型 / 送信フォームデータ型
++  const result = new FormData(); // 送信データを作るFormDataコンストラクター
++  for (const type of ["input", "select", "textarea"]) {
++    for (const item of nodes(form.children as ReactNode, type)) { // JSXから指定した要素のpropsを取り出す関数 / Reactで描画可能なノード型
++      result.set(String(item.name), String(item.value ?? "")); // キーの値設定メソッド / 値を文字列へ変換する組込み関数
 +    }
-+  },
-+);
++  }
++  return result;
++}
 +
-+it( // 試験を登録する関数
-+  "空一覧でも候補とGET検索を表示し、不要なページ送りを出さない",
-+  /**
-+   * 未取得と0件成功を区別し、フィルターを変更できる状態を維持する。
-+   */
-+  async () => { // 0件の試験コールバック
-+    mocks.read.mockResolvedValue({ // 一覧応答を設定するメソッド
-+      ...found(), // 成功fixture生成関数
-+      reports: [],
-+      totalCount: 0,
-+    }); // 空一覧応答の設定メソッド / fixture生成関数
-+    const html = await page(); // Page描画関数
-+    expect(html).toContain("表示する報告はありません"); // 期待値生成・0件表示の検証メソッド
-+    expect(html).toContain("すべてのクラブ"); // 期待値生成・検索可能状態の検証メソッド
-+    expect(html).not.toContain('rel="next"'); // 期待値生成・次ページなしの検証メソッド
-+    expect(html).not.toContain('rel="prev"'); // 期待値生成・前ページなしの検証メソッド
-+  },
-+);
++/**
++ * status変更イベントを直接呼ぶ。native DOMイベントの伝播は検証しない。
++ */
++function change(tree: ReactNode, value = "RESOLVED") { // status変更handlerを直接呼ぶ関数 / Reactで描画可能なノード型
++  const form = nodes(tree, "form")[0]; // JSXから指定した要素のpropsを取り出す関数
++  const payload = data(form); // フォーム値を送信fixtureへ移す関数
++  payload.set("status", value); // キーの値設定メソッド
++  (nodes(tree, "select")[0].onChange as (event: unknown) => void)({ // status変更イベントhandler関数 / JSXから指定した要素のpropsを取り出す関数 / 検証前の未知値の型 / 戻り値を使わない型
++    currentTarget: { form: payload },
++  });
++}
 +
-+it( // 試験を登録する関数
-+  "例外原文を表示せず、layoutでは子の管理情報も表示しない",
-+  /**
-+   * Auth基盤の障害でも固定文面だけを描画し、PageのService呼出しを止める。
-+   */
-+  async () => { // 通常例外の試験コールバック
-+    mocks.getUser.mockRejectedValue(new Error(SECRET)); // 障害応答の設定メソッド / Errorコンストラクター
-+    const html = await page(); // Page描画関数
-+    expect(html).not.toContain(SECRET); // 期待値生成・原文非開示の検証メソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // モック関数参照 / Service未呼出しの検証メソッド
-+    const layout = renderToStaticMarkup(await PlatformLayout({ children: SECRET })); // SSR描画関数 / layout関数
-+    expect(layout).not.toContain(SECRET); // 期待値生成・子画面非開示の検証メソッド
-+    expect(layout).toContain("管理権限を確認できません"); // 期待値生成・固定認可エラーの検証メソッド
-+  },
-+);
++/**
++ * textareaの入力handlerを直接呼び、未保存の値を持たせる。
++ */
++function edit(tree: ReactNode, value = "未保存の下書き") { // メモ入力handlerを直接呼ぶ関数 / Reactで描画可能なノード型
++  (nodes(tree, "textarea")[0].onChange as (event: unknown) => void)({ // メモ入力イベントhandler関数 / JSXから指定した要素のpropsを取り出す関数 / 検証前の未知値の型 / 戻り値を使わない型
++    currentTarget: { value },
++  });
++}
 +
-+it( // 試験を登録する関数
-+  "候補から消えた選択クラブも勝手に全クラブへ戻さない",
++/**
++ * メモフォームを直接submitし、native遷移が止められることも確認する。
++ */
++function save(tree: ReactNode) { // メモのsubmit handlerを直接呼ぶ関数 / Reactで描画可能なノード型
++  const form = nodes(tree, "form")[1]; // JSXから指定した要素のpropsを取り出す関数
++  const preventDefault = vi.fn(); // モック関数の生成メソッド
++  (form.onSubmit as (event: unknown) => void)({ // メモのsubmitイベントhandler関数 / 検証前の未知値の型 / 戻り値を使わない型
++    preventDefault,
++    currentTarget: data(form), // フォーム値を送信fixtureへ移す関数
++  });
++  expect(preventDefault).toHaveBeenCalledOnce(); // 呼出しが1回であることを検証メソッド / 期待値を生成する関数
++}
++
++/**
++ * 手動再読取または再編集buttonのhandlerを直接呼ぶ。
++ */
++function click(tree: ReactNode, label: string) { // 再取得・再編集buttonのhandlerを呼ぶ関数 / Reactで描画可能なノード型 / 文字列型
++  const button = nodes(tree, "button").find( // 条件に一致する値の検索メソッド / JSXから指定した要素のpropsを取り出す関数
++    /**
++     * 指定した表示文言と一致するbuttonを探す。
++     */
++    (item) => item.children === label); // 処理を渡すコールバック関数
++  expect(button).toBeDefined(); // 対象の存在を検証メソッド / 期待値を生成する関数
++  (button!.onClick as () => void)(); // 選択したbuttonのクリックhandler関数 / 戻り値を使わない型
++}
++
++/**
++ * 模したAction queueの完了を明示的に待つ。
++ */
++async function flush() { // 試験用Action queueの完了を待つ関数
++  await Promise.all(tasks.splice(0)); // 複数のAction完了待機メソッド / 待機対象の取り出しメソッド
++}
++
++beforeEach( // 各試験の初期化を登録する関数
 +  /**
-+   * 選択中IDは検証済みの値を保持し、報告なしの候補としてGETフォームへ残す。
++   * 各試験のhook領域を初期化し、実DOM・Auth・DBを使わない境界を準備する。
 +   */
-+  async () => { // 存在しない候補の試験コールバック
-+    mocks.read.mockResolvedValue({ // 報告とクラブ候補が空の場合の応答設定メソッド
-+      ...found(), // 成功fixture生成関数
-+      reports: [],
-+      clubs: [],
-+      totalCount: 0,
++  () => { // 処理を渡すコールバック関数
++    vi.resetAllMocks(); // モックの初期化メソッド
++    vi.spyOn(console, "error").mockImplementation( // モック実装の設定メソッド / spyOnを実行する関数
++      /**
++       * 試験用の値を返すコールバック。
++       */
++      () => undefined); // 処理を渡すコールバック関数
++    vi.spyOn(console, "warn").mockImplementation( // モック実装の設定メソッド / spyOnを実行する関数
++      /**
++       * 試験用の値を返すコールバック。
++       */
++      () => undefined); // 処理を渡すコールバック関数
++    vi.spyOn(console, "log").mockImplementation( // モック実装の設定メソッド / spyOnを実行する関数
++      /**
++       * 試験用の値を返すコールバック。
++       */
++      () => undefined); // 処理を渡すコールバック関数
++    frames.clear(); // hook領域の初期化メソッド
++    tasks = [];
++    ids = 0;
++    vi.stubGlobal("window", { confirm: mocks.confirm }); // 試験用グローバルの置換メソッド
++    vi.stubGlobal("FormData", class extends NativeFormData { // 試験用グローバルの置換メソッド
++      /**
++       * DOMフォームの代わりに渡されたfixtureをnative FormDataへ複写する。
++       */
++      constructor(source?: FormData) { // 送信フォームデータ型
++        super(); // native FormDataの親コンストラクター
++        if (source) {
++          for (const [name, value] of source.entries()) { // フォームの項目列挙メソッド
++            this.append(name, value); // フォーム項目の追加メソッド
++          }
++        }
++      }
 +    });
-+    const html = await page({ clubId: CLUB_ID }); // Page描画関数
-+    expect(html).toContain(`value="${CLUB_ID}" selected=""`); // 期待値生成・選択中ID維持の検証メソッド
-+    expect(html).toContain("選択中のクラブ（報告なし）"); // 期待値生成・候補不在表示の検証メソッド
-+  },
-+);
-+
-+it.each([ // ページ境界別の試験定義メソッド
-+  {
-+    number: "1",
-+    count: 51,
-+    previous: false,
-+    next: true,
-+  },
-+  {
-+    number: "2",
-+    count: 51,
-+    previous: true,
-+    next: false,
-+  },
-+  {
-+    number: "10000",
-+    count: 500001,
-+    previous: true,
-+    next: false,
-+  },
-+])(
-+  "$numberページでは先頭・末尾・最大ページの境界を守る",
-+  /**
-+   * 不要なページ送りや、query検証で拒否される10001ページへのリンクを作らない。
-+   */
-+  async ({ number, count, previous, next }) => { // ページ境界の試験コールバック
-+    mocks.read.mockResolvedValue({ // 総件数を変えた応答設定メソッド
-+      ...found(), // 成功fixture生成関数
-+      totalCount: count,
++    mocks.state.mockImplementation( // モック実装の設定メソッド
++      /**
++       * 前回値と更新関数を同じhook領域で保持する。
++       */
++      (initial) => { // 処理を渡すコールバック関数
++        const cell = slot( // hook呼出し順に値を保存する関数
++          /**
++           * Componentのhook領域へ保存する初期値を生成する。
++           */
++          () => ({ value: initial })) as Cell; // 処理を渡すコールバック関数 / hook値とpending状態の型
++        return [
++          cell.value,
++          /**
++           * 前回値または更新関数から次のhook値を保存する。
++           */
++          (value: unknown) => { // 処理を渡すコールバック関数 / 検証前の未知値の型
++            cell.value = typeof value === "function" ? value(cell.value) : value; // 前回値から次の値を作る更新関数
++          },
++        ];
++      });
++    mocks.ref.mockImplementation( // モック実装の設定メソッド
++      /**
++       * 再描画でも同じrefの参照を保持する。
++       */
++      (initial) => slot( // 処理を渡すコールバック関数 / hook呼出し順に値を保存する関数
++        /**
++         * Componentのhook領域へ保存する初期値を生成する。
++         */
++        () => ({ current: initial }))); // 処理を渡すコールバック関数
++    mocks.id.mockImplementation( // モック実装の設定メソッド
++      /**
++       * 各hookのIDを再描画でも維持する。
++       */
++      () => slot( // 処理を渡すコールバック関数 / hook呼出し順に値を保存する関数
++        /**
++         * Componentのhook領域へ保存する初期値を生成する。
++         */
++        () => `field-${++ids}`)); // 処理を渡すコールバック関数
++    mocks.actionState.mockImplementation( // モック実装の設定メソッド
++      /**
++       * 操作ごとのstate・dispatch・pendingを独立したセルで模す。
++       */
++      (action, initial) => { // 処理を渡すコールバック関数
++        const cell = slot( // hook呼出し順に値を保存する関数
++          /**
++           * Componentのhook領域へ保存する初期値を生成する。
++           */
++          () => ({ // 処理を渡すコールバック関数
++            value: initial,
++            pending: false,
++          })) as Cell; // hook値とpending状態の型
++        return [
++          cell.value,
++          /**
++           * 独立したAction queueへ送信し、完了までpendingを保持する。
++           */
++          (payload: FormData) => { // 処理を渡すコールバック関数 / 送信フォームデータ型
++            cell.pending = true;
++            tasks.push(Promise.resolve().then( // 非同期処理の登録メソッド / 完了後の値処理メソッド / 非同期処理の開始メソッド
++              /**
++               * 独立した前stateとFormDataで試験対象Actionを実行する。
++               */
++              () => action(cell.value, payload)).then( // 完了後の値処理メソッド / 処理を渡すコールバック関数 / 独立stateと送信値で試験対象Actionを実行する関数
++                /**
++                 * Actionの応答を次の描画用stateへ保存する。
++                 */
++                (value) => { // 処理を渡すコールバック関数
++                  cell.value = value;
++                }).finally( // 成功失敗にかかわらない送信終了処理メソッド
++                  /**
++                   * Actionの成功・失敗にかかわらずpendingを解除する。
++                   */
++                  () => { // 処理を渡すコールバック関数
++                    cell.pending = false;
++                  }));
++          },
++          cell.pending,
++        ];
++      });
++    mocks.guard.mockReturnValue({ // モックの戻り値設定メソッド
++      markDirty: mocks.dirty,
++      markSubmitting: mocks.submitting,
 +    });
-+    const html = await page({ page: number }); // Page描画関数
-+    expect(html.includes('rel="prev"')).toBe(previous); // 文字列包含・期待値生成・前ページ有無の比較メソッド
-+    expect(html.includes('rel="next"')).toBe(next); // 文字列包含・期待値生成・次ページ有無の比較メソッド
-+  },
-+);
++  });
 +
-+it( // 試験を登録する関数
-+  "報告時情報と担当者名のnull、通知受付日時を安全に表示する",
++afterEach( // 各試験の後処理を登録する関数
 +  /**
-+   * 現在の会員情報を取りに行かず未設定を表示し、通知受付を配送完了とは表現しない。
++   * 試験用に置換したブラウザーのグローバルを復元する。
 +   */
-+  async () => { // nullable項目の試験コールバック
-+    mocks.read.mockResolvedValue({ // nullable項目と受付済み通知の応答設定メソッド
-+      ...found(), // 成功fixture生成関数
-+      reports: [{
-+        ...report(), // 報告fixture生成関数
-+        reporterName: null,
-+        reporterEmail: null,
-+        reporterRole: null,
-+        handler: {
-+          id: "handler-id",
-+          name: null,
-+        },
-+        notifiedAt: "2026-10-25T16:00:00.000Z",
-+        notificationFailed: false,
-+        internalNote: null,
-+        userAgent: null,
-+        pageUrl: null,
-+      }],
++  () => { // 処理を渡すコールバック関数
++    expect(console.error).not.toHaveBeenCalled(); // ログへエラー原文を出さないことの検証メソッド
++    expect(console.warn).not.toHaveBeenCalled(); // 不要な警告ログがないことの検証メソッド
++    expect(console.log).not.toHaveBeenCalled(); // 本文等のログ出力がないことの検証メソッド
++    vi.unstubAllGlobals(); // 置換したグローバルの復元メソッド
++    vi.restoreAllMocks(); // consoleの監視を元へ戻すメソッド
++  });
++
++it("statusは変更時に即送信し、同じ行だけpendingにして再描画前の二重送信も防ぐ",  // 試験を登録する関数
++  /**
++   * 「statusは変更時に即送信し、同じ行だけpendingにして再描画前の二重送信も防ぐ」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const first = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    const other = props("report-b"); // 独立Actionと初期stateを持つ行propsの生成関数
++    const tree = view(first); // 編集Componentを同じhook領域で再描画する関数
++    change(tree); // status変更handlerを直接呼ぶ関数
++    change(tree); // status変更handlerを直接呼ぶ関数
++    save(tree); // メモのsubmit handlerを直接呼ぶ関数
++    expect(nodes(view(first), "fieldset").every( // 期待値を生成する関数 / 全項目の条件確認メソッド / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++      /**
++       * 各フォーム項目の無効状態が期待どおりか判定する。
++       */
++      (item) => item.disabled)).toBe(true); // 値の一致を検証メソッド / 処理を渡すコールバック関数
++    expect(nodes(view(other), "fieldset").every( // 期待値を生成する関数 / 全項目の条件確認メソッド / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++      /**
++       * 各フォーム項目の無効状態が期待どおりか判定する。
++       */
++      (item) => !item.disabled)).toBe(true); // 値の一致を検証メソッド / 処理を渡すコールバック関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    expect(first.statusAction).toHaveBeenCalledOnce(); // 呼出しが1回であることを検証メソッド / 期待値を生成する関数
++    expect(first.noteAction).not.toHaveBeenCalled(); // 呼出しの有無を検証メソッド / 期待値を生成する関数
++    const [previous, payload] = vi.mocked(first.statusAction).mock.calls[0]; // 型を保つモック取得メソッド
++    expect(previous.requestId).toBe("report-a-status"); // 値の一致を検証メソッド / 期待値を生成する関数
++    expect([...payload.keys()].sort()).toEqual(["expectedUpdatedAt", "reportId", "requestId", "status"]); // 構造の一致を検証メソッド / 期待値を生成する関数 / 検証用キーの整列メソッド / フォームのキー列挙メソッド
++    expect(payload.get("reportId")).toBe("report-a"); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド
++    expect(payload.get("expectedUpdatedAt")).toBe(V1); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド
++    expect(nodes(view(first), "select")[0].value).toBe("RESOLVED"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(view(first), "fieldset").every( // 期待値を生成する関数 / 全項目の条件確認メソッド / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++      /**
++       * 各フォーム項目の無効状態が期待どおりか判定する。
++       */
++      (item) => !item.disabled)).toBe(true); // 値の一致を検証メソッド / 処理を渡すコールバック関数
++  });
++
++it("status成功versionだけを同じ行のメモと共有し、下書き・別nonce・別useIdを保つ",  // 試験を登録する関数
++  /**
++   * 「status成功versionだけを同じ行のメモと共有し、下書き・別nonce・別useIdを保つ」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    const initial = view(item); // 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(initial, "select")[0].id).not.toBe(nodes(initial, "textarea")[0].id); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    edit(initial); // メモ入力handlerを直接呼ぶ関数
++    change(view(item)); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    const tree = view(item); // 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(tree, "textarea")[0].value).toBe("未保存の下書き"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    save(tree); // メモのsubmit handlerを直接呼ぶ関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    const [previous, payload] = vi.mocked(item.noteAction).mock.calls[0]; // 型を保つモック取得メソッド
++    expect(previous.requestId).toBe("report-a-note"); // 値の一致を検証メソッド / 期待値を生成する関数
++    expect(payload.get("requestId")).toBe("report-a-note"); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド
++    expect(payload.get("expectedUpdatedAt")).toBe(V2); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド
++    expect(payload.get("internalNote")).toBe("未保存の下書き"); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド
++    expect(item.onProtect).toHaveBeenLastCalledWith(false); // 最後の呼出し引数を検証メソッド / 期待値を生成する関数
++  });
++
++it("他者の新versionでdirtyメモの基準を差し替えず、CONFLICT後も保持して再取得・再編集を選べる",  // 試験を登録する関数
++  /**
++   * 「他者の新versionでdirtyメモの基準を差し替えず、CONFLICT後も保持して再取得・再編集を選べる」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    edit(view(item)); // メモ入力handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    const updated: Props = { // 行の編集props型
++      ...item,
++      report: {
++        ...item.report,
++        updatedAt: V2,
++        status: "IN_PROGRESS",
++        internalNote: "他者のメモ",
++      },
++    };
++    vi.mocked(item.noteAction).mockResolvedValue({ // 非同期モックの成功値設定メソッド / 型を保つモック取得メソッド
++      ...state("report-a-note"), status: "error", formError: "他の更新があります。再取得してください。", // 操作別の最小初期stateを作る関数
 +    });
-+    const html = await page(); // Page描画関数
-+    expect(html).toContain("氏名未設定"); // 期待値生成・氏名null表示の検証メソッド
-+    expect(html).toContain("メール未設定"); // 期待値生成・メールnull表示の検証メソッド
-+    expect(html).toContain("通知受付済み"); // 期待値生成・通知分類表示の検証メソッド
-+    expect(html).not.toContain("配送完了"); // 期待値生成・配送との区別の検証メソッド
-+  },
-+);
++    save(view(updated)); // メモのsubmit handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    const payload = vi.mocked(item.noteAction).mock.calls[0][1]; // 型を保つモック取得メソッド
++    expect(payload.get("expectedUpdatedAt")).toBe(V1); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド
++    expect(nodes(view(updated), "textarea")[0].value).toBe("未保存の下書き"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++    click(view(updated), "最新情報を取得（下書きを保持）"); // 再取得・再編集buttonのhandlerを呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    expect(mocks.refresh).toHaveBeenCalledOnce(); // 呼出しが1回であることを検証メソッド / 期待値を生成する関数
++    expect(nodes(view(updated), "textarea")[0].value).toBe("未保存の下書き"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++    mocks.confirm.mockReturnValue(false); // モックの戻り値設定メソッド
++    click(view(updated), "取得済みの内容で再編集"); // 再取得・再編集buttonのhandlerを呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(view(updated), "textarea")[0].value).toBe("未保存の下書き"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++    mocks.confirm.mockReturnValue(true); // モックの戻り値設定メソッド
++    click(view(updated), "取得済みの内容で再編集"); // 再取得・再編集buttonのhandlerを呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(view(updated), "textarea")[0].value).toBe("他者のメモ"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++    expect(item.onProtect).toHaveBeenLastCalledWith(false); // 最後の呼出し引数を検証メソッド / 期待値を生成する関数
++  });
 +
-+it( // 試験を登録する関数
-+  "layoutが通っても、次のPage認可で権限失効を拒否する",
++it("失敗したstatusを保存済み値へ戻し、通信例外の原文を表示・ログへ出さない",  // 試験を登録する関数
 +  /**
-+   * クライアントに再利用されたlayoutの以前の認可を、Pageの根拠にしない。
++   * 「失敗したstatusを保存済み値へ戻し、通信例外の原文を表示・ログへ出さない」をhook・Action境界で検証する。
 +   */
-+  async () => { // layout再利用の試験コールバック
-+    await PlatformLayout({ children: "認可時点の画面" }); // Platform専用layout関数
-+    mocks.actor.mockResolvedValue(null); // 権限失効後の応答設定メソッド
-+    await expect(page()).rejects.toBeInstanceOf(ControlError); // Page描画関数 / 制御例外検証メソッド / 例外クラス参照
-+    expect(mocks.read).not.toHaveBeenCalled(); // モック関数参照 / 失効後の一覧未取得検証メソッド
-+  },
-+);
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    vi.mocked(item.statusAction).mockRejectedValue(new Error("test-only-private-payload")); // 非同期モックの例外設定メソッド / 型を保つモック取得メソッド / 試験用の例外を作るErrorコンストラクター
++    change(view(item)); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    const tree = view(item); // 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(tree, "select")[0].value).toBe("OPEN"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    expect(nodes(tree, "fieldset").every( // 期待値を生成する関数 / 全項目の条件確認メソッド / JSXから指定した要素のpropsを取り出す関数
++      /**
++       * 各フォーム項目の無効状態が期待どおりか判定する。
++       */
++      (field) => !field.disabled)).toBe(true); // 値の一致を検証メソッド / 処理を渡すコールバック関数
++    expect(JSON.stringify(tree)).not.toContain("test-only-private-payload"); // 値の包含を検証メソッド / 期待値を生成する関数 / React要素情報の検査用文字列化メソッド
++    expect(JSON.stringify(tree)).toContain("更新結果を確認できませんでした"); // 値の包含を検証メソッド / 期待値を生成する関数 / React要素情報の検査用文字列化メソッド
++  });
 +
-+it( // 試験を登録する関数
-+  "読取Serviceが通常例外でも部分情報や原文を返さない",
++it("同statusのUNCHANGEDと再検証失敗の成功結果を再送せず、固定通知と手動再取得を残す",  // 試験を登録する関数
 +  /**
-+   * 取得途中の想定外例外も固定文面へ限定し、内部原因をHTMLへ含めない。
++   * 「同statusのUNCHANGEDと再検証失敗の成功結果を再送せず、固定通知と手動再取得を残す」をhook・Action境界で検証する。
 +   */
-+  async () => { // 読取例外の試験コールバック
-+    mocks.read.mockRejectedValue(new Error(SECRET)); // 失敗応答設定メソッド / Errorコンストラクター
-+    const html = await page(); // Page描画関数
-+    expect(html).toContain("管理情報を取得できません"); // 期待値生成・固定エラー表示の検証メソッド
-+    expect(html).not.toContain(SECRET); // 期待値生成・例外原文非開示の検証メソッド
-+    expect(html).not.toContain("<table"); // 期待値生成・部分一覧非開示の検証メソッド
-+  },
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    const result = success(V1, "UNCHANGED"); // 最小成功結果を作る関数
++    vi.mocked(item.statusAction).mockResolvedValue({ // 非同期モックの成功値設定メソッド / 型を保つモック取得メソッド
++      ...result,
++      data: {
++        ...result.data!,
++        reloadRequired: true,
++        message: "更新済みです。再読み込みしてください。",
++      },
++    });
++    change(view(item), "OPEN"); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    expect(JSON.stringify(view(item))).toContain("更新済みです。再読み込みしてください。"); // 値の包含を検証メソッド / 期待値を生成する関数 / React要素情報の検査用文字列化メソッド / 編集Componentを同じhook領域で再描画する関数
++    expect(item.statusAction).toHaveBeenCalledOnce(); // 呼出しが1回であることを検証メソッド / 期待値を生成する関数
++    expect(mocks.refresh).not.toHaveBeenCalled(); // 呼出しの有無を検証メソッド / 期待値を生成する関数
++    click(view(item), "最新情報を取得（下書きを保持）"); // 再取得・再編集buttonのhandlerを呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    expect(mocks.refresh).toHaveBeenCalledOnce(); // 呼出しが1回であることを検証メソッド / 期待値を生成する関数
++  });
++
++it("他者のversionを追い越したstatus成功で、古いdirtyメモの基準versionを更新しない",  // 試験を登録する関数
++  /**
++   * 「他者のversionを追い越したstatus成功で、古いdirtyメモの基準versionを更新しない」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    edit(view(item)); // メモ入力handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    const updated: Props = { // 行の編集props型
++      ...item,
++      report: {
++        ...item.report,
++        updatedAt: V2,
++      },
++    };
++    vi.mocked(item.statusAction).mockResolvedValue(success(V3)); // 非同期モックの成功値設定メソッド / 型を保つモック取得メソッド / 最小成功結果を作る関数
++    change(view(updated)); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    save(view(updated)); // メモのsubmit handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    expect(vi.mocked(item.noteAction).mock.calls[0][1].get("expectedUpdatedAt")).toBe(V1); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド / 型を保つモック取得メソッド
++  });
++
++/**
++ * テーブルの保持・keyだけを検査するための全列DTO fixtureを作る。
++ */
++function row(id: string): SupportReportRow { // テーブル用の全列DTO fixture生成関数 / 文字列型 / 報告DTOとbound Actionを持つ行の型
++  const item = props(id); // 独立Actionと初期stateを持つ行propsの生成関数
++  const actions: SupportReportActions = item; // 独立Actionと初期stateの型
++  return {
++    ...actions,
++    report: {
++      ...item.report,
++      createdAt: V1,
++      club: {
++        id: "club-id",
++        name: "クラブ",
++        slug: "club-a",
++      },
++      category: "BUG", message: "本文", pageUrl: null, userAgent: null,
++      reporterName: null, reporterEmail: null, reporterRole: null,
++      handler: null, statusChangedAt: V1, resolvedAt: null,
++      notifiedAt: null, notificationFailed: false,
++    },
++  };
++}
++
++/**
++ * 非公開の行Componentを実行せず、安定keyと保持通知propsを取り出す。
++ */
++function rows(node: ReactNode): { // 行Componentのkeyとpropsを調べる関数 / Reactで描画可能なノード型
++  key: string | null; // 文字列型
++  props: NativeProps // JSX要素propsの辞書型
++}[] { // 行Componentのkeyとpropsを調べる関数 / Reactで描画可能なノード型 / 文字列型 / JSX要素propsの辞書型
++  if (Array.isArray(node)) { // 配列かどうかを判定する組込みメソッド
++    return node.flatMap( // 子要素の探索結果を平坦化メソッド
++      /**
++       * 子要素を探索して、条件に合う要素の配列を返す。
++       */
++      (child) => rows(child)); // 処理を渡すコールバック関数 / 行Componentのkeyとpropsを調べる関数
++  }
++  if (!isValidElement<NativeProps>(node)) { // React要素の判定関数 / JSX要素propsの辞書型
++    return [];
++  }
++  return [
++    ...(typeof node.type === "function" &&
++      "row" in node.props
++      ? [{
++        key: node.key,
++        props: node.props,
++      }] : []),
++    ...rows(node.props.children as ReactNode), // 行Componentのkeyとpropsを調べる関数 / Reactで描画可能なノード型
++  ];
++}
++
++it("再検証の移動・条件外・0件でもdirty行を同じIDで残し、他行の操作で移動確認を解除しない",  // 試験を登録する関数
++  /**
++   * 「再検証の移動・条件外・0件でもdirty行を同じIDで残し、他行の操作で移動確認を解除しない」をhook・Action境界で検証する。
++   */
++  () => { // 処理を渡すコールバック関数
++    const first = row("report-a"); // テーブル用の全列DTO fixture生成関数
++    const second = row("report-b"); // テーブル用の全列DTO fixture生成関数
++    const tree = run("table",  // Componentごとのhook領域で指定した描画を実行する関数
++      /**
++       * 指定されたComponentを対応するhook領域で描画する。
++       */
++      () => SupportReportTable({ rows: [first, second] })); // 処理を渡すコールバック関数 / 下書きを行IDで保持するテーブルComponent関数
++    (rows(tree)[0].props.onProtect as (dirty: boolean) => void)(true); // (rows(tree)[0].props.onProtect as (dirty: boolean) => void)を実行する関数 / 行Componentのkeyとpropsを調べる関数 / 真偽値型 / 戻り値を使わない型
++    (rows(tree)[1].props.onProtect as (dirty: boolean) => void)(false); // (rows(tree)[1].props.onProtect as (dirty: boolean) => void)を実行する関数 / 行Componentのkeyとpropsを調べる関数 / 真偽値型 / 戻り値を使わない型
++    const moved = run("table",  // Componentごとのhook領域で指定した描画を実行する関数
++      /**
++       * 指定されたComponentを対応するhook領域で描画する。
++       */
++      () => SupportReportTable({ rows: [second] })); // 処理を渡すコールバック関数 / 下書きを行IDで保持するテーブルComponent関数
++    expect(rows(moved).map( // 期待値を生成する関数 / 配列の値を変換メソッド / 行Componentのkeyとpropsを調べる関数
++      /**
++       * 行の安定keyを検証するための値へ変換する。
++       */
++      (entry) => entry.key)).toEqual(["report-b", "report-a"]); // 構造の一致を検証メソッド / 処理を渡すコールバック関数
++    const empty = run("table",  // Componentごとのhook領域で指定した描画を実行する関数
++      /**
++       * 指定されたComponentを対応するhook領域で描画する。
++       */
++      () => SupportReportTable({ rows: [] })); // 処理を渡すコールバック関数 / 下書きを行IDで保持するテーブルComponent関数
++    expect(rows(empty).map( // 期待値を生成する関数 / 配列の値を変換メソッド / 行Componentのkeyとpropsを調べる関数
++      /**
++       * 行の安定keyを検証するための値へ変換する。
++       */
++      (entry) => entry.key)).toEqual(["report-a", "report-b"]); // 構造の一致を検証メソッド / 処理を渡すコールバック関数
++    expect(nodes(empty, SupportReportUnsavedGuard)).toHaveLength(1); // 要素数を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    expect(rows(empty)[0].props.outside).toBe(true); // 値の一致を検証メソッド / 期待値を生成する関数 / 行Componentのkeyとpropsを調べる関数
++    (rows(empty)[0].props.onProtect as (dirty: boolean) => void)(false); // (rows(empty)[0].props.onProtect as (dirty: boolean) => void)を実行する関数 / 行Componentのkeyとpropsを調べる関数 / 真偽値型 / 戻り値を使わない型
++    const clean = run("table",  // Componentごとのhook領域で指定した描画を実行する関数
++      /**
++       * 指定されたComponentを対応するhook領域で描画する。
++       */
++      () => SupportReportTable({ rows: [] })); // 処理を渡すコールバック関数 / 下書きを行IDで保持するテーブルComponent関数
++    expect(nodes(clean, SupportReportUnsavedGuard)).toHaveLength(0); // 要素数を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++  });
++
++it("未保存の間だけ共通hookをdirtyにし、ローカル保存で全体の離脱確認を抑止しない",  // 試験を登録する関数
++  /**
++   * 「未保存の間だけ共通hookをdirtyにし、ローカル保存で全体の離脱確認を抑止しない」をhook・Action境界で検証する。
++   */
++  () => { // 処理を渡すコールバック関数
++    run("guard",  // Componentごとのhook領域で指定した描画を実行する関数
++      /**
++       * 指定されたComponentを対応するhook領域で描画する。
++       */
++      () => SupportReportUnsavedGuard()); // 処理を渡すコールバック関数 / dirtyの間だけ共通hookを利用するComponent関数
++    const effect = mocks.effect.mock.calls[0][0] as () => void; // 戻り値を使わない型
++    effect(); // 移動確認を有効にするeffect関数
++    expect(mocks.guard).toHaveBeenCalledWith(false); // 呼出し引数を検証メソッド / 期待値を生成する関数
++    expect(mocks.dirty).toHaveBeenCalledOnce(); // 呼出しが1回であることを検証メソッド / 期待値を生成する関数
++    expect(mocks.submitting).not.toHaveBeenCalled(); // 呼出しの有無を検証メソッド / 期待値を生成する関数
++  });
++
++it("Nextの制御例外は固定エラーへ丸めず、送信ロックを必ず解除する",  // 試験を登録する関数
++  /**
++   * 「Nextの制御例外は固定エラーへ丸めず、送信ロックを必ず解除する」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    vi.mocked(item.statusAction).mockRejectedValue(CONTROL); // 非同期モックの例外設定メソッド / 型を保つモック取得メソッド
++    change(view(item)); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await expect(flush()).rejects.toBe(CONTROL); // 値の一致を検証メソッド / 期待値を生成する関数 / 試験用Action queueの完了を待つ関数
++    expect(nodes(view(item), "fieldset").every( // 期待値を生成する関数 / 全項目の条件確認メソッド / JSXから指定した要素のpropsを取り出す関数 / 編集Componentを同じhook領域で再描画する関数
++      /**
++       * 各フォーム項目の無効状態が期待どおりか判定する。
++       */
++      (field) => !field.disabled)).toBe(true); // 値の一致を検証メソッド / 処理を渡すコールバック関数
++  });
++
++
++it("遅れて届いた古いRSCで自分の成功version・statusを巻き戻さない",  // 試験を登録する関数
++  /**
++   * 「遅れて届いた古いRSCで自分の成功version・statusを巻き戻さない」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    vi.mocked(item.statusAction).mockResolvedValue(success(V3)); // 非同期モックの成功値設定メソッド / 型を保つモック取得メソッド / 最小成功結果を作る関数
++    change(view(item)); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    const delayed: Props = { // 行の編集props型
++      ...item,
++      report: {
++        ...item.report,
++        updatedAt: V2,
++      },
++    }; // 行の編集props型
++    const tree = view(delayed); // 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(tree, "select")[0].value).toBe("RESOLVED"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    expect(data(nodes(tree, "form")[0]).get("expectedUpdatedAt")).toBe(V3); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド / フォーム値を送信fixtureへ移す関数 / JSXから指定した要素のpropsを取り出す関数
++    expect(data(nodes(tree, "form")[1]).get("expectedUpdatedAt")).toBe(V3); // 値の一致を検証メソッド / 期待値を生成する関数 / キーの値取得メソッド / フォーム値を送信fixtureへ移す関数 / JSXから指定した要素のpropsを取り出す関数
++  });
++
++it("通常の検証エラーでもstatusを保存済み値へ戻し、項目エラーとメモの下書きを維持する",  // 試験を登録する関数
++  /**
++   * 「通常の検証エラーでもstatusを保存済み値へ戻し、項目エラーとメモの下書きを維持する」をhook・Action境界で検証する。
++   */
++  async () => { // 処理を渡すコールバック関数
++    const item = props(); // 独立Actionと初期stateを持つ行propsの生成関数
++    vi.mocked(item.statusAction).mockResolvedValue({ // 非同期モックの成功値設定メソッド / 型を保つモック取得メソッド
++      ...state("report-a-status"), // 操作別の最小初期stateを作る関数
++      status: "error",
++      fieldErrors: { status: ["ステータスを選択してください。"] },
++      formError: "入力内容を確認してください。",
++    });
++    edit(view(item)); // メモ入力handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    change(view(item)); // status変更handlerを直接呼ぶ関数 / 編集Componentを同じhook領域で再描画する関数
++    await flush(); // 試験用Action queueの完了を待つ関数
++    const tree = view(item); // 編集Componentを同じhook領域で再描画する関数
++    expect(nodes(tree, "select")[0].value).toBe("OPEN"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    expect(nodes(tree, "textarea")[0].value).toBe("未保存の下書き"); // 値の一致を検証メソッド / 期待値を生成する関数 / JSXから指定した要素のpropsを取り出す関数
++    expect(JSON.stringify(tree)).toContain("ステータスを選択してください。"); // 値の包含を検証メソッド / 期待値を生成する関数 / React要素情報の検査用文字列化メソッド
++  });
+diff --git a/tests/platform-support-pages.test.ts b/tests/platform-support-pages.test.ts
+index 73ec3e6..259509d 100644
+--- a/tests/platform-support-pages.test.ts
++++ b/tests/platform-support-pages.test.ts
+@@ -3,6 +3,8 @@
+ 
+ import {
+   createElement,
++  isValidElement,
++  type ReactElement,
+   type ReactNode,
+ } from "react";
+ import { renderToStaticMarkup } from "react-dom/server";
+@@ -16,6 +18,9 @@ import {
+ 
+ import PlatformLayout from "@/app/(club-app)/platform/layout"; // Platform専用認可と管理UIを提供するlayout Component
+ import PlatformSupportPage, { dynamic } from "@/app/(club-app)/platform/support/page"; // 再認可して管理一覧を表示するPage Component / 毎回要求時に描画する設定
++import {
++  SupportReportTable, // 【追加】検索条件ごとに編集領域を分けるテーブルComponent
++} from "@/app/(club-app)/platform/support/SupportReportTable";
+ import type {
+   PlatformSupportReport, // 全文・snapshot・管理情報を含む報告表示用の型
+ } from "@/domain/platform/support/support-report-management-types";
+@@ -31,9 +36,31 @@ const mocks = vi.hoisted( // importより前にモックを準備するメソッ
+     redirect: vi.fn(), // redirectモックの生成メソッド
+     notFound: vi.fn(), // notFoundモックの生成メソッド
+     rethrow: vi.fn(), // Next制御例外再送出モックの生成メソッド
++    operations: vi.fn(), // 【追加】行の操作Componentを観測するモック生成メソッド
++    statusAction: vi.fn(), // 【追加】status Actionのモック生成メソッド
++    noteAction: vi.fn(), // 【追加】メモActionのモック生成メソッド
+     logout: vi.fn(), // ClientログアウトComponentモックの生成メソッド
+   }),
+ );
++vi.mock( // 【追加】行のClient hookを実行せず接続値を観測する置換メソッド
++  "@/app/(club-app)/platform/support/SupportReportOperations",
++  /**
++   * 【追加】操作Componentだけを置換し、既存テーブルの安全な表示は実装を通す。
++   */
++  () => ({ // 【追加】編集Componentのモジュール置換コールバック
++    SupportReportOperations: mocks.operations, // 【追加】行の操作Componentモック関数
++  }),
 +);
++vi.mock( // 【追加】bound IDを実Auth・DBなしで検査するAction置換メソッド
++  "@/app/(club-app)/platform/support/actions",
++  /**
++   * 【追加】Pageからbindした引数だけを観測し、更新処理を実行しない。
++   */
++  () => ({ // 【追加】Actionモジュール置換コールバック
++    updateSupportReportStatusAction: mocks.statusAction, // 【追加】status Actionのモック関数
++    updateSupportReportNoteAction: mocks.noteAction, // 【追加】メモActionのモック関数
++  }),
++);
+ vi.mock( // Auth境界を置換するメソッド
+   "@/src/infrastructure/supabase/server",
+   /**
+@@ -117,7 +144,7 @@ vi.mock( // SSRでLinkの固定hrefを観測するモジュール置換メソッ
+ /**
+  * Nextが処理するredirect・404の制御例外を模す試験用クラス。
+  */
+-class ControlError extends Error {} // 制御例外クラス / Errorクラス
++class ControlError extends Error { } // 制御例外クラス / Errorクラス
+ 
+ const USER_ID = "7b4d5e1f-75ba-47bf-9b72-3129f21a2ac6";
+ const CLUB_ID = "11111111-1111-4111-8111-111111111111";
+@@ -351,7 +378,7 @@ it.each([{ page: "0" }, { page: ["1", "2"] }, { clubId: SECRET }, { status: SECR
+ );
+ 
+ it( // 試験を登録する関数
+-  "50件の全文・snapshot・管理情報を日本時間で読取専用表示する",
++  "50件の全文・snapshot・管理情報を表示し、行ごとに独立Actionを接続する",
+   /**
+    * ページ内の全行とdetailsを描画し、snapshot・通知分類・nullable担当者を表示する。
+    */
+@@ -382,8 +409,22 @@ it( // 試験を登録する関数
+     expect(html).toContain("未割当"); // 期待値生成・null担当者表示の検証メソッド
+     expect(html).toContain("担当者表示名"); // 期待値生成・担当者表示の検証メソッド
+     expect(html).toContain("通知失敗"); // 期待値生成・通知分類の検証メソッド
+-    expect(html).not.toContain("<textarea"); // 期待値生成・編集UIなしの検証メソッド
+-    expect(html).not.toContain('method="post"'); // 期待値生成・書込フォームなしの検証メソッド
++    expect(mocks.operations).toHaveBeenCalledTimes(50); // 【追加】行ごとの接続件数を検証するメソッド
++    const props = mocks.operations.mock.calls[0][0];
++    expect(props.report).toEqual({ // 【追加】編集Componentへ渡す限定列を検証するメソッド
++      id: "50",
++      status: "OPEN",
++      updatedAt: report().updatedAt, // 【追加】保存済みversionを持つfixture生成関数
++      internalNote: report().internalNote, // 【追加】保存済みメモを持つfixture生成関数
++    });
++    expect(props.statusInitialState.requestId).not.toBe(props.noteInitialState.requestId); // 【追加】操作別UUIDの独立性を検証するメソッド
++    const other = mocks.operations.mock.calls[1][0];
++    expect(props.statusInitialState.requestId).not.toBe(other.statusInitialState.requestId); // 【追加】行別UUIDの独立性を検証するメソッド
++    const data = new FormData(); // 【追加】送信データのコンストラクター
++    await props.statusAction(props.statusInitialState, data); // 【追加】bind済みstatus Action関数
++    await props.noteAction(props.noteInitialState, data); // 【追加】bind済みメモAction関数
++    expect(mocks.statusAction).toHaveBeenCalledWith("50", props.statusInitialState, data); // 【追加】固定報告IDの検証メソッド
++    expect(mocks.noteAction).toHaveBeenCalledWith("50", props.noteInitialState, data); // 【追加】固定報告IDの検証メソッド
+   },
+ );
+ 
+@@ -586,3 +627,31 @@ it( // 試験を登録する関数
+     expect(html).not.toContain("<table"); // 期待値生成・部分一覧非開示の検証メソッド
+   },
+ );
++
++
++it("同条件の再検証はkeyを維持し、確認後のフィルター・ページ移動は編集領域を分ける",  // 【追加】試験を登録する関数
++  /**
++   * 【追加】「同条件の再検証はkeyを維持し、確認後のフィルター・ページ移動は編集領域を分ける」をhook・Action境界で検証する。
++   */
++  async () => { // 【追加】処理を渡すコールバック関数
++    /**
++     * 【追加】Pageを描画し、検証済み条件で作られたテーブルkeyだけを取り出す。
++     */
++    async function key(query: Record<string, string> = {}) { // 【追加】定義した処理を実行する関数 / キーと値の辞書型 / 文字列型
++      const element = await PlatformSupportPage({ searchParams: Promise.resolve(query) }); // 【追加】PlatformSupportPageを実行する関数 / 非同期処理の開始メソッド
++      const children = element.props.children as ReactNode[]; // 【追加】Reactで描画可能なノード型
++      const table = children.find( // 【追加】条件に一致する値の検索メソッド
++        /**
++         * 【追加】指定した表示文言と一致するbuttonを探す。
++         */
++        (child) => isValidElement(child) && child.type === SupportReportTable); // 【追加】処理を渡すコールバック関数 / React要素の判定関数
++      expect(table).toBeDefined(); // 【追加】対象の存在を検証メソッド / 期待値を生成する関数
++      return (table as ReactElement).key; // 【追加】ReactElementの型
++    }
++    const initial = await key(); // 【追加】keyを実行する関数
++    expect(await key()).toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
++    expect(await key({ status: "OPEN" })).not.toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
++    expect(await key({ page: "2" })).not.toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
++    mocks.read.mockResolvedValue({ outcome: "READ_FAILED" }); // 【追加】非同期モックの成功値設定メソッド
++    expect(await key()).toBe(initial); // 【追加】値の一致を検証メソッド / 期待値を生成する関数 / keyを実行する関数
++  });
