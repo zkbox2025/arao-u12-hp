@@ -1,1283 +1,303 @@
-diff --git a/package.json b/package.json
-index c8e86a3..d3c4385 100644
---- a/package.json
-+++ b/package.json
-@@ -27,7 +27,8 @@
-     "test:club-invitation:auth:local": "RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-auth.local.integration.test.ts",
-     "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts",
-     "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts",
--    "test:support-report:local": "RUN_SUPPORT_REPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/support-report.flow.integration.test.ts"
-+    "test:support-report:local": "RUN_SUPPORT_REPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/support-report.flow.integration.test.ts",
-+    "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts"
-   },
-   "dependencies": {
-     "@axiomhq/js": "^1.8.0",
-diff --git a/tests/platform-support.flow.integration.test.ts b/tests/platform-support.flow.integration.test.ts
+diff --git a/docs/runbooks/platform-support.md b/docs/runbooks/platform-support.md
 new file mode 100644
-index 0000000..f00ccbe
+index 0000000..34cd07d
 --- /dev/null
-+++ b/tests/platform-support.flow.integration.test.ts
-@@ -0,0 +1,1263 @@
-+// tests/platform-support.flow.integration.test.ts
-+// 接続ガード後だけ専用clientを生成し、Platform認可・管理更新とF08受付の共存を実DBで照合する。
++++ b/docs/runbooks/platform-support.md
+@@ -0,0 +1,297 @@
++<!-- docs/runbooks/platform-support.md -->
 +
-+import { AsyncLocalStorage } from "node:async_hooks";
-+import { randomUUID } from "node:crypto";
-+import type { PrismaClient } from "@prisma/client";
-+import {
-+  afterAll,
-+  afterEach,
-+  beforeAll,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
++# F09 Platformサポート管理の運用と統合受入
 +
-+import type {
-+  PlatformAdminAccessContext, // Auth本人IDと有効なPlatform管理者情報をまとめた認可背景データの型
-+} from "@/app/(club-app)/platform/require-platform-admin";
-+import type {
-+  PlatformSupportActionState, // 更新日時と最小成功情報だけのAction state型
-+} from "@/app/(club-app)/platform/support/actions";
-+import type {
-+  SupportReport, // サポート報告のPrismaモデル型
-+} from "@/types/prisma";
++F09粒度12の手順書です。実装の接続、単体・mock、接続ガード、実DB、実Auth、
++ブラウザー、HTTPの結果を分けて記録します。patch適用や単体成功だけでF09受入完了にしません。
++本patch作成では実DB・実Auth・本番設定を変更せず、実メールも送信しません。
 +
-+const mail = vi.hoisted( // import前にモックを用意するメソッド
-+  /**
-+   * import評価前にメールSDKと再検証のモックを準備する。
-+   */
-+  () => ({ // 対象ケースまたは外部境界のコールバック関数
-+    send: vi.fn(), // モック関数を生成するメソッド
-+    revalidate: vi.fn(), // モック関数を生成するメソッド
-+  }));
-+const requests = new AsyncLocalStorage<string>(); // 本人IDを分離する非同期contextのコンストラクター / 文字列型
-+let client: PrismaClient | undefined; // 専用DBクライアントの型
-+const GUARD_ERROR = "F09専用の使い捨てローカルDB設定と明示flagを確認してください。";
-+const CHECK_ERROR = "F09統合確認に失敗しました。対象ケースと実行条件を確認してください。";
-+const BASE_TIME = "2020-01-01T00:00:00.000Z";
++根拠は [F09仕様](../implementation/phases/F09.md) と現在のコードです。
++受付・snapshot・通知の正本と障害対応は [F08運用](support-report.md)、
++クラブ認可との境界は [F07運用](club-account.md) も参照します。既存手順を変更しません。
 +
-+/**
-+ * flagと接続設定だけを評価する、テスト用環境辞書の型。
-+ */
-+type Environment = Record<string, string | undefined>; // 接続ガード用の環境辞書型 / 文字列キーの環境辞書型 / 文字列型
++## 権限と対象範囲
 +
-+/**
-+ * 書込み前に登録したUUIDと、一般会員の所属IDを保持するcleanup用の型。
-+ */
-+type Fixture = { // 作成前に登録したUUIDと会員識別子の型
-+  clubs: string[]; // 文字列型
-+  admins: string[]; // 文字列型
-+  member: string; // 文字列型
-+  membership: string; // 文字列型
-+  reports: Set<string>; // 重複しないcleanup対象IDの集合型 / 文字列型
-+};
++- Authの本人IDと同じ `PlatformAdmin.id` があり、isActive=true、roleがDEVELOPERまたは
++  SUPPORTの場合だけ管理できます。両roleとも同じサポート管理機能を使います。
++- AppUserやClubMembershipが0件でもPlatform管理者としてログインできます。
++  ログイン・閲覧・管理操作でAppUserや所属を自動作成しません。
++- 横断例外はSupportReportの閲覧・限定管理列の更新だけです。
++  STANDARD・STARTER・PROの既存報告を対象とし、現在のクラブ所属・プランを条件にしません。
++  F08の受付条件を全プランへ広げる意味ではありません。
++- PlatformAdminだけでクラブOWNER・COACH等の権限は得ません。
++  イベント・お知らせ・会員管理・LINE設定等は既存のクラブ認可が別途必要です。
++- layoutに加えてPage・Actionで再認可し、Repositoryもtransaction内で最新のPlatform権限を照合します。
++  Proxyのセッション更新や画面にリンクがあることを、認可の代わりにしません。
 +
-+/**
-+ * 両方の専用flagが揃うまで、DB設定の評価と専用client生成へ進ませない。
-+ */
-+function enabled(environment: Environment): boolean { // 専用flagが両方揃っているか調べる関数 / 接続ガード用の環境辞書型 / 真偽値型
-+  return (
-+    environment.RUN_PLATFORM_SUPPORT_TESTS === "1" &&
-+    environment.RUN_DB_INTEGRATION_TESTS === "1"
-+  );
-+}
++根拠：`app/(club-app)/platform/require-platform-admin.ts / requirePlatformAdmin`、
++`src/infrastructure/prisma/repositories/platform-admin-repository.ts / findActivePlatformAdminByUserId`、
++各Platform Repository、`app/(club-app)/club/club-membership-authorization.ts`。
 +
-+/**
-+ * 非production・使い捨て確認・固定loopbackの全条件を確認し、接続URLは例外へ残さない。
-+ */
-+function localConfiguration(environment: Environment): string { // 使い捨てloopback設定の全条件を確認する関数 / 接続ガード用の環境辞書型 / 文字列型
-+  try {
-+    if (!enabled(environment)) { // 専用flagが両方揃っているか調べる関数
-+      throw new Error(GUARD_ERROR); // Errorコンストラクター
-+    }
-+    const source = environment.DATABASE_URL ?? "";
-+    const url = new URL(source); // 接続先を検証するURLコンストラクター
-+    if (
-+      environment.PLATFORM_SUPPORT_DISPOSABLE !== "1" ||
-+      environment.NODE_ENV === "production" ||
-+      source !== source.trim() || // 前後の空白を除くメソッド
-+      source.includes("?") || // 許可値との一致や禁止文字の有無を調べるメソッド
-+      source.includes("#") || // 許可値との一致や禁止文字の有無を調べるメソッド
-+      !["postgres:", "postgresql:"].includes(url.protocol) || // 許可値との一致や禁止文字の有無を調べるメソッド
-+      !["localhost", "127.0.0.1"].includes(url.hostname) || // 許可値との一致や禁止文字の有無を調べるメソッド
-+      url.port !== "54322" ||
-+      url.pathname !== "/postgres" ||
-+      url.search !== "" ||
-+      url.hash !== "" ||
-+      !url.username ||
-+      !url.password
-+    ) {
-+      throw new Error(GUARD_ERROR); // Errorコンストラクター
-+    }
-+    return url.toString(); // 検証済みURLを文字列へ変換するメソッド
-+  } catch {
-+    throw new Error(GUARD_ERROR); // Errorコンストラクター
-+  }
-+}
++## 運用開始前の準備と責任
 +
-+/**
-+ * SQL・fixture・接続設定・assertionの原文とcauseを、固定の失敗文へ置き換える。
-+ */
-+async function safeCheck(operation: () => Promise<void>): Promise<void> { // 失敗の原文を固定エラーへ限定する関数 / 非同期結果の型 / 戻り値を使わない型
-+  try {
-+    await operation(); // 受け取ったケースの検証処理を実行する関数
-+  } catch {
-+    throw new Error(CHECK_ERROR); // Errorコンストラクター
-+  }
-+}
++| 担当 | 確認すること |
++| --- | --- |
++| アカウント・権限管理担当 | 既存の承認済み運用でAuthアカウントと対応するPlatformAdminを準備し、本人ID・role・有効状態を確認する |
++| 実行環境管理担当 | 対象環境、既存migration、DB接続権限、Auth設定、セッション更新経路、ログイン試行ログ用設定を確認する |
++| サポート担当 | 必要な報告だけを閲覧し、内部メモへPW・token等を記載しない。競合時は最新情報と下書きを照合する |
++| 受入担当 | 使い捨てデータ・アカウントと実施範囲を確認し、区分ごとの結果・理由・未実施事項を記録する |
 +
-+/**
-+ * 実環境を参照せず、接続ガードの単体試験用に架空の設定を返す。
-+ */
-+function sampleEnvironment(): Environment { // 架空の接続ガード設定を作る関数 / 接続ガード用の環境辞書型
-+  return {
-+    RUN_PLATFORM_SUPPORT_TESTS: "1",
-+    RUN_DB_INTEGRATION_TESTS: "1",
-+    PLATFORM_SUPPORT_DISPOSABLE: "1",
-+    NODE_ENV: "test",
-+    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
-+  };
-+}
++担当者名、PlatformAdminの作成・無効化に使う具体的な承認済み手段は、この調査では未確認です。
++この文書では公開登録画面、権限付与API、登録SQL、Auth登録や無効化の自動化を提供しません。
++承認済み手段や担当が未確定なら、その状態を受入の保留事項に残します。
 +
-+// dotenvを初期化する共有clientを置換し、ガード後に作った専用clientだけを注入する。
-+vi.mock("@/src/infrastructure/prisma/client",  // モジュールを置き換えるメソッド
-+  /**
-+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
-+   */
-+  () => ({ // 対象ケースまたは外部境界のコールバック関数
-+    prisma: new Proxy({} as PrismaClient, { // 共有clientへのアクセスを専用clientへ転送するコンストラクター / 専用DBクライアントの型
-+      /**
-+       * 初期化前のDBアクセスを拒否し、専用clientのメソッドはthisを保って返す。
-+       */
-+      get(_target, property) { // 専用clientへ転送するメソッド
-+        if (!client) {
-+          throw new Error("F09専用clientは未初期化です。"); // Errorコンストラクター
-+        }
-+        const value = Reflect.get(client, property); // プロパティを取得するメソッド
-+        return typeof value === "function" ? value.bind(client) : value; // メソッドのthisを専用clientへ固定するメソッド
-+      },
-+    }),
-+  }));
++- 使い捨てAuthアカウントは実DB試験のfixtureとは別に用意します。
++  fixtureはAuthユーザーを作成しないため、そのままログイン用に使えません。
++- `lib/security/hash.ts / hashValue` は `FORM_LOG_HASH_SALT` を必要とします。
++  値は保護された既存の設定方法で管理し、文書・チャット・コマンド引数へ載せません。
++- `checkLoginRateLimit` は共通LoginSubmissionLogを使います。
++  現行コードはIPで3分内5回以上の試行、emailで3分内3回以上の失敗を制限します。
++  Platform専用の別カウンターではなく、共通ログイン処理との試行数共有を考慮します。
++- `platformLoginAction` は試行制限やログ保存の失敗を公開用の固定エラーにします。
++  Auth成功後の試行ログ保存失敗でも成功扱いにせず、localセッション終了を試みます。
++- PlatformAdminの無効化はAuthアカウント削除・全端末のlogoutとは別です。
++  DBへの反映後に開始する認可・更新を拒否することを確認します。
++  表示済み情報の即時消去や、失効と交差した進行中transactionの取消しは保証済みとしません。
 +
-+// Authだけを本人IDの境界で置換し、PlatformAdmin・Membershipの照合は実DBへ通す。
-+vi.mock("@/src/infrastructure/supabase/server",  // モジュールを置き換えるメソッド
-+  /**
-+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
-+   */
-+  () => ({ // 対象ケースまたは外部境界のコールバック関数
-+    createClient:
-+      /**
-+       * 本人確認のモックだけを持つサーバーclientを返す。
-+       */
-+      async () => ({ // 対象ケースまたは外部境界のコールバック関数
-+        auth: {
-+          getUser:
-+            /**
-+             * リクエスト単位の本人IDをAuth応答の形で返す。
-+             */
-+            async () => ({ // 対象ケースまたは外部境界のコールバック関数
-+              data: {
-+                user: requests.getStore() ? { // リクエストごとの本人IDを取得するメソッド
-+                  id: requests.getStore(), // リクエストごとの本人IDを取得するメソッド
-+                } : null,
-+              }, // リクエストごとの本人IDを取得するメソッド
-+              error: null,
-+            }),
-+        },
-+      }),
-+  }));
++## ユーザー操作からDBまで
 +
-+/**
-+ * redirect・404を普通のDB失敗から区別するテスト用の制御例外クラス。
-+ */
-+class NextControl extends Error { } // Next制御例外のクラス / Error基底クラス
-+vi.mock("next/navigation",  // モジュールを置き換えるメソッド
-+  /**
-+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
-+   */
-+  () => ({ // 対象ケースまたは外部境界のコールバック関数
-+    redirect:
-+      /**
-+       * 専用ログインへのredirectを制御例外として再現する。
-+       */
-+      () => { // 対象ケースまたは外部境界のコールバック関数
-+        throw new NextControl("F09 test redirect"); // Next制御例外を模すコンストラクター
-+      },
-+    notFound:
-+      /**
-+       * 権限非開示の404を制御例外として再現する。
-+       */
-+      () => { // 対象ケースまたは外部境界のコールバック関数
-+        throw new NextControl("F09 test not found"); // Next制御例外を模すコンストラクター
-+      },
-+    unstable_rethrow:
-+      /**
-+       * 試験用のNext制御例外だけを再送出する。
-+       */
-+      (error: unknown) => { // 対象ケースまたは外部境界のコールバック関数 / 検証前の未知値型
-+        if (error instanceof NextControl) {
-+          throw error;
-+        }
-+      },
-+  }));
-+vi.mock("next/cache",  // モジュールを置き換えるメソッド
-+  /**
-+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
-+   */
-+  () => ({ // 対象ケースまたは外部境界のコールバック関数
-+    revalidatePath: mail.revalidate, // 再検証の呼出しだけを観測するモック関数参照
-+  })); // 対象ケースまたは外部境界のコールバック関数
++以下のパスはリポジトリルートからの相対パスです。
++UIの基点は `app/(club-app)/platform-login/` と `app/(club-app)/platform/support/`、
++Serviceは `src/application/platform/support/`、Repositoryは
++`src/infrastructure/prisma/repositories/` です。
 +
-+// F08の実adapter・Serviceを通すケースでもSDK・実メールは呼び出さない。
-+vi.mock("@/lib/mail/resend",  // モジュールを置き換えるメソッド
-+  /**
-+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
-+   */
-+  () => ({ // 対象ケースまたは外部境界のコールバック関数
-+    resend: {
-+      emails: {
-+        send: mail.send, // 実配送せずSDK受付応答だけを返すモック関数参照
-+      },
-+    },
-+    adminEmail: "operator@example.test",
-+    buildMailFrom:
-+      /**
-+       * 実設定を参照せず、fixture専用の送信元表示を返す。
-+       */
-+      () => "F09 fixture <from@example.test>", // 対象ケースまたは外部境界のコールバック関数
-+  }));
++| 段階 | ファイル・関数、受け取る値と返す値 | DB・Authの変更 |
++| --- | --- | --- |
++| 専用入口 | `platform-login/page.tsx / PlatformLoginPage` がAuth本人と有効な管理者を確認。有効なら固定 `/platform/support`、それ以外はログイン画面 | 権限読取のみ。既存の一般会員sessionをPage表示だけでlogoutしない |
++| ログイン | `PlatformLoginForm` → `platform-login/actions.ts / platformLoginAction`。単一email・password・requestIdと前stateの一致を検証し、試行制限、signInWithPassword、最新PlatformAdminを照合 | LoginSubmissionLogへハッシュ化したIP・emailと結果を記録。Authの本人sessionを更新。クラブ所属は作らない |
++| Proxy・画面 | `proxy.ts / proxy` → `updateSession`、`platform/layout.tsx / PlatformLayout`、`support/page.tsx / PlatformSupportPage` → `requirePlatformAdmin` | ProxyはCookieの更新を引き継ぐ。layout・Pageは権限読取。Proxy単独で認可しない |
++| 一覧 | `parseSupportReportQuery` → `get-platform-support.ts / getPlatformSupport` → `platform-support-report-repository.ts / findSupportReportsForPlatform`。本人contextと検索条件から限定DTO・件数・クラブ候補を返す | 最新管理者、SupportReport、Club、担当者の必要列を読取。書込みなし |
++| 全文 | `SupportReportTable` がDTOの本文・メモ・snapshot・保存済みURL・UAをReactテキストとdetailsで表示 | なし。既読や監査レコードを追加しない |
++| status | `SupportReportOperations / changeStatus` → `actions.ts / updateSupportReportStatusAction` → `update-platform-support.ts / updatePlatformSupportStatus` → `platform-support-report-mutation-repository.ts / updateSupportReportStatusForPlatform`。ID・requestId・expectedUpdatedAt・許可statusを渡す | 実変更時だけstatus・担当者・状態日時・解決日時・updatedAtを更新。競合は非更新 |
++| メモ | `SupportReportOperations / submitForm` → `updateSupportReportNoteAction` → `updatePlatformSupportNote` → `updateSupportReportNoteForPlatform`。ID・requestId・expectedUpdatedAt・メモを渡す | internalNote・担当者・updatedAtを更新。status日時は維持 |
++| 完了 | ActionがUPDATED/UNCHANGED、報告ID・version・固定案内等の最小stateを返す。UPDATED時に固定 `/platform/support` をrevalidatePathで再検証 | 再検証自体は再保存ではない。成功ごとに次回requestIdを用意する |
++| logout | `PlatformLogoutButton / submitLogout` → `platformLogoutAction` がlocal signOut後、固定 `/platform-login` へ遷移 | 現在のAuth sessionを終了。PlatformAdmin・ClubMembershipは不変 |
 +
-+describe("F09接続ガード（DB・Auth・SDK・dotenvなし）",  // ガード試験を登録する関数
-+  /**
-+   * 架空の設定だけを使う接続ガードの試験を登録する。
-+   */
-+  () => { // 対象ケースまたは外部境界のコールバック関数
-+    it.each(["RUN_PLATFORM_SUPPORT_TESTS", "RUN_DB_INTEGRATION_TESTS"])( // 入力別の接続ガード試験を登録するメソッド
-+      "%sがなければ接続設定へ進まない",
++本体の接続に後続粒度待ちはありません。以下の実環境受入は未完了です。
++F08の受付・通知経路をこの粒度で再実装しません。
 +
-+      /**
-+       * 架空の入力を差し替えて接続ガードの許可・拒否を検証する。
-+       */
-+      (flag) => { // 対象ケースまたは外部境界のコールバック関数
-+        const environment = sampleEnvironment(); // 架空の接続ガード設定を作る関数
-+        delete environment[flag];
-+        expect(enabled(environment)).toBe(false); // 値の一致を検証するメソッド / 期待値を生成する関数 / 専用flagが両方揃っているか調べる関数
-+        expect( // 期待値を生成する関数
-+          /**
-+           * 接続ガードを呼び出し、固定エラーで拒否されることを確認する。
-+           */
-+          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // 固定エラーで拒否されることを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 使い捨てloopback設定の全条件を確認する関数
-+      },
-+    );
-+    it.each([ // 入力別の接続ガード試験を登録するメソッド
-+      ["PLATFORM_SUPPORT_DISPOSABLE", undefined],
-+      ["PLATFORM_SUPPORT_DISPOSABLE", "0"],
-+      ["NODE_ENV", "production"],
-+      ["DATABASE_URL", undefined],
-+      ["DATABASE_URL", "private-fixture-invalid-url"],
-+      ["DATABASE_URL", "https://fixture:fixture@localhost:54322/postgres"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@remote.test:54322/postgres"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@localhost.remote.test:54322/postgres"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.test"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#secret"],
-+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#"],
-+      ["DATABASE_URL", "postgresql://127.0.0.1:54322/postgres"],
-+      ["DATABASE_URL", "postgresql://fixture@127.0.0.1:54322/postgres"],
-+    ])("不許可設定は接続情報を含まない固定エラーにする：%s（%#）",
-+      /**
-+       * 架空の入力を差し替えて接続ガードの許可・拒否を検証する。
-+       */
-+      (key, value) => { // 対象ケースまたは外部境界のコールバック関数
-+        const environment = sampleEnvironment(); // 架空の接続ガード設定を作る関数
-+        environment[key!] = value;
-+        expect( // 期待値を生成する関数
-+          /**
-+           * 接続ガードを呼び出し、固定エラーで拒否されることを確認する。
-+           */
-+          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // 固定エラーで拒否されることを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 使い捨てloopback設定の全条件を確認する関数
-+        expect(client).toBeUndefined(); // 値が設定されていないことを検証するメソッド / 期待値を生成する関数
-+        expect(mail.send).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
-+      });
-+    it.each(["localhost", "127.0.0.1"])("許可したloopback %sだけを使う",  // ホスト別の接続ガード試験を登録するメソッド
-+      /**
-+       * 架空の入力を差し替えて接続ガードの許可・拒否を検証する。
-+       */
-+      (host) => { // 対象ケースまたは外部境界のコールバック関数
-+        const environment = sampleEnvironment(); // 架空の接続ガード設定を作る関数
-+        environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
-+        expect(localConfiguration(environment)).toBe(environment.DATABASE_URL); // 値の一致を検証するメソッド / 期待値を生成する関数 / 使い捨てloopback設定の全条件を確認する関数
-+      });
-+    it("失敗の原文・causeを固定エラーへ残さない",  // 試験を登録する関数
-+      /**
-+       * ラップしたDBケース、または接続ガードの結果を検証する。
-+       */
-+      async () => { // 対象ケースまたは外部境界のコールバック関数
-+        try {
-+          await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+            /**
-+             * fixtureの例外原文が外へ漏れないことを調べるために例外を発生させる。
-+             */
-+            async () => { // 対象ケースまたは外部境界のコールバック関数
-+              throw new Error("private-fixture-db-error"); // Errorコンストラクター
-+            });
-+          expect.fail("固定エラーが必要です。"); // 期待する例外がない場合に試験を失敗させるメソッド
-+        } catch (error) {
-+          expect(error).toBeInstanceOf(Error); // 値のクラスを検証するメソッド / 期待値を生成する関数
-+          expect((error as Error).message).toBe(CHECK_ERROR); // 値の一致を検証するメソッド / 期待値を生成する関数 / 標準のError型
-+          expect((error as Error).cause).toBeUndefined(); // 値が設定されていないことを検証するメソッド / 期待値を生成する関数 / 標準のError型
-+        }
-+      });
-+  });
++## 表示・更新の契約
 +
-+const describeDatabase = enabled(process.env) ? describe : describe.skip; // 専用flagの判定関数 / 試験登録関数 / DB試験をskipする関数
++- 一覧はclubId・status・categoryのAND検索、1ページ50件、pageは1〜10000です。
++  不正・配列・重複queryを無条件の全件取得へ丸めません。
++  作成日時降順・ID降順のoffset方式で、新規報告によるページ間移動は保証しません。
++- 一覧の時刻は日本時間です。DBと競合検出にはミリ秒付きUTC ISOのupdatedAtを使います。
++- statusはOPEN・IN_PROGRESS・ON_HOLD・RESOLVEDの4択。選択変更で即送信します。
++  内部メモは別フォームの保存ボタンから送信します。
++- メモはtrim後5000 UTF-16コード単位以内、空欄はnullです。
++  超過を切り捨てず拒否します。表示済みの長い既存値を保存前に黙って短縮しません。
++- status実変更では担当者とstatusChangedAtを更新し、RESOLVEDに入るとresolvedAtも同じ時刻にします。
++  他のstatusへ移るとresolvedAtはnullです。同statusでは日時・担当者・updatedAtを維持します。
++- メモ保存では担当者を更新しますが、status・statusChangedAt・resolvedAtは維持します。
++- 担当者は認可context、管理日時はサーバー由来です。
++  本文・snapshot・クラブ・元所属・通知列を管理フォームから変更しません。
++- PlatformAdmin削除時、担当者FKはSetNullです。報告・状態日時・メモは残ります。
++  SQL制約の実適用はschema確認だけで証明せず、専用DB試験で別途確認します。
 +
-+describeDatabase("F09実DB統合（専用flag未指定時はskip）",  // flagに応じてDB試験を登録またはskipする関数
-+  /**
-+   * flagが揃う場合だけ動く専用DBのfixture・フロー試験を登録する。
-+   */
-+  () => { // 対象ケースまたは外部境界のコールバック関数
-+    let db: PrismaClient | undefined; // 専用DBクライアントの型
-+    let fixture: Fixture | undefined; // 作成前に登録したUUIDと会員識別子の型
-+    let authorization: typeof import("@/app/(club-app)/platform/require-platform-admin"); // ガード後に取得するモジュールの型
-+    let clubAuthorization: typeof import("@/app/(club-app)/club/club-membership-authorization"); // ガード後に取得するモジュールの型
-+    let actions: typeof import("@/app/(club-app)/platform/support/actions"); // ガード後に取得するモジュールの型
-+    let readService: typeof import("@/src/application/platform/support/get-platform-support"); // ガード後に取得するモジュールの型
-+    let updateService: typeof import("@/src/application/platform/support/update-platform-support"); // ガード後に取得するモジュールの型
-+    let readRepository: typeof import("@/src/infrastructure/prisma/repositories/platform-support-report-repository"); // ガード後に取得するモジュールの型
-+    let mutation: typeof import( // ガード後に取得するモジュールの型
-+      "@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository"
-+    );
-+    let f08Repository: typeof import("@/src/infrastructure/prisma/repositories/support-report-repository"); // ガード後に取得するモジュールの型
-+    let f08Service: typeof import("@/src/application/club/support/create-support-report"); // ガード後に取得するモジュールの型
++根拠：`domain/platform/support/support-report-query.ts`、
++`support-report-management-form.ts`、`support-report-management-policy.ts`、
++`prisma/schema.prisma` のSupportReport・PlatformAdmin。
 +
-+    /**
-+     * 専用clientを使用できるケースだけに、初期化済みの参照を渡す。
-+     */
-+    function database(): PrismaClient { // 初期化済みの専用clientを返す関数 / 専用DBクライアントの型
-+      if (!db) {
-+        throw new Error("F09専用clientは未初期化です。"); // Errorコンストラクター
-+      }
-+      return db;
-+    }
++## 競合・下書き・保存後障害の扱い
 +
-+    beforeAll( // 接続前の準備処理を登録する関数
-+      /**
-+       * 全接続条件の確認後だけ専用clientと実装モジュールを初期化する。
-+       */
-+      async () => { // 対象ケースまたは外部境界のコールバック関数
-+        await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+          /**
-+           * 接続ガードを確認し、専用clientと必要な実装だけを初期化する。
-+           */
-+          async () => { // 対象ケースまたは外部境界のコールバック関数
-+            const connectionString = localConfiguration(process.env); // 使い捨てloopback設定の全条件を確認する関数
-+            const { PrismaClient: Client } = await import("@prisma/client"); // ガード後に専用clientのコンストラクターを読み込む動的import
-+            const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後にDBアダプターのコンストラクターを読み込む動的import
-+            db = new Client({ // ガード後だけ生成するPrismaClientコンストラクター
-+              adapter: new PrismaPg({ // 固定接続先を渡すPostgreSQLアダプターのコンストラクター
-+                connectionString,
-+              }), // 固定接続先を渡すPostgreSQLアダプターのコンストラクター
-+              log: [],
-+            });
-+            client = db;
-+            await db.$connect(); // ガード後の専用DBへ接続するメソッド
-+            authorization = await import("@/app/(club-app)/platform/require-platform-admin"); // 必要な実装だけをガード後に読み込む動的import
-+            clubAuthorization = await import("@/app/(club-app)/club/club-membership-authorization"); // 必要な実装だけをガード後に読み込む動的import
-+            actions = await import("@/app/(club-app)/platform/support/actions"); // 必要な実装だけをガード後に読み込む動的import
-+            readService = await import("@/src/application/platform/support/get-platform-support"); // 必要な実装だけをガード後に読み込む動的import
-+            updateService = await import("@/src/application/platform/support/update-platform-support"); // 必要な実装だけをガード後に読み込む動的import
-+            readRepository = await import("@/src/infrastructure/prisma/repositories/platform-support-report-repository"); // 必要な実装だけをガード後に読み込む動的import
-+            mutation = await import("@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository"); // 必要な実装だけをガード後に読み込む動的import
-+            f08Repository = await import("@/src/infrastructure/prisma/repositories/support-report-repository"); // 必要な実装だけをガード後に読み込む動的import
-+            f08Service = await import("@/src/application/club/support/create-support-report"); // 必要な実装だけをガード後に読み込む動的import
-+          });
-+      }, 20_000);
++| 状況 | 現在の扱いと運用上の確認 |
++| --- | --- |
++| 同じ行の送信中 | statusとメモの両方を無効化し、refでも連打を抑える。他行は操作できる |
++| 自分のstatus更新成功 | 同じ行の最新versionを共有する。メモの基準versionが送信時と整合する場合だけ進める |
++| 他者の更新・CONFLICT | 未保存メモとその基準versionを維持する。古い内容を無条件に再送しない |
++| 最新情報を取得 | 下書きを残してrouter.refreshする。取得済み情報と下書きを照合する |
++| 取得済みの内容で再編集 | dirtyなら破棄確認後に、取得済み内容とversionを採用する。破棄してよい場合だけ選ぶ |
++| 同じ検索条件での再検証 | reportIdのkeyで行を保持。更新で条件外へ移った操作行も残す場合がある |
++| 条件外の保持行 | 表示情報は更新前の場合があるという案内を確認する。取得済みsnapshotを最新DB値と断定しない |
++| フィルター・ページ移動 | 検証済みqueryのtableKeyが変わると編集領域を切り替える。離脱確認・キャンセル・移動後の入力の扱いをブラウザーで確認する |
++| 保存済み・再検証失敗 | successとreloadRequiredの固定案内を維持する。保存失敗と読み替えず、再保存を依頼しない |
++| 応答不明・通信失敗 | 最新の保存状態を承認済み読取手段で先に照合する。失敗表示だけで「DBに未保存」と断定しない |
 +
-+    beforeEach( // ケースごとの準備を登録する関数
-+      /**
-+       * 各ケースのモックとUUIDを準備し、独立したfixtureを作る。
-+       */
-+      async () => { // 対象ケースまたは外部境界のコールバック関数
-+        fixture = undefined;
-+        vi.spyOn(console, "error").mockImplementation( // 実処理をモックへ置き換えるメソッド / ログ呼出しを監視するメソッド
-+          /**
-+           * ログの原文を表示せず、後で呼出し有無だけを検査できるようにする。
-+           */
-+          () => undefined); // 対象ケースまたは外部境界のコールバック関数
-+        vi.spyOn(console, "warn").mockImplementation( // 実処理をモックへ置き換えるメソッド / ログ呼出しを監視するメソッド
-+          /**
-+           * ログの原文を表示せず、後で呼出し有無だけを検査できるようにする。
-+           */
-+          () => undefined); // 対象ケースまたは外部境界のコールバック関数
-+        vi.spyOn(console, "log").mockImplementation( // 実処理をモックへ置き換えるメソッド / ログ呼出しを監視するメソッド
-+          /**
-+           * ログの原文を表示せず、後で呼出し有無だけを検査できるようにする。
-+           */
-+          () => undefined); // 対象ケースまたは外部境界のコールバック関数
-+        mail.send.mockReset(); // ケース前にモックを初期化するメソッド
-+        mail.revalidate.mockReset(); // ケース前にモックを初期化するメソッド
-+        mail.send.mockResolvedValue({ // SDK受付の架空応答を設定するメソッド
-+          data: {
-+            id: "f09-provider-id",
-+          },
-+          error: null,
-+        });
-+        await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+          /**
-+           * UUIDを作成前に登録して、必要最小限のDB fixtureを保存する。
-+           */
-+          async () => { // 対象ケースまたは外部境界のコールバック関数
-+            fixture = {
-+              clubs: [randomUUID(), randomUUID(), randomUUID()], // UUID v4を生成する関数
-+              admins: [randomUUID(), randomUUID(), randomUUID()], // UUID v4を生成する関数
-+              member: randomUUID(), // UUID v4を生成する関数
-+              membership: randomUUID(), // UUID v4を生成する関数
-+              reports: new Set(), // cleanup対象UUIDの集合コンストラクター
-+            };
-+            const f = fixture;
-+            await database().club.createMany({ // 登録済みUUIDのfixtureをまとめて保存するメソッド / 初期化済みの専用clientを返す関数
-+              data: f.clubs.map( // 識別子または固定結果の配列へ変換するメソッド
-+                /**
-+                 * 登録済みUUIDから全プランのクラブfixtureを作る。
-+                 */
-+                (id, index) => ({ // 対象ケースまたは外部境界のコールバック関数
-+                  id,
-+                  slug: `f09-${id}`,
-+                  name: "F09 fixture",
-+                  planType: (["STANDARD", "STARTER", "PRO"] as const)[index], // 読取専用リテラル型
-+                })),
-+            });
-+            await database().platformAdmin.createMany({ // 登録済みUUIDのfixtureをまとめて保存するメソッド / 初期化済みの専用clientを返す関数
-+              data: f.admins.map( // 識別子または固定結果の配列へ変換するメソッド
-+                /**
-+                 * 登録済みUUIDから有効・無効のPlatform管理者fixtureを作る。
-+                 */
-+                (id, index) => ({ // 対象ケースまたは外部境界のコールバック関数
-+                  id,
-+                  email: `${id}@fixture.example.test`,
-+                  name: "F09 operator",
-+                  role: index === 0 ? "DEVELOPER" : "SUPPORT",
-+                  isActive: index !== 2,
-+                })),
-+            });
-+            await database().appUser.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
-+              data: { // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
-+                id: f.member,
-+                name: "F09 reporter",
-+              }
-+            });
-+            await database().clubMembership.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
-+              data: {
-+                id: f.membership,
-+                userId: f.member,
-+                clubId: f.clubs[0],
-+                role: "MEMBER",
-+                status: "ACTIVE",
-+              },
-+            });
-+          });
-+      }, 20_000);
++F08の通知結果保存でもupdatedAtが変わります。メモやstatusの変更が見えなくても競合し得ます。
++通知失敗を理由に再送したり、通知列を手動修正して管理更新を通したりしません。
++F09の管理操作から通知メールを再送しません。通知の意味・復旧の限界はF08運用を参照します。
 +
-+    // 途中で作成に失敗しても、登録済みUUIDだけを子→親の順序でcleanupする。
-+    afterEach( // ケースごとのcleanupを登録する関数
-+      /**
-+       * 安全なログだけであることを確認し、途中失敗時も登録済みUUIDだけをcleanupする。
-+       */
-+      async () => { // 対象ケースまたは外部境界のコールバック関数
-+        const f = fixture;
-+        fixture = undefined;
-+        try {
-+          await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+            /**
-+             * 本文・例外原文を含む不要なログがないことを確認する。
-+             */
-+            async () => { // 対象ケースまたは外部境界のコールバック関数
-+              expect(console.error).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
-+              expect(console.warn).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
-+              expect(console.log).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
-+            });
-+        } finally {
-+          vi.restoreAllMocks(); // ログの監視を解除するメソッド
-+          if (f) {
-+            await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+              /**
-+               * このケースに登録したUUIDだけを、子から親の順で削除する。
-+               */
-+              async () => { // 対象ケースまたは外部境界のコールバック関数
-+                const db = database(); // 初期化済みの専用clientを返す関数
-+                try {
-+                  await db.supportReport.deleteMany({ // 登録済みUUIDだけを削除するメソッド
-+                    where: {
-+                      id: {
-+                        in: [...f.reports],
-+                      },
-+                    },
-+                  }); // 登録済みUUIDだけを削除するメソッド
-+                } finally {
-+                  try {
-+                    await db.club.deleteMany({ // 登録済みUUIDだけを削除するメソッド
-+                      where: {
-+                        id: {
-+                          in: f.clubs,
-+                        },
-+                      },
-+                    }); // 登録済みUUIDだけを削除するメソッド
-+                  } finally {
-+                    try {
-+                      await db.appUser.deleteMany({ // 登録済みUUIDだけを削除するメソッド
-+                        where: {
-+                          id: f.member,
-+                        },
-+                      }); // 登録済みUUIDだけを削除するメソッド
-+                    } finally {
-+                      await db.platformAdmin.deleteMany({ // 登録済みUUIDだけを削除するメソッド
-+                        where: {
-+                          id: {
-+                            in: f.admins,
-+                          },
-+                        },
-+                      }); // 登録済みUUIDだけを削除するメソッド
-+                    }
-+                  }
-+                }
-+              });
-+          }
-+        }
-+      }, 20_000);
-+    afterAll( // 専用接続の解放処理を登録する関数
-+      /**
-+       * 接続に失敗した場合も生成済みの専用clientを解放する。
-+       */
-+      async () => { // 対象ケースまたは外部境界のコールバック関数
-+        await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+          /**
-+           * 専用clientを切断し、注入用の参照を必ず解除する。
-+           */
-+          async () => { // 対象ケースまたは外部境界のコールバック関数
-+            try {
-+              await db?.$disconnect(); // 専用DB接続を解放するメソッド
-+            } finally {
-+              client = undefined;
-+            }
-+          });
-+      }, 20_000);
++下書きはマウント中のClient stateです。ブラウザーの再読込・終了・logout・認可拒否を越える
++永続保存や復元は保証しません。共通guardはリンククリックとbeforeunloadを扱いますが、
++履歴戻りや実際のNext遷移を含む保護範囲はブラウザーで実測します。
++Platformのlogoutボタンは即時Actionで、F07の確認ダイアログは使いません。
++未保存内容はlogout前に扱い、logoutをキャンセルすれば必ず復元できるとは案内しません。
 +
-+    /**
-+     * DBケースとhookの例外を固定文へ包み、ケース名だけを失敗調査の手掛かりにする。
-+     */
-+    function databaseCase(label: string, operation: (f: Fixture) => Promise<void>): void { // fixtureと固定失敗文でDBケースを登録する関数 / 文字列型 / 作成前に登録したUUIDと会員識別子の型 / 非同期結果の型 / 戻り値を使わない型
-+      it(label,  // 試験を登録する関数
-+        /**
-+         * ラップしたDBケース、または接続ガードの結果を検証する。
-+         */
-+        async () => { // 対象ケースまたは外部境界のコールバック関数
-+          await safeCheck( // 失敗の原文を固定エラーへ限定する関数
-+            /**
-+             * 登録済みfixtureで対象ケースを実行し、失敗を固定文へ包む。
-+             */
-+            async () => { // 対象ケースまたは外部境界のコールバック関数
-+              if (!fixture) {
-+                throw new Error("F09 fixtureがありません。"); // Errorコンストラクター
-+              }
-+              await operation(fixture); // 受け取ったケースの検証処理を実行する関数
-+            });
-+        }, 20_000);
-+    }
++不具合を確認した場合、この粒度で本体を変更せず、再現条件と対象ファイル・関数を記録し、
++該当粒度の修正案へ切り分けます。
 +
-+    /**
-+     * Authだけをfixtureの本人IDにし、実DBのPlatformAdmin認可contextを取得する。
-+     */
-+    async function access(id: string): Promise<PlatformAdminAccessContext> { // 実DBで本人のPlatform権限を確認する関数 / 文字列型 / 非同期結果の型 / 本人IDと有効なPlatform管理者情報の型
-+      return requests.run(id,  // 本人IDの非同期contextで処理を実行するメソッド
-+        /**
-+         * Auth本人IDだけを指定し、実DBからPlatform権限を確認する。
-+         */
-+        () => authorization.requirePlatformAdmin()); // 対象ケースまたは外部境界のコールバック関数 / 本人の有効なPlatform権限を実DBで確認するメソッド
-+    }
++## DBなしの自動回帰
 +
-+    /**
-+     * 書込み前に報告UUIDを登録し、全プランの既存報告を模したDB行を作成する。
-+     */
-+    async function report(f: Fixture, club = 0): Promise<SupportReport> { // UUIDを登録して報告fixtureを保存する関数 / 作成前に登録したUUIDと会員識別子の型 / 非同期結果の型 / 保存されたサポート報告モデル型
-+      const id = randomUUID(); // UUID v4を生成する関数
-+      f.reports.add(id); // 作成前にcleanup用UUIDを登録するメソッド
-+      return database().supportReport.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
-+        data: {
-+          id,
-+          clubId: f.clubs[club],
-+          membershipId: club === 0 ? f.membership : null,
-+          message: "F09 fixture本文",
-+          category: "BUG",
-+          status: "OPEN",
-+          reporterName: "保存時氏名",
-+          reporterEmail: "snapshot@example.test",
-+          reporterRole: "MEMBER",
-+          pageUrl: `/club/f09-${f.clubs[club]}/account`,
-+          userAgent: "F09 fixture browser",
-+          updatedAt: new Date(BASE_TIME), // 検証用の日時を作るDateコンストラクター
-+          createdAt: new Date(Date.parse(BASE_TIME) + f.reports.size * 1000), // 検証用の日時を作るDateコンストラクター / fixture日時をミリ秒へ変換するメソッド
-+        },
-+      });
-+    }
++リポジトリルートで、インストール済み依存を使います。実接続flagを0に固定し、
++以下の対象だけを実行します。環境変数ファイル・実接続設定は読み込みません。
++`verify`・`verify:local`・`test:db` はこの確認の代用にせず実行しません。
 +
-+    /**
-+     * 管理操作で更新してはいけないF08の本文・所属・snapshot・通知列だけを抽出する。
-+     */
-+    function immutable(row: SupportReport) { // 管理操作で不変にするF08列を抽出する関数 / 保存されたサポート報告モデル型
-+      return {
-+        id: row.id,
-+        clubId: row.clubId,
-+        membershipId: row.membershipId,
-+        createdAt: row.createdAt,
-+        message: row.message,
-+        category: row.category,
-+        reporterName: row.reporterName,
-+        reporterEmail: row.reporterEmail,
-+        reporterRole: row.reporterRole,
-+        pageUrl: row.pageUrl,
-+        userAgent: row.userAgent,
-+        notifiedAt: row.notifiedAt,
-+        notifyError: row.notifyError,
-+      };
-+    }
++```sh
++RUN_PLATFORM_SUPPORT_TESTS=0 \
++RUN_SUPPORT_REPORT_TESTS=0 \
++RUN_DB_INTEGRATION_TESTS=0 \
++node node_modules/vitest/vitest.mjs run \
++  domain/platform \
++  src/application/platform \
++  tests/platform-*.test.ts \
++  domain/club/support \
++  src/application/club/support \
++  tests/support-report*.test.ts \
++  lib/mail/support-report-mail.test.ts \
++  src/infrastructure/logging/sanitize-log-context.test.ts \
++  domain/club/plan-features.test.ts \
++  tests/club-membership-authorization.test.ts \
++  tests/club-account-navigation.test.ts \
++  tests/club-account-pages.test.ts \
++  tests/club-account-forms.test.ts \
++  tests/club-invitation-login-resume.test.ts \
++  tests/club-invitation-entry.test.ts
++```
 +
-+    /**
-+     * 最新versionと独立requestIdを持つAction入力だけを作る。
-+     */
-+    function submission(row: SupportReport, kind: "STATUS" | "NOTE", value: string) { // 独立requestIdとversionを持つAction入力を作る関数 / 保存されたサポート報告モデル型 / 文字列型
-+      const state: PlatformSupportActionState = { // versionと最小成功情報だけのAction state型
-+        status: "idle",
-+        values: {
-+          expectedUpdatedAt: row.updatedAt.toISOString(), // 競合検出のUTC ISO versionへ変換するメソッド
-+        }, // 競合検出のUTC ISO versionへ変換するメソッド
-+        fieldErrors: {},
-+        formError: null,
-+        requestId: randomUUID(), // UUID v4を生成する関数
-+      };
-+      const data = new FormData(); // Action送信値のFormDataコンストラクター
-+      data.set("requestId", state.requestId); // 限定した送信項目を設定するメソッド
-+      data.set("reportId", row.id); // 限定した送信項目を設定するメソッド
-+      data.set("expectedUpdatedAt", state.values.expectedUpdatedAt); // 限定した送信項目を設定するメソッド
-+      data.set(kind === "STATUS" ? "status" : "internalNote", value); // 限定した送信項目を設定するメソッド
-+      return {
-+        state,
-+        data,
-+      };
-+    }
++F09の接続ガード21件、F08の接続ガード19件は架空の設定だけで実行します。
++実DBケースはF09が15件、F08が23件で、上記コマンドではskipです。
++`platform-entry.test.ts` は実Nextのmatcher評価器とRequest/Responseを使いますが、
++Auth・セッション更新はmockです。Cookieの実更新や実HTTPのOrigin保護は証明しません。
++フォームのnode試験はhook境界を模しており、実DOM・focus・履歴・離脱確認の実証にはしません。
 +
-+    /**
-+     * 実Actionから認可・検証・Service・DB更新まで通し、Auth本人だけを置換する。
-+     */
-+    async function invoke(id: string, row: SupportReport, kind: "STATUS" | "NOTE", value: string) { // Auth本人だけを置換して実Actionを実行する関数 / 文字列型 / 保存されたサポート報告モデル型
-+      const input = submission(row, kind, value); // 独立requestIdとversionを持つAction入力を作る関数
-+      return requests.run(id,  // 本人IDの非同期contextで処理を実行するメソッド
-+        /**
-+         * Auth本人IDだけを指定し、実Actionから保存までを実行する。
-+         */
-+        () => kind === "STATUS" // 対象ケースまたは外部境界のコールバック関数
-+          ? actions.updateSupportReportStatusAction(row.id, input.state, input.data) // 毎回再認可してstatusを更新するAction関数
-+          : actions.updateSupportReportNoteAction(row.id, input.state, input.data)); // 毎回再認可して内部メモを更新するAction関数
-+    }
++## 使い捨てDBの専用統合試験
 +
-+    /**
-+     * 実Serviceの再検証へ渡す、本人context由来の入力を作る。
-+     */
-+    function identity(actor: PlatformAdminAccessContext, row: SupportReport) { // 認可contextと保存済みversionから更新入力を作る関数 / 本人IDと有効なPlatform管理者情報の型 / 保存されたサポート報告モデル型
-+      return {
-+        userId: actor.userId,
-+        platformAdminId: actor.platformAdmin.id,
-+        reportId: row.id,
-+        requestId: randomUUID(), // UUID v4を生成する関数
-+        expectedUpdatedAt: row.updatedAt.toISOString(), // 競合検出のUTC ISO versionへ変換するメソッド
-+      };
-+    }
++1. 本番・日常開発データを含まない、破棄できる専用ローカルDBを担当者が用意します。
++2. 既存migrationの適用と必要な実行権限を確認します。
++   試験自体はmigration・seed・reset・schema変更を実行しません。
++3. loopback接続がリモートDBへのトンネル・proxyでないことを確認します。
++   URL検査だけで転送先や使い捨て状態を証明するものではありません。
++4. 接続設定は承認された方法でプロセス環境へ渡し、URL・PWを引数・証跡へ記載しません。
++5. 使い捨て確認を行った担当者だけが `PLATFORM_SUPPORT_DISPOSABLE=1` を設定します。
 +
-+    for (const role of ["DEVELOPER", "SUPPORT"] as const) { // 読取専用リテラル型
-+      databaseCase(`${role}はAppUser・所属なしで全プランの報告を横断読取する`,  // fixtureと固定失敗文でDBケースを登録する関数
-+        /**
-+         * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+         */
-+        async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+          const id = role === "DEVELOPER" ? f.admins[0] : f.admins[1];
-+          const actor = await access(id); // 実DBで本人のPlatform権限を確認する関数
-+          expect(actor.platformAdmin.role).toBe(role); // 値の一致を検証するメソッド / 期待値を生成する関数
-+          expect(await database().appUser.count({ // 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
-+            where: {
-+              id,
-+            },
-+          })).toBe(0); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
-+          expect(await database().clubMembership.count({ // 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
-+            where: {
-+              userId: id,
-+            },
-+          })).toBe(0); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
-+          for (const index of [0, 1, 2]) {
-+            const stored = await report(f, index); // UUIDを登録して報告fixtureを保存する関数
-+            const result = await readService.getPlatformSupport(actor, { // 検証済み条件で横断一覧を取得するService関数
-+              clubId: f.clubs[index],
-+            }); // 検証済み条件で横断一覧を取得するService関数
-+            expect(result.outcome).toBe("FOUND"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+            if (result.outcome !== "FOUND") {
-+              throw new Error("一覧取得失敗"); // Errorコンストラクター
-+            }
-+            expect(result.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
-+              /**
-+               * 限定DTOから識別子だけを抽出して期待する並びと照合する。
-+               */
-+              (item) => item.id)).toEqual([stored.id]); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数
-+            expect(result.reports[0].message).toBe(stored.message); // 値の一致を検証するメソッド / 期待値を生成する関数
-+            expect((await invoke(id, stored, "STATUS", "IN_PROGRESS")).status).toBe("success"); // 両ロールが所属・プランによらず管理更新できることを確認するAction呼出し / 成功の期待値生成・検証メソッド // 値の一致を検証するメソッド / 期待値を生成する関数
-+          }
-+          const all = await readService.getPlatformSupport(actor, {}); // 検証済み条件で横断一覧を取得するService関数
-+          expect(all.outcome).toBe("FOUND"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+          if (all.outcome !== "FOUND") {
-+            throw new Error("横断取得失敗"); // Errorコンストラクター
-+          }
-+          expect(all.clubs.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
-+            /**
-+             * 限定DTOから識別子だけを抽出して期待する並びと照合する。
-+             */
-+            (club) => club.id)).toEqual(expect.arrayContaining(f.clubs)); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 指定したクラブ候補を含むことを検証するメソッド
-+          expect(all.totalCount).toBe(await database().supportReport.count()); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
-+          expect(all.reports.length).toBeLessThanOrEqual(50); // 件数の上限を検証するメソッド / 期待値を生成する関数
-+        });
-+    }
++| 条件 | 許可する設定 |
++| --- | --- |
++| DATABASE_URL | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、username・passwordあり |
++| URLの付加要素 | query・fragmentを拒否。末尾だけの `?`・`#` や前後の空白も拒否 |
++| NODE_ENV | production以外 |
++| PLATFORM_SUPPORT_DISPOSABLE | 担当者が使い捨て確認後に設定する1 |
++| RUN_PLATFORM_SUPPORT_TESTS・RUN_DB_INTEGRATION_TESTS | 両方1が必要。専用scriptが設定する |
 +
-+    databaseCase("club・status・categoryのAND絞り込みと50件ページ送り・新着順を実DBで確認する",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const ids: string[] = []; // 文字列型
-+        for (let index = 0;index < 61;index++) {
-+          ids.push((await report(f)).id); // 検証用の識別子を配列へ登録するメソッド / UUIDを登録して報告fixtureを保存する関数
-+        }
-+        await database().supportReport.update({ // 対象fixtureの検証用状態を更新するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: ids[60],
-+          },
-+          data: {
-+            category: "QUESTION",
-+            status: "ON_HOLD",
-+          },
-+        });
-+        await report(f, 1); // UUIDを登録して報告fixtureを保存する関数
-+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        const query = {
-+          clubId: f.clubs[0],
-+          category: "BUG",
-+          status: "OPEN",
-+        };
-+        const first = await readService.getPlatformSupport(actor, query); // 検証済み条件で横断一覧を取得するService関数
-+        const second = await readService.getPlatformSupport(actor, { // 検証済み条件で横断一覧を取得するService関数
-+          ...query,
-+          page: "2",
-+        });
-+        if (first.outcome !== "FOUND" ||
-+          second.outcome !== "FOUND") {
-+          throw new Error("絞り込み失敗"); // Errorコンストラクター
-+        }
-+        expect(first.totalCount).toBe(60); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(first.pageSize).toBe(50); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(first.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
-+          /**
-+           * 限定DTOから識別子だけを抽出して期待する並びと照合する。
-+           */
-+          (row) => row.id)).toEqual(ids.slice(0, 60).reverse().slice(0, 50)); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 対象の範囲だけを取り出すメソッド / 期待する新着順へ並べるメソッド
-+        expect(second.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
-+          /**
-+           * 限定DTOから識別子だけを抽出して期待する並びと照合する。
-+           */
-+          (row) => row.id)).toEqual(ids.slice(0, 60).reverse().slice(50)); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 対象の範囲だけを取り出すメソッド / 期待する新着順へ並べるメソッド
-+        const filtered = await readService.getPlatformSupport(actor, { // 検証済み条件で横断一覧を取得するService関数
-+          clubId: f.clubs[0],
-+          category: "QUESTION",
-+          status: "ON_HOLD",
-+        });
-+        if (filtered.outcome !== "FOUND") {
-+          throw new Error("絞り込み失敗"); // Errorコンストラクター
-+        }
-+        expect(filtered.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
-+          /**
-+           * 限定DTOから識別子だけを抽出して期待する並びと照合する。
-+           */
-+          (row) => row.id)).toEqual([ids[60]]); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数
-+        expect((await readService.getPlatformSupport(actor, { // 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
-+          status: "INVALID",
-+        })).outcome).toBe("INVALID_QUERY"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
-+      });
++全条件が揃った環境でのみ、次を実行します。
 +
-+    for (const actorKind of ["inactive", "member"] as const) { // 読取専用リテラル型
-+      databaseCase(`${actorKind}は実認可とAction直呼び・偽装contextのServiceで拒否される`,  // fixtureと固定失敗文でDBケースを登録する関数
-+        /**
-+         * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+         */
-+        async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+          const id = actorKind === "inactive" ? f.admins[2] : f.member;
-+          const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+          await expect(access(id)).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 期待値を生成する関数 / 実DBで本人のPlatform権限を確認する関数
-+          await expect(invoke(id, stored, "NOTE", "非許可メモ")).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 期待値を生成する関数 / Auth本人だけを置換して実Actionを実行する関数
-+          const forged: PlatformAdminAccessContext = { // 本人IDと有効なPlatform管理者情報の型
-+            userId: id,
-+            platformAdmin: {
-+              id,
-+              role: "SUPPORT",
-+            },
-+          };
-+          expect(await readService.getPlatformSupport(forged, {})).toEqual({ // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
-+            outcome: "FORBIDDEN",
-+          }); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
-+          expect(await updateService.updatePlatformSupportNote(forged, { // 期待値を生成する関数 / 再検証してメモを更新するService関数
-+            ...identity(forged, stored), // 認可contextと保存済みversionから更新入力を作る関数
-+            internalNote: "非許可メモ",
-+          })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+            outcome: "FORBIDDEN",
-+          }); // 保存値の構造と内容を検証するメソッド
-+          expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+            where: {
-+              id: stored.id,
-+            },
-+          })).toEqual(stored); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        });
-+    }
++```sh
++npm run test:platform-support:local
++```
 +
-+    databaseCase("認可後に権限を失った古いcontextも、読取・status・同status・メモ更新で拒否する",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        await database().platformAdmin.update({ // 対象fixtureの検証用状態を更新するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: actor.userId,
-+          },
-+          data: {
-+            isActive: false,
-+          },
-+        });
-+        const scope = identity(actor, stored); // 認可contextと保存済みversionから更新入力を作る関数
-+        const query = {
-+          clubId: null,
-+          category: null,
-+          status: null,
-+          page: 1,
-+          pageSize: 50 as const, // 読取専用リテラル型
-+          skip: 0,
-+        };
-+        expect(await readRepository.findSupportReportsForPlatform({ // 期待値を生成する関数 / 最新Platform権限を照合して一覧を取得するRepository関数
-+          userId: actor.userId,
-+          platformAdminId: actor.userId,
-+          query,
-+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+          outcome: "FORBIDDEN",
-+        }); // 保存値の構造と内容を検証するメソッド
-+        for (const status of ["OPEN", "RESOLVED"] as const) { // 読取専用リテラル型
-+          expect(await mutation.updateSupportReportStatusForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してstatusを更新するRepository関数
-+            ...scope,
-+            status,
-+          })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+            outcome: "FORBIDDEN",
-+          }); // 保存値の構造と内容を検証するメソッド
-+        }
-+        expect(await mutation.updateSupportReportNoteForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してメモを更新するRepository関数
-+          ...scope,
-+          internalNote: "非許可メモ",
-+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+          outcome: "FORBIDDEN",
-+        }); // 保存値の構造と内容を検証するメソッド
-+        expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        })).toEqual(stored); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+      });
++専用scriptは `tests/platform-support.flow.integration.test.ts` だけを実行し、
++dotenvを自動読込しません。共有clientのdotenv初期化はmockし、ガード後に専用clientを注入します。
++不正設定なら接続前に固定エラーで失敗します。失敗回避のためにガードを緩めません。
 +
-+    databaseCase("statusの実変更だけ日時を更新し、同status再送では全管理列を維持する",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        let current = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        const before = immutable(current); // 管理操作で不変にするF08列を抽出する関数
-+        for (const status of ["IN_PROGRESS", "ON_HOLD", "RESOLVED", "OPEN"] as const) { // 読取専用リテラル型
-+          const actorId = status === "ON_HOLD" ||
-+            status === "OPEN" ? f.admins[1] : f.admins[0];
-+          const result = await invoke(actorId, current, "STATUS", status); // Auth本人だけを置換して実Actionを実行する関数
-+          expect(result.data?.outcome).toBe("UPDATED"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+          const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+            where: {
-+              id: current.id,
-+            },
-+          }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          expect(updated.status).toBe(status); // 値の一致を検証するメソッド / 期待値を生成する関数
-+          expect(updated.handledByPlatformAdminId).toBe(actorId); // 値の一致を検証するメソッド / 期待値を生成する関数
-+          expect(updated.statusChangedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
-+          expect(updated.updatedAt.getTime()).toBeGreaterThan(current.updatedAt.getTime()); // versionが進んだことを検証するメソッド / 期待値を生成する関数 / 保存日時をミリ秒で比較するメソッド
-+          expect(updated.resolvedAt).toEqual(status === "RESOLVED" ? updated.statusChangedAt : null); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
-+          expect(immutable(updated)).toEqual(before); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
-+          expect(result.data?.updatedAt).toBe(updated.updatedAt.toISOString()); // 値の一致を検証するメソッド / 期待値を生成する関数 / 競合検出のUTC ISO versionへ変換するメソッド
-+          current = updated;
-+        }
-+        const count = mail.revalidate.mock.calls.length; // 再検証モック関数の呼出し履歴を参照する
-+        const unchanged = await invoke(f.admins[1], current, "STATUS", "OPEN"); // Auth本人だけを置換して実Actionを実行する関数
-+        expect(unchanged.data?.outcome).toBe("UNCHANGED"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(mail.revalidate).toHaveBeenCalledTimes(count); // 呼出し回数を検証するメソッド / 期待値を生成する関数
-+        expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: current.id,
-+          },
-+        })).toEqual(current); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        expect(await mutation.updateSupportReportStatusForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してstatusを更新するRepository関数
-+          ...identity(actor, { // 認可contextと保存済みversionから更新入力を作る関数
-+            ...current,
-+            updatedAt: new Date(BASE_TIME), // 検証用の日時を作るDateコンストラクター
-+          }),
-+          status: "OPEN",
-+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+          outcome: "CONFLICT",
-+        }); // 保存値の構造と内容を検証するメソッド
-+      });
++15ケースは両role・AppUser/所属なし・全プラン横断、一般会員/inactive/失効済みcontext拒否、
++AND検索と50件ページ、status往復と同status、メモと対応者、改ざん入力、同時管理更新、
++F08通知によるversion競合、F08受付とsnapshot保持、担当者SetNull、クラブ越権防止を確認します。
++Action・Service・Repository・DB制約は実物を使い、Auth・Next・Resend SDKはmockです。
++実Auth、実キャッシュ再検証、HTTP、実配送が成功したとは扱いません。
++同時開始は特定SQL順序やP2034発生を強制せず、競合の厳密な順序制御とは区別します。
 +
-+    databaseCase("メモ保存は対応者を更新し、status日時・F08列を維持して空欄をnullにする",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        let stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        await f08Repository.recordSupportReportNotification({ // F08の通知受付結果を保存するRepository関数
-+          reportId: stored.id,
-+          clubId: stored.clubId,
-+          notification: {
-+            outcome: "FAILED",
-+            errorCode: "EMAIL_SEND_FAILED",
-+          },
-+        });
-+        stored = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        await invoke(f.admins[0], stored, "STATUS", "RESOLVED"); // Auth本人だけを置換して実Actionを実行する関数
-+        const before = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        const result = await invoke(f.admins[1], before, "NOTE", "  内部メモ  "); // Auth本人だけを置換して実Actionを実行する関数
-+        expect(result.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(JSON.stringify(result)).not.toContain("内部メモ"); // 期待する値の包含を検証するメソッド / 期待値を生成する関数 / 結果にメモ原文がないか検証するため文字列化するメソッド
-+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(updated.internalNote).toBe("内部メモ"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(updated.notifyError).toBe("EMAIL_SEND_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(updated.handledByPlatformAdminId).toBe(f.admins[1]); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(updated.statusChangedAt).toEqual(before.statusChangedAt); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
-+        expect(updated.resolvedAt).toEqual(before.resolvedAt); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
-+        expect(immutable(updated)).toEqual(immutable(before)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
-+        await invoke(f.admins[0], updated, "NOTE", " \n "); // Auth本人だけを置換して実Actionを実行する関数
-+        expect((await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        })).internalNote).toBeNull(); // nullであることを検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+      });
++fixtureの報告・クラブ・AppUser・PlatformAdminのUUIDは書込み前に登録し、その対象だけをcleanupします。
++全件削除・truncateはしません。強制終了時の残存はあり得るため、担当者が専用環境で確認します。
++SQL・SDK・assertionの原文やcauseを証跡へ追加せず、ケース名と固定エラー・理由を記録します。
 +
-+    databaseCase("Actionの改ざんhiddenは管理対象列や対応者にならず、bindしたID不一致も保存しない",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        const request = submission(stored, "NOTE", "許可メモ"); // 独立requestIdとversionを持つAction入力を作る関数
-+        for (const key of [
-+          "clubId",
-+          "membershipId",
-+          "reporterName",
-+          "reporterEmail",
-+          "status",
-+          "handledByPlatformAdminId",
-+          "statusChangedAt",
-+          "resolvedAt",
-+          "notifiedAt",
-+          "notifyError",
-+        ]) {
-+          request.data.set(key, f.clubs[1]); // 限定した送信項目を設定するメソッド
-+        }
-+        const result = await requests.run(f.admins[0],  // 本人IDの非同期contextで処理を実行するメソッド
-+          /**
-+           * Auth本人IDだけを指定し、実Actionから保存までを実行する。
-+           */
-+          () => actions.updateSupportReportNoteAction(stored.id, request.state, request.data)); // 対象ケースまたは外部境界のコールバック関数 / 毎回再認可して内部メモを更新するAction関数
-+        expect(result.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(updated.handledByPlatformAdminId).toBe(f.admins[0]); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(immutable(updated)).toEqual(immutable(stored)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
-+        const mismatch = submission(updated, "NOTE", "不一致メモ"); // 独立requestIdとversionを持つAction入力を作る関数
-+        mismatch.data.set("reportId", randomUUID()); // 限定した送信項目を設定するメソッド / UUID v4を生成する関数
-+        expect((await requests.run(f.admins[0],  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
-+          /**
-+           * Auth本人IDだけを指定し、実Actionから保存までを実行する。
-+           */
-+          () => actions.updateSupportReportNoteAction(stored.id, mismatch.state, mismatch.data))).status).toBe("error"); // 値の一致を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 毎回再認可して内部メモを更新するAction関数
-+        expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        })).toEqual(updated); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+      });
++## 実Auth・ブラウザーの統合受入
 +
-+    databaseCase("同じversionの同時管理更新は1件だけ成功し、他方をCONFLICTにする",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        const results = await Promise.all([ // 複数の実更新を同時に待機するメソッド
-+          mutation.updateSupportReportStatusForPlatform({ // 最新権限とversionを照合してstatusを更新するRepository関数
-+            ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
-+            status: "IN_PROGRESS",
-+          }),
-+          mutation.updateSupportReportNoteForPlatform({ // 最新権限とversionを照合してメモを更新するRepository関数
-+            ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
-+            internalNote: "同時メモ",
-+          }),
-+        ]);
-+        expect(results.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
-+          /**
-+           * 並列処理の固定結果分類だけを取り出す。
-+           */
-+          (result) => result.outcome).sort()).toEqual(["CONFLICT", "UPDATED"]); // 保存値の構造と内容を検証するメソッド / 比較用に結果分類を並べるメソッド / 対象ケースまたは外部境界のコールバック関数
-+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(immutable(updated)).toEqual(immutable(stored)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
-+        expect(updated.handledByPlatformAdminId).toBe(actor.userId); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(updated.updatedAt.getTime()).toBeGreaterThan(stored.updatedAt.getTime()); // versionが進んだことを検証するメソッド / 期待値を生成する関数 / 保存日時をミリ秒で比較するメソッド
-+      });
++事前に対象環境、担当、実施範囲、使い捨てAuthアカウント・クラブA/Bを決めます。
++無所属のDEVELOPER/SUPPORT、inactive管理者、一般MEMBER、別担当者を区別します。
++既存データや実アカウントで代替しません。権限変更は既存の承認済み運用担当が扱います。
 +
-+    databaseCase("通知結果保存で進んだversionを古い管理操作で上書きせず、通知後の管理更新でもF08列を維持する",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        const notification = {
-+          reportId: stored.id,
-+          clubId: stored.clubId,
-+          notification: {
-+            outcome: "ACCEPTED" as const, // constの型
-+          }, // 読取専用リテラル型
-+        };
-+        expect((await f08Repository.recordSupportReportNotification(notification)).outcome).toBe("RECORDED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / F08の通知受付結果を保存するRepository関数
-+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        expect(await mutation.updateSupportReportNoteForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してメモを更新するRepository関数
-+          ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
-+          internalNote: "古いメモ",
-+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+          outcome: "CONFLICT",
-+        }); // 保存値の構造と内容を検証するメソッド
-+        const notified = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(notified.updatedAt.getTime()).toBeGreaterThan(stored.updatedAt.getTime()); // versionが進んだことを検証するメソッド / 期待値を生成する関数 / 保存日時をミリ秒で比較するメソッド
-+        expect(notified.notifiedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
-+        expect((await invoke(actor.userId, notified, "NOTE", "通知後のメモ")).status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数 / Auth本人だけを置換して実Actionを実行する関数
-+        expect(immutable(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }))).toEqual(immutable(notified)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+      });
++| ID | 操作と期待結果 |
++| --- | --- |
++| B01 | 未認証で `/platform/support` へ直打ちし、固定 `/platform-login` へ遷移。存在しない旧ログイン先へ送られない |
++| B02 | 所属・AppUserがない有効なDEVELOPER/SUPPORTで各々ログインし、管理画面へ到達する。所属が自動作成されない |
++| B03 | 一般MEMBERとinactiveでURL直打ち・ログインを試す。管理報告を開示しない。ログインPage表示だけでは既存sessionを勝手にlogoutしない |
++| B04 | 専用layoutに管理見出しとlogoutがあり、クラブ用フッターがない。クラブのイベント・お知らせ・会員/LINE管理へ直接アクセスしても、Platform権限だけでは使えない |
++| B05 | A/Bと全プランの既存報告を横断表示する。本文・内部メモ・snapshot・UA・保存URLの全文と日本時間表示を確認し、架空のXSS文字列や保存URLを実行・外部リンク化しない |
++| B06 | club・status・categoryのAND検索、50件ページ送り、条件変更時のpage=1、0件・不正queryを確認。候補外のクラブIDも他データの開示へ広がらない |
++| B07 | 両roleでOPEN→IN_PROGRESS→ON_HOLD→RESOLVED→OPEN。担当者・statusChangedAt、RESOLVED時のresolvedAtと解除時のnullを読取結果と照合する |
++| B08 | 同statusを正規入力として再送し、変更なし成功、日時・担当者・version維持を確認。実UIの選択変更で同値イベントを発生できない場合はHTTP確認と区別して記録する |
++| B09 | メモだけを保存し、対応者とupdatedAtだけが更新され、状態日時・本文・snapshot・通知列が維持される。空欄null、上限、超過時の非保存・入力保持を確認する |
++| B10 | 通信遅延下でstatusとメモを連打。同じ行だけpendingとなり二重操作せず、他行のstate・入力ID・エラーが混線しない |
++| B11 | 二人の担当者で同じversionから更新。後続操作は競合となり、未保存メモを保持して再読取・明示再編集を選べる。古い内容を自動再送しない |
++| B12 | メモ編集中に自分のstatusを更新し、安全なversion共有を確認。他者更新と遅延RSCでは基準version・最新statusを巻き戻さない |
++| B13 | 他行操作、同じ条件の再検証、0件化、status変更による条件外移動で下書きを失わない。保持行の古い表示には案内がある |
++| B14 | dirtyのままfilter・ページ送り・リンク・戻る・再読込・終了を試す。警告範囲、キャンセル時の入力、移動同意後の破棄を実測。意図せぬ消失はfailとして残す |
++| B15 | 保存後の再検証失敗を安全に用意できる環境だけで確認。保存済み成功と手動再読取の案内を出し、再保存を促さない。用意できなければskip理由を残す |
++| B16 | 表示後にisActive=falseを反映し、以後の再取得・送信を拒否。すでに進行中の処理と失効の交差は別に記録し、未確認を拒否成功へ読み替えない |
++| B17 | 未保存内容を扱ってから専用logoutを実行。local session終了と固定ログイン先への遷移、履歴戻り・再送時の再認可を確認。logout失敗は固定案内、他端末終了やPW失効と混同しない |
++| B18 | ログイン失敗・試行制限・記録不能時の固定エラー、pending、項目エラー、ラベルとfocusを確認。Cookie更新と認証状態が画面遷移後も整合する |
 +
-+    databaseCase("通知保存と管理更新を同時に実行しても、通知を失わず競合を無条件再試行しない",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        const [notification, update] = await Promise.all([ // 複数の実更新を同時に待機するメソッド
-+          f08Repository.recordSupportReportNotification({ // F08の通知受付結果を保存するRepository関数
-+            reportId: stored.id,
-+            clubId: stored.clubId,
-+            notification: {
-+              outcome: "ACCEPTED",
-+            },
-+          }),
-+          mutation.updateSupportReportNoteForPlatform({ // 最新権限とversionを照合してメモを更新するRepository関数
-+            ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
-+            internalNote: "同時管理メモ",
-+          }),
-+        ]);
-+        expect(notification.outcome).toBe("RECORDED"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(["UPDATED", "CONFLICT"]).toContain(update.outcome); // 期待する値の包含を検証するメソッド / 期待値を生成する関数
-+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(updated.notifiedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
-+        expect(updated.internalNote).toBe(update.outcome === "UPDATED" ? "同時管理メモ" : null); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(updated.message).toBe(stored.message); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(updated.reporterEmail).toBe(stored.reporterEmail); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      });
++障害注入ができない項目は、mock試験の成功で埋めずskip理由を記録します。
++F08通知との競合はまず専用DBでmock SDKを用いて確認し、受入のために実メールを送信しません。
 +
-+    databaseCase("F08の実Service受付・mock通知後のsnapshotを管理更新でも保持する",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const id = randomUUID(); // UUID v4を生成する関数
-+        f.reports.add(id); // 作成前にcleanup用UUIDを登録するメソッド
-+        expect(await f08Service.createSupportReport({ // 期待値を生成する関数 / F08の受付保存と運営者通知を実行するService関数
-+          userId: f.member,
-+          club: {
-+            id: f.clubs[0],
-+            slug: `f09-${f.clubs[0]}`,
-+            name: "F09 fixture",
-+            timezone: "Asia/Tokyo",
-+            planType: "STANDARD",
-+          },
-+          membership: {
-+            id: f.membership,
-+            role: "MEMBER",
-+          },
-+        }, id, {
-+          category: "QUESTION",
-+          message: "F08共存確認",
-+        }, {
-+          pageUrl: `/club/f09-${f.clubs[0]}/account`,
-+          userAgent: "F09 fixture browser",
-+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+          outcome: "ACCEPTED",
-+        }); // 保存値の構造と内容を検証するメソッド
-+        expect(mail.send).toHaveBeenCalledOnce(); // 1回だけの呼出しを検証するメソッド / 期待値を生成する関数
-+        const stored = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(stored.notifiedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
-+        expect((await invoke(f.admins[0], stored, "NOTE", "管理メモ")).status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数 / Auth本人だけを置換して実Actionを実行する関数
-+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(immutable(updated)).toEqual(immutable(stored)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
-+        expect(mail.send).toHaveBeenCalledOnce(); // 1回だけの呼出しを検証するメソッド / 期待値を生成する関数
-+      });
++## HTTPでの直接呼出し・foreign Origin
 +
-+    databaseCase("PlatformAdminを削除すると担当者だけSetNullになり報告と日時・メモは残る",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
-+        await invoke(f.admins[0], stored, "STATUS", "RESOLVED"); // Auth本人だけを置換して実Actionを実行する関数
-+        const before = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        const stale = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
-+        await database().platformAdmin.delete({ // 検証対象の管理者fixtureを削除するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: f.admins[0],
-+          },
-+        }); // 検証対象の管理者fixtureを削除するメソッド / 初期化済みの専用clientを返す関数
-+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: stored.id,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(updated).toEqual({ // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
-+          ...before,
-+          handledByPlatformAdminId: null,
-+        });
-+        expect(await updateService.updatePlatformSupportNote(stale, { // 期待値を生成する関数 / 再検証してメモを更新するService関数
-+          ...identity(stale, updated), // 認可contextと保存済みversionから更新入力を作る関数
-+          internalNote: "削除後メモ",
-+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
-+          outcome: "FORBIDDEN",
-+        }); // 保存値の構造と内容を検証するメソッド
-+        const result = await readService.getPlatformSupport(await access(f.admins[1]), { // 検証済み条件で横断一覧を取得するService関数 / 実DBで本人のPlatform権限を確認する関数
-+          clubId: stored.clubId,
-+        }); // 検証済み条件で横断一覧を取得するService関数 / 実DBで本人のPlatform権限を確認する関数
-+        if (result.outcome !== "FOUND") {
-+          throw new Error("削除後一覧失敗"); // Errorコンストラクター
-+        }
-+        expect(result.reports[0].handler).toBeNull(); // nullであることを検証するメソッド / 期待値を生成する関数
-+      });
++使い捨て環境の正常リクエストと対象fixtureのDB状態を先に確認します。
++現在のAction ID、Cookie、認証ヘッダー、PW、本文・メモを含むリクエストやHARを
++公開資料・チャット・結果ログへ保存しません。Action IDを文書へ固定しません。
 +
-+    databaseCase("Platform管理者はクラブOWNERへ昇格せず、一般MEMBER兼任でも管理権限を得ない",  // fixtureと固定失敗文でDBケースを登録する関数
-+      /**
-+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
-+       */
-+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
-+        for (const id of f.admins.slice(0, 2)) { // 対象の範囲だけを取り出すメソッド
-+          await expect(requests.run(id,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
-+            /**
-+             * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
-+             */
-+            () => clubAuthorization.requireClubOwner(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブOWNERの実DB認可を確認するメソッド
-+          await expect(requests.run(id,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
-+            /**
-+             * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
-+             */
-+            () => clubAuthorization.requireClubAdminMembership(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブ管理者の実DB認可を確認するメソッド
-+        }
-+        f.admins.push(f.member); // 検証用の識別子を配列へ登録するメソッド
-+        await database().platformAdmin.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
-+          data: { // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
-+            id: f.member,
-+            email: `${f.member}@fixture.example.test`,
-+            role: "SUPPORT",
-+          }
-+        });
-+        expect((await access(f.member)).platformAdmin.role).toBe("SUPPORT"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 実DBで本人のPlatform権限を確認する関数
-+        await expect(requests.run(f.member,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
-+          /**
-+           * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
-+           */
-+          () => clubAuthorization.requireClubOwner(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブOWNERの実DB認可を確認するメソッド
-+        await expect(requests.run(f.member,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
-+          /**
-+           * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
-+           */
-+          () => clubAuthorization.requireClubAdminMembership(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブ管理者の実DB認可を確認するメソッド
-+        const membership = await database().clubMembership.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            id: f.membership,
-+          },
-+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
-+        expect(membership.role).toBe("MEMBER"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+        expect(await database().clubMembership.count({ // 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
-+          where: {
-+            userId: {
-+              in: f.admins.slice(0, 2), // 対象の範囲だけを取り出すメソッド
-+            },
-+          },
-+        })).toBe(0); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数 / 対象の範囲だけを取り出すメソッド
-+      });
-+  });
++| ID | 操作と期待結果 |
++| --- | --- |
++| H01 | 正常リクエストのOriginだけをforeign Originへ変え、Nextの拒否とDB非変更を照合する。固定のHTTP番号は推測せず実応答を記録する |
++| H02 | 正常Originでも未認証・一般会員・inactive・表示後の失効状態から直接POSTし、報告更新を拒否する |
++| H03 | reportIdの欠損・重複・File・不正UUID・bind先との不一致、requestIdの欠損・重複・File・不正UUID v4・前state不一致を試し、非保存を確認する |
++| H04 | expectedUpdatedAtの欠損・重複・不正形式・古いversionを試す。競合は無条件再試行せず固定案内と非保存を確認する |
++| H05 | status不正値、メモの重複・File・上限超過を拒否する。改ざんしたclubId・所属・担当者・管理日時・本文・snapshot・通知列・returnToを採用せず、固定経路だけを使う |
++| H06 | 実更新後の同status再送では管理列を維持する。保存後の再検証失敗と保存前の拒否をDB値で区別する |
++| H07 | `next.config.ts` のServer Actions bodySizeLimitは現行12mb。リクエスト全体の上限とメモ5000文字検証を分け、上限超過時の非保存を確認する |
++| H08 | 専用ログイン・logoutのHTTP経路も、foreign Origin、直接呼出し、Cookieの扱いを別に確認。foreign Originの拒否でログイン・logout Actionや報告更新が実行されないことを実測し、Proxyのsession更新とは分ける |
++
++allowedDevOriginsとServer Actionsのforeign Origin許可を混同しません。
++この粒度ではbodySizeLimit・Origin設定・Proxy・本番設定を変更しません。
++関数直接試験の成功は、実HTTPの保護やCookieの実更新を証明しません。
++
++## 障害調査と証跡の扱い
++
++1. 対象環境と操作段階を確認し、承認済みの読取手段で保存有無・現在のversionを照合します。
++   応答不明や再検証失敗を根拠に、同じ変更を再保存しません。
++2. 認証段階は `platform.login.rate-limit`、`platform.login.authenticate`、
++   `platform.login.log`、`platform.auth.sign-out`、`platform.logout.client` の固定operationを確認します。
++3. 管理処理は `platform_support_operation_failed` と `platformSupport.read`・
++   `platformSupport.status`・`platformSupport.note`、固定result/errorCodeを確認します。
++   ログ基盤の停止や保存後の再検証失敗まで、必ずこのログが残るとは扱いません。
++4. 証跡はケースID、基準commit、匿名化した環境名、pass/fail/skip、理由、担当と日付に限定します。
++   Cookie・token・PW・Action ID・接続URL・本文・メモ・氏名/email・UA・SDK/SQL例外原文を転記しません。
++   ログインのハッシュ値やsaltも証跡へコピーしません。
++5. 管理者設定・Auth・ログ連携の問題は既存の運用担当へ切り分けます。
++   本体修正、DB手動修復、制約緩和、権限自動付与や通知復旧workerをこの手順へ追加しません。
++
++## 今回の確認結果と受入保留
++
++基準ブランチは `feat/club-app-foundation`、コミットは
++`65046226b6dbc15a8f8ce9c642f4d4791ded4c49` です。
++インストール済みとlockはNext.js 16.2.6、Vitest 4.1.10、Prisma Client 7.8.0で一致しています。
++実行日は2026-10-26（JST）、担当はpatch作成エージェントです。
++一時チェックアウトで実行しました。実環境の受入責任者は未確定です。
++
++| 区分 | 結果 | 根拠・理由 |
++| --- | --- | --- |
++| F09単体/mock・F08・クラブ認可・招待再開・matcher回帰 | pass | 上記コマンドで34ファイル、1096件成功・実DB38件skip。一時環境で実行 |
++| 接続ガード | pass | 上記1096件に含むF09 21件・F08 19件。実設定を使用しない |
++| TypeScript | pass | 一時環境で `node node_modules/typescript/bin/tsc --noEmit --incremental false` が成功 |
++| F09実DB統合 | skip | 15件。実DB変更を行わない条件のため未実行 |
++| F08実DB回帰 | skip | 23件。実DB変更を行わない条件のため未実行 |
++| 実Auth | skip | 使い捨てAuth環境の操作・session更新を未実施 |
++| 実ブラウザー | skip | B01〜B18を未実施。node試験を実DOM・履歴・離脱確認へ読み替えない |
++| HTTP・foreign Origin | skip | H01〜H08を未実施。関数直接呼出しをHTTP成功へ読み替えない |
++| 実メール配送 | skip | 実メール未送信。F09の管理操作は再通知機能を追加しない |
++| F09統合受入 | 保留 | 実DB・実Auth・ブラウザー・HTTP等の未確認が残るため未完了 |
++
++実施時は次の形式で、B/Hの各ケースと実DBケースを個別に追記します。
++
++| ケースID・試験名 | 担当・日付 | 基準commit・匿名環境 | pass/fail/skip | 理由・安全化した根拠 |
++| --- | --- | --- | --- | --- |
++| 未実施ケース | 未割当 | 未確定 | skip | 必要条件と次に確認する内容だけを記載 |
++
++担当者、既存の権限管理手段、実DBのmigration/RLS/実行権限、Auth・ログ設定の実反映、
++失効と処理中更新の交差、実ブラウザーの入力保持・HTTP保護が未確認です。
++上記が残る間はF09受入完了とせず、失敗時は対象の粒度・関数・条件を示して修正案を報告します。
