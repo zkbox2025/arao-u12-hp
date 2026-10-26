@@ -1,303 +1,811 @@
-diff --git a/docs/runbooks/platform-support.md b/docs/runbooks/platform-support.md
+diff --git a/docs/implementation/phases/F10.md b/docs/implementation/phases/F10.md
+index 5e1c447564ce9eb79d9f8696d5563e9c3c2d18fd..0ea424071985a189076f6fe0dfd7d5ae56b26c09 100644
+--- a/docs/implementation/phases/F10.md
++++ b/docs/implementation/phases/F10.md
+@@ -40,3 +40,53 @@ MVP 1.0での推奨仕様
+ * 一括作成ではUIのpendingだけでなくサーバー冪等性が必要なこと
+ * UTCではなくclub timezoneの日付を先に変換する理由
+ * 一般的な定期イベント複製はMVP 1.5へ残すこと
++
++
++【追加：粒度1】仕様・入力・結果の契約
++
++ユーザー確定事項
++* 複製元は、クラブ現地時刻で対象月の前月に開始したイベントだけとする。
++  前々月に開始し、前月にも継続している予定は含めない。
++* 完全一致は、変換後のコピー対象項目で比較する。
++  既存側のDRAFT／PUBLISHEDは問わず、作成者・更新者・公開日時・PDF等は比較しない。
++* 除外前の前月候補が101件以上なら、preview段階で拒否する。
++  日付不正や重複の除外、選択件数の削減によって上限を回避しない。
++
++粒度1で定義する入力境界
++* 対象月は、前月も西暦1年以上となる単一のYYYY-MM文字列とする。
++  0000年、0001年1月、不正な月、配列、余分な空白や改行を拒否し、現在月へfallbackしない。
++* 選択IDはUUIDの配列で1〜100件とし、小文字・昇順へ正規化する。
++  大小文字を揃えた後に同じIDになる場合も重複として拒否する。
++* requestIdは既存のUUID v4検証を利用し、小文字へ正規化する。
++  previewFingerprintは64桁の16進文字列として検証し、小文字へ正規化する。
++* FormDataでは選択IDだけを反復項目として許可する。
++  その他の単一項目の重複、File値、未許可項目は拒否する。
++  Nextが付加する$ACTION_接頭辞の輸送用項目は業務入力として利用しない。
++* 入力はtargetMonth・selectedEventIds・requestId・previewFingerprintに限定する。
++  clientからclubId・実行者・status・コピー日時・本文等を受け取らない。
++* この検証が保証するのは入力構造だけである。
++  認証・認可、前月候補への所属、fingerprintの一致、冪等性は後続粒度で保証する。
++
++コピー列と結果の契約
++* コピー列はtitle・content・genre・targetRoles・startAt・endAt・isAllDay・location・
++  meetingAt・meetingLocation・belongings・notesとする。日時以外の値やnullを黙って変更しない。
++* Client用previewは、ID・見出し・新旧日時・終日区分・補正項目・重複・除外理由・初期選択へ限定する。
++  コピー本文や関連行、Prismaのモデル全体をClientへ返さない。
++* preview結果はREADY（0件も含む）・TOO_MANY・FORBIDDEN・PREVIEW_FAILEDで区別する。
++* 実行結果はCREATED・ALREADY_COMPLETED・VALIDATION_FAILED・FORBIDDEN・PREVIEW_CHANGED・
++  CONFLICT・CREATE_FAILED・RESULT_UNKNOWNで区別する。
++  完了結果は対象月と作成件数だけとし、本文・生Error・DBエラー原文を含めない。
++* 保存後の再検証失敗は、保存済み成功データのneedsReloadで案内できる契約とする。
++  入力のrequestIdだけで保存済みと判断しない。
++
++未確定事項（提案のまま保持し、確定済み仕様として実装しない）
++* 元DRAFTも対象にするか、既存完全一致候補を明示選択で複製できるか。
++* 月末補正で候補同士が一致した場合の初期選択と、利用者による選択可否。
++* 終了・集合が対象月の前後に跨る場合の扱い、DST fold時の時刻選択・表示。
++* 不正source・DST gap・補正後の期間逆転を理由付きで選択不可にする方針。
++* 秒・ミリ秒を保持する方針、初回送信後の選択変更時の再preview・requestId更新の運用。
++
++粒度1の実装範囲
++* 入力・preview・結果の型契約、入力構造検証、境界テストだけを追加する。
++* 日時変換・比較・fingerprint計算・DB・Repository・Service・Action・画面は後続粒度とする。
++  この粒度だけを適用しても、予定は作成されずDB変更も発生しない。
+diff --git a/domain/club/event/event-month-copy-form.ts b/domain/club/event/event-month-copy-form.ts
 new file mode 100644
-index 0000000..34cd07d
+index 0000000000000000000000000000000000000000..b4156c3053c186af5fc528e50079f2ddad9b4eef
 --- /dev/null
-+++ b/docs/runbooks/platform-support.md
-@@ -0,0 +1,297 @@
-+<!-- docs/runbooks/platform-support.md -->
++++ b/domain/club/event/event-month-copy-form.ts
+@@ -0,0 +1,217 @@
++// domain/club/event/event-month-copy-form.ts
++// 前月予定複製の構造検証。認可・候補照合・冪等性の保証は後続粒度で行う。
 +
-+# F09 Platformサポート管理の運用と統合受入
++import { z } from "zod";
 +
-+F09粒度12の手順書です。実装の接続、単体・mock、接続ガード、実DB、実Auth、
-+ブラウザー、HTTPの結果を分けて記録します。patch適用や単体成功だけでF09受入完了にしません。
-+本patch作成では実DB・実Auth・本番設定を変更せず、実メールも送信しません。
++import type {
++  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
++} from "@/domain/shared/action-state";
++import {
++  isRequestId, // UUID v4形式のrequestIdを検証する関数
++} from "@/domain/shared/request-id";
++import {
++  EVENT_MONTH_COPY_MAX_COUNT, // 除外前候補数と選択予定数の上限
++  type EventMonthCopyField, // 複製入力の項目名の型
++  type EventMonthCopyInput, // 構造検証・正規化済みの複製入力型
++  type EventMonthCopyValidation, // 成功データと安全な検証エラーを分ける型
++} from "./event-month-copy-types";
 +
-+根拠は [F09仕様](../implementation/phases/F09.md) と現在のコードです。
-+受付・snapshot・通知の正本と障害対応は [F08運用](support-report.md)、
-+クラブ認可との境界は [F07運用](club-account.md) も参照します。既存手順を変更しません。
++const uuidSchema = z.uuid(); // UUID識別子を検証するスキーマの生成関数
++const inputFields = new Set<string>([ // 入力項目名を判定する集合の生成 / 文字列型
++  "targetMonth",
++  "selectedEventIds",
++  "requestId",
++  "previewFingerprint",
++]);
++const INVALID_FORM_MESSAGE = "複製入力を確認してください。";
++const INVALID_SELECTION_MESSAGE = "複製対象を1〜100件、重複なしで指定してください。";
 +
-+## 権限と対象範囲
++/**
++ * 単一のYYYY-MM文字列で、前月も西暦1年以上になる対象月かを検証する。
++ */
++export function isEventMonthCopyTargetMonth( // 複製対象月の厳密な構造を検証する関数
++  value: unknown, // 検証前の不明値型
++): value is string { // 検証成功時に文字列へ絞り込む型述語
++  return (
++    typeof value === "string" &&
++    value.length === 7 &&
++    /^\d{4}-(0[1-9]|1[0-2])$/.test(value) && // 4桁年と01〜12月の形式を検証するメソッド
++    !value.startsWith("0000-") && // 西暦0年の対象月を拒否するメソッド
++    value !== "0001-01"
++  );
++}
 +
-+- Authの本人IDと同じ `PlatformAdmin.id` があり、isActive=true、roleがDEVELOPERまたは
-+  SUPPORTの場合だけ管理できます。両roleとも同じサポート管理機能を使います。
-+- AppUserやClubMembershipが0件でもPlatform管理者としてログインできます。
-+  ログイン・閲覧・管理操作でAppUserや所属を自動作成しません。
-+- 横断例外はSupportReportの閲覧・限定管理列の更新だけです。
-+  STANDARD・STARTER・PROの既存報告を対象とし、現在のクラブ所属・プランを条件にしません。
-+  F08の受付条件を全プランへ広げる意味ではありません。
-+- PlatformAdminだけでクラブOWNER・COACH等の権限は得ません。
-+  イベント・お知らせ・会員管理・LINE設定等は既存のクラブ認可が別途必要です。
-+- layoutに加えてPage・Actionで再認可し、Repositoryもtransaction内で最新のPlatform権限を照合します。
-+  Proxyのセッション更新や画面にリンクがあることを、認可の代わりにしません。
++/**
++ * 上限内のUUID配列を検証し、小文字・昇順に正規化する。重複は拒否する。
++ */
++function normalizeSelectedEventIds( // 複製対象IDの検証と正規化を行う関数
++  value: unknown, // 検証前の不明値型
++): string[] | null { // 正規化済みIDの文字列配列または検証失敗の型
++  if (
++    !Array.isArray(value) || // 配列であるかを確認するメソッド
++    value.length === 0 ||
++    value.length > EVENT_MONTH_COPY_MAX_COUNT
++  ) {
++    return null;
++  }
++  const normalized: string[] = []; // 検証後のIDを保持する文字列配列型
++  const seen = new Set<string>(); // ID重複を検出する集合の生成 / 文字列型
++  for (const entry of value as unknown[]) { // 入力要素を不明値の配列型として扱う型アサーション
++    if (
++      typeof entry !== "string" ||
++      !uuidSchema.safeParse(entry).success // UUIDスキーマによる安全な構造検証メソッド
++    ) {
++      return null;
++    }
++    const identifier = entry.toLowerCase(); // UUIDの表記を小文字へ揃えるメソッド
++    if (seen.has(identifier)) { // 正規化後のIDが重複しているかを調べるメソッド
++      return null;
++    }
++    seen.add(identifier); // 検証済みIDを重複検出用集合へ追加するメソッド
++    normalized.push(identifier); // 検証済みIDを配列へ追加するメソッド
++  }
++  return normalized.sort(); // UUID文字列を昇順に並べ、入力順による差を除くメソッド
++}
 +
-+根拠：`app/(club-app)/platform/require-platform-admin.ts / requirePlatformAdmin`、
-+`src/infrastructure/prisma/repositories/platform-admin-repository.ts / findActivePlatformAdminByUserId`、
-+各Platform Repository、`app/(club-app)/club/club-membership-authorization.ts`。
++/**
++ * 入力オブジェクトの許可項目だけを検証し、安全な項目エラーか正規化済み値を返す。
++ */
++export function validateEventMonthCopyInput( // 複製入力の構造検証と正規化を行う関数
++  input: unknown, // 外部から受け取る不明値型
++): EventMonthCopyValidation<EventMonthCopyInput> { // 複製入力型の検証結果型
++  if (
++    typeof input !== "object" ||
++    input === null ||
++    Array.isArray(input) // 配列を入力オブジェクトとして受け付けない判定メソッド
++  ) {
++    return {
++      success: false,
++      fieldErrors: {},
++      formError: INVALID_FORM_MESSAGE,
++    };
++  }
++  const prototype = Object.getPrototypeOf(input); // 入力オブジェクトのprototypeを取得するメソッド
++  if (
++    prototype !== Object.prototype && // 標準Objectコンストラクターのprototypeとの比較
++    prototype !== null
++  ) {
++    return {
++      success: false,
++      fieldErrors: {},
++      formError: INVALID_FORM_MESSAGE,
++    };
++  }
++  const record = input as Record<string, unknown>; // 文字列キーと不明値の辞書型への型アサーション
++  if (Object.keys(record).some( // 自身の項目名を取り出すメソッド / 未許可項目の有無を判定するメソッド
++    /**
++     * 許可項目に含まれない入力キーかを調べる。
++     */
++    (field) => !inputFields.has(field), // 項目名を検査するコールバック / 許可項目の集合照合メソッド
++  )) {
++    return {
++      success: false,
++      fieldErrors: {},
++      formError: INVALID_FORM_MESSAGE,
++    };
++  }
++  const targetMonth = isEventMonthCopyTargetMonth(record.targetMonth) // 厳密な対象月を検証する関数
++    ? record.targetMonth
++    : null;
++  const selectedEventIds = normalizeSelectedEventIds(record.selectedEventIds); // 選択IDを検証・正規化する関数
++  const requestId = isRequestId(record.requestId) // UUID v4のrequestIdを検証する関数
++    ? record.requestId.toLowerCase() // UUID表記を小文字に揃えるメソッド
++    : null;
++  const previewFingerprint = (
++    typeof record.previewFingerprint === "string" &&
++    record.previewFingerprint.length === 64 &&
++    /^[0-9a-f]{64}$/i.test(record.previewFingerprint) // SHA-256識別値の16進文字列形式を検証するメソッド
++  ) ? record.previewFingerprint.toLowerCase() : null; // 識別値の16進表記を小文字に揃えるメソッド
++  const fieldErrors: FieldErrors<EventMonthCopyField> = {}; // 複製項目名をキーにするエラー辞書型
++  if (targetMonth === null) {
++    fieldErrors.targetMonth = ["前月も指定可能な対象月をYYYY-MM形式で指定してください。"];
++  }
++  if (selectedEventIds === null) {
++    fieldErrors.selectedEventIds = [INVALID_SELECTION_MESSAGE];
++  }
++  if (requestId === null) {
++    fieldErrors.requestId = ["操作の識別値が不正です。再読込してください。"];
++  }
++  if (previewFingerprint === null) {
++    fieldErrors.previewFingerprint = ["複製予定の識別値が不正です。再読込してください。"];
++  }
++  if (
++    targetMonth === null ||
++    selectedEventIds === null ||
++    requestId === null ||
++    previewFingerprint === null
++  ) {
++    return {
++      success: false,
++      fieldErrors,
++      formError: null,
++    };
++  }
++  return {
++    success: true,
++    data: {
++      targetMonth,
++      selectedEventIds,
++      requestId,
++      previewFingerprint,
++    },
++  };
++}
 +
-+## 運用開始前の準備と責任
++/**
++ * FormDataの単一項目・反復選択・件数を確認して、共通の入力検証へ渡す。
++ * $ACTION_で始まるNextの輸送用項目は無視し、業務入力として利用しない。
++ */
++export function parseEventMonthCopyFormData( // フォーム送信値を複製入力へ検証する関数
++  formData: FormData, // ブラウザー送信値を保持するFormData型
++): EventMonthCopyValidation<EventMonthCopyInput> { // 複製入力型の検証結果型
++  const selectedEventIds: string[] = []; // 上限内の選択IDを保持する文字列配列型
++  const record: Record<string, unknown> = { // 単一項目と選択IDを保持する不明値の辞書型
++    selectedEventIds,
++  };
++  if (!(formData instanceof FormData)) { // 実際のFormDataであることを確認する型判定
++    return {
++      success: false,
++      fieldErrors: {},
++      formError: INVALID_FORM_MESSAGE,
++    };
++  }
++  for (const [field, value] of formData.entries()) { // 送信された各項目を順番に取得するメソッド
++    if (field.startsWith("$ACTION_")) { // Nextの輸送用項目を判定するメソッド
++      continue;
++    }
++    if (
++      !inputFields.has(field) || // 業務入力の許可項目と照合するメソッド
++      typeof value !== "string" ||
++      (
++        field !== "selectedEventIds" &&
++        Object.hasOwn(record, field) // 単一項目が既に存在するかを調べるメソッド
++      )
++    ) {
++      return {
++        success: false,
++        fieldErrors: {},
++        formError: INVALID_FORM_MESSAGE,
++      };
++    }
++    if (field === "selectedEventIds") {
++      if (selectedEventIds.length >= EVENT_MONTH_COPY_MAX_COUNT) {
++        return {
++          success: false,
++          fieldErrors: {
++            selectedEventIds: [INVALID_SELECTION_MESSAGE],
++          },
++          formError: null,
++        };
++      }
++      selectedEventIds.push(value); // 上限内の選択IDを配列へ追加するメソッド
++    } else {
++      record[field] = value;
++    }
++  }
++  return validateEventMonthCopyInput(record); // オブジェクトと共通の構造検証・正規化を行う関数
++}
+diff --git a/domain/club/event/event-month-copy-types.ts b/domain/club/event/event-month-copy-types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..19278abfe8b08f3528599ec456a9530345a7f0d6
+--- /dev/null
++++ b/domain/club/event/event-month-copy-types.ts
+@@ -0,0 +1,174 @@
++// domain/club/event/event-month-copy-types.ts
++// 前月予定複製の入力・サーバー内部データ・限定preview・結果の契約。
 +
-+| 担当 | 確認すること |
-+| --- | --- |
-+| アカウント・権限管理担当 | 既存の承認済み運用でAuthアカウントと対応するPlatformAdminを準備し、本人ID・role・有効状態を確認する |
-+| 実行環境管理担当 | 対象環境、既存migration、DB接続権限、Auth設定、セッション更新経路、ログイン試行ログ用設定を確認する |
-+| サポート担当 | 必要な報告だけを閲覧し、内部メモへPW・token等を記載しない。競合時は最新情報と下書きを照合する |
-+| 受入担当 | 使い捨てデータ・アカウントと実施範囲を確認し、区分ごとの結果・理由・未実施事項を記録する |
++import type {
++  ActionState, // フォームの入力・エラー・成功データ・requestIdをまとめた共通型
++  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
++} from "@/domain/shared/action-state";
++import type {
++  ClubEventGenre, // Prisma由来のイベントジャンルの型
++  ClubMemberRole, // Prisma由来のクラブ所属ロールの型
++} from "@/types/prisma";
 +
-+担当者名、PlatformAdminの作成・無効化に使う具体的な承認済み手段は、この調査では未確認です。
-+この文書では公開登録画面、権限付与API、登録SQL、Auth登録や無効化の自動化を提供しません。
-+承認済み手段や担当が未確定なら、その状態を受入の保留事項に残します。
++/**
++ * 除外前の前月候補数と、一度に選択できる予定数の上限。
++ */
++export const EVENT_MONTH_COPY_MAX_COUNT = 100;
 +
-+- 使い捨てAuthアカウントは実DB試験のfixtureとは別に用意します。
-+  fixtureはAuthユーザーを作成しないため、そのままログイン用に使えません。
-+- `lib/security/hash.ts / hashValue` は `FORM_LOG_HASH_SALT` を必要とします。
-+  値は保護された既存の設定方法で管理し、文書・チャット・コマンド引数へ載せません。
-+- `checkLoginRateLimit` は共通LoginSubmissionLogを使います。
-+  現行コードはIPで3分内5回以上の試行、emailで3分内3回以上の失敗を制限します。
-+  Platform専用の別カウンターではなく、共通ログイン処理との試行数共有を考慮します。
-+- `platformLoginAction` は試行制限やログ保存の失敗を公開用の固定エラーにします。
-+  Auth成功後の試行ログ保存失敗でも成功扱いにせず、localセッション終了を試みます。
-+- PlatformAdminの無効化はAuthアカウント削除・全端末のlogoutとは別です。
-+  DBへの反映後に開始する認可・更新を拒否することを確認します。
-+  表示済み情報の即時消去や、失効と交差した進行中transactionの取消しは保証済みとしません。
++/**
++ * 構造検証する複製入力の項目名。
++ */
++export type EventMonthCopyField = // 複製フォームの項目名を表す型
++  | "targetMonth" // 複製先の年月を指定する項目名の型
++  | "selectedEventIds" // 複製元の選択IDを指定する項目名の型
++  | "requestId" // 操作IDを指定する項目名の型
++  | "previewFingerprint"; // preview識別値を指定する項目名の型
 +
-+## ユーザー操作からDBまで
++/**
++ * 検証・正規化済みの複製入力。クラブ・実行者・コピー本文は含めない。
++ */
++export type EventMonthCopyInput = { // 構造検証済みの複製入力型
++  targetMonth: string; // 複製先の年月を表す文字列型
++  selectedEventIds: readonly string[]; // 小文字・昇順で重複しない選択IDの読取専用配列型
++  requestId: string; // 小文字に正規化したUUID v4の文字列型
++  previewFingerprint: string; // 小文字64桁のpreview識別値を表す文字列型
++};
 +
-+以下のパスはリポジトリルートからの相対パスです。
-+UIの基点は `app/(club-app)/platform-login/` と `app/(club-app)/platform/support/`、
-+Serviceは `src/application/platform/support/`、Repositoryは
-+`src/infrastructure/prisma/repositories/` です。
++/**
++ * 入力検証の成功データと、原文を含まない安全なエラーを分ける型。
++ */
++export type EventMonthCopyValidation<T> = // 検証済みデータの型を受け取る検証結果型
++  | {
++      success: true; // 検証成功を表すリテラル型
++      data: T; // 呼出し側で指定した検証済みデータの型
++    }
++  | {
++      success: false; // 検証失敗を表すリテラル型
++      fieldErrors: FieldErrors<EventMonthCopyField>; // 複製項目別のエラー辞書型
++      formError: string | null; // フォーム全体の安全なエラー文字列または未設定の型
++    };
 +
-+| 段階 | ファイル・関数、受け取る値と返す値 | DB・Authの変更 |
-+| --- | --- | --- |
-+| 専用入口 | `platform-login/page.tsx / PlatformLoginPage` がAuth本人と有効な管理者を確認。有効なら固定 `/platform/support`、それ以外はログイン画面 | 権限読取のみ。既存の一般会員sessionをPage表示だけでlogoutしない |
-+| ログイン | `PlatformLoginForm` → `platform-login/actions.ts / platformLoginAction`。単一email・password・requestIdと前stateの一致を検証し、試行制限、signInWithPassword、最新PlatformAdminを照合 | LoginSubmissionLogへハッシュ化したIP・emailと結果を記録。Authの本人sessionを更新。クラブ所属は作らない |
-+| Proxy・画面 | `proxy.ts / proxy` → `updateSession`、`platform/layout.tsx / PlatformLayout`、`support/page.tsx / PlatformSupportPage` → `requirePlatformAdmin` | ProxyはCookieの更新を引き継ぐ。layout・Pageは権限読取。Proxy単独で認可しない |
-+| 一覧 | `parseSupportReportQuery` → `get-platform-support.ts / getPlatformSupport` → `platform-support-report-repository.ts / findSupportReportsForPlatform`。本人contextと検索条件から限定DTO・件数・クラブ候補を返す | 最新管理者、SupportReport、Club、担当者の必要列を読取。書込みなし |
-+| 全文 | `SupportReportTable` がDTOの本文・メモ・snapshot・保存済みURL・UAをReactテキストとdetailsで表示 | なし。既読や監査レコードを追加しない |
-+| status | `SupportReportOperations / changeStatus` → `actions.ts / updateSupportReportStatusAction` → `update-platform-support.ts / updatePlatformSupportStatus` → `platform-support-report-mutation-repository.ts / updateSupportReportStatusForPlatform`。ID・requestId・expectedUpdatedAt・許可statusを渡す | 実変更時だけstatus・担当者・状態日時・解決日時・updatedAtを更新。競合は非更新 |
-+| メモ | `SupportReportOperations / submitForm` → `updateSupportReportNoteAction` → `updatePlatformSupportNote` → `updateSupportReportNoteForPlatform`。ID・requestId・expectedUpdatedAt・メモを渡す | internalNote・担当者・updatedAtを更新。status日時は維持 |
-+| 完了 | ActionがUPDATED/UNCHANGED、報告ID・version・固定案内等の最小stateを返す。UPDATED時に固定 `/platform/support` をrevalidatePathで再検証 | 再検証自体は再保存ではない。成功ごとに次回requestIdを用意する |
-+| logout | `PlatformLogoutButton / submitLogout` → `platformLogoutAction` がlocal signOut後、固定 `/platform-login` へ遷移 | 現在のAuth sessionを終了。PlatformAdmin・ClubMembershipは不変 |
++/**
++ * コピーするイベント列だけのサーバー内部型。公開状態や関連行は含めない。
++ */
++export type EventMonthCopyEvent = { // 複製元と変換後に共通するサーバー内部型
++  title: string; // タイトルの文字列型
++  content: string | null; // 本文の文字列または未設定の型
++  genre: ClubEventGenre; // Prisma由来のイベントジャンル型
++  targetRoles: readonly ClubMemberRole[]; // Prisma由来の対象ロールの読取専用配列型
++  startAt: Date; // 開始UTC日時の型
++  endAt: Date | null; // 終了UTC日時または未設定の型
++  isAllDay: boolean; // 終日予定かどうかの真偽値型
++  location: string | null; // 開催場所の文字列または未設定の型
++  meetingAt: Date | null; // 集合UTC日時または未設定の型
++  meetingLocation: string | null; // 集合場所の文字列または未設定の型
++  belongings: string | null; // 持ち物の文字列または未設定の型
++  notes: string | null; // 注意事項の文字列または未設定の型
++};
 +
-+本体の接続に後続粒度待ちはありません。以下の実環境受入は未完了です。
-+F08の受付・通知経路をこの粒度で再実装しません。
++/**
++ * 再取得時の照合に必要なIDと更新日時を持つ、複製元のサーバー内部型。
++ */
++export type EventMonthCopySource = EventMonthCopyEvent & { // コピー列の型と複製元識別情報の結合型
++  id: string; // 複製元IDの文字列型
++  updatedAt: Date; // 複製元の更新UTC日時の型
++};
 +
-+## 表示・更新の契約
++/**
++ * Clientへ渡せるISO日時の組。実際の変換とtimezone表示は後続粒度で行う。
++ */
++export type EventMonthCopyPreviewDateTimes = { // previewの限定日時データ型
++  startAt: string; // 開始UTC ISO日時の文字列型
++  endAt: string | null; // 終了UTC ISO日時または未設定の型
++  meetingAt: string | null; // 集合UTC ISO日時または未設定の型
++};
 +
-+- 一覧はclubId・status・categoryのAND検索、1ページ50件、pageは1〜10000です。
-+  不正・配列・重複queryを無条件の全件取得へ丸めません。
-+  作成日時降順・ID降順のoffset方式で、新規報告によるページ間移動は保証しません。
-+- 一覧の時刻は日本時間です。DBと競合検出にはミリ秒付きUTC ISOのupdatedAtを使います。
-+- statusはOPEN・IN_PROGRESS・ON_HOLD・RESOLVEDの4択。選択変更で即送信します。
-+  内部メモは別フォームの保存ボタンから送信します。
-+- メモはtrim後5000 UTF-16コード単位以内、空欄はnullです。
-+  超過を切り捨てず拒否します。表示済みの長い既存値を保存前に黙って短縮しません。
-+- status実変更では担当者とstatusChangedAtを更新し、RESOLVEDに入るとresolvedAtも同じ時刻にします。
-+  他のstatusへ移るとresolvedAtはnullです。同statusでは日時・担当者・updatedAtを維持します。
-+- メモ保存では担当者を更新しますが、status・statusChangedAt・resolvedAtは維持します。
-+- 担当者は認可context、管理日時はサーバー由来です。
-+  本文・snapshot・クラブ・元所属・通知列を管理フォームから変更しません。
-+- PlatformAdmin削除時、担当者FKはSetNullです。報告・状態日時・メモは残ります。
-+  SQL制約の実適用はschema確認だけで証明せず、専用DB試験で別途確認します。
++/**
++ * 月末補正が必要だった日時項目の型。
++ */
++export type EventMonthCopyCorrectionField = // 補正された日時の項目名の型
++  | "startAt" // 開始日時の項目名の型
++  | "endAt" // 終了日時の項目名の型
++  | "meetingAt"; // 集合日時の項目名の型
 +
-+根拠：`domain/platform/support/support-report-query.ts`、
-+`support-report-management-form.ts`、`support-report-management-policy.ts`、
-+`prisma/schema.prisma` のSupportReport・PlatformAdmin。
++/**
++ * 不正な元データ・日時・期間によって選択できない候補の理由。
++ */
++export type EventMonthCopyExclusionReason = // 選択不能な候補の理由を区別する型
++  | "INVALID_SOURCE" // 元データの不正を表す理由の型
++  | "INVALID_DATE_TIME" // 変換できない日時を表す理由の型
++  | "INVALID_INTERVAL"; // 終了順序の不正を表す理由の型
 +
-+## 競合・下書き・保存後障害の扱い
++/**
++ * 本文や関連行を含めず、新旧日時・補正・重複・除外を表示する候補型。
++ */
++export type EventMonthCopyPreviewItem = { // Client表示へ限定した複製候補の型
++  sourceEventId: string; // 複製元IDの文字列型
++  title: string; // 表示用タイトルの文字列型
++  isAllDay: boolean; // 終日表示のための真偽値型
++  original: EventMonthCopyPreviewDateTimes; // 複製前のISO日時をまとめた型
++  converted: EventMonthCopyPreviewDateTimes | null; // 変換後のISO日時型または変換不能のnull型
++  correctedFields: readonly EventMonthCopyCorrectionField[]; // 月末補正された項目の読取専用配列型
++  exclusionReason: EventMonthCopyExclusionReason | null; // 選択不能理由の型または除外なしのnull型
++  duplicateEventId: string | null; // 完全一致する既存イベントの代表IDまたは未一致の型
++  duplicateSourceEventId: string | null; // 他候補との一致を示す複製元IDまたは未一致の型
++  initiallySelected: boolean; // previewでの初期選択を表す真偽値型
++};
 +
-+| 状況 | 現在の扱いと運用上の確認 |
-+| --- | --- |
-+| 同じ行の送信中 | statusとメモの両方を無効化し、refでも連打を抑える。他行は操作できる |
-+| 自分のstatus更新成功 | 同じ行の最新versionを共有する。メモの基準versionが送信時と整合する場合だけ進める |
-+| 他者の更新・CONFLICT | 未保存メモとその基準versionを維持する。古い内容を無条件に再送しない |
-+| 最新情報を取得 | 下書きを残してrouter.refreshする。取得済み情報と下書きを照合する |
-+| 取得済みの内容で再編集 | dirtyなら破棄確認後に、取得済み内容とversionを採用する。破棄してよい場合だけ選ぶ |
-+| 同じ検索条件での再検証 | reportIdのkeyで行を保持。更新で条件外へ移った操作行も残す場合がある |
-+| 条件外の保持行 | 表示情報は更新前の場合があるという案内を確認する。取得済みsnapshotを最新DB値と断定しない |
-+| フィルター・ページ移動 | 検証済みqueryのtableKeyが変わると編集領域を切り替える。離脱確認・キャンセル・移動後の入力の扱いをブラウザーで確認する |
-+| 保存済み・再検証失敗 | successとreloadRequiredの固定案内を維持する。保存失敗と読み替えず、再保存を依頼しない |
-+| 応答不明・通信失敗 | 最新の保存状態を承認済み読取手段で先に照合する。失敗表示だけで「DBに未保存」と断定しない |
++/**
++ * preview成功と上限超過・認可拒否・取得失敗を分ける結果型。
++ */
++export type EventMonthCopyPreview = // previewの取得結果を区別する型
++  | {
++      outcome: "READY"; // 候補の取得成功を表すリテラル型
++      targetMonth: string; // 対象月の文字列型
++      sourceMonth: string; // 前月の文字列型
++      timezone: string; // クラブtimezoneの文字列型
++      fingerprint: string; // 後続粒度で計算するpreview識別値の文字列型
++      items: readonly EventMonthCopyPreviewItem[]; // 空配列も許容する限定候補の読取専用配列型
++    }
++  | {
++      outcome: "TOO_MANY" | "FORBIDDEN" | "PREVIEW_FAILED"; // 上限超過・認可拒否・取得失敗のリテラル型
++    };
 +
-+F08の通知結果保存でもupdatedAtが変わります。メモやstatusの変更が見えなくても競合し得ます。
-+通知失敗を理由に再送したり、通知列を手動修正して管理更新を通したりしません。
-+F09の管理操作から通知メールを再送しません。通知の意味・復旧の限界はF08運用を参照します。
++/**
++ * 保存完了記録から返す対象月と作成件数だけの成功データ。
++ */
++export type EventMonthCopyReceipt = { // 作成済み操作の最小結果型
++  targetMonth: string; // 保存済みの対象月の文字列型
++  createdCount: number; // 保存件数の数値型。1〜100の保証は後続の保存処理で行う
++};
 +
-+下書きはマウント中のClient stateです。ブラウザーの再読込・終了・logout・認可拒否を越える
-+永続保存や復元は保証しません。共通guardはリンククリックとbeforeunloadを扱いますが、
-+履歴戻りや実際のNext遷移を含む保護範囲はブラウザーで実測します。
-+Platformのlogoutボタンは即時Actionで、F07の確認ダイアログは使いません。
-+未保存内容はlogout前に扱い、logoutをキャンセルすれば必ず復元できるとは案内しません。
++/**
++ * 新規保存・同一操作の再送・各失敗・結果不明を区別する実行結果。
++ */
++export type EventMonthCopyResult = // 保存処理の結果を判別する型
++  | {
++      outcome: "CREATED" | "ALREADY_COMPLETED"; // 新規保存・同一操作の保存済みを表すリテラル型
++      receipt: EventMonthCopyReceipt; // 完了済み操作の最小結果型
++    }
++  | {
++      outcome:
++        | "VALIDATION_FAILED" // 入力構造の不正を表す結果の型
++        | "FORBIDDEN" // 認可拒否を表す結果の型
++        | "PREVIEW_CHANGED" // preview後の変更を表す結果の型
++        | "CONFLICT" // 同じ操作IDと異なる入力等の衝突を表す結果の型
++        | "CREATE_FAILED" // 保存失敗を表す結果の型
++        | "RESULT_UNKNOWN"; // 保存結果が不明で同じ操作の確認が必要な結果の型
++    };
 +
-+不具合を確認した場合、この粒度で本体を変更せず、再現条件と対象ファイル・関数を記録し、
-+該当粒度の修正案へ切り分けます。
++/**
++ * 保存後の再検証失敗も、保存済み成功として画面に伝えられるデータ型。
++ */
++export type EventMonthCopyActionData = EventMonthCopyReceipt & { // 保存済み結果型と再読込案内の結合型
++  needsReload: boolean; // 再読込が必要かを表す真偽値型
++};
 +
-+## DBなしの自動回帰
++/**
++ * 複製入力と項目エラー、保存済み結果を保持する共通形式のAction state。
++ */
++export type EventMonthCopyActionState = ActionState< // フォームの入力・エラー・成功結果をまとめる共通型
++  EventMonthCopyInput, // 正規化済みの複製入力型
++  EventMonthCopyField, // 複製入力の項目名の型
++  EventMonthCopyActionData // 保存済み件数と再読込案内の型
++>;
+diff --git a/tests/event-month-copy-form.test.ts b/tests/event-month-copy-form.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2152f41db88baffb72b79b2e49f37221b90aebd9
+--- /dev/null
++++ b/tests/event-month-copy-form.test.ts
+@@ -0,0 +1,344 @@
++// tests/event-month-copy-form.test.ts
++// 実Auth・DB・Next実行環境を使わず、複製入力の境界と限定契約を検証する。
 +
-+リポジトリルートで、インストール済み依存を使います。実接続flagを0に固定し、
-+以下の対象だけを実行します。環境変数ファイル・実接続設定は読み込みません。
-+`verify`・`verify:local`・`test:db` はこの確認の代用にせず実行しません。
++import {
++  expect,
++  it,
++} from "vitest";
 +
-+```sh
-+RUN_PLATFORM_SUPPORT_TESTS=0 \
-+RUN_SUPPORT_REPORT_TESTS=0 \
-+RUN_DB_INTEGRATION_TESTS=0 \
-+node node_modules/vitest/vitest.mjs run \
-+  domain/platform \
-+  src/application/platform \
-+  tests/platform-*.test.ts \
-+  domain/club/support \
-+  src/application/club/support \
-+  tests/support-report*.test.ts \
-+  lib/mail/support-report-mail.test.ts \
-+  src/infrastructure/logging/sanitize-log-context.test.ts \
-+  domain/club/plan-features.test.ts \
-+  tests/club-membership-authorization.test.ts \
-+  tests/club-account-navigation.test.ts \
-+  tests/club-account-pages.test.ts \
-+  tests/club-account-forms.test.ts \
-+  tests/club-invitation-login-resume.test.ts \
-+  tests/club-invitation-entry.test.ts
-+```
++import {
++  isEventMonthCopyTargetMonth, // 前月も表現可能な単一対象月を検証する関数
++  parseEventMonthCopyFormData, // 反復選択と単一項目を確認して複製入力を検証する関数
++  validateEventMonthCopyInput, // 複製入力の構造検証と正規化を行う関数
++} from "@/domain/club/event/event-month-copy-form";
++import type {
++  EventMonthCopyActionState, // 複製入力・エラー・保存済み結果をまとめるAction state型
++  EventMonthCopyInput, // 構造検証・正規化済みの複製入力型
++  EventMonthCopyPreview, // preview成功と超過・拒否・取得失敗を分ける結果型
++  EventMonthCopyResult, // 保存済み・再送・変更・衝突・失敗を分ける結果型
++} from "@/domain/club/event/event-month-copy-types";
++import {
++  createInitialActionState, // 入力値と新しいrequestIdを持つ初期stateを作る関数
++} from "@/domain/shared/action-state";
 +
-+F09の接続ガード21件、F08の接続ガード19件は架空の設定だけで実行します。
-+実DBケースはF09が15件、F08が23件で、上記コマンドではskipです。
-+`platform-entry.test.ts` は実Nextのmatcher評価器とRequest/Responseを使いますが、
-+Auth・セッション更新はmockです。Cookieの実更新や実HTTPのOrigin保護は証明しません。
-+フォームのnode試験はhook境界を模しており、実DOM・focus・履歴・離脱確認の実証にはしません。
++const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
++const SOURCE_A = "550e8400-e29b-41d4-a716-446655440001";
++const SOURCE_B = "550e8400-e29b-41d4-a716-446655440002";
++const FINGERPRINT = "a".repeat(64); // 架空の64桁識別値を作る文字列反復メソッド
 +
-+## 使い捨てDBの専用統合試験
++/**
++ * テストごとに独立した正常入力を作る。
++ */
++function validInput(): EventMonthCopyInput { // 正常入力を生成する関数 / 構造検証済み複製入力型
++  return {
++    targetMonth: "2026-02",
++    selectedEventIds: [SOURCE_A],
++    requestId: REQUEST_ID,
++    previewFingerprint: FINGERPRINT,
++  };
++}
 +
-+1. 本番・日常開発データを含まない、破棄できる専用ローカルDBを担当者が用意します。
-+2. 既存migrationの適用と必要な実行権限を確認します。
-+   試験自体はmigration・seed・reset・schema変更を実行しません。
-+3. loopback接続がリモートDBへのトンネル・proxyでないことを確認します。
-+   URL検査だけで転送先や使い捨て状態を証明するものではありません。
-+4. 接続設定は承認された方法でプロセス環境へ渡し、URL・PWを引数・証跡へ記載しません。
-+5. 使い捨て確認を行った担当者だけが `PLATFORM_SUPPORT_DISPOSABLE=1` を設定します。
++/**
++ * 正常入力から、実ブラウザーと同じ反復選択項目のFormDataを作る。
++ */
++function validForm(): FormData { // 正常な送信値を作る関数 / ブラウザー送信値を保持する型
++  const input = validInput(); // 正常な複製入力を生成する関数
++  const form = new FormData(); // ブラウザー送信値のコンストラクター
++  form.set("targetMonth", input.targetMonth); // 単一の対象月を設定するメソッド
++  form.set("requestId", input.requestId); // 単一の操作IDを設定するメソッド
++  form.set("previewFingerprint", input.previewFingerprint); // 単一のpreview識別値を設定するメソッド
++  for (const id of input.selectedEventIds) {
++    form.append("selectedEventIds", id); // 選択IDを反復項目として追加するメソッド
++  }
++  return form;
++}
 +
-+| 条件 | 許可する設定 |
-+| --- | --- |
-+| DATABASE_URL | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、username・passwordあり |
-+| URLの付加要素 | query・fragmentを拒否。末尾だけの `?`・`#` や前後の空白も拒否 |
-+| NODE_ENV | production以外 |
-+| PLATFORM_SUPPORT_DISPOSABLE | 担当者が使い捨て確認後に設定する1 |
-+| RUN_PLATFORM_SUPPORT_TESTS・RUN_DB_INTEGRATION_TESTS | 両方1が必要。専用scriptが設定する |
++/**
++ * 大量選択の境界試験に使う、互いに異なるUUIDを生成する。
++ */
++function eventIds(count: number): string[] { // 指定件数のUUIDを作る関数 / 件数の数値型 / 文字列配列型
++  const identifiers: string[] = []; // 異なるIDを保持する文字列配列型
++  for (let index = 0; index < count; index += 1) {
++    const firstGroup = index.toString(16).padStart(8, "0"); // 数値の16進変換メソッド / 8桁へ補完するメソッド
++    identifiers.push(`${firstGroup}-e29b-41d4-a716-446655440000`); // 異なるUUIDを追加するメソッド
++  }
++  return identifiers;
++}
 +
-+全条件が揃った環境でのみ、次を実行します。
++it.each(["0001-02", "2026-01", "2028-02", "9999-12"])( // 表現可能な月を表形式で検証するテスト関数
++  "対象月%sは前月とともに表現できる",
++  /**
++   * 有効な単一対象月が現在月等へ変換されず受理されることを確認する。
++   */
++  (month) => { // 有効な対象月を受け取るテストコールバック
++    expect(isEventMonthCopyTargetMonth(month)).toBe(true); // 期待値を作る関数 / 月検証関数 / 真偽値の検証メソッド
++  },
++);
 +
-+```sh
-+npm run test:platform-support:local
-+```
++it.each([ // 不正な月と非文字列を表形式で検証するテスト関数
++  undefined,
++  null,
++  202602,
++  [],
++  ["2026-02"],
++  {},
++  "",
++  "0000-02",
++  "0001-01",
++  "2026-00",
++  "2026-13",
++  "2026-2",
++  "2026-02-01",
++  "10000-02",
++  " 2026-02",
++  "2026-02\n",
++])(
++  "不正な月のケース%#を現在月へfallbackせず拒否する",
++  /**
++   * 月の構造不正が固定の項目エラーになり、データを返さないことを確認する。
++   */
++  (targetMonth) => { // 不正な対象月を受け取るテストコールバック
++    const result = validateEventMonthCopyInput({ // 複製入力の構造検証を行う関数
++      ...validInput(), // 独立した正常入力を作る関数
++      targetMonth,
++    });
++    expect(result.success).toBe(false); // 期待値を作る関数 / 検証失敗を確認するメソッド
++    if (!result.success) {
++      expect(result.fieldErrors.targetMonth).toBeDefined(); // 期待値を作る関数 / 月の項目エラーを確認するメソッド
++      expect(result).not.toHaveProperty("data"); // 期待値を作る関数 / 未検証データの非返却を確認するメソッド
++    }
++  },
++);
 +
-+専用scriptは `tests/platform-support.flow.integration.test.ts` だけを実行し、
-+dotenvを自動読込しません。共有clientのdotenv初期化はmockし、ガード後に専用clientを注入します。
-+不正設定なら接続前に固定エラーで失敗します。失敗回避のためにガードを緩めません。
++it("UUIDとfingerprintの大小文字・選択順を正規化し、元の入力を変更しない", // テストケースを登録する関数
++  /**
++   * 同じ操作の表記揺れを揃え、並べ替えによって呼出し元の配列を変更しないことを確認する。
++   */
++  () => { // 正規化と非破壊性を検証するコールバック
++    const input = {
++      ...validInput(), // 正常入力を作る関数
++      selectedEventIds: [SOURCE_B.toUpperCase(), SOURCE_A], // UUIDを大文字に変換するメソッド
++      requestId: REQUEST_ID.toUpperCase(), // 操作IDを大文字に変換するメソッド
++      previewFingerprint: FINGERPRINT.toUpperCase(), // 識別値を大文字に変換するメソッド
++    };
++    expect(validateEventMonthCopyInput(input)).toEqual({ // 期待値を作る関数 / 入力検証関数 / 構造一致の検証メソッド
++      success: true,
++      data: {
++        ...validInput(), // 正常入力を作る関数
++        selectedEventIds: [SOURCE_A, SOURCE_B],
++      },
++    });
++    expect(input.selectedEventIds[0]).toBe(SOURCE_B.toUpperCase()); // 期待値を作る関数 / 元の順序の検証 / 大文字変換メソッド
++  },
++);
 +
-+15ケースは両role・AppUser/所属なし・全プラン横断、一般会員/inactive/失効済みcontext拒否、
-+AND検索と50件ページ、status往復と同status、メモと対応者、改ざん入力、同時管理更新、
-+F08通知によるversion競合、F08受付とsnapshot保持、担当者SetNull、クラブ越権防止を確認します。
-+Action・Service・Repository・DB制約は実物を使い、Auth・Next・Resend SDKはmockです。
-+実Auth、実キャッシュ再検証、HTTP、実配送が成功したとは扱いません。
-+同時開始は特定SQL順序やP2034発生を強制せず、競合の厳密な順序制御とは区別します。
++it.each([0, 1, 100, 101, 10000])( // 選択件数の境界を表形式で検証するテスト関数
++  "%i件の選択を1〜100件に制限する",
++  /**
++   * 上限前後と大きな配列を検証し、過大入力を受理しないことを確認する。
++   */
++  (count) => { // 選択件数を受け取るテストコールバック
++    const result = validateEventMonthCopyInput({ // 入力検証関数
++      ...validInput(), // 正常入力を作る関数
++      selectedEventIds: eventIds(count), // 指定件数の異なるUUIDを作る関数
++    });
++    expect(result.success).toBe(count >= 1 && count <= 100); // 期待値を作る関数 / 件数境界を検証するメソッド
++  },
++);
 +
-+fixtureの報告・クラブ・AppUser・PlatformAdminのUUIDは書込み前に登録し、その対象だけをcleanupします。
-+全件削除・truncateはしません。強制終了時の残存はあり得るため、担当者が専用環境で確認します。
-+SQL・SDK・assertionの原文やcauseを証跡へ追加せず、ケース名と固定エラー・理由を記録します。
++it.each([ // 不正な選択値を表形式で検証するテスト関数
++  undefined,
++  null,
++  SOURCE_A,
++  ["invalid"],
++  [null],
++  [123],
++  [SOURCE_A, SOURCE_A],
++  [SOURCE_A, SOURCE_A.toUpperCase()], // 同一UUIDの表記揺れを作るメソッド
++])(
++  "不正または重複した選択のケース%#を拒否する",
++  /**
++   * 配列外入力・不正UUID・正規化後の重複を拒否する。
++   */
++  (selectedEventIds) => { // 不正選択を受け取るテストコールバック
++    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
++      ...validInput(), // 正常入力を作る関数
++      selectedEventIds,
++    }).success).toBe(false); // 検証失敗を確認するメソッド
++  },
++);
 +
-+## 実Auth・ブラウザーの統合受入
++it("イベントIDのUUID形式と、requestIdのUUID v4制約を区別する", // テストケースを登録する関数
++  /**
++   * 通常のUUIDイベントIDを許容しても、操作IDの版を緩めないことを確認する。
++   */
++  () => { // UUIDの用途別制約を検証するコールバック
++    const uuidV1 = "550e8400-e29b-11d4-a716-446655440000";
++    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
++      ...validInput(), // 正常入力を作る関数
++      selectedEventIds: [uuidV1],
++    }).success).toBe(true); // イベントIDの許容を確認するメソッド
++    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
++      ...validInput(), // 正常入力を作る関数
++      requestId: uuidV1,
++    }).success).toBe(false); // 操作IDの拒否を確認するメソッド
++  },
++);
 +
-+事前に対象環境、担当、実施範囲、使い捨てAuthアカウント・クラブA/Bを決めます。
-+無所属のDEVELOPER/SUPPORT、inactive管理者、一般MEMBER、別担当者を区別します。
-+既存データや実アカウントで代替しません。権限変更は既存の承認済み運用担当が扱います。
++it.each([undefined, null, "", "x", "a".repeat(63), "g".repeat(64), "a".repeat(65)])( // 識別値の境界試験を登録する関数 / 架空文字列の反復メソッド
++  "不正なpreview識別値のケース%#を拒否する",
++  /**
++   * SHA-256形式に合わない識別値を拒否する。識別値の真正性はこの試験の対象外。
++   */
++  (previewFingerprint) => { // 不正なpreview識別値を受け取るコールバック
++    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
++      ...validInput(), // 正常入力を作る関数
++      previewFingerprint,
++    }).success).toBe(false); // 検証失敗を確認するメソッド
++  },
++);
 +
-+| ID | 操作と期待結果 |
-+| --- | --- |
-+| B01 | 未認証で `/platform/support` へ直打ちし、固定 `/platform-login` へ遷移。存在しない旧ログイン先へ送られない |
-+| B02 | 所属・AppUserがない有効なDEVELOPER/SUPPORTで各々ログインし、管理画面へ到達する。所属が自動作成されない |
-+| B03 | 一般MEMBERとinactiveでURL直打ち・ログインを試す。管理報告を開示しない。ログインPage表示だけでは既存sessionを勝手にlogoutしない |
-+| B04 | 専用layoutに管理見出しとlogoutがあり、クラブ用フッターがない。クラブのイベント・お知らせ・会員/LINE管理へ直接アクセスしても、Platform権限だけでは使えない |
-+| B05 | A/Bと全プランの既存報告を横断表示する。本文・内部メモ・snapshot・UA・保存URLの全文と日本時間表示を確認し、架空のXSS文字列や保存URLを実行・外部リンク化しない |
-+| B06 | club・status・categoryのAND検索、50件ページ送り、条件変更時のpage=1、0件・不正queryを確認。候補外のクラブIDも他データの開示へ広がらない |
-+| B07 | 両roleでOPEN→IN_PROGRESS→ON_HOLD→RESOLVED→OPEN。担当者・statusChangedAt、RESOLVED時のresolvedAtと解除時のnullを読取結果と照合する |
-+| B08 | 同statusを正規入力として再送し、変更なし成功、日時・担当者・version維持を確認。実UIの選択変更で同値イベントを発生できない場合はHTTP確認と区別して記録する |
-+| B09 | メモだけを保存し、対応者とupdatedAtだけが更新され、状態日時・本文・snapshot・通知列が維持される。空欄null、上限、超過時の非保存・入力保持を確認する |
-+| B10 | 通信遅延下でstatusとメモを連打。同じ行だけpendingとなり二重操作せず、他行のstate・入力ID・エラーが混線しない |
-+| B11 | 二人の担当者で同じversionから更新。後続操作は競合となり、未保存メモを保持して再読取・明示再編集を選べる。古い内容を自動再送しない |
-+| B12 | メモ編集中に自分のstatusを更新し、安全なversion共有を確認。他者更新と遅延RSCでは基準version・最新statusを巻き戻さない |
-+| B13 | 他行操作、同じ条件の再検証、0件化、status変更による条件外移動で下書きを失わない。保持行の古い表示には案内がある |
-+| B14 | dirtyのままfilter・ページ送り・リンク・戻る・再読込・終了を試す。警告範囲、キャンセル時の入力、移動同意後の破棄を実測。意図せぬ消失はfailとして残す |
-+| B15 | 保存後の再検証失敗を安全に用意できる環境だけで確認。保存済み成功と手動再読取の案内を出し、再保存を促さない。用意できなければskip理由を残す |
-+| B16 | 表示後にisActive=falseを反映し、以後の再取得・送信を拒否。すでに進行中の処理と失効の交差は別に記録し、未確認を拒否成功へ読み替えない |
-+| B17 | 未保存内容を扱ってから専用logoutを実行。local session終了と固定ログイン先への遷移、履歴戻り・再送時の再認可を確認。logout失敗は固定案内、他端末終了やPW失効と混同しない |
-+| B18 | ログイン失敗・試行制限・記録不能時の固定エラー、pending、項目エラー、ラベルとfocusを確認。Cookie更新と認証状態が画面遷移後も整合する |
++it.each([undefined, null, "bad", REQUEST_ID + "\n", [REQUEST_ID]])( // 不正な操作IDを表形式で検証する関数
++  "不正なrequestIdのケース%#を拒否する",
++  /**
++   * 単一UUID v4以外の操作IDを拒否する。
++   */
++  (requestId) => { // 不正な操作IDを受け取るコールバック
++    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
++      ...validInput(), // 正常入力を作る関数
++      requestId,
++    }).success).toBe(false); // 検証失敗を確認するメソッド
++  },
++);
 +
-+障害注入ができない項目は、mock試験の成功で埋めずskip理由を記録します。
-+F08通知との競合はまず専用DBでmock SDKを用いて確認し、受入のために実メールを送信しません。
++it.each(["targetMonth", "requestId", "previewFingerprint"])( // 単一項目の重複を表形式で検証する関数
++  "FormDataの%s複数指定を、値が同じでも拒否する",
++  /**
++   * 同名の単一項目について先勝ち・後勝ちの解釈をしないことを確認する。
++   */
++  (field) => { // 単一項目名を受け取るテストコールバック
++    const form = validForm(); // 正常なFormDataを作る関数
++    form.append(field, String(form.get(field))); // 項目追加メソッド / 文字列化関数 / 先頭値の取得メソッド
++    expect(parseEventMonthCopyFormData(form).success).toBe(false); // 期待値を作る関数 / FormData検証関数 / 失敗の検証メソッド
++  },
++);
 +
-+## HTTPでの直接呼出し・foreign Origin
++it.each(["targetMonth", "requestId", "previewFingerprint", "selectedEventIds"])( // 各項目の欠落を表形式で検証する関数
++  "必須項目%sの欠落を拒否する",
++  /**
++   * FormDataで必須項目が欠けた場合に受理しないことを確認する。
++   */
++  (field) => { // 欠落させる項目を受け取るコールバック
++    const form = validForm(); // 正常なFormDataを作る関数
++    form.delete(field); // 対象項目を削除するメソッド
++    expect(parseEventMonthCopyFormData(form).success).toBe(false); // 期待値を作る関数 / FormData検証関数 / 失敗の検証メソッド
++  },
++);
 +
-+使い捨て環境の正常リクエストと対象fixtureのDB状態を先に確認します。
-+現在のAction ID、Cookie、認証ヘッダー、PW、本文・メモを含むリクエストやHARを
-+公開資料・チャット・結果ログへ保存しません。Action IDを文書へ固定しません。
++it.each(["targetMonth", "requestId", "previewFingerprint", "selectedEventIds"])( // 各項目のFile値を表形式で検証する関数
++  "項目%sのFile値を拒否する",
++  /**
++   * 文字列が必要な項目をFileとして送信できないことを確認する。
++   */
++  (field) => { // Fileへ置き換える項目を受け取るコールバック
++    const form = validForm(); // 正常なFormDataを作る関数
++    form.set(field, new File(["fake"], "fixture.txt")); // 項目設定メソッド / 架空ファイルのコンストラクター
++    expect(parseEventMonthCopyFormData(form).success).toBe(false); // 期待値を作る関数 / FormData検証関数 / 失敗の検証メソッド
++  },
++);
 +
-+| ID | 操作と期待結果 |
-+| --- | --- |
-+| H01 | 正常リクエストのOriginだけをforeign Originへ変え、Nextの拒否とDB非変更を照合する。固定のHTTP番号は推測せず実応答を記録する |
-+| H02 | 正常Originでも未認証・一般会員・inactive・表示後の失効状態から直接POSTし、報告更新を拒否する |
-+| H03 | reportIdの欠損・重複・File・不正UUID・bind先との不一致、requestIdの欠損・重複・File・不正UUID v4・前state不一致を試し、非保存を確認する |
-+| H04 | expectedUpdatedAtの欠損・重複・不正形式・古いversionを試す。競合は無条件再試行せず固定案内と非保存を確認する |
-+| H05 | status不正値、メモの重複・File・上限超過を拒否する。改ざんしたclubId・所属・担当者・管理日時・本文・snapshot・通知列・returnToを採用せず、固定経路だけを使う |
-+| H06 | 実更新後の同status再送では管理列を維持する。保存後の再検証失敗と保存前の拒否をDB値で区別する |
-+| H07 | `next.config.ts` のServer Actions bodySizeLimitは現行12mb。リクエスト全体の上限とメモ5000文字検証を分け、上限超過時の非保存を確認する |
-+| H08 | 専用ログイン・logoutのHTTP経路も、foreign Origin、直接呼出し、Cookieの扱いを別に確認。foreign Originの拒否でログイン・logout Actionや報告更新が実行されないことを実測し、Proxyのsession更新とは分ける |
++it.each([100, 101])( // FormData経路の件数境界を表形式で検証する関数
++  "FormDataの反復選択%i件でも同じ上限を守る",
++  /**
++   * 反復項目を受け付けつつ、上限を超えた送信を拒否する。
++   */
++  (count) => { // 反復選択数を受け取るコールバック
++    const form = validForm(); // 正常なFormDataを作る関数
++    form.delete("selectedEventIds"); // 既存の選択IDを削除するメソッド
++    for (const id of eventIds(count)) { // 指定件数の異なるUUIDを作る関数
++      form.append("selectedEventIds", id); // 反復項目として選択IDを追加するメソッド
++    }
++    expect(parseEventMonthCopyFormData(form).success).toBe(count === 100); // 期待値を作る関数 / FormData検証関数 / 件数の検証メソッド
++  },
++);
 +
-+allowedDevOriginsとServer Actionsのforeign Origin許可を混同しません。
-+この粒度ではbodySizeLimit・Origin設定・Proxy・本番設定を変更しません。
-+関数直接試験の成功は、実HTTPの保護やCookieの実更新を証明しません。
++it.each(["clubId", "membershipId", "status", "content", "startAt", "createdByMembershipId"])( // 信頼禁止項目を表形式で検証する関数
++  "追加された信頼禁止項目%sを両入力経路で拒否し、原文を返さない",
++  /**
++   * 改変された保存列を採用せず、安全な固定エラーのみを返すことを確認する。
++   */
++  (field) => { // 信頼してはいけない項目名を受け取るコールバック
++    const privateValue = "fixture-private-value";
++    const objectResult = validateEventMonthCopyInput({ // オブジェクト入力の検証関数
++      ...validInput(), // 正常入力を作る関数
++      [field]: privateValue,
++    });
++    const form = validForm(); // 正常なFormDataを作る関数
++    form.set(field, privateValue); // 信頼禁止項目を追加するメソッド
++    const formResult = parseEventMonthCopyFormData(form); // FormData入力の検証関数
++    expect(objectResult.success).toBe(false); // 期待値を作る関数 / 拒否の検証メソッド
++    expect(formResult.success).toBe(false); // 期待値を作る関数 / 拒否の検証メソッド
++    expect(JSON.stringify([objectResult, formResult])).not.toContain(privateValue); // 期待値を作る関数 / JSON文字列化メソッド / 原文の非露出の検証メソッド
++  },
++);
 +
-+## 障害調査と証跡の扱い
++it("Nextの輸送用項目を業務入力へ含めず、正常なFormDataだけを検証する", // テストケースを登録する関数
++  /**
++   * Nextの追加項目を無視しても、成功データの項目が増えないことを確認する。
++   */
++  () => { // 輸送用項目と業務入力の分離を確認するコールバック
++    const form = validForm(); // 正常なFormDataを作る関数
++    form.set("$ACTION_ID_fixture", "transport-only"); // 架空のNext輸送用項目を追加するメソッド
++    expect(parseEventMonthCopyFormData(form)).toEqual({ // 期待値を作る関数 / FormData検証関数 / 構造一致の検証メソッド
++      success: true,
++      data: validInput(), // 正常な複製入力を作る関数
++    });
++  },
++);
 +
-+1. 対象環境と操作段階を確認し、承認済みの読取手段で保存有無・現在のversionを照合します。
-+   応答不明や再検証失敗を根拠に、同じ変更を再保存しません。
-+2. 認証段階は `platform.login.rate-limit`、`platform.login.authenticate`、
-+   `platform.login.log`、`platform.auth.sign-out`、`platform.logout.client` の固定operationを確認します。
-+3. 管理処理は `platform_support_operation_failed` と `platformSupport.read`・
-+   `platformSupport.status`・`platformSupport.note`、固定result/errorCodeを確認します。
-+   ログ基盤の停止や保存後の再検証失敗まで、必ずこのログが残るとは扱いません。
-+4. 証跡はケースID、基準commit、匿名化した環境名、pass/fail/skip、理由、担当と日付に限定します。
-+   Cookie・token・PW・Action ID・接続URL・本文・メモ・氏名/email・UA・SDK/SQL例外原文を転記しません。
-+   ログインのハッシュ値やsaltも証跡へコピーしません。
-+5. 管理者設定・Auth・ログ連携の問題は既存の運用担当へ切り分けます。
-+   本体修正、DB手動修復、制約緩和、権限自動付与や通知復旧workerをこの手順へ追加しません。
++it.each([undefined, null, [], "input", 1, new Date(0), new Map()])( // 入力オブジェクトの境界試験を登録する関数 / 日時コンストラクター / Mapコンストラクター
++  "入力オブジェクトでないケース%#を拒否する",
++  /**
++   * plain object以外の入力を例外原文なしに拒否する。
++   */
++  (value) => { // オブジェクト以外の入力を受け取るコールバック
++    expect(validateEventMonthCopyInput(value).success).toBe(false); // 期待値を作る関数 / 入力検証関数 / 失敗の検証メソッド
++  },
++);
 +
-+## 今回の確認結果と受入保留
-+
-+基準ブランチは `feat/club-app-foundation`、コミットは
-+`65046226b6dbc15a8f8ce9c642f4d4791ded4c49` です。
-+インストール済みとlockはNext.js 16.2.6、Vitest 4.1.10、Prisma Client 7.8.0で一致しています。
-+実行日は2026-10-26（JST）、担当はpatch作成エージェントです。
-+一時チェックアウトで実行しました。実環境の受入責任者は未確定です。
-+
-+| 区分 | 結果 | 根拠・理由 |
-+| --- | --- | --- |
-+| F09単体/mock・F08・クラブ認可・招待再開・matcher回帰 | pass | 上記コマンドで34ファイル、1096件成功・実DB38件skip。一時環境で実行 |
-+| 接続ガード | pass | 上記1096件に含むF09 21件・F08 19件。実設定を使用しない |
-+| TypeScript | pass | 一時環境で `node node_modules/typescript/bin/tsc --noEmit --incremental false` が成功 |
-+| F09実DB統合 | skip | 15件。実DB変更を行わない条件のため未実行 |
-+| F08実DB回帰 | skip | 23件。実DB変更を行わない条件のため未実行 |
-+| 実Auth | skip | 使い捨てAuth環境の操作・session更新を未実施 |
-+| 実ブラウザー | skip | B01〜B18を未実施。node試験を実DOM・履歴・離脱確認へ読み替えない |
-+| HTTP・foreign Origin | skip | H01〜H08を未実施。関数直接呼出しをHTTP成功へ読み替えない |
-+| 実メール配送 | skip | 実メール未送信。F09の管理操作は再通知機能を追加しない |
-+| F09統合受入 | 保留 | 実DB・実Auth・ブラウザー・HTTP等の未確認が残るため未完了 |
-+
-+実施時は次の形式で、B/Hの各ケースと実DBケースを個別に追記します。
-+
-+| ケースID・試験名 | 担当・日付 | 基準commit・匿名環境 | pass/fail/skip | 理由・安全化した根拠 |
-+| --- | --- | --- | --- | --- |
-+| 未実施ケース | 未割当 | 未確定 | skip | 必要条件と次に確認する内容だけを記載 |
-+
-+担当者、既存の権限管理手段、実DBのmigration/RLS/実行権限、Auth・ログ設定の実反映、
-+失効と処理中更新の交差、実ブラウザーの入力保持・HTTP保護が未確認です。
-+上記が残る間はF09受入完了とせず、失敗時は対象の粒度・関数・条件を示して修正案を報告します。
++it("空のpreview・既存結果・保存済み再読込を、共通stateで表現できる", // テストケースを登録する関数
++  /**
++   * 本文やDBモデルをClient結果に要求せず、成功後の再読込を表現できることを確認する。
++   */
++  () => { // 型契約と共通stateの接続を確認するコールバック
++    const preview: EventMonthCopyPreview = { // 限定preview結果型
++      outcome: "READY",
++      targetMonth: "2026-02",
++      sourceMonth: "2026-01",
++      timezone: "Asia/Tokyo",
++      fingerprint: FINGERPRINT,
++      items: [],
++    };
++    const result: EventMonthCopyResult = { // 保存処理の判別結果型
++      outcome: "ALREADY_COMPLETED",
++      receipt: {
++        targetMonth: "2026-02",
++        createdCount: 1,
++      },
++    };
++    const state: EventMonthCopyActionState = { // 複製のAction state型
++      ...createInitialActionState(validInput()), // 入力値とrequestIdを持つ初期stateを作る関数 / 正常入力を作る関数
++      status: "success",
++      data: {
++        ...result.receipt,
++        needsReload: true,
++      },
++    };
++    expect(preview.items).toHaveLength(0); // 期待値を作る関数 / 候補0件の表現を確認するメソッド
++    expect(state.data).toEqual({ // 期待値を作る関数 / 保存済み結果と再読込案内の構造検証メソッド
++      targetMonth: "2026-02",
++      createdCount: 1,
++      needsReload: true,
++    });
++  },
++);
