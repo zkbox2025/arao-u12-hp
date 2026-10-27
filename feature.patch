@@ -1,811 +1,844 @@
-diff --git a/docs/implementation/phases/F10.md b/docs/implementation/phases/F10.md
-index 5e1c447564ce9eb79d9f8696d5563e9c3c2d18fd..0ea424071985a189076f6fe0dfd7d5ae56b26c09 100644
---- a/docs/implementation/phases/F10.md
-+++ b/docs/implementation/phases/F10.md
-@@ -40,3 +40,53 @@ MVP 1.0での推奨仕様
- * 一括作成ではUIのpendingだけでなくサーバー冪等性が必要なこと
- * UTCではなくclub timezoneの日付を先に変換する理由
- * 一般的な定期イベント複製はMVP 1.5へ残すこと
-+
-+
-+【追加：粒度1】仕様・入力・結果の契約
-+
-+ユーザー確定事項
-+* 複製元は、クラブ現地時刻で対象月の前月に開始したイベントだけとする。
-+  前々月に開始し、前月にも継続している予定は含めない。
-+* 完全一致は、変換後のコピー対象項目で比較する。
-+  既存側のDRAFT／PUBLISHEDは問わず、作成者・更新者・公開日時・PDF等は比較しない。
-+* 除外前の前月候補が101件以上なら、preview段階で拒否する。
-+  日付不正や重複の除外、選択件数の削減によって上限を回避しない。
-+
-+粒度1で定義する入力境界
-+* 対象月は、前月も西暦1年以上となる単一のYYYY-MM文字列とする。
-+  0000年、0001年1月、不正な月、配列、余分な空白や改行を拒否し、現在月へfallbackしない。
-+* 選択IDはUUIDの配列で1〜100件とし、小文字・昇順へ正規化する。
-+  大小文字を揃えた後に同じIDになる場合も重複として拒否する。
-+* requestIdは既存のUUID v4検証を利用し、小文字へ正規化する。
-+  previewFingerprintは64桁の16進文字列として検証し、小文字へ正規化する。
-+* FormDataでは選択IDだけを反復項目として許可する。
-+  その他の単一項目の重複、File値、未許可項目は拒否する。
-+  Nextが付加する$ACTION_接頭辞の輸送用項目は業務入力として利用しない。
-+* 入力はtargetMonth・selectedEventIds・requestId・previewFingerprintに限定する。
-+  clientからclubId・実行者・status・コピー日時・本文等を受け取らない。
-+* この検証が保証するのは入力構造だけである。
-+  認証・認可、前月候補への所属、fingerprintの一致、冪等性は後続粒度で保証する。
-+
-+コピー列と結果の契約
-+* コピー列はtitle・content・genre・targetRoles・startAt・endAt・isAllDay・location・
-+  meetingAt・meetingLocation・belongings・notesとする。日時以外の値やnullを黙って変更しない。
-+* Client用previewは、ID・見出し・新旧日時・終日区分・補正項目・重複・除外理由・初期選択へ限定する。
-+  コピー本文や関連行、Prismaのモデル全体をClientへ返さない。
-+* preview結果はREADY（0件も含む）・TOO_MANY・FORBIDDEN・PREVIEW_FAILEDで区別する。
-+* 実行結果はCREATED・ALREADY_COMPLETED・VALIDATION_FAILED・FORBIDDEN・PREVIEW_CHANGED・
-+  CONFLICT・CREATE_FAILED・RESULT_UNKNOWNで区別する。
-+  完了結果は対象月と作成件数だけとし、本文・生Error・DBエラー原文を含めない。
-+* 保存後の再検証失敗は、保存済み成功データのneedsReloadで案内できる契約とする。
-+  入力のrequestIdだけで保存済みと判断しない。
-+
-+未確定事項（提案のまま保持し、確定済み仕様として実装しない）
-+* 元DRAFTも対象にするか、既存完全一致候補を明示選択で複製できるか。
-+* 月末補正で候補同士が一致した場合の初期選択と、利用者による選択可否。
-+* 終了・集合が対象月の前後に跨る場合の扱い、DST fold時の時刻選択・表示。
-+* 不正source・DST gap・補正後の期間逆転を理由付きで選択不可にする方針。
-+* 秒・ミリ秒を保持する方針、初回送信後の選択変更時の再preview・requestId更新の運用。
-+
-+粒度1の実装範囲
-+* 入力・preview・結果の型契約、入力構造検証、境界テストだけを追加する。
-+* 日時変換・比較・fingerprint計算・DB・Repository・Service・Action・画面は後続粒度とする。
-+  この粒度だけを適用しても、予定は作成されずDB変更も発生しない。
-diff --git a/domain/club/event/event-month-copy-form.ts b/domain/club/event/event-month-copy-form.ts
+diff --git a/domain/club/event/event-month-copy-date-times.ts b/domain/club/event/event-month-copy-date-times.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b4156c3053c186af5fc528e50079f2ddad9b4eef
+index 0000000000000000000000000000000000000000..16aa68cc0388c4bf74284b14efbb2a075079fb77
 --- /dev/null
-+++ b/domain/club/event/event-month-copy-form.ts
-@@ -0,0 +1,217 @@
-+// domain/club/event/event-month-copy-form.ts
-+// 前月予定複製の構造検証。認可・候補照合・冪等性の保証は後続粒度で行う。
++++ b/domain/club/event/event-month-copy-date-times.ts
+@@ -0,0 +1,352 @@
++// domain/club/event/event-month-copy-date-times.ts
++// クラブ現地時刻で1か月先へ変換し、月末補正と変換不能の理由を返す。
 +
-+import { z } from "zod";
++import {
++  TZDate,
++  tzOffset,
++} from "@date-fns/tz";
 +
 +import type {
-+  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
-+} from "@/domain/shared/action-state";
-+import {
-+  isRequestId, // UUID v4形式のrequestIdを検証する関数
-+} from "@/domain/shared/request-id";
-+import {
-+  EVENT_MONTH_COPY_MAX_COUNT, // 除外前候補数と選択予定数の上限
-+  type EventMonthCopyField, // 複製入力の項目名の型
-+  type EventMonthCopyInput, // 構造検証・正規化済みの複製入力型
-+  type EventMonthCopyValidation, // 成功データと安全な検証エラーを分ける型
++  EventUtcDateTimes, // 開始・終了・集合のUTC日時をまとめる型
++} from "./event-date-times";
++import type {
++  EventMonthCopyCorrectionField, // 補正対象の開始・終了・集合日時の項目名の型
++  EventMonthCopyEvent, // コピーするイベント1件あたりのサーバー内部型
++  EventMonthCopyExclusionReason, // 元データ・日時・期間の不正を分ける除外理由の型
 +} from "./event-month-copy-types";
 +
-+const uuidSchema = z.uuid(); // UUID識別子を検証するスキーマの生成関数
-+const inputFields = new Set<string>([ // 入力項目名を判定する集合の生成 / 文字列型
-+  "targetMonth",
-+  "selectedEventIds",
-+  "requestId",
-+  "previewFingerprint",
-+]);
-+const INVALID_FORM_MESSAGE = "複製入力を確認してください。";
-+const INVALID_SELECTION_MESSAGE = "複製対象を1〜100件、重複なしで指定してください。";
++/**
++ * 月送りに必要な日時と終日区分だけの入力型。
++ */
++export type EventMonthCopyDateTimeInput = Pick< // 既存型から日時処理に必要な項目だけを選ぶ型
++  EventMonthCopyEvent, // コピー対象イベントの型
++  "startAt" | "endAt" | "meetingAt" | "isAllDay" // 日時処理の対象項目名の型
++>;
 +
 +/**
-+ * 単一のYYYY-MM文字列で、前月も西暦1年以上になる対象月かを検証する。
++ * preview等の呼出し元で安全に区別できる、日時変換の詳細な失敗理由。
 + */
-+export function isEventMonthCopyTargetMonth( // 複製対象月の厳密な構造を検証する関数
-+  value: unknown, // 検証前の不明値型
-+): value is string { // 検証成功時に文字列へ絞り込む型述語
++export type EventMonthCopyDateTimeIssue = // 日時変換の失敗箇所を説明するリテラル型
++  | "INVALID_SOURCE" // 元データの型や日時が不正である理由の型
++  | "INVALID_TIMEZONE" // timezoneが利用できない理由の型
++  | "INVALID_ALL_DAY_BOUNDARY" // 終日の開始・終了境界が不正である理由の型
++  | "INVALID_INTERVAL" // 終了が開始より後にならない理由の型
++  | "OUT_OF_RANGE" // 西暦1〜9999年の範囲を外れる理由の型
++  | "NONEXISTENT_LOCAL_TIME" // DST gap等で現地日時が存在しない理由の型
++  | "AMBIGUOUS_LOCAL_TIME" // 複数のUTC日時が対応する現地時刻を表す理由の型
++  | "CONVERSION_FAILED"; // その他の変換失敗を原文なしで伝える理由の型
++
++/**
++ * 新旧UTC日時・補正項目、または既存の除外区分と詳細理由を返す結果型。
++ */
++export type EventMonthCopyDateTimeResult = // 日時変換の成功と失敗を分ける型
++  | {
++      success: true; // 変換成功を表すリテラル型
++      original: EventUtcDateTimes; // コピー元から独立した新しいDateで表す元日時の型
++      converted: EventUtcDateTimes; // コピー先UTC日時の型
++      correctedFields: readonly EventMonthCopyCorrectionField[]; // 月末補正項目の読取専用配列型
++    }
++  | {
++      success: false; // 変換失敗を表すリテラル型
++      original: EventUtcDateTimes | null; // 元日時の型、または元データ自体が不正な場合のnull型
++      converted: null; // 一部の変換結果を利用させない未変換の型
++      correctedFields: readonly EventMonthCopyCorrectionField[]; // 失敗前に確認できた月末補正項目の型
++      exclusionReason: EventMonthCopyExclusionReason; // 既存preview契約の除外区分の型
++      issue: EventMonthCopyDateTimeIssue; // 安全な詳細失敗理由の型
++      field: EventMonthCopyCorrectionField | null; // 失敗した日時項目の型、または項目外エラーのnull型
++    };
++
++/**
++ * ホストのtimezoneに依存しない、クラブ現地の日時成分。
++ */
++type LocalDateTime = { // クラブ現地の日時を表す内部型
++  year: number; // 西暦年の数値型
++  month: number; // 1〜12月の数値型
++  day: number; // 日の数値型
++  hour: number; // 時の数値型
++  minute: number; // 分の数値型
++  second: number; // 秒の数値型
++  millisecond: number; // ミリ秒の数値型
++};
++
++const DATE_FIELDS = ["startAt", "endAt", "meetingAt"] as const; // 日時項目を固定する読取専用タプル型
++
++/**
++ * 実在するDateかを確認し、文字列やInvalid Dateを受け付けない。
++ */
++function isValidDate(value: unknown): value is Date { // 日時を検証する関数 / 不明値型 / Dateへ絞る型述語
 +  return (
-+    typeof value === "string" &&
-+    value.length === 7 &&
-+    /^\d{4}-(0[1-9]|1[0-2])$/.test(value) && // 4桁年と01〜12月の形式を検証するメソッド
-+    !value.startsWith("0000-") && // 西暦0年の対象月を拒否するメソッド
-+    value !== "0001-01"
++    value instanceof Date && // Dateの型判定
++    Number.isFinite(value.getTime()) // 有限値の判定メソッド / UTC値の取得メソッド
 +  );
 +}
 +
 +/**
-+ * 上限内のUUID配列を検証し、小文字・昇順に正規化する。重複は拒否する。
++ * 指定timezoneをIntlでも扱えるか確認し、設定値や例外を外へ返さない。
 + */
-+function normalizeSelectedEventIds( // 複製対象IDの検証と正規化を行う関数
-+  value: unknown, // 検証前の不明値型
-+): string[] | null { // 正規化済みIDの文字列配列または検証失敗の型
-+  if (
-+    !Array.isArray(value) || // 配列であるかを確認するメソッド
-+    value.length === 0 ||
-+    value.length > EVENT_MONTH_COPY_MAX_COUNT
-+  ) {
++function isValidTimeZone(value: unknown): value is string { // timezone検証関数 / 不明値型 / 文字列へ絞る型述語
++  if (typeof value !== "string" || value.length === 0) {
++    return false;
++  }
++  try {
++    new Intl.DateTimeFormat("en-US", { timeZone: value }).format(0); // timezoneを検証する書式の生成 / 固定日時の書式化メソッド
++    return true;
++  } catch {
++    return false;
++  }
++}
++
++/**
++ * UTC日時をクラブ現地の年・月・日・時・分・秒・ミリ秒に分解する。
++ */
++function localParts( // 現地の日時成分を取得する関数
++  value: Date, // 変換元のUTC日時の型
++  timeZone: string, // クラブtimezoneの文字列型
++): LocalDateTime { // 現地日時成分の型
++  const zoned = new TZDate(value.getTime(), timeZone); // timezone付き日時の生成 / UTC値の取得メソッド
++  return {
++    year: zoned.getFullYear(), // 現地年の取得メソッド
++    month: zoned.getMonth() + 1, // 現地の0始まり月を取得するメソッド
++    day: zoned.getDate(), // 現地日の取得メソッド
++    hour: zoned.getHours(), // 現地時の取得メソッド
++    minute: zoned.getMinutes(), // 現地分の取得メソッド
++    second: zoned.getSeconds(), // 現地秒の取得メソッド
++    millisecond: zoned.getMilliseconds(), // 現地ミリ秒の取得メソッド
++  };
++}
++
++/**
++ * 現地成分をUTCの時計上へ置き、前後のoffsetで候補を作って全成分を照合する。
++ * TZDateの現地時刻constructorは使わず、ホストtimezoneによるfoldの選択差を避ける。
++ */
++function utcCandidates( // 現地日時に対応するUTC候補を列挙する関数
++  parts: LocalDateTime, // 現地日時成分の型
++  timeZone: string, // クラブtimezoneの文字列型
++): Date[] { // 対応するUTC日時を保持する配列型
++  const wallClock = new Date(0); // 現地成分を置くUTC時計のコンストラクター
++  wallClock.setUTCFullYear(parts.year, parts.month - 1, parts.day); // 年0〜99特例なしで年月日を置くメソッド
++  wallClock.setUTCHours( // 時分秒ミリ秒をUTC時計へ置くメソッド
++    parts.hour,
++    parts.minute,
++    parts.second,
++    parts.millisecond,
++  );
++  const wallTime = wallClock.getTime(); // 現地成分を数値化したUTC値の取得メソッド
++  const offsets = new Set<number>(); // offsetの重複を除く集合の生成 / 数値型
++  // DST・日付変更線を跨ぐ前後のoffsetを得る。UTC候補は必ず全成分で再検証する。
++  for (const day of [-2, -1, 0, 1, 2]) {
++    const sample = new Date(wallTime + day * 86400000); // offset調査用日時のコンストラクター
++    const offset = tzOffset(timeZone, sample); // 指定timezoneのUTC offsetを分単位で得る関数
++    if (Number.isFinite(offset)) { // 有限なoffsetであることを確認するメソッド
++      offsets.add(offset); // 前後で異なるoffsetを記録するメソッド
++    }
++  }
++  const candidates: Date[] = []; // 厳密な照合を通ったUTC日時の配列型
++  for (const offset of offsets) {
++    const candidate = new Date(Math.round(wallTime - offset * 60000)); // UTC候補の生成 / 秒offsetの小数誤差を丸めるメソッド
++    const restored = localParts(candidate, timeZone); // 候補の現地日時成分を取得する関数
++    if (
++      restored.year === parts.year &&
++      restored.month === parts.month &&
++      restored.day === parts.day &&
++      restored.hour === parts.hour &&
++      restored.minute === parts.minute &&
++      restored.second === parts.second &&
++      restored.millisecond === parts.millisecond
++    ) {
++      candidates.push(candidate); // 現地成分が完全一致するUTC候補を記録するメソッド
++    }
++  }
++  return candidates;
++}
++
++/**
++ * Dateの年0〜99特例を使わず、Gregorian calendarの月末日を返す。
++ */
++function daysInMonth(year: number, month: number): number { // 月末日を計算する関数 / 年・月・戻り値の数値型
++  if (month === 2) {
++    const leap = (
++      year % 4 === 0 &&
++      (year % 100 !== 0 || year % 400 === 0)
++    );
++    return leap ? 29 : 28;
++  }
++  return [4, 6, 9, 11].includes(month) ? 30 : 31; // 30日の月を判定するメソッド
++}
++
++/**
++ * 日時を1か月進め、存在しない日を移動先月末に丸める。範囲外の年はnullにする。
++ */
++function nextMonth( // 現地日時を翌月へ進める関数
++  parts: LocalDateTime, // 現地日時成分の型
++): LocalDateTime | null { // 移動先日時成分または範囲外の型
++  const year = parts.month === 12 ? parts.year + 1 : parts.year;
++  const month = parts.month === 12 ? 1 : parts.month + 1;
++  if (parts.year < 1 || parts.year > 9999 || year > 9999) {
 +    return null;
 +  }
-+  const normalized: string[] = []; // 検証後のIDを保持する文字列配列型
-+  const seen = new Set<string>(); // ID重複を検出する集合の生成 / 文字列型
-+  for (const entry of value as unknown[]) { // 入力要素を不明値の配列型として扱う型アサーション
-+    if (
-+      typeof entry !== "string" ||
-+      !uuidSchema.safeParse(entry).success // UUIDスキーマによる安全な構造検証メソッド
-+    ) {
-+      return null;
-+    }
-+    const identifier = entry.toLowerCase(); // UUIDの表記を小文字へ揃えるメソッド
-+    if (seen.has(identifier)) { // 正規化後のIDが重複しているかを調べるメソッド
-+      return null;
-+    }
-+    seen.add(identifier); // 検証済みIDを重複検出用集合へ追加するメソッド
-+    normalized.push(identifier); // 検証済みIDを配列へ追加するメソッド
-+  }
-+  return normalized.sort(); // UUID文字列を昇順に並べ、入力順による差を除くメソッド
-+}
-+
-+/**
-+ * 入力オブジェクトの許可項目だけを検証し、安全な項目エラーか正規化済み値を返す。
-+ */
-+export function validateEventMonthCopyInput( // 複製入力の構造検証と正規化を行う関数
-+  input: unknown, // 外部から受け取る不明値型
-+): EventMonthCopyValidation<EventMonthCopyInput> { // 複製入力型の検証結果型
-+  if (
-+    typeof input !== "object" ||
-+    input === null ||
-+    Array.isArray(input) // 配列を入力オブジェクトとして受け付けない判定メソッド
-+  ) {
-+    return {
-+      success: false,
-+      fieldErrors: {},
-+      formError: INVALID_FORM_MESSAGE,
-+    };
-+  }
-+  const prototype = Object.getPrototypeOf(input); // 入力オブジェクトのprototypeを取得するメソッド
-+  if (
-+    prototype !== Object.prototype && // 標準Objectコンストラクターのprototypeとの比較
-+    prototype !== null
-+  ) {
-+    return {
-+      success: false,
-+      fieldErrors: {},
-+      formError: INVALID_FORM_MESSAGE,
-+    };
-+  }
-+  const record = input as Record<string, unknown>; // 文字列キーと不明値の辞書型への型アサーション
-+  if (Object.keys(record).some( // 自身の項目名を取り出すメソッド / 未許可項目の有無を判定するメソッド
-+    /**
-+     * 許可項目に含まれない入力キーかを調べる。
-+     */
-+    (field) => !inputFields.has(field), // 項目名を検査するコールバック / 許可項目の集合照合メソッド
-+  )) {
-+    return {
-+      success: false,
-+      fieldErrors: {},
-+      formError: INVALID_FORM_MESSAGE,
-+    };
-+  }
-+  const targetMonth = isEventMonthCopyTargetMonth(record.targetMonth) // 厳密な対象月を検証する関数
-+    ? record.targetMonth
-+    : null;
-+  const selectedEventIds = normalizeSelectedEventIds(record.selectedEventIds); // 選択IDを検証・正規化する関数
-+  const requestId = isRequestId(record.requestId) // UUID v4のrequestIdを検証する関数
-+    ? record.requestId.toLowerCase() // UUID表記を小文字に揃えるメソッド
-+    : null;
-+  const previewFingerprint = (
-+    typeof record.previewFingerprint === "string" &&
-+    record.previewFingerprint.length === 64 &&
-+    /^[0-9a-f]{64}$/i.test(record.previewFingerprint) // SHA-256識別値の16進文字列形式を検証するメソッド
-+  ) ? record.previewFingerprint.toLowerCase() : null; // 識別値の16進表記を小文字に揃えるメソッド
-+  const fieldErrors: FieldErrors<EventMonthCopyField> = {}; // 複製項目名をキーにするエラー辞書型
-+  if (targetMonth === null) {
-+    fieldErrors.targetMonth = ["前月も指定可能な対象月をYYYY-MM形式で指定してください。"];
-+  }
-+  if (selectedEventIds === null) {
-+    fieldErrors.selectedEventIds = [INVALID_SELECTION_MESSAGE];
-+  }
-+  if (requestId === null) {
-+    fieldErrors.requestId = ["操作の識別値が不正です。再読込してください。"];
-+  }
-+  if (previewFingerprint === null) {
-+    fieldErrors.previewFingerprint = ["複製予定の識別値が不正です。再読込してください。"];
-+  }
-+  if (
-+    targetMonth === null ||
-+    selectedEventIds === null ||
-+    requestId === null ||
-+    previewFingerprint === null
-+  ) {
-+    return {
-+      success: false,
-+      fieldErrors,
-+      formError: null,
-+    };
-+  }
 +  return {
-+    success: true,
-+    data: {
-+      targetMonth,
-+      selectedEventIds,
-+      requestId,
-+      previewFingerprint,
-+    },
++    ...parts,
++    year,
++    month,
++    day: Math.min(parts.day, daysInMonth(year, month)), // 小さい値の選択メソッド / 月末日を計算する関数
 +  };
 +}
 +
 +/**
-+ * FormDataの単一項目・反復選択・件数を確認して、共通の入力検証へ渡す。
-+ * $ACTION_で始まるNextの輸送用項目は無視し、業務入力として利用しない。
++ * 補正済み最終日の翌日0時を、終日の排他的な終了境界として返す。
 + */
-+export function parseEventMonthCopyFormData( // フォーム送信値を複製入力へ検証する関数
-+  formData: FormData, // ブラウザー送信値を保持するFormData型
-+): EventMonthCopyValidation<EventMonthCopyInput> { // 複製入力型の検証結果型
-+  const selectedEventIds: string[] = []; // 上限内の選択IDを保持する文字列配列型
-+  const record: Record<string, unknown> = { // 単一項目と選択IDを保持する不明値の辞書型
-+    selectedEventIds,
++function nextDayBoundary(parts: LocalDateTime): LocalDateTime { // 翌日境界を計算する関数 / 現地日時成分の引数・戻り値型
++  const lastDay = daysInMonth(parts.year, parts.month); // 月末日を計算する関数
++  const endOfMonth = parts.day === lastDay;
++  const endOfYear = endOfMonth && parts.month === 12;
++  return {
++    year: endOfYear ? parts.year + 1 : parts.year,
++    month: endOfMonth ? (endOfYear ? 1 : parts.month + 1) : parts.month,
++    day: endOfMonth ? 1 : parts.day + 1,
++    hour: 0,
++    minute: 0,
++    second: 0,
++    millisecond: 0,
 +  };
-+  if (!(formData instanceof FormData)) { // 実際のFormDataであることを確認する型判定
-+    return {
-+      success: false,
-+      fieldErrors: {},
-+      formError: INVALID_FORM_MESSAGE,
++}
++
++/**
++ * 終日の境界として必要な現地0時0分0秒0ミリ秒かを確認する。
++ */
++function isMidnight(parts: LocalDateTime): boolean { // 終日境界の検証関数 / 現地日時成分の型 / 真偽値型
++  return (
++    parts.hour === 0 &&
++    parts.minute === 0 &&
++    parts.second === 0 &&
++    parts.millisecond === 0
++  );
++}
++
++/**
++ * 詳細理由を既存の除外区分へ写し、原文や途中の変換値を返さず失敗を表現する。
++ */
++function failed( // 安全な失敗結果を組み立てる関数
++  issue: EventMonthCopyDateTimeIssue, // 詳細な失敗理由の型
++  field: EventMonthCopyCorrectionField | null, // 失敗項目の型または項目外エラーの型
++  original: EventUtcDateTimes | null, // 元日時の型または不正な元データの型
++  correctedFields: readonly EventMonthCopyCorrectionField[], // 既に確認できた補正項目の配列型
++): EventMonthCopyDateTimeResult { // 日時変換の結果型
++  const exclusionReason = issue === "INVALID_INTERVAL"
++    ? "INVALID_INTERVAL"
++    : issue === "INVALID_SOURCE" || issue === "INVALID_ALL_DAY_BOUNDARY"
++      ? "INVALID_SOURCE"
++      : "INVALID_DATE_TIME";
++  return {
++    success: false,
++    original,
++    converted: null,
++    correctedFields: [...correctedFields],
++    exclusionReason,
++    issue,
++    field,
++  };
++}
++
++/**
++ * イベント日時とクラブtimezoneを受け取り、新旧UTC日時と月末補正項目を返す。
++ * nullを保持し、終日は表示上の最終日を移動して翌日0時へ戻す。入力は変更しない。
++ * 候補取得・認可・重複・保存・選択可否の決定は行わない。
++ */
++export function convertEventMonthCopyDateTimes( // 前月予定の日時だけを1か月先へ変換する関数
++  input: EventMonthCopyDateTimeInput, // 日時と終日区分に限定した入力型
++  timeZone: string, // クラブtimezoneの文字列型
++): EventMonthCopyDateTimeResult { // 新旧日時または安全な失敗理由の型
++  let original: EventUtcDateTimes | null = null; // 元日時を保持する型または未検証のnull型
++  let field: EventMonthCopyCorrectionField | null = null; // 処理対象の日時項目の型または項目外の型
++  const correctedFields: EventMonthCopyCorrectionField[] = []; // 月末補正の項目名を保持する配列型
++  try {
++    if (
++      !input ||
++      typeof input.isAllDay !== "boolean" ||
++      !isValidDate(input.startAt) || // 元の開始日時を検証する関数
++      (input.endAt !== null && !isValidDate(input.endAt)) || // 元の終了日時を検証する関数
++      (input.meetingAt !== null && !isValidDate(input.meetingAt)) // 元の集合日時を検証する関数
++    ) {
++      return failed("INVALID_SOURCE", field, original, correctedFields); // 安全な失敗結果を組み立てる関数
++    }
++    original = {
++      startAt: new Date(input.startAt.getTime()), // Dateの生成 / 元のUTC値を取得するメソッド
++      endAt: input.endAt === null ? null : new Date(input.endAt.getTime()), // Dateの生成 / 元のUTC値を取得するメソッド
++      meetingAt: input.meetingAt === null ? null : new Date(input.meetingAt.getTime()), // Dateの生成 / 元のUTC値を取得するメソッド
 +    };
-+  }
-+  for (const [field, value] of formData.entries()) { // 送信された各項目を順番に取得するメソッド
-+    if (field.startsWith("$ACTION_")) { // Nextの輸送用項目を判定するメソッド
-+      continue;
++    if (!isValidTimeZone(timeZone)) { // クラブtimezoneを検証する関数
++      return failed("INVALID_TIMEZONE", field, original, correctedFields); // 安全な失敗結果を組み立てる関数
 +    }
 +    if (
-+      !inputFields.has(field) || // 業務入力の許可項目と照合するメソッド
-+      typeof value !== "string" ||
-+      (
-+        field !== "selectedEventIds" &&
-+        Object.hasOwn(record, field) // 単一項目が既に存在するかを調べるメソッド
-+      )
++      original.endAt !== null &&
++      original.endAt.getTime() <= original.startAt.getTime() // 終了と開始のUTC値を取得するメソッド
 +    ) {
-+      return {
-+        success: false,
-+        fieldErrors: {},
-+        formError: INVALID_FORM_MESSAGE,
-+      };
++      return failed("INVALID_INTERVAL", "endAt", original, correctedFields); // 安全な失敗結果を組み立てる関数
 +    }
-+    if (field === "selectedEventIds") {
-+      if (selectedEventIds.length >= EVENT_MONTH_COPY_MAX_COUNT) {
-+        return {
-+          success: false,
-+          fieldErrors: {
-+            selectedEventIds: [INVALID_SELECTION_MESSAGE],
-+          },
-+          formError: null,
-+        };
++    if (input.isAllDay) {
++      if (!isMidnight(localParts(original.startAt, timeZone))) { // 終日境界の検証関数 / 現地成分を取得する関数
++        return failed("INVALID_ALL_DAY_BOUNDARY", "startAt", original, correctedFields); // 安全な失敗結果を組み立てる関数
 +      }
-+      selectedEventIds.push(value); // 上限内の選択IDを配列へ追加するメソッド
-+    } else {
-+      record[field] = value;
++      if (original.endAt === null || !isMidnight(localParts(original.endAt, timeZone))) { // 終日境界の検証関数 / 現地成分を取得する関数
++        return failed("INVALID_ALL_DAY_BOUNDARY", "endAt", original, correctedFields); // 安全な失敗結果を組み立てる関数
++      }
 +    }
++    const converted: Record<EventMonthCopyCorrectionField, Date | null> = { // 日時項目名をキーにしたDateまたはnullの辞書型
++      startAt: null,
++      endAt: null,
++      meetingAt: null,
++    };
++    for (field of DATE_FIELDS) {
++      const source = original[field];
++      if (source === null) {
++        continue;
++      }
++      const allDayEnd = input.isAllDay && field === "endAt";
++      const sourceForShift = allDayEnd
++        ? new Date(source.getTime() - 1) // 終日の最終日へ戻すDateの生成 / UTC値を取得するメソッド
++        : source;
++      const parts = localParts(sourceForShift, timeZone); // 元の現地日時成分を取得する関数
++      const shifted = nextMonth(parts); // 月末補正して現地日時を1か月進める関数
++      if (shifted === null) {
++        return failed("OUT_OF_RANGE", field, original, correctedFields); // 安全な失敗結果を組み立てる関数
++      }
++      if (shifted.day !== parts.day) {
++        correctedFields.push(field); // 補正された日時項目を記録するメソッド
++      }
++      const targetParts = allDayEnd ? nextDayBoundary(shifted) : shifted; // 終日の翌日終了境界を計算する関数
++      if (targetParts.year > 9999) {
++        return failed("OUT_OF_RANGE", field, original, correctedFields); // 安全な失敗結果を組み立てる関数
++      }
++      const targets = utcCandidates(targetParts, timeZone); // ホストに依存せずUTC候補を列挙する関数
++      if (targets.length === 0) {
++        return failed("NONEXISTENT_LOCAL_TIME", field, original, correctedFields); // 安全な失敗結果を組み立てる関数
++      }
++      if (targets.length > 1) {
++        return failed("AMBIGUOUS_LOCAL_TIME", field, original, correctedFields); // UTC候補を勝手に選ばず失敗を返す関数
++      }
++      converted[field] = targets[0];
++    }
++    if (converted.startAt === null) {
++      return failed("CONVERSION_FAILED", "startAt", original, correctedFields); // 安全な失敗結果を組み立てる関数
++    }
++    if (
++      converted.endAt !== null &&
++      converted.endAt.getTime() <= converted.startAt.getTime() // 補正後の終了と開始のUTC値を取得するメソッド
++    ) {
++      return failed("INVALID_INTERVAL", "endAt", original, correctedFields); // 安全な失敗結果を組み立てる関数
++    }
++    return {
++      success: true,
++      original,
++      converted: {
++        startAt: converted.startAt,
++        endAt: converted.endAt,
++        meetingAt: converted.meetingAt,
++      },
++      correctedFields,
++    };
++  } catch {
++    return failed("CONVERSION_FAILED", field, original, correctedFields); // 例外原文を含まない失敗結果を組み立てる関数
 +  }
-+  return validateEventMonthCopyInput(record); // オブジェクトと共通の構造検証・正規化を行う関数
 +}
-diff --git a/domain/club/event/event-month-copy-types.ts b/domain/club/event/event-month-copy-types.ts
+diff --git a/tests/event-month-copy-date-times.test.ts b/tests/event-month-copy-date-times.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..19278abfe8b08f3528599ec456a9530345a7f0d6
+index 0000000000000000000000000000000000000000..332383cf3523b825065bfb182ce7f83566b1a6dd
 --- /dev/null
-+++ b/domain/club/event/event-month-copy-types.ts
-@@ -0,0 +1,174 @@
-+// domain/club/event/event-month-copy-types.ts
-+// 前月予定複製の入力・サーバー内部データ・限定preview・結果の契約。
++++ b/tests/event-month-copy-date-times.test.ts
+@@ -0,0 +1,480 @@
++// tests/event-month-copy-date-times.test.ts
++// 固定UTC値で、クラブtimezoneの月末・終日境界・DST・年境界・入力非変更を検証する。
 +
-+import type {
-+  ActionState, // フォームの入力・エラー・成功データ・requestIdをまとめた共通型
-+  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
-+} from "@/domain/shared/action-state";
-+import type {
-+  ClubEventGenre, // Prisma由来のイベントジャンルの型
-+  ClubMemberRole, // Prisma由来のクラブ所属ロールの型
-+} from "@/types/prisma";
-+
-+/**
-+ * 除外前の前月候補数と、一度に選択できる予定数の上限。
-+ */
-+export const EVENT_MONTH_COPY_MAX_COUNT = 100;
-+
-+/**
-+ * 構造検証する複製入力の項目名。
-+ */
-+export type EventMonthCopyField = // 複製フォームの項目名を表す型
-+  | "targetMonth" // 複製先の年月を指定する項目名の型
-+  | "selectedEventIds" // 複製元の選択IDを指定する項目名の型
-+  | "requestId" // 操作IDを指定する項目名の型
-+  | "previewFingerprint"; // preview識別値を指定する項目名の型
-+
-+/**
-+ * 検証・正規化済みの複製入力。クラブ・実行者・コピー本文は含めない。
-+ */
-+export type EventMonthCopyInput = { // 構造検証済みの複製入力型
-+  targetMonth: string; // 複製先の年月を表す文字列型
-+  selectedEventIds: readonly string[]; // 小文字・昇順で重複しない選択IDの読取専用配列型
-+  requestId: string; // 小文字に正規化したUUID v4の文字列型
-+  previewFingerprint: string; // 小文字64桁のpreview識別値を表す文字列型
-+};
-+
-+/**
-+ * 入力検証の成功データと、原文を含まない安全なエラーを分ける型。
-+ */
-+export type EventMonthCopyValidation<T> = // 検証済みデータの型を受け取る検証結果型
-+  | {
-+      success: true; // 検証成功を表すリテラル型
-+      data: T; // 呼出し側で指定した検証済みデータの型
-+    }
-+  | {
-+      success: false; // 検証失敗を表すリテラル型
-+      fieldErrors: FieldErrors<EventMonthCopyField>; // 複製項目別のエラー辞書型
-+      formError: string | null; // フォーム全体の安全なエラー文字列または未設定の型
-+    };
-+
-+/**
-+ * コピーするイベント列だけのサーバー内部型。公開状態や関連行は含めない。
-+ */
-+export type EventMonthCopyEvent = { // 複製元と変換後に共通するサーバー内部型
-+  title: string; // タイトルの文字列型
-+  content: string | null; // 本文の文字列または未設定の型
-+  genre: ClubEventGenre; // Prisma由来のイベントジャンル型
-+  targetRoles: readonly ClubMemberRole[]; // Prisma由来の対象ロールの読取専用配列型
-+  startAt: Date; // 開始UTC日時の型
-+  endAt: Date | null; // 終了UTC日時または未設定の型
-+  isAllDay: boolean; // 終日予定かどうかの真偽値型
-+  location: string | null; // 開催場所の文字列または未設定の型
-+  meetingAt: Date | null; // 集合UTC日時または未設定の型
-+  meetingLocation: string | null; // 集合場所の文字列または未設定の型
-+  belongings: string | null; // 持ち物の文字列または未設定の型
-+  notes: string | null; // 注意事項の文字列または未設定の型
-+};
-+
-+/**
-+ * 再取得時の照合に必要なIDと更新日時を持つ、複製元のサーバー内部型。
-+ */
-+export type EventMonthCopySource = EventMonthCopyEvent & { // コピー列の型と複製元識別情報の結合型
-+  id: string; // 複製元IDの文字列型
-+  updatedAt: Date; // 複製元の更新UTC日時の型
-+};
-+
-+/**
-+ * Clientへ渡せるISO日時の組。実際の変換とtimezone表示は後続粒度で行う。
-+ */
-+export type EventMonthCopyPreviewDateTimes = { // previewの限定日時データ型
-+  startAt: string; // 開始UTC ISO日時の文字列型
-+  endAt: string | null; // 終了UTC ISO日時または未設定の型
-+  meetingAt: string | null; // 集合UTC ISO日時または未設定の型
-+};
-+
-+/**
-+ * 月末補正が必要だった日時項目の型。
-+ */
-+export type EventMonthCopyCorrectionField = // 補正された日時の項目名の型
-+  | "startAt" // 開始日時の項目名の型
-+  | "endAt" // 終了日時の項目名の型
-+  | "meetingAt"; // 集合日時の項目名の型
-+
-+/**
-+ * 不正な元データ・日時・期間によって選択できない候補の理由。
-+ */
-+export type EventMonthCopyExclusionReason = // 選択不能な候補の理由を区別する型
-+  | "INVALID_SOURCE" // 元データの不正を表す理由の型
-+  | "INVALID_DATE_TIME" // 変換できない日時を表す理由の型
-+  | "INVALID_INTERVAL"; // 終了順序の不正を表す理由の型
-+
-+/**
-+ * 本文や関連行を含めず、新旧日時・補正・重複・除外を表示する候補型。
-+ */
-+export type EventMonthCopyPreviewItem = { // Client表示へ限定した複製候補の型
-+  sourceEventId: string; // 複製元IDの文字列型
-+  title: string; // 表示用タイトルの文字列型
-+  isAllDay: boolean; // 終日表示のための真偽値型
-+  original: EventMonthCopyPreviewDateTimes; // 複製前のISO日時をまとめた型
-+  converted: EventMonthCopyPreviewDateTimes | null; // 変換後のISO日時型または変換不能のnull型
-+  correctedFields: readonly EventMonthCopyCorrectionField[]; // 月末補正された項目の読取専用配列型
-+  exclusionReason: EventMonthCopyExclusionReason | null; // 選択不能理由の型または除外なしのnull型
-+  duplicateEventId: string | null; // 完全一致する既存イベントの代表IDまたは未一致の型
-+  duplicateSourceEventId: string | null; // 他候補との一致を示す複製元IDまたは未一致の型
-+  initiallySelected: boolean; // previewでの初期選択を表す真偽値型
-+};
-+
-+/**
-+ * preview成功と上限超過・認可拒否・取得失敗を分ける結果型。
-+ */
-+export type EventMonthCopyPreview = // previewの取得結果を区別する型
-+  | {
-+      outcome: "READY"; // 候補の取得成功を表すリテラル型
-+      targetMonth: string; // 対象月の文字列型
-+      sourceMonth: string; // 前月の文字列型
-+      timezone: string; // クラブtimezoneの文字列型
-+      fingerprint: string; // 後続粒度で計算するpreview識別値の文字列型
-+      items: readonly EventMonthCopyPreviewItem[]; // 空配列も許容する限定候補の読取専用配列型
-+    }
-+  | {
-+      outcome: "TOO_MANY" | "FORBIDDEN" | "PREVIEW_FAILED"; // 上限超過・認可拒否・取得失敗のリテラル型
-+    };
-+
-+/**
-+ * 保存完了記録から返す対象月と作成件数だけの成功データ。
-+ */
-+export type EventMonthCopyReceipt = { // 作成済み操作の最小結果型
-+  targetMonth: string; // 保存済みの対象月の文字列型
-+  createdCount: number; // 保存件数の数値型。1〜100の保証は後続の保存処理で行う
-+};
-+
-+/**
-+ * 新規保存・同一操作の再送・各失敗・結果不明を区別する実行結果。
-+ */
-+export type EventMonthCopyResult = // 保存処理の結果を判別する型
-+  | {
-+      outcome: "CREATED" | "ALREADY_COMPLETED"; // 新規保存・同一操作の保存済みを表すリテラル型
-+      receipt: EventMonthCopyReceipt; // 完了済み操作の最小結果型
-+    }
-+  | {
-+      outcome:
-+        | "VALIDATION_FAILED" // 入力構造の不正を表す結果の型
-+        | "FORBIDDEN" // 認可拒否を表す結果の型
-+        | "PREVIEW_CHANGED" // preview後の変更を表す結果の型
-+        | "CONFLICT" // 同じ操作IDと異なる入力等の衝突を表す結果の型
-+        | "CREATE_FAILED" // 保存失敗を表す結果の型
-+        | "RESULT_UNKNOWN"; // 保存結果が不明で同じ操作の確認が必要な結果の型
-+    };
-+
-+/**
-+ * 保存後の再検証失敗も、保存済み成功として画面に伝えられるデータ型。
-+ */
-+export type EventMonthCopyActionData = EventMonthCopyReceipt & { // 保存済み結果型と再読込案内の結合型
-+  needsReload: boolean; // 再読込が必要かを表す真偽値型
-+};
-+
-+/**
-+ * 複製入力と項目エラー、保存済み結果を保持する共通形式のAction state。
-+ */
-+export type EventMonthCopyActionState = ActionState< // フォームの入力・エラー・成功結果をまとめる共通型
-+  EventMonthCopyInput, // 正規化済みの複製入力型
-+  EventMonthCopyField, // 複製入力の項目名の型
-+  EventMonthCopyActionData // 保存済み件数と再読込案内の型
-+>;
-diff --git a/tests/event-month-copy-form.test.ts b/tests/event-month-copy-form.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..2152f41db88baffb72b79b2e49f37221b90aebd9
---- /dev/null
-+++ b/tests/event-month-copy-form.test.ts
-@@ -0,0 +1,344 @@
-+// tests/event-month-copy-form.test.ts
-+// 実Auth・DB・Next実行環境を使わず、複製入力の境界と限定契約を検証する。
++import { expect, it } from "vitest";
 +
 +import {
-+  expect,
-+  it,
-+} from "vitest";
-+
-+import {
-+  isEventMonthCopyTargetMonth, // 前月も表現可能な単一対象月を検証する関数
-+  parseEventMonthCopyFormData, // 反復選択と単一項目を確認して複製入力を検証する関数
-+  validateEventMonthCopyInput, // 複製入力の構造検証と正規化を行う関数
-+} from "@/domain/club/event/event-month-copy-form";
++  convertEventMonthCopyDateTimes, // 日時だけをクラブ現地で1か月先へ変換する関数
++  type EventMonthCopyDateTimeInput, // 日時と終日区分に限定した入力型
++  type EventMonthCopyDateTimeIssue, // 変換不能を安全に区別する詳細理由の型
++} from "@/domain/club/event/event-month-copy-date-times";
 +import type {
-+  EventMonthCopyActionState, // 複製入力・エラー・保存済み結果をまとめるAction state型
-+  EventMonthCopyInput, // 構造検証・正規化済みの複製入力型
-+  EventMonthCopyPreview, // preview成功と超過・拒否・取得失敗を分ける結果型
-+  EventMonthCopyResult, // 保存済み・再送・変更・衝突・失敗を分ける結果型
++  EventUtcDateTimes, // 開始・終了・集合のUTC日時をまとめる型
++} from "@/domain/club/event/event-date-times";
++import type {
++  EventMonthCopyCorrectionField, // 開始・終了・集合の日時項目名の型
 +} from "@/domain/club/event/event-month-copy-types";
-+import {
-+  createInitialActionState, // 入力値と新しいrequestIdを持つ初期stateを作る関数
-+} from "@/domain/shared/action-state";
-+
-+const REQUEST_ID = "550e8400-e29b-41d4-a716-446655440000";
-+const SOURCE_A = "550e8400-e29b-41d4-a716-446655440001";
-+const SOURCE_B = "550e8400-e29b-41d4-a716-446655440002";
-+const FINGERPRINT = "a".repeat(64); // 架空の64桁識別値を作る文字列反復メソッド
 +
 +/**
-+ * テストごとに独立した正常入力を作る。
++ * 固定ISO値から、テスト用の通常予定を作る。
 + */
-+function validInput(): EventMonthCopyInput { // 正常入力を生成する関数 / 構造検証済み複製入力型
++function timed( // 通常予定の入力を作る関数
++  startAt = "2026-01-31T00:30:25.123Z",
++  endAt: string | null = null, // 終了ISO文字列または未設定の型
++  meetingAt: string | null = null, // 集合ISO文字列または未設定の型
++): EventMonthCopyDateTimeInput { // 日時に限定した複製入力型
 +  return {
-+    targetMonth: "2026-02",
-+    selectedEventIds: [SOURCE_A],
-+    requestId: REQUEST_ID,
-+    previewFingerprint: FINGERPRINT,
++    startAt: new Date(startAt), // 開始UTC日時を作るコンストラクター
++    endAt: endAt === null ? null : new Date(endAt), // 終了UTC日時を作るコンストラクター
++    meetingAt: meetingAt === null ? null : new Date(meetingAt), // 集合UTC日時を作るコンストラクター
++    isAllDay: false,
 +  };
 +}
 +
 +/**
-+ * 正常入力から、実ブラウザーと同じ反復選択項目のFormDataを作る。
++ * 日時の組を、比較用のUTC ISO文字列へ変換する。
 + */
-+function validForm(): FormData { // 正常な送信値を作る関数 / ブラウザー送信値を保持する型
-+  const input = validInput(); // 正常な複製入力を生成する関数
-+  const form = new FormData(); // ブラウザー送信値のコンストラクター
-+  form.set("targetMonth", input.targetMonth); // 単一の対象月を設定するメソッド
-+  form.set("requestId", input.requestId); // 単一の操作IDを設定するメソッド
-+  form.set("previewFingerprint", input.previewFingerprint); // 単一のpreview識別値を設定するメソッド
-+  for (const id of input.selectedEventIds) {
-+    form.append("selectedEventIds", id); // 選択IDを反復項目として追加するメソッド
-+  }
-+  return form;
++function iso(values: EventUtcDateTimes) { // 比較用ISO値を作る関数 / UTC日時の組の型
++  return {
++    startAt: values.startAt.toISOString(), // 開始日時のISO文字列化メソッド
++    endAt: values.endAt?.toISOString() ?? null, // 終了日時のISO文字列化メソッド
++    meetingAt: values.meetingAt?.toISOString() ?? null, // 集合日時のISO文字列化メソッド
++  };
 +}
 +
 +/**
-+ * 大量選択の境界試験に使う、互いに異なるUUIDを生成する。
++ * 変換成功を確認し、成功側の結果へ型を絞る。
 + */
-+function eventIds(count: number): string[] { // 指定件数のUUIDを作る関数 / 件数の数値型 / 文字列配列型
-+  const identifiers: string[] = []; // 異なるIDを保持する文字列配列型
-+  for (let index = 0; index < count; index += 1) {
-+    const firstGroup = index.toString(16).padStart(8, "0"); // 数値の16進変換メソッド / 8桁へ補完するメソッド
-+    identifiers.push(`${firstGroup}-e29b-41d4-a716-446655440000`); // 異なるUUIDを追加するメソッド
++function successful( // 変換成功を検証するテスト用関数
++  input: EventMonthCopyDateTimeInput, // 日時と終日区分の入力型
++  zone = "Asia/Tokyo",
++) {
++  const result = convertEventMonthCopyDateTimes(input, zone); // 月送りの純粋関数
++  expect(result.success).toBe(true); // 期待値を作る関数 / 成功を確認するメソッド
++  if (!result.success) {
++    throw new Error("期待した日時変換に失敗しました。"); // 型を絞るための固定例外を作るコンストラクター
 +  }
-+  return identifiers;
++  return result;
 +}
 +
-+it.each(["0001-02", "2026-01", "2028-02", "9999-12"])( // 表現可能な月を表形式で検証するテスト関数
-+  "対象月%sは前月とともに表現できる",
-+  /**
-+   * 有効な単一対象月が現在月等へ変換されず受理されることを確認する。
-+   */
-+  (month) => { // 有効な対象月を受け取るテストコールバック
-+    expect(isEventMonthCopyTargetMonth(month)).toBe(true); // 期待値を作る関数 / 月検証関数 / 真偽値の検証メソッド
-+  },
-+);
++/**
++ * 安全な詳細理由と項目を確認し、一部の変換値が返らないことも確かめる。
++ */
++function rejected( // 変換失敗を検証するテスト用関数
++  input: EventMonthCopyDateTimeInput, // 日時と終日区分の入力型
++  zone: string, // クラブtimezoneの文字列型
++  issue: EventMonthCopyDateTimeIssue, // 期待する詳細理由の型
++  field: EventMonthCopyCorrectionField | null, // 期待する失敗項目の型または項目外の型
++) {
++  const result = convertEventMonthCopyDateTimes(input, zone); // 月送りの純粋関数
++  expect(result).toMatchObject({ // 期待値を作る関数 / 安全な失敗情報の構造検証メソッド
++    success: false,
++    converted: null,
++    issue,
++    field,
++  });
++  if (result.success) {
++    throw new Error("拒否すべき日時を受理しました。"); // 型を絞るための固定例外を作るコンストラクター
++  }
++  return result;
++}
 +
-+it.each([ // 不正な月と非文字列を表形式で検証するテスト関数
-+  undefined,
-+  null,
-+  202602,
-+  [],
-+  ["2026-02"],
-+  {},
-+  "",
-+  "0000-02",
-+  "0001-01",
-+  "2026-00",
-+  "2026-13",
-+  "2026-2",
-+  "2026-02-01",
-+  "10000-02",
-+  " 2026-02",
-+  "2026-02\n",
++it.each([ // 月末とGregorian閏年を固定値で検証するテスト関数
++  ["2026-01-31T00:30:25.123Z", "2026-02-28T00:30:25.123Z"],
++  ["2028-01-31T00:30:25.123Z", "2028-02-29T00:30:25.123Z"],
++  ["1900-01-31T00:30:25.123Z", "1900-02-28T00:30:25.123Z"],
++  ["2000-01-31T00:30:25.123Z", "2000-02-29T00:30:25.123Z"],
++  ["2100-01-31T00:30:25.123Z", "2100-02-28T00:30:25.123Z"],
++  ["2026-03-31T00:30:25.123Z", "2026-04-30T00:30:25.123Z"],
 +])(
-+  "不正な月のケース%#を現在月へfallbackせず拒否する",
++  "%sを翌月末へ補正し、秒・ミリ秒とnullを保持する",
 +  /**
-+   * 月の構造不正が固定の項目エラーになり、データを返さないことを確認する。
++   * 月末日を固定期待値と照合し、未設定の終了・集合を生成しないことを確認する。
 +   */
-+  (targetMonth) => { // 不正な対象月を受け取るテストコールバック
-+    const result = validateEventMonthCopyInput({ // 複製入力の構造検証を行う関数
-+      ...validInput(), // 独立した正常入力を作る関数
-+      targetMonth,
++  (source, expected) => { // 元と期待値を受け取るテストコールバック
++    const result = successful(timed(source)); // 成功確認関数 / 通常予定を作る関数
++    expect(iso(result.converted)).toEqual({ // 期待値を作る関数 / ISO変換関数 / 構造比較メソッド
++      startAt: expected,
++      endAt: null,
++      meetingAt: null,
 +    });
-+    expect(result.success).toBe(false); // 期待値を作る関数 / 検証失敗を確認するメソッド
-+    if (!result.success) {
-+      expect(result.fieldErrors.targetMonth).toBeDefined(); // 期待値を作る関数 / 月の項目エラーを確認するメソッド
-+      expect(result).not.toHaveProperty("data"); // 期待値を作る関数 / 未検証データの非返却を確認するメソッド
-+    }
++    expect(result.correctedFields).toEqual(["startAt"]); // 期待値を作る関数 / 補正項目の比較メソッド
++    expect(iso(result.original).startAt).toBe(source); // 期待値を作る関数 / ISO変換関数 / 元日時の比較メソッド
 +  },
 +);
 +
-+it("UUIDとfingerprintの大小文字・選択順を正規化し、元の入力を変更しない", // テストケースを登録する関数
++it("UTCでは前日でも東京では1月31日として補正する", // テストケースを登録する関数
 +  /**
-+   * 同じ操作の表記揺れを揃え、並べ替えによって呼出し元の配列を変更しないことを確認する。
++   * UTC年月日を月送りすると誤る、クラブ現地の日付境界を確認する。
 +   */
-+  () => { // 正規化と非破壊性を検証するコールバック
++  () => { // クラブ現地の月末を確認するコールバック
++    const result = successful(timed("2026-01-30T15:30:25.123Z")); // 成功確認関数 / 通常予定を作る関数
++    expect(result.converted.startAt.toISOString()).toBe( // 期待値を作る関数 / ISO文字列化メソッド / 固定値の比較メソッド
++      "2026-02-27T15:30:25.123Z",
++    );
++  },
++);
++
++it("30日と31日が同じ日へ丸まっても、この関数は重複の選択可否を決めない", // テストケースを登録する関数
++  /**
++   * 日付変換だけを行い、候補間重複の判断を後続粒度へ残すことを確認する。
++   */
++  () => { // 同じ変換先日時を確認するコールバック
++    const first = successful(timed("2026-01-30T09:00:00.000Z")); // 成功確認関数 / 通常予定を作る関数
++    const second = successful(timed("2026-01-31T09:00:00.000Z")); // 成功確認関数 / 通常予定を作る関数
++    expect(iso(first.converted)).toEqual(iso(second.converted)); // 期待値を作る関数 / ISO変換関数 / 構造比較メソッド
++  },
++);
++
++it("終了・集合をそれぞれ1か月進め、対象月に切り詰めない", // テストケースを登録する関数
++  /**
++   * 月を跨ぐ終了と前日の集合について、独立した月送りと精度保持を確認する。
++   */
++  () => { // 日時ごとの月送りを確認するコールバック
++    const result = successful(timed( // 成功確認関数 / 通常予定を作る関数
++      "2026-07-31T01:02:03.004Z",
++      "2026-08-02T02:03:04.005Z",
++      "2026-07-30T23:01:02.003Z",
++    ));
++    expect(iso(result.converted)).toEqual({ // 期待値を作る関数 / ISO変換関数 / 構造比較メソッド
++      startAt: "2026-08-31T01:02:03.004Z",
++      endAt: "2026-09-02T02:03:04.005Z",
++      meetingAt: "2026-08-30T23:01:02.003Z",
++    });
++    expect(result.correctedFields).toEqual([]); // 期待値を作る関数 / 補正なしの比較メソッド
++  },
++);
++
++it("開始・終了・集合の補正項目をそれぞれ記録する", // テストケースを登録する関数
++  /**
++   * 全日時が月末補正されても、時刻と有効な期間を保持することを確認する。
++   */
++  () => { // 補正項目を確認するコールバック
++    const result = successful(timed( // 成功確認関数 / 通常予定を作る関数
++      "2026-01-31T01:00:00.000Z",
++      "2026-01-31T03:00:00.000Z",
++      "2026-01-30T23:00:00.000Z",
++    ));
++    expect(result.correctedFields).toEqual(["startAt", "endAt", "meetingAt"]); // 期待値を作る関数 / 補正項目の比較メソッド
++  },
++);
++
++it.each([ // 年0〜99のDate特例と年跨ぎを検証するテスト関数
++  ["0001-01-31T09:30:45.123Z", "0001-02-28T09:30:45.123Z"],
++  ["0096-01-31T09:30:45.123Z", "0096-02-29T09:30:45.123Z"],
++  ["0099-12-31T09:30:45.123Z", "0100-01-31T09:30:45.123Z"],
++  ["0100-01-31T09:30:45.123Z", "0100-02-28T09:30:45.123Z"],
++  ["0400-01-31T09:30:45.123Z", "0400-02-29T09:30:45.123Z"],
++  ["2026-12-31T09:30:45.123Z", "2027-01-31T09:30:45.123Z"],
++])(
++  "UTCの%sを1900年代等へ変えず翌月へ移す",
++  /**
++   * 年0〜99の構築特例とGregorian閏年、12月から1月への境界を確認する。
++   */
++  (source, expected) => { // 元と期待値を受け取るテストコールバック
++    const result = successful(timed(source), "UTC"); // 成功確認関数 / 通常予定を作る関数
++    expect(result.converted.startAt.toISOString()).toBe(expected); // 期待値を作る関数 / ISO文字列化メソッド / 固定値の比較メソッド
++  },
++);
++
++it.each([ // 終日の排他的終了を固定値で検証するテスト関数
++  [
++    "2026-01-30T15:00:00.000Z",
++    "2026-01-31T15:00:00.000Z",
++    "2026-02-27T15:00:00.000Z",
++    "2026-02-28T15:00:00.000Z",
++  ],
++  [
++    "2028-01-30T15:00:00.000Z",
++    "2028-01-31T15:00:00.000Z",
++    "2028-02-28T15:00:00.000Z",
++    "2028-02-29T15:00:00.000Z",
++  ],
++  [
++    "2026-01-29T15:00:00.000Z",
++    "2026-02-01T15:00:00.000Z",
++    "2026-02-27T15:00:00.000Z",
++    "2026-03-01T15:00:00.000Z",
++  ],
++])(
++  "終日の%s〜%sを最終日から補正する",
++  /**
++   * 単日が翌月へ伸びず、複数日の終日では最終日の翌日0時が終了になることを確認する。
++   */
++  (start, end, expectedStart, expectedEnd) => { // 終日の元と期待値を受け取るコールバック
++    const result = successful({ // 成功確認関数
++      ...timed(start, end), // 通常予定を作る関数
++      isAllDay: true,
++    });
++    expect(iso(result.converted)).toEqual({ // 期待値を作る関数 / ISO変換関数 / 構造比較メソッド
++      startAt: expectedStart,
++      endAt: expectedEnd,
++      meetingAt: null,
++    });
++    expect(result.correctedFields).toContain("startAt"); // 期待値を作る関数 / 開始の補正記録を確認するメソッド
++  },
++);
++
++it("終日の終了補正は、排他的終了日時ではなく表示上の最終日について記録する", // テストケースを登録する関数
++  /**
++   * 1月30日だけの終日予定が2月末の1日になり、開始・最終日の両方が補正されることを確認する。
++   */
++  () => { // 終日の補正記録を確認するコールバック
++    const result = successful({ // 成功確認関数
++      ...timed("2026-01-29T15:00:00.000Z", "2026-01-30T15:00:00.000Z"), // 通常予定を作る関数
++      isAllDay: true,
++    });
++    expect(result.correctedFields).toEqual(["startAt", "endAt"]); // 期待値を作る関数 / 補正項目の比較メソッド
++    expect(result.converted.endAt?.toISOString()).toBe("2026-02-28T15:00:00.000Z"); // 期待値を作る関数 / ISO文字列化メソッド / 終了境界の比較メソッド
++  },
++);
++
++it.each([ // DST日の終日境界を固定値で検証するテスト関数
++  [
++    "2026-02-08T05:00:00.000Z",
++    "2026-02-09T05:00:00.000Z",
++    "2026-03-08T05:00:00.000Z",
++    "2026-03-09T04:00:00.000Z",
++    23,
++  ],
++  [
++    "2026-10-01T04:00:00.000Z",
++    "2026-10-02T04:00:00.000Z",
++    "2026-11-01T04:00:00.000Z",
++    "2026-11-02T05:00:00.000Z",
++    25,
++  ],
++])(
++  "NYの終日をDSTに合わせて移し、%s〜%sを固定24時間扱いしない",
++  /**
++   * 終日をUTCの固定時間加算にせず、23時間・25時間の現地日付境界へ変換する。
++   */
++  (start, end, expectedStart, expectedEnd, hours) => { // 元と期待値を受け取るコールバック
++    const result = successful({ // 成功確認関数
++      ...timed(start, end), // 通常予定を作る関数
++      isAllDay: true,
++    }, "America/New_York");
++    expect(result.converted.startAt.toISOString()).toBe(expectedStart); // 期待値を作る関数 / ISO文字列化メソッド / 開始境界の比較メソッド
++    expect(result.converted.endAt?.toISOString()).toBe(expectedEnd); // 期待値を作る関数 / ISO文字列化メソッド / 終了境界の比較メソッド
++    expect( // 期待値を作る関数
++      (result.converted.endAt!.getTime() - result.converted.startAt.getTime()) / 3600000, // 終了と開始のUTC値を取得するメソッド
++    ).toBe(hours); // 現地1日の実際の時間数を比較するメソッド
++  },
++);
++
++it("通常予定もDSTを跨いで現地時刻を保持する", // テストケースを登録する関数
++  /**
++   * UTCの時刻が変わっても、現地の時分秒ミリ秒が保持されることを固定値で確認する。
++   */
++  () => { // 通常予定のDST跨ぎを確認するコールバック
++    const result = successful(timed( // 成功確認関数 / 通常予定を作る関数
++      "2026-02-20T15:30:25.123Z",
++      "2026-02-20T16:30:25.123Z",
++    ), "America/New_York");
++    expect(iso(result.converted)).toEqual({ // 期待値を作る関数 / ISO変換関数 / 構造比較メソッド
++      startAt: "2026-03-20T14:30:25.123Z",
++      endAt: "2026-03-20T15:30:25.123Z",
++      meetingAt: null,
++    });
++  },
++);
++
++it.each(["startAt", "endAt", "meetingAt"] as const)( // DST foldの各項目を検証するテスト関数 / 読取専用タプル型
++  "%sのDST foldをホストに任せず曖昧な現地時刻として返す",
++  /**
++   * DSTの重複時刻を自動選択せず、業務上の選択方針が未確定であることを保つ。
++   */
++  (field) => { // DST foldの対象項目を受け取るコールバック
 +    const input = {
-+      ...validInput(), // 正常入力を作る関数
-+      selectedEventIds: [SOURCE_B.toUpperCase(), SOURCE_A], // UUIDを大文字に変換するメソッド
-+      requestId: REQUEST_ID.toUpperCase(), // 操作IDを大文字に変換するメソッド
-+      previewFingerprint: FINGERPRINT.toUpperCase(), // 識別値を大文字に変換するメソッド
++      ...timed("2026-10-01T04:00:00.000Z"), // NYの10月1日00時を表す通常予定の生成関数
++      [field]: new Date("2026-10-01T05:30:25.123Z"), // NYの10月1日01:30を表すDateの生成
 +    };
-+    expect(validateEventMonthCopyInput(input)).toEqual({ // 期待値を作る関数 / 入力検証関数 / 構造一致の検証メソッド
-+      success: true,
-+      data: {
-+        ...validInput(), // 正常入力を作る関数
-+        selectedEventIds: [SOURCE_A, SOURCE_B],
-+      },
-+    });
-+    expect(input.selectedEventIds[0]).toBe(SOURCE_B.toUpperCase()); // 期待値を作る関数 / 元の順序の検証 / 大文字変換メソッド
++    rejected(input, "America/New_York", "AMBIGUOUS_LOCAL_TIME", field); // 失敗確認関数
 +  },
 +);
 +
-+it.each([0, 1, 100, 101, 10000])( // 選択件数の境界を表形式で検証するテスト関数
-+  "%i件の選択を1〜100件に制限する",
++it("30分のDST foldも自動選択しない", // テストケースを登録する関数
 +  /**
-+   * 上限前後と大きな配列を検証し、過大入力を受理しないことを確認する。
++   * Lord Howeの01:45に2つのUTC候補が対応することを検出する。
 +   */
-+  (count) => { // 選択件数を受け取るテストコールバック
-+    const result = validateEventMonthCopyInput({ // 入力検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      selectedEventIds: eventIds(count), // 指定件数の異なるUUIDを作る関数
-+    });
-+    expect(result.success).toBe(count >= 1 && count <= 100); // 期待値を作る関数 / 件数境界を検証するメソッド
++  () => { // 30分の重複時刻を確認するコールバック
++    rejected( // 失敗確認関数
++      timed("2026-03-04T14:45:25.123Z"), // Lord Howeの3月5日01:45を表す通常予定の生成関数
++      "Australia/Lord_Howe", "AMBIGUOUS_LOCAL_TIME", "startAt",
++    );
 +  },
 +);
 +
-+it.each([ // 不正な選択値を表形式で検証するテスト関数
-+  undefined,
-+  null,
-+  SOURCE_A,
-+  ["invalid"],
-+  [null],
-+  [123],
-+  [SOURCE_A, SOURCE_A],
-+  [SOURCE_A, SOURCE_A.toUpperCase()], // 同一UUIDの表記揺れを作るメソッド
++it("西暦1年の東京でも歴史的な秒単位offsetとミリ秒を保持する", // テストケースを登録する関数
++  /**
++   * 分に丸められない歴史的offsetを使って、年0〜99と秒精度の両方を確認する。
++   */
++  () => { // 古い年のtimezone変換を確認するコールバック
++    const result = successful(timed("0001-01-31T00:11:46.123Z")); // 成功確認関数 / 通常予定を作る関数
++    expect(result.converted.startAt.toISOString()).toBe( // 期待値を作る関数 / ISO文字列化メソッド / 固定値の比較メソッド
++      "0001-02-28T00:11:46.123Z",
++    );
++  },
++);
++
++it.each(["startAt", "endAt", "meetingAt"] as const)( // DST gapの対象項目ごとのテスト関数 / 読取専用タプル型
++  "%sのDST gapを自動で03時へ変更せず拒否する",
++  /**
++   * 通常の開始・終了・集合のどの項目も、不存在時刻を黙って正規化しないことを確認する。
++   */
++  (field) => { // 対象日時項目を受け取るコールバック
++    const input = {
++      ...timed("2026-02-08T06:00:00.000Z"), // 通常予定を作る関数
++      [field]: new Date("2026-02-08T07:30:25.123Z"), // NYの02:30を表すDateの生成
++    };
++    const result = rejected(input, "America/New_York", "NONEXISTENT_LOCAL_TIME", field); // 失敗確認関数
++    expect(result.exclusionReason).toBe("INVALID_DATE_TIME"); // 期待値を作る関数 / 既存除外区分を確認するメソッド
++  },
++);
++
++it("30分のDST gapも検出する", // テストケースを登録する関数
++  /**
++   * Lord Howeの02:15が移動先に存在しないケースを、1時間の差だけに限定せず拒否する。
++   */
++  () => { // 30分の時刻変更を確認するコールバック
++    rejected( // 失敗確認関数
++      timed("2026-09-03T15:45:00.000Z"), // Lord Howeの9月4日02:15を表す通常予定の生成関数
++      "Australia/Lord_Howe",
++      "NONEXISTENT_LOCAL_TIME",
++      "startAt",
++    );
++  },
++);
++
++it.each([ // 終日の0時消失を開始・終了ごとに検証するテスト関数
++  ["2026-08-06T04:00:00.000Z", "2026-08-07T04:00:00.000Z", "startAt"],
++  ["2026-08-05T04:00:00.000Z", "2026-08-06T04:00:00.000Z", "endAt"],
++] as const)( // 固定期待値を保持する読取専用タプル型
++  "Santiagoの終日境界%s〜%sに存在しない0時があれば拒否する",
++  /**
++   * 開始と、最終日の翌日である終了境界の両方にroundtrip検証が働くことを確認する。
++   */
++  (start, end, field) => { // 元の境界と対象項目を受け取るコールバック
++    rejected({ // 失敗確認関数
++      ...timed(start, end), // 通常予定を作る関数
++      isAllDay: true,
++    }, "America/Santiago", "NONEXISTENT_LOCAL_TIME", field);
++  },
++);
++
++it("日付全体が消えるSamoaの2011年12月30日を受理しない", // テストケースを登録する関数
++  /**
++   * 日付変更線の移動による不存在日を、別の日へ黙って移さないことを確認する。
++   */
++  () => { // 日付全体の消失を確認するコールバック
++    rejected( // 失敗確認関数
++      timed("2011-11-30T22:00:00.000Z"), // Samoaの11月30日12時を表す通常予定の生成関数
++      "Pacific/Apia",
++      "NONEXISTENT_LOCAL_TIME",
++      "startAt",
++    );
++  },
++);
++
++it.each(["2026-01-31T00:00:00.000Z", "2026-01-31T23:00:00.000Z"])( // 補正後の逆転・同時刻を検証するテスト関数
++  "月末補正で終了%sが開始以下になれば、途中の変換値を返さない",
++  /**
++   * 元は正しい期間でも、補正後に無効になった場合は保存に使える結果を返さない。
++   */
++  (end) => { // 終了日時を受け取るコールバック
++    const result = rejected( // 失敗確認関数
++      timed("2026-01-30T23:00:00.000Z", end), // 正しい元期間を作る関数
++      "UTC", "INVALID_INTERVAL", "endAt",
++    );
++    expect(result.correctedFields).toEqual(["startAt", "endAt"]); // 期待値を作る関数 / 補正情報が残ることの比較メソッド
++    expect(result.exclusionReason).toBe("INVALID_INTERVAL"); // 期待値を作る関数 / 既存除外区分の比較メソッド
++  },
++);
++
++it.each(["2026-01-31T00:30:25.123Z", "2026-01-30T00:00:00.000Z"])( // 元の無効期間を検証するテスト関数
++  "元の終了%sが開始以下なら変換前に拒否する",
++  /**
++   * 元の不正期間を月送りによって正常化して隠さないことを確認する。
++   */
++  (end) => { // 元の終了日時を受け取るコールバック
++    const result = rejected(timed(undefined, end), "UTC", "INVALID_INTERVAL", "endAt"); // 失敗確認関数 / 通常予定を作る関数
++    expect(result.correctedFields).toEqual([]); // 期待値を作る関数 / 変換前拒否を確認する比較メソッド
++  },
++);
++
++it.each(["", "Not/A_Timezone", "private-token-zone"])( // 不正timezoneを検証するテスト関数
++  "不正timezoneのケース%#を固定の理由だけで返す",
++  /**
++   * 設定値やSDKの例外原文を、失敗結果へ含めないことを確認する。
++   */
++  (zone) => { // 不正timezoneを受け取るコールバック
++    const result = rejected(timed(), zone, "INVALID_TIMEZONE", null); // 失敗確認関数 / 通常予定を作る関数
++    expect(JSON.stringify(result)).not.toContain(zone || "RangeError"); // 期待値を作る関数 / JSON文字列化メソッド / 原文非露出の比較メソッド
++  },
++);
++
++it.each([ // 元のDate以外・Invalid Dateを検証するテスト関数
++  ["startAt", new Date(NaN)], // 不正Dateの生成
++  ["startAt", "2026-01-31T00:00:00.000Z"],
++  ["endAt", undefined],
++  ["meetingAt", new Date(Infinity)], // 範囲外Dateの生成
++  ["isAllDay", "true"],
 +])(
-+  "不正または重複した選択のケース%#を拒否する",
++  "元データ%sの不正を日時変換へ持ち込まない",
 +  /**
-+   * 配列外入力・不正UUID・正規化後の重複を拒否する。
++   * DB由来を想定した入力でも型と日時の妥当性を確認する。
 +   */
-+  (selectedEventIds) => { // 不正選択を受け取るテストコールバック
-+    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      selectedEventIds,
-+    }).success).toBe(false); // 検証失敗を確認するメソッド
++  (field, value) => { // 不正項目と値を受け取るコールバック
++    const input = { ...timed(), [field]: value } as EventMonthCopyDateTimeInput; // 通常予定を作る関数 / 不正入力を検証用入力型へ渡す型アサーション
++    const result = rejected(input, "UTC", "INVALID_SOURCE", null); // 失敗確認関数
++    expect(result.original).toBeNull(); // 期待値を作る関数 / 不正な元日時を返さないことの比較メソッド
 +  },
 +);
 +
-+it("イベントIDのUUID形式と、requestIdのUUID v4制約を区別する", // テストケースを登録する関数
++it.each([ // 不正な終日境界を検証するテスト関数
++  ["2026-01-31T00:00:01.000Z", "2026-02-01T00:00:00.000Z", "startAt"],
++  ["2026-01-31T00:00:00.000Z", "2026-02-01T00:00:00.001Z", "endAt"],
++  ["2026-01-31T00:00:00.000Z", null, "endAt"],
++] as const)( // 固定境界の読取専用タプル型
++  "不正な終日境界%s〜%sを修正して隠さない",
 +  /**
-+   * 通常のUUIDイベントIDを許容しても、操作IDの版を緩めないことを確認する。
++   * 終日が開始・終了とも現地0時であり、終了が必須であることを確認する。
 +   */
-+  () => { // UUIDの用途別制約を検証するコールバック
-+    const uuidV1 = "550e8400-e29b-11d4-a716-446655440000";
-+    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      selectedEventIds: [uuidV1],
-+    }).success).toBe(true); // イベントIDの許容を確認するメソッド
-+    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      requestId: uuidV1,
-+    }).success).toBe(false); // 操作IDの拒否を確認するメソッド
++  (start, end, field) => { // 不正境界を受け取るコールバック
++    const result = rejected({ // 失敗確認関数
++      ...timed(start, end), // 通常予定を作る関数
++      isAllDay: true,
++    }, "UTC", "INVALID_ALL_DAY_BOUNDARY", field);
++    expect(result.exclusionReason).toBe("INVALID_SOURCE"); // 期待値を作る関数 / 元データ不正の比較メソッド
 +  },
 +);
 +
-+it.each([undefined, null, "", "x", "a".repeat(63), "g".repeat(64), "a".repeat(65)])( // 識別値の境界試験を登録する関数 / 架空文字列の反復メソッド
-+  "不正なpreview識別値のケース%#を拒否する",
++it.each(["0000-12-31T09:00:00.000Z", "9999-12-31T09:00:00.000Z", "+010000-01-01T00:00:00.000Z"])( // 年の範囲外を検証するテスト関数
++  "西暦1〜9999年を外れる%sを受理しない",
 +  /**
-+   * SHA-256形式に合わない識別値を拒否する。識別値の真正性はこの試験の対象外。
++   * 元の年と移動先年の両方を確認する。
 +   */
-+  (previewFingerprint) => { // 不正なpreview識別値を受け取るコールバック
-+    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      previewFingerprint,
-+    }).success).toBe(false); // 検証失敗を確認するメソッド
++  (source) => { // 範囲外となる元日時を受け取るコールバック
++    rejected(timed(source), "UTC", "OUT_OF_RANGE", "startAt"); // 失敗確認関数 / 通常予定を作る関数
 +  },
 +);
 +
-+it.each([undefined, null, "bad", REQUEST_ID + "\n", [REQUEST_ID]])( // 不正な操作IDを表形式で検証する関数
-+  "不正なrequestIdのケース%#を拒否する",
++it("成功時の入力と返却日時を共有せず、呼出し元のDateを変更しない", // テストケースを登録する関数
 +  /**
-+   * 単一UUID v4以外の操作IDを拒否する。
++   * 元日時の内容と参照を守り、戻り値を変更しても入力へ影響しないことを確認する。
 +   */
-+  (requestId) => { // 不正な操作IDを受け取るコールバック
-+    expect(validateEventMonthCopyInput({ // 期待値を作る関数 / 入力検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      requestId,
-+    }).success).toBe(false); // 検証失敗を確認するメソッド
-+  },
-+);
-+
-+it.each(["targetMonth", "requestId", "previewFingerprint"])( // 単一項目の重複を表形式で検証する関数
-+  "FormDataの%s複数指定を、値が同じでも拒否する",
-+  /**
-+   * 同名の単一項目について先勝ち・後勝ちの解釈をしないことを確認する。
-+   */
-+  (field) => { // 単一項目名を受け取るテストコールバック
-+    const form = validForm(); // 正常なFormDataを作る関数
-+    form.append(field, String(form.get(field))); // 項目追加メソッド / 文字列化関数 / 先頭値の取得メソッド
-+    expect(parseEventMonthCopyFormData(form).success).toBe(false); // 期待値を作る関数 / FormData検証関数 / 失敗の検証メソッド
-+  },
-+);
-+
-+it.each(["targetMonth", "requestId", "previewFingerprint", "selectedEventIds"])( // 各項目の欠落を表形式で検証する関数
-+  "必須項目%sの欠落を拒否する",
-+  /**
-+   * FormDataで必須項目が欠けた場合に受理しないことを確認する。
-+   */
-+  (field) => { // 欠落させる項目を受け取るコールバック
-+    const form = validForm(); // 正常なFormDataを作る関数
-+    form.delete(field); // 対象項目を削除するメソッド
-+    expect(parseEventMonthCopyFormData(form).success).toBe(false); // 期待値を作る関数 / FormData検証関数 / 失敗の検証メソッド
-+  },
-+);
-+
-+it.each(["targetMonth", "requestId", "previewFingerprint", "selectedEventIds"])( // 各項目のFile値を表形式で検証する関数
-+  "項目%sのFile値を拒否する",
-+  /**
-+   * 文字列が必要な項目をFileとして送信できないことを確認する。
-+   */
-+  (field) => { // Fileへ置き換える項目を受け取るコールバック
-+    const form = validForm(); // 正常なFormDataを作る関数
-+    form.set(field, new File(["fake"], "fixture.txt")); // 項目設定メソッド / 架空ファイルのコンストラクター
-+    expect(parseEventMonthCopyFormData(form).success).toBe(false); // 期待値を作る関数 / FormData検証関数 / 失敗の検証メソッド
-+  },
-+);
-+
-+it.each([100, 101])( // FormData経路の件数境界を表形式で検証する関数
-+  "FormDataの反復選択%i件でも同じ上限を守る",
-+  /**
-+   * 反復項目を受け付けつつ、上限を超えた送信を拒否する。
-+   */
-+  (count) => { // 反復選択数を受け取るコールバック
-+    const form = validForm(); // 正常なFormDataを作る関数
-+    form.delete("selectedEventIds"); // 既存の選択IDを削除するメソッド
-+    for (const id of eventIds(count)) { // 指定件数の異なるUUIDを作る関数
-+      form.append("selectedEventIds", id); // 反復項目として選択IDを追加するメソッド
-+    }
-+    expect(parseEventMonthCopyFormData(form).success).toBe(count === 100); // 期待値を作る関数 / FormData検証関数 / 件数の検証メソッド
-+  },
-+);
-+
-+it.each(["clubId", "membershipId", "status", "content", "startAt", "createdByMembershipId"])( // 信頼禁止項目を表形式で検証する関数
-+  "追加された信頼禁止項目%sを両入力経路で拒否し、原文を返さない",
-+  /**
-+   * 改変された保存列を採用せず、安全な固定エラーのみを返すことを確認する。
-+   */
-+  (field) => { // 信頼してはいけない項目名を受け取るコールバック
-+    const privateValue = "fixture-private-value";
-+    const objectResult = validateEventMonthCopyInput({ // オブジェクト入力の検証関数
-+      ...validInput(), // 正常入力を作る関数
-+      [field]: privateValue,
-+    });
-+    const form = validForm(); // 正常なFormDataを作る関数
-+    form.set(field, privateValue); // 信頼禁止項目を追加するメソッド
-+    const formResult = parseEventMonthCopyFormData(form); // FormData入力の検証関数
-+    expect(objectResult.success).toBe(false); // 期待値を作る関数 / 拒否の検証メソッド
-+    expect(formResult.success).toBe(false); // 期待値を作る関数 / 拒否の検証メソッド
-+    expect(JSON.stringify([objectResult, formResult])).not.toContain(privateValue); // 期待値を作る関数 / JSON文字列化メソッド / 原文の非露出の検証メソッド
-+  },
-+);
-+
-+it("Nextの輸送用項目を業務入力へ含めず、正常なFormDataだけを検証する", // テストケースを登録する関数
-+  /**
-+   * Nextの追加項目を無視しても、成功データの項目が増えないことを確認する。
-+   */
-+  () => { // 輸送用項目と業務入力の分離を確認するコールバック
-+    const form = validForm(); // 正常なFormDataを作る関数
-+    form.set("$ACTION_ID_fixture", "transport-only"); // 架空のNext輸送用項目を追加するメソッド
-+    expect(parseEventMonthCopyFormData(form)).toEqual({ // 期待値を作る関数 / FormData検証関数 / 構造一致の検証メソッド
-+      success: true,
-+      data: validInput(), // 正常な複製入力を作る関数
-+    });
-+  },
-+);
-+
-+it.each([undefined, null, [], "input", 1, new Date(0), new Map()])( // 入力オブジェクトの境界試験を登録する関数 / 日時コンストラクター / Mapコンストラクター
-+  "入力オブジェクトでないケース%#を拒否する",
-+  /**
-+   * plain object以外の入力を例外原文なしに拒否する。
-+   */
-+  (value) => { // オブジェクト以外の入力を受け取るコールバック
-+    expect(validateEventMonthCopyInput(value).success).toBe(false); // 期待値を作る関数 / 入力検証関数 / 失敗の検証メソッド
-+  },
-+);
-+
-+it("空のpreview・既存結果・保存済み再読込を、共通stateで表現できる", // テストケースを登録する関数
-+  /**
-+   * 本文やDBモデルをClient結果に要求せず、成功後の再読込を表現できることを確認する。
-+   */
-+  () => { // 型契約と共通stateの接続を確認するコールバック
-+    const preview: EventMonthCopyPreview = { // 限定preview結果型
-+      outcome: "READY",
-+      targetMonth: "2026-02",
-+      sourceMonth: "2026-01",
-+      timezone: "Asia/Tokyo",
-+      fingerprint: FINGERPRINT,
-+      items: [],
-+    };
-+    const result: EventMonthCopyResult = { // 保存処理の判別結果型
-+      outcome: "ALREADY_COMPLETED",
-+      receipt: {
-+        targetMonth: "2026-02",
-+        createdCount: 1,
-+      },
-+    };
-+    const state: EventMonthCopyActionState = { // 複製のAction state型
-+      ...createInitialActionState(validInput()), // 入力値とrequestIdを持つ初期stateを作る関数 / 正常入力を作る関数
-+      status: "success",
-+      data: {
-+        ...result.receipt,
-+        needsReload: true,
-+      },
-+    };
-+    expect(preview.items).toHaveLength(0); // 期待値を作る関数 / 候補0件の表現を確認するメソッド
-+    expect(state.data).toEqual({ // 期待値を作る関数 / 保存済み結果と再読込案内の構造検証メソッド
-+      targetMonth: "2026-02",
-+      createdCount: 1,
-+      needsReload: true,
-+    });
++  () => { // 入力非変更を確認するコールバック
++    const input = timed( // 通常予定を作る関数
++      "2026-01-31T01:00:00.000Z",
++      "2026-01-31T03:00:00.000Z",
++      "2026-01-31T00:30:45.123Z",
++    );
++    const before = iso(input); // 元のISO日時を取得する関数
++    const result = successful(input); // 成功確認関数
++    expect(iso(input)).toEqual(before); // 期待値を作る関数 / ISO変換関数 / 入力内容の比較メソッド
++    expect(result.original.startAt).not.toBe(input.startAt); // 期待値を作る関数 / 入力との参照分離の比較メソッド
++    result.original.startAt.setTime(0); // 返却した元日時だけを変更するメソッド
++    result.converted.endAt?.setTime(0); // 返却した変換後日時だけを変更するメソッド
++    expect(iso(input)).toEqual(before); // 期待値を作る関数 / ISO変換関数 / 入力保持の比較メソッド
 +  },
 +);

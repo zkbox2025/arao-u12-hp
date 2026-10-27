@@ -32,7 +32,10 @@ export class EventDateTimeInputError
   }
 }
 
-//イベント日時の型
+
+/**
+ *  イベント日時の型
+ */
 export type EventUtcDateTimes = {
   startAt: Date;
   endAt: Date | null;
