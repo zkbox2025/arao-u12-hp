@@ -1,3 +1,5 @@
+// prisma/schema.prisma // 【追加】Prismaのデータモデルとrelationを定義する。
+
 generator client {
   provider = "prisma-client-js"
 }
@@ -194,6 +196,9 @@ model Club {
   events           ClubEvent[]
   notices          ClubNotice[]
 
+  //クラブ内で完了した前月イベント複製の操作記録。
+  eventBatchOperations ClubEventBatchOperation[] //完了した一括操作モデルの配列型
+
   eventAttachments  ClubEventAttachment[]
   noticeAttachments ClubNoticeAttachment[]
 
@@ -268,6 +273,9 @@ model ClubMembership {
 
   createdEvents ClubEvent[] @relation("ClubEventCreatedBy")
   updatedEvents ClubEvent[] @relation("ClubEventUpdatedBy")
+
+  /// 【追加】このMembershipが実行した前月イベント複製の完了記録。
+  executedEventBatchOperations ClubEventBatchOperation[] // 【追加】実行者から操作記録へ辿るrelation配列型
 
   createdNotices ClubNotice[] @relation("ClubNoticeCreatedBy")
   updatedNotices ClubNotice[] @relation("ClubNoticeUpdatedBy")
@@ -404,6 +412,31 @@ model ClubEvent {
   @@unique([id, clubId])
   @@index([clubId, status, startAt])
   @@index([clubId, status, endAt])
+}
+
+//前月イベント複製と同一transactionで保存する完了記録。途中状態は保存しない。
+//本文を保存せず、再送時の照合値と完了結果だけを保持する。
+model ClubEventBatchOperation { //クラブ単位の一括操作の冪等性・完了結果を保持するモデル
+  id        String   @id @default(uuid()) 
+  createdAt DateTime @default(now()) 
+
+  clubId String 
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade) 
+
+  requestId   String 
+  operation   String // COPY_PREVIOUS_MONTHだけを許す操作種別の文字列型。SQL CHECKで限定する
+  targetMonth String 
+  inputHash   String // 正規化済み実行入力の小文字SHA-256文字列型。本文は保存しない
+
+  //新規保存時は認可済み実行者を設定し、Membership削除後だけnullの履歴を保持する。
+  executedByMembershipId String? // 履歴参照解除を許す実行Membership IDのnullable文字列型
+  executedByMembership   ClubMembership? @relation(fields: [executedByMembershipId], references: [id], onDelete: SetNull) // 【追加】実行者削除時に参照IDだけをnullにするrelation型
+
+  createdCount Int // 完了した作成件数の整数型。SQL CHECKで1〜100件に限定する
+  completedAt  DateTime // 保存完了日時の必須型。未完了の記録を先に作らない
+
+  @@unique([clubId, requestId]) // 同じクラブ内の操作識別子を一意にする
+  @@index([executedByMembershipId]) // 実行者削除時のSetNull対象を検索する索引
 }
 
 // イベントに対する「自分専用メモ」

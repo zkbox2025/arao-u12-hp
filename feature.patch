@@ -1,1201 +1,166 @@
-diff --git a/domain/club/event/event-month-copy-policy.ts b/domain/club/event/event-month-copy-policy.ts
+diff --git a/prisma/migrations/20261027000000_f10_event_month_copy/migration.sql b/prisma/migrations/20261027000000_f10_event_month_copy/migration.sql
 new file mode 100644
-index 0000000000000000000000000000000000000000..15e6806609277ef899b210f734e63c5fe1804fa3
+index 0000000000000000000000000000000000000000..74cd6af214d1b7e700601ed942784b5e5edc1e96
 --- /dev/null
-+++ b/domain/club/event/event-month-copy-policy.ts
-@@ -0,0 +1,182 @@
-+// domain/club/event/event-month-copy-policy.ts
-+// コピー列の抽出・完全一致の比較値・候補同士の一致情報を扱う純粋関数。
++++ b/prisma/migrations/20261027000000_f10_event_month_copy/migration.sql
+@@ -0,0 +1,98 @@
++-- prisma/migrations/20261027000000_f10_event_month_copy/migration.sql
++-- 前月予定の複製と同一transactionで保存する完了記録を追加する。
++-- CHECK・triggerはPrisma schemaで表現できないため、このmigrationで定義する。
++-- F01の同クラブ参照・SetNull補正・clubId不変の共通関数が適用済みであることを前提とする。
 +
-+import { z } from "zod";
++BEGIN;
 +
-+import {
-+  CLUB_MEMBER_ROLE_LABELS, // Prisma由来の全クラブ所属ロールに対応する表示ラベル
-+} from "@/domain/club/club-member-role";
-+import type {
-+  ClubEventGenre, // Prisma由来のイベントジャンルの型
-+  ClubMemberRole, // Prisma由来のクラブ所属ロールの型
-+} from "@/types/prisma";
-+import {
-+  EVENT_GENRE_LABELS, // Prisma由来の全イベントジャンルに対応する表示ラベル
-+} from "./event-labels";
-+import type {
-+  EventMonthCopyDateTimeResult, // コピー元日時から新しい日時へ変換した結果型
-+} from "./event-month-copy-date-times";
-+import {
-+  EVENT_MONTH_COPY_MAX_COUNT, // 前月予定の複製候補・選択件数の上限
-+  type EventMonthCopyEvent, // コピーするイベント1件あたりのサーバー内部型
-+  type EventMonthCopySource, // コピー列に複製元IDと更新日時を加えた型
-+} from "./event-month-copy-types";
++-- 本文やイベントへの関連行を持たず、操作の照合値と完了結果だけを保持する。
++CREATE TABLE public."ClubEventBatchOperation" (
++    "id" TEXT NOT NULL, -- 操作記録IDの文字列型。Prismaのuuid()で生成する
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 記録時刻のミリ秒精度日時型
++    "clubId" TEXT NOT NULL, -- 操作を所属させるクラブIDの文字列型
++    "requestId" TEXT NOT NULL, -- 小文字UUID v4の操作識別子を保持する文字列型
++    "operation" TEXT NOT NULL, -- 固定の操作種別を保持する文字列型
++    "targetMonth" TEXT NOT NULL, -- 対象月をYYYY-MMで保持する文字列型
++    "inputHash" TEXT NOT NULL, -- 実行入力の小文字SHA-256を保持する文字列型
++    "executedByMembershipId" TEXT, -- 実行者削除後のnullを許す履歴参照IDの文字列型
++    "createdCount" INTEGER NOT NULL, -- 完了した作成件数の整数型
++    "completedAt" TIMESTAMP(3) NOT NULL, -- 完了日時のミリ秒精度日時型。途中状態用の既定値は設けない
 +
-+const INVALID_DATA_MESSAGE = "複製対象のデータを確認できません。";
-+const identifierSchema = z.uuid(); // UUID識別子を検証するスキーマの生成関数
-+const genres = Object.keys(EVENT_GENRE_LABELS) as ClubEventGenre[]; // ラベルのキー取得メソッド / イベントジャンル配列型への型アサーション
-+const roles = Object.keys(CLUB_MEMBER_ROLE_LABELS) as ClubMemberRole[]; // ラベルのキー取得メソッド / 所属ロール配列型への型アサーション
-+
-+// このshapeをコピー列のallowlistとする。trim・空文字のnull化・OWNER補完は行わない。
-+const eventSchema = z.object({ // コピー列だけを抽出・検証するオブジェクトスキーマ生成関数
-+  title: z.string(), // タイトル文字列の検証スキーマ生成関数
-+  content: z.string().nullable(), // 本文文字列の検証 / nullを許すスキーマ生成メソッド
-+  genre: z.enum(genres), // 既存の全ジャンルを検証するスキーマ生成関数
-+  targetRoles: z.array(z.enum(roles)), // ロール配列の検証 / 既存の全ロールを検証するスキーマ生成関数
-+  startAt: z.date(), // 開始Dateを検証するスキーマ生成関数
-+  endAt: z.date().nullable(), // 終了Dateの検証 / nullを許すスキーマ生成メソッド
-+  isAllDay: z.boolean(), // 終日区分の真偽値を検証するスキーマ生成関数
-+  location: z.string().nullable(), // 開催場所文字列の検証 / nullを許すスキーマ生成メソッド
-+  meetingAt: z.date().nullable(), // 集合Dateの検証 / nullを許すスキーマ生成メソッド
-+  meetingLocation: z.string().nullable(), // 集合場所文字列の検証 / nullを許すスキーマ生成メソッド
-+  belongings: z.string().nullable(), // 持ち物文字列の検証 / nullを許すスキーマ生成メソッド
-+  notes: z.string().nullable(), // 注意事項文字列の検証 / nullを許すスキーマ生成メソッド
-+}) satisfies z.ZodType<EventMonthCopyEvent>; // スキーマ型 / コピー対象の全必須列を満たす型の確認
-+
-+/**
-+ * コピーと完全一致比較の対象列。実行時の変更も防ぐ読取専用allowlist。
-+ */
-+export const EVENT_MONTH_COPY_FIELDS = Object.freeze( // 配列の実行時変更を防ぐメソッド
-+  Object.keys(eventSchema.shape) as (keyof EventMonthCopyEvent)[], // shapeのキー取得 / コピー列名の配列型への型アサーション
++    CONSTRAINT "ClubEventBatchOperation_pkey" PRIMARY KEY ("id"),
++    CONSTRAINT "ClubEventBatchOperation_operation_check"
++        CHECK ("operation" = 'COPY_PREVIOUS_MONTH'),
++    CONSTRAINT "ClubEventBatchOperation_request_id_check"
++        CHECK (
++            char_length("requestId") = 36 -- 文字数を数える関数。末尾の改行等を許可しない
++            AND "requestId" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
++        ),
++    CONSTRAINT "ClubEventBatchOperation_target_month_check"
++        CHECK (
++            char_length("targetMonth") = 7 -- 対象月の文字数を検証する関数
++            AND "targetMonth" ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'
++            AND "targetMonth" NOT LIKE '0000-%'
++            AND "targetMonth" <> '0001-01'
++        ),
++    CONSTRAINT "ClubEventBatchOperation_input_hash_check"
++        CHECK (
++            char_length("inputHash") = 64 -- SHA-256の16進表記の文字数を検証する関数
++            AND "inputHash" ~ '^[0-9a-f]{64}$'
++        ),
++    CONSTRAINT "ClubEventBatchOperation_created_count_check"
++        CHECK (
++            "createdCount" >= 1
++            AND "createdCount" <= 100
++        )
 +);
 +
-+/**
-+ * 元データと日時変換結果の組。選択可否や既存イベントとの一致はこの型で決めない。
-+ */
-+export type EventMonthCopyCandidate = { // 候補間比較とpreview照合に使うサーバー内部型
-+  source: EventMonthCopySource; // 複製元のコピー列・ID・更新日時の型
-+  dateTimes: EventMonthCopyDateTimeResult; // 日時変換の成功・失敗結果の型
-+};
++-- Membership削除時の履歴参照解除で、対象の操作記録を検索するための索引。
++CREATE INDEX "ClubEventBatchOperation_executedByMembershipId_idx"
++    ON public."ClubEventBatchOperation" ("executedByMembershipId");
 +
-+/**
-+ * 他の複製候補と完全一致した候補IDと、その代表となる複製元ID。
-+ */
-+export type EventMonthCopyCandidateDuplicate = { // 注意表示用の候補間一致情報の型
-+  sourceEventId: string; // 重複した候補IDの文字列型
-+  duplicateSourceEventId: string; // 安定順で先頭の候補IDの文字列型
-+};
++-- 同じクラブ内での再送を一意にし、別クラブでの同じrequestIdは独立して扱う。
++CREATE UNIQUE INDEX "ClubEventBatchOperation_clubId_requestId_key"
++    ON public."ClubEventBatchOperation" ("clubId", "requestId");
 +
-+/**
-+ * 余分な列を落としてコピー列だけを返す。Dateと配列は元データから独立させる。
-+ * この抽出は認可やOWNER必須等の業務妥当性を保証しない。
-+ */
-+export function pickEventMonthCopyEvent( // コピー列だけを検証・抽出する関数
-+  event: EventMonthCopyEvent, // コピー列を持つイベントの型
-+): EventMonthCopyEvent { // コピー列だけのイベント型
-+  try {
-+    const parsed = eventSchema.safeParse(event); // コピー列を安全に検証するメソッド
-+    if (!parsed.success) {
-+      throw new Error(INVALID_DATA_MESSAGE); // 入力原文を含まない固定例外のコンストラクター
-+    }
-+    return {
-+      ...parsed.data,
-+      targetRoles: [...parsed.data.targetRoles],
-+      startAt: new Date(parsed.data.startAt.getTime()), // 独立したDateの生成 / 開始UTC値を取得するメソッド
-+      endAt: parsed.data.endAt === null
-+        ? null
-+        : new Date(parsed.data.endAt.getTime()), // 独立したDateの生成 / 終了UTC値を取得するメソッド
-+      meetingAt: parsed.data.meetingAt === null
-+        ? null
-+        : new Date(parsed.data.meetingAt.getTime()), // 独立したDateの生成 / 集合UTC値を取得するメソッド
-+    };
-+  } catch {
-+    throw new Error(INVALID_DATA_MESSAGE); // 生の検証例外やcauseを返さない固定例外のコンストラクター
-+  }
++-- クラブ自体の削除時だけ、所属する完了記録を削除する。
++ALTER TABLE public."ClubEventBatchOperation"
++    ADD CONSTRAINT "ClubEventBatchOperation_clubId_fkey"
++    FOREIGN KEY ("clubId")
++    REFERENCES public."Club" ("id")
++    ON DELETE CASCADE
++    ON UPDATE CASCADE;
++
++-- clubIdは必須のまま保持し、Membership削除時には実行者の単一FKだけを解除する。
++ALTER TABLE public."ClubEventBatchOperation"
++    ADD CONSTRAINT "ClubEventBatchOperation_executedByMembershipId_fkey"
++    FOREIGN KEY ("executedByMembershipId")
++    REFERENCES public."ClubMembership" ("id")
++    ON DELETE SET NULL
++    ON UPDATE CASCADE;
++
++-- 実行者を設定・変更する際は、操作記録と同じクラブのMembershipであることを保証する。
++-- 新規保存時の実行者必須・ACTIVE・管理者権限の確認は、後続Repositoryで別途行う。
++CREATE TRIGGER "ClubEventBatchOperation_executor_club_match"
++    BEFORE INSERT OR UPDATE
++    ON public."ClubEventBatchOperation"
++    FOR EACH ROW
++    EXECUTE FUNCTION public."enforce_same_club_reference"( -- F01の同クラブ参照検証関数を再利用する
++        'executedByMembershipId',
++        'ClubMembership'
++    );
++
++-- 更新によって別クラブへ完了記録を移せないようにする。
++CREATE TRIGGER "ClubEventBatchOperation_club_id_immutable"
++    BEFORE UPDATE OF "clubId"
++    ON public."ClubEventBatchOperation"
++    FOR EACH ROW
++    EXECUTE FUNCTION public."prevent_club_id_change"(); -- F01のclubId変更禁止関数を再利用する
++
++-- ブラウザー向けpolicyを作らず、既存のサーバーDB接続だけで利用する。
++ALTER TABLE public."ClubEventBatchOperation" ENABLE ROW LEVEL SECURITY;
++
++-- 作成roleのdefault privilegesに依存せず、既存のData API用ロールとPUBLICから権限を剥奪する。
++REVOKE ALL PRIVILEGES
++    ON TABLE public."ClubEventBatchOperation"
++    FROM PUBLIC, anon, authenticated;
++
++COMMIT;
+diff --git a/prisma/schema.prisma b/prisma/schema.prisma
+index 95b874817d6229bbd288199a817e4ce6788f3e25..e81890d3ca0d931dc3ed9602c49a5ee0ad4482fd 100644
+--- a/prisma/schema.prisma
++++ b/prisma/schema.prisma
+@@ -1,3 +1,5 @@
++// prisma/schema.prisma // 【追加】Prismaのデータモデルとrelationを定義する。
++
+ generator client {
+   provider = "prisma-client-js"
+ }
+@@ -194,6 +196,9 @@ model Club {
+   events           ClubEvent[]
+   notices          ClubNotice[]
+ 
++  /// 【追加】クラブ内で完了した前月イベント複製の操作記録。
++  eventBatchOperations ClubEventBatchOperation[] // 【追加】完了した一括操作モデルの配列型
++
+   eventAttachments  ClubEventAttachment[]
+   noticeAttachments ClubNoticeAttachment[]
+ 
+@@ -269,6 +274,9 @@ model ClubMembership {
+   createdEvents ClubEvent[] @relation("ClubEventCreatedBy")
+   updatedEvents ClubEvent[] @relation("ClubEventUpdatedBy")
+ 
++  /// 【追加】このMembershipが実行した前月イベント複製の完了記録。
++  executedEventBatchOperations ClubEventBatchOperation[] // 【追加】実行者から操作記録へ辿るrelation配列型
++
+   createdNotices ClubNotice[] @relation("ClubNoticeCreatedBy")
+   updatedNotices ClubNotice[] @relation("ClubNoticeUpdatedBy")
+ 
+@@ -406,6 +414,31 @@ model ClubEvent {
+   @@index([clubId, status, endAt])
+ }
+ 
++/// 【追加】前月イベント複製と同一transactionで保存する完了記録。途中状態は保存しない。
++/// 【追加】本文を保存せず、再送時の照合値と完了結果だけを保持する。
++model ClubEventBatchOperation { // 【追加】クラブ単位の一括操作の冪等性・完了結果を保持するモデル
++  id        String   @id @default(uuid()) // 【追加】操作記録IDの文字列型 / UUIDを生成するPrisma関数
++  createdAt DateTime @default(now()) // 【追加】記録日時の型 / 現在時刻を設定するPrisma関数
++
++  clubId String // 【追加】所属クラブIDの文字列型
++  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade) // 【追加】クラブ削除時だけ記録も削除するrelation型
++
++  requestId   String // 【追加】小文字UUID v4の操作識別子の文字列型。SQL CHECKでも検証する
++  operation   String // 【追加】COPY_PREVIOUS_MONTHだけを許す操作種別の文字列型。SQL CHECKで限定する
++  targetMonth String // 【追加】前月を表現できるYYYY-MMの文字列型。SQL CHECKで検証する
++  inputHash   String // 【追加】正規化済み実行入力の小文字SHA-256文字列型。本文は保存しない
++
++  /// 【追加】新規保存時は認可済み実行者を設定し、Membership削除後だけnullの履歴を保持する。
++  executedByMembershipId String? // 【追加】履歴参照解除を許す実行Membership IDのnullable文字列型
++  executedByMembership   ClubMembership? @relation(fields: [executedByMembershipId], references: [id], onDelete: SetNull) // 【追加】実行者削除時に参照IDだけをnullにするrelation型
++
++  createdCount Int // 【追加】完了した作成件数の整数型。SQL CHECKで1〜100件に限定する
++  completedAt  DateTime // 【追加】保存完了日時の必須型。未完了の記録を先に作らない
++
++  @@unique([clubId, requestId]) // 【追加】同じクラブ内の操作識別子を一意にする
++  @@index([executedByMembershipId]) // 【追加】実行者削除時のSetNull対象を検索する索引
 +}
 +
-+/**
-+ * コピー列の完全一致キーを返す。ロールは集合、日時はUTC ISO値として比較する。
-+ * 戻り値には本文が含まれるため、ログ・Client・DBの公開項目へ出してはいけない。
-+ */
-+export function buildEventMonthCopyKey( // コピー列の決定的な比較値を作る関数
-+  event: EventMonthCopyEvent, // コピー列を持つイベントの型
-+): string { // サーバー内部比較専用の文字列型
-+  const picked = pickEventMonthCopyEvent(event); // コピー列を検証・抽出する関数
-+  const targetRoles = [...new Set(picked.targetRoles)].sort(); // ロールの重複を除く集合の生成 / 順序を揃えるメソッド
-+  return JSON.stringify({ // コピー列だけを一定の順序で文字列化するメソッド
-+    ...picked,
-+    targetRoles,
-+  });
-+}
-+
-+/**
-+ * 有効な日時を持つ候補同士を比較し、注意表示に使う一致情報を返す。
-+ * 代表は元の開始日時・小文字IDの順で決め、初期選択・除外・再選択は決めない。
-+ */
-+export function findEventMonthCopyCandidateDuplicates( // 候補間の完全一致情報を返す関数
-+  candidates: readonly EventMonthCopyCandidate[], // 複製候補の読取専用配列型
-+): readonly EventMonthCopyCandidateDuplicate[] { // 候補間一致情報の読取専用配列型
-+  try {
-+    if (candidates.length > EVENT_MONTH_COPY_MAX_COUNT) {
-+      throw new Error(INVALID_DATA_MESSAGE); // 上限超過を原文なしで伝える固定例外のコンストラクター
-+    }
-+    const seenIds = new Set<string>(); // 候補IDの重複検出用集合の生成 / 文字列型
-+    const rows: { // 比較前に必要値だけを取り出す内部構造型
-+      id: string; // 小文字UUIDの文字列型
-+      time: number; // 元の開始UTC値の数値型
-+      key: string; // コピー列の比較値の文字列型
-+    }[] = [];
-+    for (const candidate of candidates) {
-+      const id = candidate.source.id.toLowerCase(); // UUID表記を小文字へ揃えるメソッド
-+      if (
-+        !identifierSchema.safeParse(id).success || // UUIDを安全に検証するメソッド
-+        seenIds.has(id) // 候補IDの重複を検出するメソッド
-+      ) {
-+        throw new Error(INVALID_DATA_MESSAGE); // 不正または重複した候補IDの固定例外のコンストラクター
-+      }
-+      seenIds.add(id); // 候補IDを記録するメソッド
-+      if (!candidate.dateTimes.success) {
-+        continue;
-+      }
-+      const source = pickEventMonthCopyEvent(candidate.source); // コピー元の列を検証・抽出する関数
-+      rows.push({ // 比較する候補を記録するメソッド
-+        id,
-+        time: source.startAt.getTime(), // 元の開始UTC値を取得するメソッド
-+        key: buildEventMonthCopyKey({ // 変換後の全コピー列の比較値を作る関数
-+          ...source,
-+          ...candidate.dateTimes.converted,
-+        }),
-+      });
-+    }
-+    rows.sort( // 入力順に依存しない候補順へ並べるメソッド
-+      /**
-+       * 元の開始UTC値、同値なら小文字UUIDの辞書順で比較する。
-+       */
-+      (left, right) => { // 安定した候補順を作る比較コールバック
-+        if (left.time !== right.time) {
-+          return left.time - right.time;
-+        }
-+        if (left.id === right.id) {
-+          return 0;
-+        }
-+        return left.id < right.id ? -1 : 1;
-+      },
-+    );
-+    const firstByKey = new Map<string, string>(); // 比較値から代表IDを引くMapの生成 / 文字列のキーと値の型
-+    const duplicates: EventMonthCopyCandidateDuplicate[] = []; // 候補間一致情報を保持する配列型
-+    for (const row of rows) {
-+      const first = firstByKey.get(row.key); // 一致する先行候補のIDを取得するメソッド
-+      if (first === undefined) {
-+        firstByKey.set(row.key, row.id); // 比較値に対応する代表IDを登録するメソッド
-+      } else {
-+        duplicates.push({ // 注意表示用の候補間一致情報を追加するメソッド
-+          sourceEventId: row.id,
-+          duplicateSourceEventId: first,
-+        });
-+      }
-+    }
-+    return duplicates;
-+  } catch {
-+    throw new Error(INVALID_DATA_MESSAGE); // 本文や比較値を含めない固定例外のコンストラクター
-+  }
-+}
-diff --git a/src/infrastructure/security/event-month-copy-fingerprint.ts b/src/infrastructure/security/event-month-copy-fingerprint.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..bed5aea0dc4bd8c20179ffe2d40633c3c35f0bb2
---- /dev/null
-+++ b/src/infrastructure/security/event-month-copy-fingerprint.ts
-@@ -0,0 +1,224 @@
-+// src/infrastructure/security/event-month-copy-fingerprint.ts
-+// F10のpreviewと実行入力を、用途・版・クラブ・本人に紐づくSHA-256へ変換する。
-+
-+import "server-only";
-+
-+import { createHash } from "node:crypto";
-+import { z } from "zod";
-+
-+import {
-+  isEventMonthCopyTargetMonth, // 前月も表現できる単一対象月を検証する関数
-+  validateEventMonthCopyInput, // 複製入力の構造検証と正規化を行う関数
-+} from "@/domain/club/event/event-month-copy-form";
-+import {
-+  buildEventMonthCopyKey, // 全コピー列からサーバー内部専用の比較値を作る関数
-+  type EventMonthCopyCandidate, // 元イベントと日時変換結果をまとめた候補の型
-+} from "@/domain/club/event/event-month-copy-policy";
-+import {
-+  EVENT_MONTH_COPY_MAX_COUNT, // 前月予定の複製候補・選択件数の上限
-+  type EventMonthCopyInput, // 正規化済み複製入力の型
-+} from "@/domain/club/event/event-month-copy-types";
-+import type {
-+  EventUtcDateTimes, // 開始・終了・集合のUTC日時をまとめる型
-+} from "@/domain/club/event/event-date-times";
-+
-+// 比較列や候補照合の意味を変更する場合は版を上げ、既存操作との互換性を確認する。
-+const FORMAT_VERSION = 1;
-+const INVALID_DATA_MESSAGE = "複製内容を確認できません。";
-+const identifierSchema = z.uuid(); // UUID識別子を検証するスキーマの生成関数
-+const correctedFieldSchema = z.array(z.enum([ // 補正項目の配列検証 / 許可された項目名の検証スキーマ生成関数
-+  "startAt",
-+  "endAt",
-+  "meetingAt",
-+]));
-+
-+/**
-+ * 最新認可から得たクラブ・所属・Auth本人の識別子。この型自体は認可を保証しない。
-+ */
-+export type EventMonthCopyFingerprintScope = { // ハッシュを別クラブ・別本人へ流用させないスコープ型
-+  clubId: string; // クラブIDの文字列型
-+  membershipId: string; // 実行Membership IDの文字列型
-+  userId: string; // Auth本人IDの文字列型
-+};
-+
-+/**
-+ * 既存イベントとの一致状態を加えた、サーバー内のpreview候補。
-+ */
-+export type EventMonthCopyFingerprintCandidate = EventMonthCopyCandidate & { // 元データと変換結果の型へ一致状態を加える結合型
-+  duplicateEventId: string | null; // 既存完全一致イベントの代表IDまたは未一致の型
-+};
-+
-+/**
-+ * preview全体の照合に必要な現在のscope・対象月・timezone・全候補。
-+ */
-+export type EventMonthCopyFingerprintInput = EventMonthCopyFingerprintScope & { // 認可scopeとpreview内容の結合型
-+  targetMonth: string; // 複製先の対象月の文字列型
-+  timezone: string; // 現在DBのクラブtimezoneの文字列型
-+  candidates: readonly EventMonthCopyFingerprintCandidate[]; // 除外候補も含む全候補の読取専用配列型
-+};
-+
-+/**
-+ * UUID識別子を検証し、表記上の大小文字差を除く。
-+ */
-+function identifier(value: string): string { // ハッシュ内のUUIDを正規化する関数 / 引数・戻り値の文字列型
-+  if (!identifierSchema.safeParse(value).success) { // UUIDを安全に検証するメソッド
-+    throw new Error(INVALID_DATA_MESSAGE); // 不正IDを固定文言だけで伝える例外のコンストラクター
-+  }
-+  return value.toLowerCase(); // UUIDを小文字へ揃えるメソッド
-+}
-+
-+/**
-+ * 有効なDateをUTC ISO文字列へ変え、Invalid Dateや文字列入力を拒否する。
-+ */
-+function dateVersion(value: Date): string { // 日時の決定的な比較表現を作る関数 / Date型 / 戻り値の文字列型
-+  if (
-+    !(value instanceof Date) || // Dateの型判定
-+    !Number.isFinite(value.getTime()) // 有限値検証メソッド / UTC値の取得メソッド
-+  ) {
-+    throw new Error(INVALID_DATA_MESSAGE); // 不正日時を原文なしで伝える例外のコンストラクター
-+  }
-+  return new Date(value.getTime()).toISOString(); // 標準Dateの生成 / UTC値の取得 / ISO文字列化メソッド
-+}
-+
-+/**
-+ * 日時の組を固定順のISO値へ変える。元日時が取得できない失敗はnullとして区別する。
-+ */
-+function dates(values: EventUtcDateTimes | null) { // 日時の組を正規化する関数 / UTC日時の組または未取得の型
-+  if (values === null) {
-+    return null;
-+  }
-+  return [
-+    dateVersion(values.startAt), // 開始日時をISO値へ変える関数
-+    values.endAt === null ? null : dateVersion(values.endAt), // 終了日時をISO値へ変える関数
-+    values.meetingAt === null ? null : dateVersion(values.meetingAt), // 集合日時をISO値へ変える関数
-+  ];
-+}
-+
-+/**
-+ * scopeの値を固定順に正規化する。認可処理の代用にはならない。
-+ */
-+function scopeValues(scope: EventMonthCopyFingerprintScope): string[] { // scopeを正規化する関数 / 認可scope型 / 文字列配列型
-+  return [
-+    identifier(scope.clubId), // クラブIDを正規化する関数
-+    identifier(scope.membershipId), // 実行所属IDを正規化する関数
-+    identifier(scope.userId), // Auth本人IDを正規化する関数
-+  ];
-+}
-+
-+/**
-+ * 用途と書式版を含めてハッシュ化する。素材・ハッシュのどちらも認証署名ではない。
-+ */
-+function digest( // 用途を分けたSHA-256を計算する関数
-+  kind: "PREVIEW" | "INPUT", // preview用と実行入力用の用途を分ける型
-+  payload: unknown, // サーバー内で明示的に組み立てる素材の型
-+): string { // SHA-256の小文字16進文字列型
-+  return createHash("sha256") // SHA-256を生成する関数
-+    .update(JSON.stringify([ // UTF-8素材を投入するメソッド / 固定順でJSONへ変換するメソッド
-+      "F10_COPY_PREVIOUS_MONTH",
-+      FORMAT_VERSION,
-+      kind,
-+      payload,
-+    ]), "utf8")
-+    .digest("hex"); // ハッシュを小文字16進文字列として得るメソッド
-+}
-+
-+/**
-+ * 元のコピー値・更新版・日時変換・補正・既存重複を含む、順序に依存しないpreview照合値。
-+ * 呼出し元は必ず現在DBから候補を再取得する。Clientの自己申告値を検証したことにはならない。
-+ */
-+export function buildEventMonthCopyFingerprint( // previewの陳腐化検出用ハッシュを計算する関数
-+  input: EventMonthCopyFingerprintInput, // scope・月・timezone・全候補の型
-+): string { // preview識別値の文字列型
-+  try {
-+    if (
-+      !isEventMonthCopyTargetMonth(input.targetMonth) || // 対象月を厳密に検証する関数
-+      !Array.isArray(input.candidates) || // 候補が配列であることを検証するメソッド
-+      input.candidates.length > EVENT_MONTH_COPY_MAX_COUNT ||
-+      typeof input.timezone !== "string" ||
-+      input.timezone.length === 0
-+    ) {
-+      throw new Error(INVALID_DATA_MESSAGE); // 不正なpreview指定を固定文言で伝える例外のコンストラクター
-+    }
-+    new Intl.DateTimeFormat("en-US", { timeZone: input.timezone }).format(0); // timezoneを検証する書式の生成 / 固定日時の書式化メソッド
-+    const seen = new Set<string>(); // 候補IDの重複を検出する集合の生成 / 文字列型
-+    const snapshots = input.candidates.map( // 各候補を限定した比較素材へ写すメソッド
-+      /**
-+       * 候補のコピー列・更新日時・変換結果・重複状態だけを決定的な値へ写す。
-+       */
-+      (candidate) => { // サーバー内の候補を正規化するコールバック
-+        const id = identifier(candidate.source.id); // 複製元IDを正規化する関数
-+        if (seen.has(id)) { // 候補IDの重複を検出するメソッド
-+          throw new Error(INVALID_DATA_MESSAGE); // 重複した候補IDを固定文言で伝える例外のコンストラクター
-+        }
-+        seen.add(id); // 正規化済み候補IDを記録するメソッド
-+        const result = candidate.dateTimes;
-+        const corrections = correctedFieldSchema.safeParse(result.correctedFields); // 補正項目を安全に検証するメソッド
-+        if (!corrections.success) {
-+          throw new Error(INVALID_DATA_MESSAGE); // 不正な補正項目を固定文言で伝える例外のコンストラクター
-+        }
-+        return {
-+          id,
-+          value: [
-+            id,
-+            dateVersion(candidate.source.updatedAt), // 複製元の更新版を正規化する関数
-+            buildEventMonthCopyKey(candidate.source), // 元の全コピー列を正規化する関数
-+            result.success,
-+            dates(result.original), // 元日時の組を正規化する関数
-+            result.success ? dates(result.converted) : null, // 変換後日時の組を正規化する関数
-+            [...new Set(corrections.data)].sort(), // 補正項目の重複を除く集合の生成 / 順序を揃えるメソッド
-+            result.success ? null : [result.exclusionReason, result.issue, result.field],
-+            candidate.duplicateEventId === null ? null : identifier(candidate.duplicateEventId), // 既存一致IDを正規化する関数
-+          ],
-+        };
-+      },
-+    );
-+    snapshots.sort( // 候補の取得順によるハッシュ差を除くメソッド
-+      /**
-+       * 正規化済みの複製元IDを辞書順で比較する。
-+       */
-+      (left, right) => { // 候補順を固定する比較コールバック
-+        if (left.id === right.id) {
-+          return 0;
-+        }
-+        return left.id < right.id ? -1 : 1;
-+      },
-+    );
-+    return digest("PREVIEW", [ // preview用途のハッシュを計算する関数
-+      scopeValues(input), // scopeを正規化する関数
-+      input.targetMonth,
-+      input.timezone,
-+      snapshots.map( // ID順に並べた比較素材だけを取り出すメソッド
-+        /**
-+         * コピー本文を含む内部素材を、返却せずハッシュ計算だけへ渡す。
-+         */
-+        (snapshot) => snapshot.value, // 限定した比較素材を取得するコールバック
-+      ),
-+    ]);
-+  } catch {
-+    throw new Error(INVALID_DATA_MESSAGE); // 生の例外・入力・causeを含めない固定例外のコンストラクター
-+  }
-+}
-+
-+/**
-+ * 同じrequestIdに異なる操作内容が届いたかを照合する入力ハッシュ。
-+ * requestIdは別の一意キーで照合するため素材に入れず、認可scopeと選択内容を結び付ける。
-+ */
-+export function buildEventMonthCopyInputHash( // 実行内容の一致を確認するハッシュを計算する関数
-+  scope: EventMonthCopyFingerprintScope, // 現在の認可scope型
-+  input: EventMonthCopyInput, // 複製入力の型
-+): string { // 実行入力のSHA-256文字列型
-+  try {
-+    const validation = validateEventMonthCopyInput(input); // 既存の入力構造検証と正規化を行う関数
-+    if (!validation.success) {
-+      throw new Error(INVALID_DATA_MESSAGE); // 不正入力を固定文言で伝える例外のコンストラクター
-+    }
-+    return digest("INPUT", [ // 実行入力用途のハッシュを計算する関数
-+      scopeValues(scope), // scopeを正規化する関数
-+      validation.data.targetMonth,
-+      validation.data.selectedEventIds,
-+      validation.data.previewFingerprint,
-+    ]);
-+  } catch {
-+    throw new Error(INVALID_DATA_MESSAGE); // 本文や生の検証例外を含めない固定例外のコンストラクター
-+  }
-+}
-diff --git a/tests/event-month-copy-fingerprint.test.ts b/tests/event-month-copy-fingerprint.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..96b68bde572b13c047fb368d6bb49987d123ac24
---- /dev/null
-+++ b/tests/event-month-copy-fingerprint.test.ts
-@@ -0,0 +1,388 @@
-+// tests/event-month-copy-fingerprint.test.ts
-+// 実DB・Authなしで、preview／入力ハッシュの不変性・変更検出・server-only境界を検証する。
-+
-+import { expect, it, vi } from "vitest";
-+
-+import {
-+  buildEventMonthCopyFingerprint, // 全候補を含むpreview照合ハッシュを計算する関数
-+  buildEventMonthCopyInputHash, // scopeと実行入力を結び付けるハッシュを計算する関数
-+  type EventMonthCopyFingerprintCandidate, // 既存一致状態を含むサーバー内候補の型
-+  type EventMonthCopyFingerprintInput, // scope・月・timezone・全候補の型
-+} from "@/src/infrastructure/security/event-month-copy-fingerprint";
-+import {
-+  convertEventMonthCopyDateTimes, // クラブ現地時刻で日時を1か月先へ変換する関数
-+} from "@/domain/club/event/event-month-copy-date-times";
-+import type {
-+  EventMonthCopyInput, // 検証・正規化済みの実行入力の型
-+  EventMonthCopySource, // コピー列・複製元ID・更新日時の型
-+} from "@/domain/club/event/event-month-copy-types";
-+
-+const SOURCE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
-+const SOURCE_B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
-+const EXISTING_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-+const OTHER_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
-+
-+/**
-+ * 更新版・全コピー列・変換結果を持つ新しい候補を作る。
-+ */
-+function candidate( // preview照合用の候補を生成する関数
-+  id = SOURCE_A,
-+  start = "2026-01-30T09:00:00.123Z",
-+): EventMonthCopyFingerprintCandidate { // 既存一致状態を含む候補の型
-+  const source: EventMonthCopySource = { // コピー元イベントの型
-+    id,
-+    updatedAt: new Date("2026-01-01T00:00:00.000Z"), // 更新版Dateの生成
-+    title: "練習",
-+    content: " 本文\n",
-+    genre: "PRACTICE",
-+    targetRoles: ["OWNER", "MEMBER"],
-+    startAt: new Date(start), // 開始Dateの生成
-+    endAt: null,
-+    isAllDay: false,
-+    location: "グラウンド",
-+    meetingAt: null,
-+    meetingLocation: null,
-+    belongings: "ボール",
-+    notes: null,
-+  };
-+  return {
-+    source,
-+    dateTimes: convertEventMonthCopyDateTimes(source, "UTC"), // 実際の日時変換関数
-+    duplicateEventId: null,
-+  };
-+}
-+
-+/**
-+ * 他のテストと参照を共有しない認可scopeとpreviewを作る。
-+ */
-+function snapshot(): EventMonthCopyFingerprintInput { // 正常なpreviewを生成する関数 / preview入力型
-+  return {
-+    clubId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-+    membershipId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-+    userId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-+    targetMonth: "2026-02",
-+    timezone: "UTC",
-+    candidates: [candidate()], // 独立した候補を作る関数
-+  };
-+}
-+
-+/**
-+ * 一意キーとは別に比較する、正常な操作内容を作る。
-+ */
-+function input(): EventMonthCopyInput { // 正常な実行入力を生成する関数 / 複製入力型
-+  return {
-+    targetMonth: "2026-02",
-+    selectedEventIds: [SOURCE_A],
-+    requestId: "11111111-1111-4111-8111-111111111111",
-+    previewFingerprint: buildEventMonthCopyFingerprint(snapshot()), // previewハッシュ生成関数 / 正常なpreview生成関数
-+  };
-+}
-+
-+it("SHA-256の小文字64桁を返し、同じ内容で再現する", // テストケースを登録する関数
-+  /**
-+   * Dateの参照や実行時刻に依存せず、同じDB値のsnapshotを再照合できることを確認する。
-+   */
-+  () => { // 決定的なハッシュを確認するコールバック
-+    const first = buildEventMonthCopyFingerprint(snapshot()); // previewハッシュ生成関数 / preview生成関数
-+    expect(first).toMatch(/^[0-9a-f]{64}$/); // 期待値を作る関数 / ハッシュ形式の検証メソッド
-+    expect(first).toBe(buildEventMonthCopyFingerprint(snapshot())); // 期待値を作る関数 / 同一性の比較メソッド / previewハッシュ生成関数 / preview生成関数
-+    expect(buildEventMonthCopyInputHash(snapshot(), input())).toMatch(/^[0-9a-f]{64}$/); // 期待値を作る関数 / 実行入力ハッシュ生成関数 / preview・入力生成関数 / ハッシュ形式の検証メソッド
-+    expect(buildEventMonthCopyInputHash(snapshot(), input())).not.toBe(first); // 期待値を作る関数 / 入力ハッシュ生成関数 / preview・入力生成関数 / 用途分離の比較メソッド
-+  },
-+);
-+
-+it("候補の取得順・UUID表記・ロール順が違っても同じpreview値になる", // テストケースを登録する関数
-+  /**
-+   * 意味を変えない取得順やUUID大小文字だけの違いを変更と判定しないことを確認する。
-+   */
-+  () => { // previewの正規化を確認するコールバック
-+    const first = snapshot(); // previewを生成する関数
-+    first.candidates = [candidate(), candidate(SOURCE_B)]; // 2候補を生成する関数
-+    const second = snapshot(); // 別のpreviewを生成する関数
-+    second.clubId = second.clubId.toUpperCase(); // クラブIDを大文字へ変えるメソッド
-+    second.membershipId = second.membershipId.toUpperCase(); // 所属IDを大文字へ変えるメソッド
-+    second.userId = second.userId.toUpperCase(); // 本人IDを大文字へ変えるメソッド
-+    const last = candidate(SOURCE_B.toUpperCase()); // 候補生成関数 / IDを大文字へ変えるメソッド
-+    last.source.targetRoles = ["MEMBER", "OWNER", "MEMBER"];
-+    second.candidates = [last, candidate(SOURCE_A.toUpperCase())]; // 候補生成関数 / IDを大文字へ変えるメソッド
-+    expect(buildEventMonthCopyFingerprint(first)).toBe(buildEventMonthCopyFingerprint(second)); // 期待値を作る関数 / previewハッシュ生成関数 / 表記差を無視する比較メソッド
-+  },
-+);
-+
-+it.each(["clubId", "membershipId", "userId"] as const)( // scope変更を検証するテスト関数 / 読取専用タプル型
-+  "%sが違えばpreview用・実行入力用の両ハッシュが変わる",
-+  /**
-+   * 別クラブ・別所属・別Auth本人へ値を流用できないよう、全scopeが素材に含まれることを確認する。
-+   */
-+  (field) => { // 変更するscope項目を受け取るコールバック
-+    const before = snapshot(); // 元のpreviewを生成する関数
-+    const after = {
-+      ...snapshot(), // 検証用のpreviewを生成する関数
-+      [field]: OTHER_ID,
-+    }; // 別scopeのpreviewを生成する関数
-+    expect(buildEventMonthCopyFingerprint(after)).not.toBe(buildEventMonthCopyFingerprint(before)); // 期待値を作る関数 / previewハッシュ生成関数 / scope差の比較メソッド
-+    const operation = input(); // 固定操作入力を生成する関数
-+    expect(buildEventMonthCopyInputHash(after, operation)).not.toBe( // 期待値を作る関数 / 実行入力ハッシュ生成関数 / scope差の比較メソッド
-+      buildEventMonthCopyInputHash(before, operation), // 元scopeの入力ハッシュ生成関数
-+    );
-+  },
-+);
-+
-+it.each([ // 月・timezone・候補集合の変更を検証するテスト関数
-+  { targetMonth: "2026-03" },
-+  { timezone: "Asia/Tokyo" },
-+  { candidates: [] },
-+  { candidates: [candidate(), candidate(SOURCE_B)] }, // 追加候補を生成する関数
-+])(
-+  "月・timezone・候補集合の変更ケース%#を検出する",
-+  /**
-+   * 選択された候補だけでなく、preview全体の変化を照合することを確認する。
-+   */
-+  (change) => { // preview変更値を受け取るコールバック
-+    expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / preview全体のハッシュを生成する関数
-+      ...snapshot(), // 検証用のpreviewを生成する関数
-+      ...change,
-+    })).not.toBe( // 期待値を作る関数 / previewハッシュ生成関数 / preview生成関数 / 変更検出の比較メソッド
-+      buildEventMonthCopyFingerprint(snapshot()), // 元のpreviewハッシュ生成関数 / preview生成関数
-+    );
-+  },
-+);
-+
-+it("元の内容・更新版・変換後の1ミリ秒・補正情報・既存一致状態を検出する", // テストケースを登録する関数
-+  /**
-+   * 同じIDの候補でも、実行前の確認に関係する各要素が変化すればハッシュが変わる。
-+   */
-+  () => { // snapshot各要素の変化を確認するコールバック
-+    const before = buildEventMonthCopyFingerprint(snapshot()); // 元のpreviewハッシュ生成関数 / preview生成関数
-+    const changedContent = candidate(); // 独立した候補を作る関数
-+    changedContent.source.content = "別の本文";
-+    const changedVersion = candidate(); // 独立した候補を作る関数
-+    changedVersion.source.updatedAt = new Date("2026-01-01T00:00:00.001Z"); // 更新版を1ミリ秒変えるDateの生成
-+    const changedConversion = candidate(); // 独立した候補を作る関数
-+    if (!changedConversion.dateTimes.success) {
-+      throw new Error("fixture-conversion"); // fixture不正を検出する固定例外の生成
-+    }
-+    changedConversion.dateTimes.converted.startAt.setTime( // 変換後のDateだけを変更するメソッド
-+      changedConversion.dateTimes.converted.startAt.getTime() + 1, // 変換後UTC値を取得するメソッド
-+    );
-+    const changedCorrection = candidate(); // 独立した候補を作る関数
-+    changedCorrection.dateTimes.correctedFields = [];
-+    const existing = {
-+      ...candidate(), // 検証用の候補を生成する関数
-+      duplicateEventId: EXISTING_ID,
-+    }; // 既存完全一致を持つ候補を生成する関数
-+    const changes = [
-+      changedContent,
-+      changedVersion,
-+      changedConversion,
-+      changedCorrection,
-+      existing,
-+    ];
-+    for (const row of changes) {
-+      expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / preview全体のハッシュを生成する関数
-+        ...snapshot(), // 検証用のpreviewを生成する関数
-+        candidates: [row],
-+      })).not.toBe(before); // 期待値を作る関数 / previewハッシュ生成関数 / preview生成関数 / 変更検出の比較メソッド
-+    }
-+    expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / previewハッシュ生成関数
-+      ...snapshot(), // preview生成関数
-+      candidates: [{
-+        ...candidate(), // 検証用の候補を生成する関数
-+        duplicateEventId: EXISTING_ID.toUpperCase(), // UUID表記を大文字へ変えるメソッド
-+      }], // 候補生成関数 / 既存IDを大文字へ変えるメソッド
-+    })).toBe(buildEventMonthCopyFingerprint({ // 表記差を無視する比較メソッド / previewハッシュ生成関数
-+      ...snapshot(), // preview生成関数
-+      candidates: [existing],
-+    }));
-+  },
-+);
-+
-+it("除外される変換失敗の理由もpreviewの照合対象に含める", // テストケースを登録する関数
-+  /**
-+   * 選択不可候補の変更を照合から落とさず、全候補を確認できることを検証する。
-+   */
-+  () => { // 失敗候補の照合を確認するコールバック
-+    const failed = candidate(SOURCE_A, "2026-02-08T07:30:00.000Z"); // DST gapへ移る候補を生成する関数
-+    failed.dateTimes = convertEventMonthCopyDateTimes(failed.source, "America/New_York"); // 実際の日時変換関数
-+    if (failed.dateTimes.success) {
-+      throw new Error("fixture-gap"); // fixture不正を検出する固定例外の生成
-+    }
-+    const before = buildEventMonthCopyFingerprint({ // 元の失敗候補を含むハッシュ生成関数
-+      ...snapshot(), // preview生成関数
-+      targetMonth: "2026-03",
-+      timezone: "America/New_York",
-+      candidates: [failed],
-+    });
-+    failed.dateTimes.issue = "AMBIGUOUS_LOCAL_TIME";
-+    expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / previewハッシュ生成関数
-+      ...snapshot(), // preview生成関数
-+      targetMonth: "2026-03",
-+      timezone: "America/New_York",
-+      candidates: [failed],
-+    })).not.toBe(before); // 失敗理由の変更を確認する比較メソッド
-+  },
-+);
-+
-+it("status・公開日時・PDF等の非コピー値をpreviewの変更としない", // テストケースを登録する関数
-+  /**
-+   * DBの余分な関連行や公開状態を、コピー内容の一致へ混ぜないことを確認する。
-+   */
-+  () => { // 非コピー列の無視を確認するコールバック
-+    const row = candidate(); // 独立した候補を作る関数
-+    const before = buildEventMonthCopyFingerprint({ // preview全体のハッシュを生成する関数
-+      ...snapshot(), // 検証用のpreviewを生成する関数
-+      candidates: [row],
-+    }); // 元ハッシュ生成関数 / preview生成関数
-+    Object.assign(row.source, { // 非コピー列を元オブジェクトへ追加するメソッド
-+      status: "PUBLISHED",
-+      firstPublishedAt: new Date(0), // 比較しない公開Dateの生成
-+      createdByMembershipId: OTHER_ID,
-+      attachments: [{ id: "fixture-pdf" }],
-+      personalMemos: [{ content: "fixture-private-value" }],
-+    });
-+    expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / preview全体のハッシュを生成する関数
-+      ...snapshot(), // 検証用のpreviewを生成する関数
-+      candidates: [row],
-+    })).toBe(before); // 期待値を作る関数 / previewハッシュ生成関数 / preview生成関数 / 同一性の比較メソッド
-+  },
-+);
-+
-+it("実行入力は選択順・UUID表記を揃え、requestIdだけの変更を内容変更にしない", // テストケースを登録する関数
-+  /**
-+   * requestIdは別の一意キーで扱い、同じ操作内容を正規化して比較することを確認する。
-+   */
-+  () => { // 実行入力の意味を確認するコールバック
-+    const first = {
-+      ...input(), // 検証用の実行入力を生成する関数
-+      selectedEventIds: [SOURCE_A, SOURCE_B],
-+    }; // 正常な実行入力を生成する関数
-+    const second = {
-+      ...first,
-+      selectedEventIds: [SOURCE_B.toUpperCase(), SOURCE_A.toUpperCase()], // UUIDを大文字へ変えるメソッド
-+      previewFingerprint: first.previewFingerprint.toUpperCase(), // 識別値を大文字へ変えるメソッド
-+      requestId: "22222222-2222-4222-8222-222222222222",
-+    };
-+    expect(buildEventMonthCopyInputHash(snapshot(), first)).toBe( // 期待値を作る関数 / 入力ハッシュ生成関数 / preview生成関数 / 内容一致の比較メソッド
-+      buildEventMonthCopyInputHash(snapshot(), second), // 入力ハッシュ生成関数 / preview生成関数
-+    );
-+  },
-+);
-+
-+it.each([ // 実行入力の変更を検証するテスト関数
-+  { targetMonth: "2026-03" },
-+  { selectedEventIds: [SOURCE_B] },
-+  { previewFingerprint: "f".repeat(64) }, // 異なる有効識別値を作る反復メソッド
-+])(
-+  "実行入力変更ケース%#を別の内容として検出する",
-+  /**
-+   * 対象月・選択ID・preview識別値のどれも省略せずハッシュへ含める。
-+   */
-+  (change) => { // 実行入力の変更値を受け取るコールバック
-+    expect(buildEventMonthCopyInputHash(snapshot(), { // 期待値を作る関数 / 実行入力のハッシュを生成する関数 / 検証用のpreviewを生成する関数
-+      ...input(), // 検証用の実行入力を生成する関数
-+      ...change,
-+    })).not.toBe( // 期待値を作る関数 / 入力ハッシュ生成関数 / preview・入力生成関数 / 変更検出の比較メソッド
-+      buildEventMonthCopyInputHash(snapshot(), input()), // 元の入力ハッシュ生成関数 / preview・入力生成関数
-+    );
-+  },
-+);
-+
-+it("空previewと100件を扱い、101件と同一IDの多重候補を拒否する", // テストケースを登録する関数
-+  /**
-+   * 候補が空でもスコープ付きのハッシュを作り、上限を超えた入力は素材化しない。
-+   */
-+  () => { // 候補数とID一意性を確認するコールバック
-+    expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / preview全体のハッシュを生成する関数
-+      ...snapshot(), // 検証用のpreviewを生成する関数
-+      candidates: [],
-+    })).toMatch(/^[0-9a-f]{64}$/); // 期待値を作る関数 / ハッシュ生成関数 / preview生成関数 / 形式検証メソッド
-+    const rows: EventMonthCopyFingerprintCandidate[] = []; // 候補配列の型
-+    for (let index = 0; index < 101; index += 1) {
-+      const prefix = index.toString(16).padStart(8, "0"); // 16進表記の生成 / 8桁への補完メソッド
-+      rows.push(candidate(`${prefix}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`)); // 配列への追加メソッド / 候補生成関数
-+    }
-+    expect(buildEventMonthCopyFingerprint({ // 期待値を作る関数 / ハッシュ生成関数
-+      ...snapshot(), // preview生成関数
-+      candidates: rows.slice(0, 100), // 上限内の候補を切り出すメソッド
-+    })).toMatch(/^[0-9a-f]{64}$/); // ハッシュ形式を検証するメソッド
-+    expect( // 期待値を作る関数
-+      /**
-+       * 上限を超えた候補を渡す。
-+       */
-+      () => buildEventMonthCopyFingerprint({ // 拒否確認用のコールバック / preview全体のハッシュを生成する関数
-+        ...snapshot(), // 検証用のpreviewを生成する関数
-+        candidates: rows,
-+      }), // 拒否確認コールバック / ハッシュ生成関数 / preview生成関数
-+    ).toThrow("複製内容を確認できません。"); // 固定失敗文を確認するメソッド
-+    expect( // 期待値を作る関数
-+      /**
-+       * UUID表記だけが異なる同一候補を渡す。
-+       */
-+      () => buildEventMonthCopyFingerprint({ // 拒否確認コールバック / ハッシュ生成関数
-+        ...snapshot(), // preview生成関数
-+        candidates: [candidate(), candidate(SOURCE_A.toUpperCase())], // 候補生成関数 / UUIDの大文字変換メソッド
-+      }),
-+    ).toThrow("複製内容を確認できません。"); // 固定失敗文を確認するメソッド
-+  },
-+);
-+
-+it("不正な元データ・scope・入力は原文やcauseなしの固定エラーにする", // テストケースを登録する関数
-+  /**
-+   * SDKや入力検証の例外に含まれ得る内容を、この境界から外へ出さない。
-+   */
-+  () => { // 例外の情報制限を確認するコールバック
-+    const value = snapshot(); // previewを生成する関数
-+    value.candidates[0].source.updatedAt = new Date(NaN); // 不正な更新版Dateの生成
-+    expect( // 期待値を作る関数
-+      /**
-+       * 不正日時を持つsnapshotをハッシュ化する。
-+       */
-+      () => buildEventMonthCopyFingerprint(value), // 拒否確認コールバック / ハッシュ生成関数
-+    ).toThrow("複製内容を確認できません。"); // 固定失敗文を確認するメソッド
-+    expect( // 期待値を作る関数
-+      /**
-+       * 不正scopeを持つsnapshotをハッシュ化する。
-+       */
-+      () => buildEventMonthCopyFingerprint({ // 拒否確認用のコールバック / preview全体のハッシュを生成する関数
-+        ...snapshot(), // 検証用のpreviewを生成する関数
-+        userId: "fixture-private-value",
-+      }), // 拒否確認コールバック / ハッシュ生成関数 / preview生成関数
-+    ).toThrow("複製内容を確認できません。"); // 固定失敗文を確認するメソッド
-+    try {
-+      buildEventMonthCopyInputHash(snapshot(), { // 実行入力のハッシュを生成する関数 / 検証用のpreviewを生成する関数
-+        ...input(), // 検証用の実行入力を生成する関数
-+        selectedEventIds: [],
-+      }); // 入力ハッシュ生成関数 / preview・入力生成関数
-+      throw new Error("fixture-expected-failure"); // 拒否されなかった場合を検出する固定例外の生成
-+    } catch (error) {
-+      expect(error).toBeInstanceOf(Error); // 期待値を作る関数 / Errorの型を検証するメソッド
-+      expect(error).toHaveProperty("message", "複製内容を確認できません。"); // 期待値を作る関数 / 固定失敗文の検証メソッド
-+      expect(error).not.toHaveProperty("cause"); // 期待値を作る関数 / 原因原文を含めない検証メソッド
-+    }
-+  },
-+);
-+
-+it("ハッシュモジュールはserver-onlyの境界を通る", // テストケースを登録する関数
-+  /**
-+   * server-onlyマーカーが拒否された場合は、モジュールの読込自体も失敗することを確認する。
-+   */
-+  async () => { // モジュール境界を検証する非同期コールバック
-+    vi.resetModules(); // モジュールの評価状態をリセットするメソッド
-+    vi.doMock("server-only", // server-onlyマーカーの動作を置換するメソッド
-+      /**
-+       * Clientからの読込拒否を模した固定例外を発生させる。
-+       */
-+      () => { // server-onlyの拒否を模すモックコールバック
-+        throw new Error("fixture-server-only"); // 境界確認用の固定例外の生成
-+      },
-+    );
-+    try {
-+      await expect( // 非同期の読込結果を検証する関数
-+        import("@/src/infrastructure/security/event-month-copy-fingerprint"), // サーバー専用モジュールの読込関数
-+      ).rejects.toHaveProperty("cause.message", "fixture-server-only"); // Vitestが保持した原因を通して境界の拒否を確認するメソッド
-+    } finally {
-+      vi.doUnmock("server-only"); // server-onlyモックを解除するメソッド
-+      vi.resetModules(); // 他の試験へ評価状態を残さないリセットメソッド
-+    }
-+  },
-+);
-diff --git a/tests/event-month-copy-policy.test.ts b/tests/event-month-copy-policy.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..cf5d714af8b25fbfeaa91bac6377353aa04f3994
---- /dev/null
-+++ b/tests/event-month-copy-policy.test.ts
-@@ -0,0 +1,383 @@
-+// tests/event-month-copy-policy.test.ts
-+// コピー列の完全一致・不変性・非コピー列の除外と、候補同士の一致情報を検証する。
-+
-+import { expect, it, vi } from "vitest";
-+
-+import {
-+  buildEventMonthCopyKey, // 全コピー列からサーバー内部専用の比較値を作る関数
-+  findEventMonthCopyCandidateDuplicates, // 候補間の完全一致情報を返す関数
-+  pickEventMonthCopyEvent, // コピー列だけを検証・抽出する関数
-+  type EventMonthCopyCandidate, // 元イベントと日時変換結果の組の型
-+} from "@/domain/club/event/event-month-copy-policy";
-+import {
-+  convertEventMonthCopyDateTimes, // クラブ現地時刻で日時を1か月先へ変換する関数
-+} from "@/domain/club/event/event-month-copy-date-times";
-+import type {
-+  EventMonthCopyEvent, // コピーするイベント1件あたりの型
-+  EventMonthCopySource, // コピー列・複製元ID・更新日時の型
-+} from "@/domain/club/event/event-month-copy-types";
-+
-+const SOURCE_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
-+const SOURCE_B = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
-+const SOURCE_C = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3";
-+
-+/**
-+ * 全コピー列を持つ独立したイベントを作る。
-+ */
-+function event(): EventMonthCopyEvent { // 正常イベントを生成する関数 / コピー対象イベントの型
-+  return {
-+    title: "練習",
-+    content: " 本文\n",
-+    genre: "PRACTICE",
-+    targetRoles: ["OWNER", "MEMBER"],
-+    startAt: new Date("2026-01-30T09:00:00.123Z"), // 開始Dateの生成
-+    endAt: null,
-+    isAllDay: false,
-+    location: "グラウンド",
-+    meetingAt: null,
-+    meetingLocation: null,
-+    belongings: "ボール",
-+    notes: null,
-+  };
-+}
-+
-+/**
-+ * 固定UTC値から、元データと実際の日時変換結果を作る。
-+ */
-+function candidate( // 候補間比較に使うデータを生成する関数
-+  id = SOURCE_A,
-+  start = "2026-01-30T09:00:00.123Z",
-+): EventMonthCopyCandidate { // 元データと変換結果の型
-+  const source: EventMonthCopySource = { // 複製元イベントの型
-+    ...event(), // 独立したコピー列を作る関数
-+    id,
-+    startAt: new Date(start), // 元の開始Dateを作るコンストラクター
-+    updatedAt: new Date("2026-01-01T00:00:00.000Z"), // 固定更新日時のDate生成
-+  };
-+  return {
-+    source,
-+    dateTimes: convertEventMonthCopyDateTimes(source, "UTC"), // 実際の日時変換関数
-+  };
-+}
-+
-+const changes: { // コピー各列の変更ケースを表す内部構造型
-+  field: keyof EventMonthCopyEvent; // コピー列名の型
-+  values: Partial<EventMonthCopyEvent>; // コピー列の一部を変更する型
-+}[] = [
-+  {
-+    field: "title",
-+    values: { title: "大会" },
-+  },
-+  {
-+    field: "content",
-+    values: { content: "別の本文" },
-+  },
-+  {
-+    field: "genre",
-+    values: { genre: "OTHER" },
-+  },
-+  {
-+    field: "targetRoles",
-+    values: { targetRoles: ["OWNER", "COACH"] },
-+  },
-+  {
-+    field: "startAt",
-+    values: { startAt: new Date("2026-01-30T09:00:00.124Z") }, // 検証用のDateを生成するコンストラクター
-+  }, // 1ミリ秒異なるDateの生成
-+  {
-+    field: "endAt",
-+    values: { endAt: new Date("2026-01-30T10:00:00.000Z") }, // 検証用のDateを生成するコンストラクター
-+  }, // 終了Dateの生成
-+  {
-+    field: "isAllDay",
-+    values: { isAllDay: true },
-+  },
-+  {
-+    field: "location",
-+    values: { location: "別の会場" },
-+  },
-+  {
-+    field: "meetingAt",
-+    values: { meetingAt: new Date("2026-01-30T08:00:00.000Z") }, // 検証用のDateを生成するコンストラクター
-+  }, // 集合Dateの生成
-+  {
-+    field: "meetingLocation",
-+    values: { meetingLocation: "集合場所" },
-+  },
-+  {
-+    field: "belongings",
-+    values: { belongings: "水筒" },
-+  },
-+  {
-+    field: "notes",
-+    values: { notes: "注意事項" },
-+  },
-+];
-+
-+it.each(changes)( // コピー各列の差を表形式で検証するテスト関数
-+  "$fieldの差を完全一致として扱わない",
-+  /**
-+   * コピー対象の列が1つでも異なれば比較値が変わることを確認する。
-+   */
-+  ({ values }) => { // 変更値を受け取るテストコールバック
-+    const original = event(); // 独立したイベントを作る関数
-+    expect(buildEventMonthCopyKey({ // 期待値を作る関数 / コピー列の比較値を作る関数
-+      ...original,
-+      ...values,
-+    })).not.toBe(buildEventMonthCopyKey(original)); // 不一致の比較メソッド / 元の比較値を作る関数
-+  },
-+);
-+
-+it("公開状態・ID・作者・公開日時・PDF・配送・既読・メモをコピーにも比較にも含めない", // テストケースを登録する関数
-+  /**
-+   * 余分なDB列や関連行を持つオブジェクトから、全コピー列だけが抽出されることを確認する。
-+   */
-+  () => { // allowlistと非コピー列を確認するコールバック
-+    const source = {
-+      ...event(), // 全コピー列を作る関数
-+      id: SOURCE_A,
-+      status: "PUBLISHED",
-+      createdAt: new Date(0), // コピーしない作成日時のDate生成
-+      updatedAt: new Date(1), // 比較しない更新日時のDate生成
-+      createdByMembershipId: SOURCE_B,
-+      updatedByMembershipId: SOURCE_C,
-+      firstPublishedAt: new Date(2), // 比較しない公開日時のDate生成
-+      readRequiredAt: new Date(3), // 比較しない未読基準日時のDate生成
-+      attachments: [{ id: "fixture-pdf" }],
-+      lineDeliveries: [{ id: "fixture-line" }],
-+      reads: [{ id: "fixture-read" }],
-+      personalMemos: [{ content: "fixture-private-memo" }],
-+    };
-+    expect(pickEventMonthCopyEvent(source)).toEqual(event()); // 期待値を作る関数 / コピー列抽出関数 / 構造比較メソッド / 独立イベント生成関数
-+    expect(buildEventMonthCopyKey(source)).toBe(buildEventMonthCopyKey(event())); // 期待値を作る関数 / コピー列の比較値生成関数 / 一致の比較メソッド / イベント生成関数
-+    const draft = {
-+      ...source,
-+      status: "DRAFT",
-+    };
-+    expect(buildEventMonthCopyKey(draft)).toBe( // 期待値を作る関数 / 比較値生成関数 / 公開状態に依存しない比較メソッド
-+      buildEventMonthCopyKey(source), // 元の比較値を作る関数
-+    );
-+  },
-+);
-+
-+it("対象ロールを順序・重複に依存しない集合として比較し、OWNERを自動補完しない", // テストケースを登録する関数
-+  /**
-+   * 集合としての一致と、元データの欠落を勝手に修復しないことを確認する。
-+   */
-+  () => { // ロール集合の意味を確認するコールバック
-+    const original = event(); // イベントを作る関数
-+    expect(buildEventMonthCopyKey({ // 期待値を作る関数 / 比較値生成関数
-+      ...original,
-+      targetRoles: ["MEMBER", "OWNER", "MEMBER"],
-+    })).toBe(buildEventMonthCopyKey(original)); // 一致の比較メソッド / 元の比較値生成関数
-+    const missingOwner = {
-+      ...original,
-+      targetRoles: ["MEMBER"] as const, // 読取専用ロール配列の型
-+    }; // OWNERを欠く読取専用ロール配列の型
-+    expect(buildEventMonthCopyKey(missingOwner)).not.toBe(buildEventMonthCopyKey(original)); // 期待値を作る関数 / 比較値生成関数 / 欠落を区別する比較メソッド
-+    expect(pickEventMonthCopyEvent(missingOwner).targetRoles).toEqual(["MEMBER"]); // 期待値を作る関数 / コピー列抽出関数 / 補完しない比較メソッド
-+  },
-+);
-+
-+it.each(["content", "location", "meetingLocation", "belongings", "notes"] as const)( // nullable文字列を検証するテスト関数 / 読取専用タプル型
-+  "%sのnull・空文字・空白を勝手に同一化しない",
-+  /**
-+   * 編集フォームのtrimや空文字null化をコピー比較へ混入させないことを確認する。
-+   */
-+  (field) => { // nullableのコピー列を受け取るコールバック
-+    const original = event(); // イベントを作る関数
-+    const nullKey = buildEventMonthCopyKey({ // コピー列の比較値を生成する関数
-+      ...original,
-+      [field]: null,
-+    }); // nullを含む比較値生成関数
-+    expect(buildEventMonthCopyKey({ // 期待値を作る関数 / コピー列の比較値を生成する関数
-+      ...original,
-+      [field]: "",
-+    })).not.toBe(nullKey); // 期待値を作る関数 / 比較値生成関数 / nullとの差の比較メソッド
-+    expect(buildEventMonthCopyKey({ // 期待値を作る関数 / コピー列の比較値を生成する関数
-+      ...original,
-+      [field]: " ",
-+    })).not.toBe( // 期待値を作る関数 / 比較値生成関数 / 空白との差の比較メソッド
-+      buildEventMonthCopyKey({ // コピー列の比較値を生成する関数
-+        ...original,
-+        [field]: "",
-+      }), // 空文字を含む比較値生成関数
-+    );
-+  },
-+);
-+
-+it("区切り文字やUnicode表記を含む本文も、別の列や別の文字列と混同しない", // テストケースを登録する関数
-+  /**
-+   * 単純な区切り文字連結や、意図しないUnicode正規化による誤一致を防ぐ。
-+   */
-+  () => { // 文字列の完全一致を確認するコールバック
-+    expect(buildEventMonthCopyKey({ // 期待値を作る関数 / コピー列の比較値を生成する関数
-+      ...event(), // 検証用のイベントを生成する関数
-+      title: "a|b",
-+      content: "c",
-+    })).not.toBe( // 期待値を作る関数 / 比較値生成関数 / イベント生成関数 / 不一致の比較メソッド
-+      buildEventMonthCopyKey({ // コピー列の比較値を生成する関数
-+        ...event(), // 検証用のイベントを生成する関数
-+        title: "a",
-+        content: "b|c",
-+      }), // 比較値生成関数 / イベント生成関数
-+    );
-+    expect(buildEventMonthCopyKey({ // 期待値を作る関数 / コピー列の比較値を生成する関数
-+      ...event(), // 検証用のイベントを生成する関数
-+      title: "\u00e9",
-+    })).not.toBe( // 期待値を作る関数 / 比較値生成関数 / イベント生成関数 / 不一致の比較メソッド
-+      buildEventMonthCopyKey({ // コピー列の比較値を生成する関数
-+        ...event(), // 検証用のイベントを生成する関数
-+        title: "e\u0301",
-+      }), // 比較値生成関数 / イベント生成関数
-+    );
-+  },
-+);
-+
-+it("抽出したDate・配列や入力独自のtoJSONを、元データと共有しない", // テストケースを登録する関数
-+  /**
-+   * 返却値からの入力変更と、独自シリアライズによるallowlist迂回を防ぐ。
-+   */
-+  () => { // 元データの非変更を確認するコールバック
-+    const source = event(); // イベントを作る関数
-+    const poison = vi.fn( // 呼出しを観測するモック生成メソッド
-+      /**
-+       * 呼ばれるべきでない独自JSON処理を検出する。
-+       */
-+      () => "fixture-private-value", // 独自JSON処理を模すコールバック
-+    );
-+    Object.assign(source.startAt, { toJSON: poison }); // 元Dateへ独自JSON処理を付けるメソッド
-+    const picked = pickEventMonthCopyEvent(source); // コピー列を抽出する関数
-+    const before = source.startAt.getTime(); // 元の開始UTC値を取得するメソッド
-+    picked.startAt.setTime(0); // 返却Dateだけを変更するメソッド
-+    expect(source.startAt.getTime()).toBe(before); // 期待値を作る関数 / UTC値取得メソッド / 入力保持の比較メソッド
-+    expect(picked.targetRoles).not.toBe(source.targetRoles); // 期待値を作る関数 / 配列参照の分離を確認するメソッド
-+    buildEventMonthCopyKey(source); // 独自JSON処理を使わず比較値を作る関数
-+    expect(poison).not.toHaveBeenCalled(); // 期待値を作る関数 / 独自処理が未呼出しであることの検証メソッド
-+  },
-+);
-+
-+it("不正なコピー値を本文や検証原文なしの固定例外で返す", // テストケースを登録する関数
-+  /**
-+   * Zodの詳細例外や入力の内容を公開しないことを確認する。
-+   */
-+  () => { // 安全なエラーを確認するコールバック
-+    const invalid = {
-+      ...event(), // 検証用のイベントを生成する関数
-+      genre: "fixture-private-value",
-+    } as unknown as EventMonthCopyEvent; // イベント生成関数 / 不明値型と検証用イベント型への型アサーション
-+    expect( // 期待値を作る関数
-+      /**
-+       * 不正なイベントの比較を試みる。
-+       */
-+      () => buildEventMonthCopyKey(invalid), // 検証対象コールバック / 比較値生成関数
-+    ).toThrow("複製対象のデータを確認できません。"); // 固定の失敗文を確認するメソッド
-+  },
-+);
-+
-+it("月末補正で候補同士が一致した場合は、元の開始日時順で注意情報だけを返す", // テストケースを登録する関数
-+  /**
-+   * 候補の入力順やIDの大小だけではなく、元の開始日時を代表選択の優先順にする。
-+   */
-+  () => { // 月末の候補間一致を確認するコールバック
-+    const earlier = candidate(SOURCE_B, "2026-01-30T09:00:00.123Z"); // 先行候補を作る関数
-+    const later = candidate(SOURCE_A, "2026-01-31T09:00:00.123Z"); // 後続候補を作る関数
-+    const candidates = [later, earlier];
-+    const expected = [{
-+      sourceEventId: SOURCE_A,
-+      duplicateSourceEventId: SOURCE_B,
-+    }];
-+    expect(findEventMonthCopyCandidateDuplicates(candidates)).toEqual(expected); // 期待値を作る関数 / 候補間一致情報の関数 / 構造比較メソッド
-+    expect(findEventMonthCopyCandidateDuplicates([earlier, later])).toEqual(expected); // 期待値を作る関数 / 候補間一致情報の関数 / 順序不変の比較メソッド
-+    expect(candidates[0]).toBe(later); // 期待値を作る関数 / 呼出し元の順序保持の比較メソッド
-+    expect(later).not.toHaveProperty("initiallySelected"); // 期待値を作る関数 / 選択方針を追加しない検証メソッド
-+  },
-+);
-+
-+it("開始日時が同じ候補では小文字IDの辞書順で代表と注意情報を固定する", // テストケースを登録する関数
-+  /**
-+   * 3件以上の一致とUUID表記差でも、代表を一貫して返す。
-+   */
-+  () => { // 同時刻の安定順を確認するコールバック
-+    const first = candidate(SOURCE_A.toUpperCase()); // 候補生成関数 / UUIDの大文字変換メソッド
-+    expect(findEventMonthCopyCandidateDuplicates([ // 期待値を作る関数 / 候補間一致情報の関数
-+      candidate(SOURCE_C), // 候補を作る関数
-+      candidate(SOURCE_B), // 候補を作る関数
-+      first,
-+    ])).toEqual([ // 注意情報の順序と代表を比較するメソッド
-+      {
-+        sourceEventId: SOURCE_B,
-+        duplicateSourceEventId: SOURCE_A,
-+      },
-+      {
-+        sourceEventId: SOURCE_C,
-+        duplicateSourceEventId: SOURCE_A,
-+      },
-+    ]);
-+  },
-+);
-+
-+it("変換不能な候補を重複として扱わず、コピー内容が異なる候補も除外しない", // テストケースを登録する関数
-+  /**
-+   * 日時変換の失敗を注意表示上の完全一致に混ぜないことを確認する。
-+   */
-+  () => { // 非一致と変換不能を確認するコールバック
-+    const different = candidate(SOURCE_B); // 候補を作る関数
-+    different.source.content = "異なる内容";
-+    const gap = candidate(SOURCE_C, "2026-02-08T07:30:00.000Z"); // DST gapへ移る候補を作る関数
-+    gap.dateTimes = convertEventMonthCopyDateTimes(gap.source, "America/New_York"); // 実際の日時変換関数
-+    expect(gap.dateTimes.success).toBe(false); // 期待値を作る関数 / 不存在時刻の確認メソッド
-+    expect(findEventMonthCopyCandidateDuplicates([candidate(), different, gap])).toEqual([]); // 期待値を作る関数 / 候補間一致情報の関数 / 候補生成関数 / 非一致の検証メソッド
-+  },
-+);
-+
-+it("0件・100件を扱い、101件と正規化後に同じ候補IDを拒否する", // テストケースを登録する関数
-+  /**
-+   * 上限と候補識別子の曖昧性を、この関数でも受け付けないことを確認する。
-+   */
-+  () => { // 件数とID重複を確認するコールバック
-+    expect(findEventMonthCopyCandidateDuplicates([])).toEqual([]); // 期待値を作る関数 / 候補間一致情報の関数 / 空結果の比較メソッド
-+    const rows: EventMonthCopyCandidate[] = []; // 候補配列の型
-+    for (let index = 0; index < 101; index += 1) {
-+      const prefix = index.toString(16).padStart(8, "0"); // 16進表記の生成 / 8桁への補完メソッド
-+      rows.push(candidate(`${prefix}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`)); // 候補配列への追加メソッド / 候補生成関数
-+    }
-+    expect(findEventMonthCopyCandidateDuplicates(rows.slice(0, 100))).toHaveLength(99); // 期待値を作る関数 / 候補間一致情報の関数 / 配列の切出し / 結果件数の検証メソッド
-+    expect( // 期待値を作る関数
-+      /**
-+       * 上限を超えた候補を渡す。
-+       */
-+      () => findEventMonthCopyCandidateDuplicates(rows), // 拒否確認コールバック / 候補間一致情報の関数
-+    ).toThrow("複製対象のデータを確認できません。"); // 固定エラーの検証メソッド
-+    expect( // 期待値を作る関数
-+      /**
-+       * 大小文字だけが違う同一IDの候補を渡す。
-+       */
-+      () => findEventMonthCopyCandidateDuplicates([candidate(), candidate(SOURCE_A.toUpperCase())]), // 拒否確認コールバック / 候補間一致情報の関数 / 候補生成関数 / 大文字変換メソッド
-+    ).toThrow("複製対象のデータを確認できません。"); // 固定エラーの検証メソッド
-+  },
-+);
-+
-+it("比較用DomainはNode cryptoを読み込まずに利用できる", // テストケースを登録する関数
-+  /**
-+   * cryptoを利用不能にしても、純粋な比較モジュールだけは動作することを確認する。
-+   */
-+  async () => { // モジュール境界を検証する非同期コールバック
-+    vi.resetModules(); // モジュールの評価状態をリセットするメソッド
-+    vi.doMock("node:crypto", // Node cryptoを置換するメソッド
-+      /**
-+       * Domainから到達してはいけないNode依存を検出する。
-+       */
-+      () => { // Node依存を拒否するモックコールバック
-+        throw new Error("fixture-node-import"); // Node依存を検出する固定例外の生成
-+      },
-+    );
-+    try {
-+      const policy = await import("@/domain/club/event/event-month-copy-policy"); // Domainモジュールだけを読み込む関数
-+      expect(policy.buildEventMonthCopyKey(event())).toBe(buildEventMonthCopyKey(event())); // 期待値を作る関数 / 新規評価と既存の比較値生成関数 / イベント生成関数 / 一致の比較メソッド
-+    } finally {
-+      vi.doUnmock("node:crypto"); // Node cryptoのモックを解除するメソッド
-+      vi.resetModules(); // 他の試験へ評価状態を残さないリセットメソッド
-+    }
-+  },
-+);
+ // イベントに対する「自分専用メモ」
+ model ClubEventMemo {
+   id        String   @id @default(uuid())
