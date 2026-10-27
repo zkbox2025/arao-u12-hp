@@ -12,7 +12,9 @@ export const PLAN_FEATURES = {
   PRO: [],
 } as const satisfies Record<PlanType, readonly ClubFeature[]>;
 
-// プランに応じて機能が有効かどうかを判定する
+/** 
+ * プランに応じて機能が有効かどうかを判定する
+ */
 export function hasClubFeature(
   planType: PlanType,
   feature: ClubFeature,

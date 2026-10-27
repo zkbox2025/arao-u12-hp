@@ -10,7 +10,9 @@ const CLUB_ADMIN_ROLES = new Set<ClubMemberRole>([
 ]);
 
 
-//管理者(OWNER / COACH / OFFICER)かどうか判定する関数
+/** 
+ * 管理者(OWNER / COACH / OFFICER)かどうか判定する関数
+ */
 export function isClubAdminRole(
   role: ClubMemberRole,
 ): boolean {

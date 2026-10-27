@@ -1,166 +1,893 @@
-diff --git a/prisma/migrations/20261027000000_f10_event_month_copy/migration.sql b/prisma/migrations/20261027000000_f10_event_month_copy/migration.sql
+diff --git a/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts b/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..74cd6af214d1b7e700601ed942784b5e5edc1e96
+index 0000000000000000000000000000000000000000..8df57356f369241c2c66bcc6e135b40873e72842
 --- /dev/null
-+++ b/prisma/migrations/20261027000000_f10_event_month_copy/migration.sql
-@@ -0,0 +1,98 @@
-+-- prisma/migrations/20261027000000_f10_event_month_copy/migration.sql
-+-- 前月予定の複製と同一transactionで保存する完了記録を追加する。
-+-- CHECK・triggerはPrisma schemaで表現できないため、このmigrationで定義する。
-+-- F01の同クラブ参照・SetNull補正・clubId不変の共通関数が適用済みであることを前提とする。
++++ b/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts
+@@ -0,0 +1,249 @@
++// src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts
++// 前月開始の候補と完全一致する既存イベントを、現在の認可条件で上限付き取得する。
 +
-+BEGIN;
++import "server-only";
 +
-+-- 本文やイベントへの関連行を持たず、操作の照合値と完了結果だけを保持する。
-+CREATE TABLE public."ClubEventBatchOperation" (
-+    "id" TEXT NOT NULL, -- 操作記録IDの文字列型。Prismaのuuid()で生成する
-+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP, -- 記録時刻のミリ秒精度日時型
-+    "clubId" TEXT NOT NULL, -- 操作を所属させるクラブIDの文字列型
-+    "requestId" TEXT NOT NULL, -- 小文字UUID v4の操作識別子を保持する文字列型
-+    "operation" TEXT NOT NULL, -- 固定の操作種別を保持する文字列型
-+    "targetMonth" TEXT NOT NULL, -- 対象月をYYYY-MMで保持する文字列型
-+    "inputHash" TEXT NOT NULL, -- 実行入力の小文字SHA-256を保持する文字列型
-+    "executedByMembershipId" TEXT, -- 実行者削除後のnullを許す履歴参照IDの文字列型
-+    "createdCount" INTEGER NOT NULL, -- 完了した作成件数の整数型
-+    "completedAt" TIMESTAMP(3) NOT NULL, -- 完了日時のミリ秒精度日時型。途中状態用の既定値は設けない
++import { TZDate } from "@date-fns/tz";
++import type { Prisma } from "@prisma/client";
 +
-+    CONSTRAINT "ClubEventBatchOperation_pkey" PRIMARY KEY ("id"),
-+    CONSTRAINT "ClubEventBatchOperation_operation_check"
-+        CHECK ("operation" = 'COPY_PREVIOUS_MONTH'),
-+    CONSTRAINT "ClubEventBatchOperation_request_id_check"
-+        CHECK (
-+            char_length("requestId") = 36 -- 文字数を数える関数。末尾の改行等を許可しない
-+            AND "requestId" ~ '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
-+        ),
-+    CONSTRAINT "ClubEventBatchOperation_target_month_check"
-+        CHECK (
-+            char_length("targetMonth") = 7 -- 対象月の文字数を検証する関数
-+            AND "targetMonth" ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'
-+            AND "targetMonth" NOT LIKE '0000-%'
-+            AND "targetMonth" <> '0001-01'
-+        ),
-+    CONSTRAINT "ClubEventBatchOperation_input_hash_check"
-+        CHECK (
-+            char_length("inputHash") = 64 -- SHA-256の16進表記の文字数を検証する関数
-+            AND "inputHash" ~ '^[0-9a-f]{64}$'
-+        ),
-+    CONSTRAINT "ClubEventBatchOperation_created_count_check"
-+        CHECK (
-+            "createdCount" >= 1
-+            AND "createdCount" <= 100
-+        )
-+);
++import {
++  CLUB_MEMBER_ROLE_LABELS, // Prisma由来の全クラブ所属ロールに対応する表示ラベル
++  isClubAdminRole, // OWNER・COACH・OFFICERかを判定する関数
++} from "@/domain/club/club-member-role";
++import {
++  convertEventMonthCopyDateTimes, // 前月イベントの日時だけを1か月先へ変換する関数
++} from "@/domain/club/event/event-month-copy-date-times";
++import {
++  isEventMonthCopyTargetMonth, // 複製対象月の厳密な構造を検証する関数
++} from "@/domain/club/event/event-month-copy-form";
++import {
++  buildEventMonthCopyKey, // 全コピー列の決定的な比較値を作る関数
++  EVENT_MONTH_COPY_FIELDS, // 変更できないコピー対象の項目名リスト
++  pickEventMonthCopyEvent, // コピー対象の値を検証し、必要な列だけを抽出する関数
++} from "@/domain/club/event/event-month-copy-policy";
++import {
++  EVENT_MONTH_COPY_MAX_COUNT, // 前月予定の複製候補・選択件数の上限100件
++  type EventMonthCopyEvent, // コピーするイベント1件あたりの型
++} from "@/domain/club/event/event-month-copy-types";
++import {
++  hasClubFeature, // プランで指定機能を利用できるか判定する関数
++} from "@/domain/club/plan-features";
++import {
++  prisma, // サーバーDB接続用の共有Prisma Client
++} from "@/src/infrastructure/prisma/client";
++import type {
++  EventMonthCopyFingerprintCandidate, // 元データ・変換結果・既存一致IDをまとめたサーバー用候補型
++  EventMonthCopyFingerprintScope, // クラブ・所属・Auth本人の識別子をまとめた型
++} from "@/src/infrastructure/security/event-month-copy-fingerprint";
++import type {
++  ClubMemberRole, // Prisma由来のクラブ所属ロール型
++} from "@/types/prisma";
 +
-+-- Membership削除時の履歴参照解除で、対象の操作記録を検索するための索引。
-+CREATE INDEX "ClubEventBatchOperation_executedByMembershipId_idx"
-+    ON public."ClubEventBatchOperation" ("executedByMembershipId");
++/**
++ * 認証済みの呼出し元から受け取るscopeと、厳密な検証対象の複製先年月。
++ * この識別子だけでAuth本人を認証したことにはならない。
++ */
++export type EventMonthCopyPreviewDataInput = EventMonthCopyFingerprintScope & { // 認可scopeと対象月の結合型
++  targetMonth: string; // 複製先YYYY-MMの文字列型
++};
 +
-+-- 同じクラブ内での再送を一意にし、別クラブでの同じrequestIdは独立して扱う。
-+CREATE UNIQUE INDEX "ClubEventBatchOperation_clubId_requestId_key"
-+    ON public."ClubEventBatchOperation" ("clubId", "requestId");
++/**
++ * Client表示へ変換する前のサーバー内部材料。初期選択・コピー実行の可否は決めない。
++ */
++export type EventMonthCopyPreviewData = // 上限付き読取の成功・失敗を区別する型
++  | { // 読取成功の材料をまとめる構造型
++      outcome: "READY"; // 0件を含む取得成功の型
++      targetMonth: string; // 複製先YYYY-MMの文字列型
++      sourceMonth: string; // 複製元YYYY-MMの文字列型
++      timezone: string; // 現在のDBから取得したクラブtimezoneの文字列型
++      candidates: readonly EventMonthCopyFingerprintCandidate[]; // 本文を含むサーバー専用候補配列型
++    }
++  | { // 値を公開しない取得失敗の構造型
++      outcome: "FORBIDDEN" | "TOO_MANY" | "PREVIEW_FAILED"; // 認可拒否・超過・安全な取得失敗の型
++    };
 +
-+-- クラブ自体の削除時だけ、所属する完了記録を削除する。
-+ALTER TABLE public."ClubEventBatchOperation"
-+    ADD CONSTRAINT "ClubEventBatchOperation_clubId_fkey"
-+    FOREIGN KEY ("clubId")
-+    REFERENCES public."Club" ("id")
-+    ON DELETE CASCADE
-+    ON UPDATE CASCADE;
++const COPY_SELECT = Object.fromEntries( // 共通allowlistからselect辞書を生成するメソッド
++  EVENT_MONTH_COPY_FIELDS.map( // コピー項目名をselect値へ写すメソッド
++    /**
++     * コピー項目1つを、取得を許可するselectの組へ変換する。
++     */
++    (field) => [field, true], // 項目名からselectの組を返すコールバック
++  ),
++) as Record<keyof EventMonthCopyEvent, true>; // コピー列名だけをキーに持つ辞書型への型アサーション
++const SOURCE_SELECT = {
++  ...COPY_SELECT,
++  id: true,
++  updatedAt: true,
++} satisfies Prisma.ClubEventSelect; // コピー列・元ID・更新版だけのPrisma select型
++const ALL_ROLES = Object.keys(CLUB_MEMBER_ROLE_LABELS) as ClubMemberRole[]; // 全ロール名を取得するメソッド / ロール配列型
 +
-+-- clubIdは必須のまま保持し、Membership削除時には実行者の単一FKだけを解除する。
-+ALTER TABLE public."ClubEventBatchOperation"
-+    ADD CONSTRAINT "ClubEventBatchOperation_executedByMembershipId_fkey"
-+    FOREIGN KEY ("executedByMembershipId")
-+    REFERENCES public."ClubMembership" ("id")
-+    ON DELETE SET NULL
-+    ON UPDATE CASCADE;
-+
-+-- 実行者を設定・変更する際は、操作記録と同じクラブのMembershipであることを保証する。
-+-- 新規保存時の実行者必須・ACTIVE・管理者権限の確認は、後続Repositoryで別途行う。
-+CREATE TRIGGER "ClubEventBatchOperation_executor_club_match"
-+    BEFORE INSERT OR UPDATE
-+    ON public."ClubEventBatchOperation"
-+    FOR EACH ROW
-+    EXECUTE FUNCTION public."enforce_same_club_reference"( -- F01の同クラブ参照検証関数を再利用する
-+        'executedByMembershipId',
-+        'ClubMembership'
-+    );
-+
-+-- 更新によって別クラブへ完了記録を移せないようにする。
-+CREATE TRIGGER "ClubEventBatchOperation_club_id_immutable"
-+    BEFORE UPDATE OF "clubId"
-+    ON public."ClubEventBatchOperation"
-+    FOR EACH ROW
-+    EXECUTE FUNCTION public."prevent_club_id_change"(); -- F01のclubId変更禁止関数を再利用する
-+
-+-- ブラウザー向けpolicyを作らず、既存のサーバーDB接続だけで利用する。
-+ALTER TABLE public."ClubEventBatchOperation" ENABLE ROW LEVEL SECURITY;
-+
-+-- 作成roleのdefault privilegesに依存せず、既存のData API用ロールとPUBLICから権限を剥奪する。
-+REVOKE ALL PRIVILEGES
-+    ON TABLE public."ClubEventBatchOperation"
-+    FROM PUBLIC, anon, authenticated;
-+
-+COMMIT;
-diff --git a/prisma/schema.prisma b/prisma/schema.prisma
-index 95b874817d6229bbd288199a817e4ce6788f3e25..e81890d3ca0d931dc3ed9602c49a5ee0ad4482fd 100644
---- a/prisma/schema.prisma
-+++ b/prisma/schema.prisma
-@@ -1,3 +1,5 @@
-+// prisma/schema.prisma // 【追加】Prismaのデータモデルとrelationを定義する。
-+
- generator client {
-   provider = "prisma-client-js"
- }
-@@ -194,6 +196,9 @@ model Club {
-   events           ClubEvent[]
-   notices          ClubNotice[]
- 
-+  /// 【追加】クラブ内で完了した前月イベント複製の操作記録。
-+  eventBatchOperations ClubEventBatchOperation[] // 【追加】完了した一括操作モデルの配列型
-+
-   eventAttachments  ClubEventAttachment[]
-   noticeAttachments ClubNoticeAttachment[]
- 
-@@ -269,6 +274,9 @@ model ClubMembership {
-   createdEvents ClubEvent[] @relation("ClubEventCreatedBy")
-   updatedEvents ClubEvent[] @relation("ClubEventUpdatedBy")
- 
-+  /// 【追加】このMembershipが実行した前月イベント複製の完了記録。
-+  executedEventBatchOperations ClubEventBatchOperation[] // 【追加】実行者から操作記録へ辿るrelation配列型
-+
-   createdNotices ClubNotice[] @relation("ClubNoticeCreatedBy")
-   updatedNotices ClubNotice[] @relation("ClubNoticeUpdatedBy")
- 
-@@ -406,6 +414,31 @@ model ClubEvent {
-   @@index([clubId, status, endAt])
- }
- 
-+/// 【追加】前月イベント複製と同一transactionで保存する完了記録。途中状態は保存しない。
-+/// 【追加】本文を保存せず、再送時の照合値と完了結果だけを保持する。
-+model ClubEventBatchOperation { // 【追加】クラブ単位の一括操作の冪等性・完了結果を保持するモデル
-+  id        String   @id @default(uuid()) // 【追加】操作記録IDの文字列型 / UUIDを生成するPrisma関数
-+  createdAt DateTime @default(now()) // 【追加】記録日時の型 / 現在時刻を設定するPrisma関数
-+
-+  clubId String // 【追加】所属クラブIDの文字列型
-+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade) // 【追加】クラブ削除時だけ記録も削除するrelation型
-+
-+  requestId   String // 【追加】小文字UUID v4の操作識別子の文字列型。SQL CHECKでも検証する
-+  operation   String // 【追加】COPY_PREVIOUS_MONTHだけを許す操作種別の文字列型。SQL CHECKで限定する
-+  targetMonth String // 【追加】前月を表現できるYYYY-MMの文字列型。SQL CHECKで検証する
-+  inputHash   String // 【追加】正規化済み実行入力の小文字SHA-256文字列型。本文は保存しない
-+
-+  /// 【追加】新規保存時は認可済み実行者を設定し、Membership削除後だけnullの履歴を保持する。
-+  executedByMembershipId String? // 【追加】履歴参照解除を許す実行Membership IDのnullable文字列型
-+  executedByMembership   ClubMembership? @relation(fields: [executedByMembershipId], references: [id], onDelete: SetNull) // 【追加】実行者削除時に参照IDだけをnullにするrelation型
-+
-+  createdCount Int // 【追加】完了した作成件数の整数型。SQL CHECKで1〜100件に限定する
-+  completedAt  DateTime // 【追加】保存完了日時の必須型。未完了の記録を先に作らない
-+
-+  @@unique([clubId, requestId]) // 【追加】同じクラブ内の操作識別子を一意にする
-+  @@index([executedByMembershipId]) // 【追加】実行者削除時のSetNull対象を検索する索引
++/**
++ * クラブ現地の月初をUTCへ変換する。年1〜99も1900年代へ読み替えず明示設定する。
++ * 月境界のDSTによる欠落時刻はSDKが解決する。予定本体の変換とは別の検索境界である。
++ */
++function monthStart( // クラブ現地月初のUTC値を作る関数
++  year: number, // 西暦年の数値型
++  month: number, // 1〜12月の数値型
++  timezone: string, // クラブtimezoneの文字列型
++): Date { // 月初UTC日時の型
++  const local = new TZDate(0, timezone); // timezone付き日時のコンストラクター
++  local.setFullYear(year, month - 1, 1); // 年0〜99の読替えなしで年月初日を設定するメソッド
++  local.setHours(0, 0, 0, 0); // 現地月初の時分秒ミリ秒を設定するメソッド
++  return new Date(local.getTime()); // 標準Dateの生成 / UTC値を取得するメソッド
 +}
 +
- // イベントに対する「自分専用メモ」
- model ClubEventMemo {
-   id        String   @id @default(uuid())
++/**
++ * 全コピー列が等しい既存イベントの条件。ロールは順序・重複を無視した集合で比較する。
++ * 余分なロールを持つ行も排除し、公開状態や関連行は条件に含めない。
++ */
++function duplicateWhere( // 既存イベントの完全一致検索条件を組み立てる関数
++  clubId: string, // 認可対象クラブIDの文字列型
++  event: EventMonthCopyEvent, // 変換後のコピー値の型
++): Prisma.ClubEventWhereInput { // Prismaイベント検索条件の型
++  const { targetRoles, ...columns } = pickEventMonthCopyEvent(event); // コピー列だけを検証・抽出する関数
++  const roles = [...new Set(targetRoles)]; // ロールの重複を除く集合の生成
++  if (roles.length === 0) {
++    return {
++      clubId,
++      ...columns,
++      targetRoles: {
++        isEmpty: true,
++      },
++    };
++  }
++  const excludedRoles = ALL_ROLES.filter( // 候補に含まれないロールを取り出すメソッド
++    /**
++     * 候補のロール集合にないロールだけを残す。
++     */
++    (role) => !roles.includes(role), // 集合外か判定するコールバック / 配列の包含判定メソッド
++  );
++  return {
++    clubId,
++    ...columns,
++    targetRoles: {
++      hasEvery: roles,
++    },
++    NOT: {
++      targetRoles: {
++        hasSome: excludedRoles,
++      },
++    },
++  };
++}
++
++/**
++ * 最新のACTIVE所属・本人・クラブ・管理者ロール・利用可能プランを確認して材料を取得する。
++ * Prisma読取は認可1回＋候補1回＋異なる変換値の一致検索最大100回の計102呼出し。
++ * 実SQL数はclubのrelation取得方式に依存するため、DB統合試験で別途確認する。
++ * transaction clientを渡せば、後続の保存処理でも同じ読取を再利用できる。
++ * transactionの開始、Auth検証、ログ出力、初期選択、書込は行わない。
++ */
++export async function findEventMonthCopyPreviewData( // 上限付きpreview読取の公開関数
++  input: EventMonthCopyPreviewDataInput, // 認証済み呼出し元のscopeと対象月の型
++  database: Prisma.TransactionClient = prisma, // 通常Clientまたは呼出し元transaction clientの型
++): Promise<EventMonthCopyPreviewData> { // サーバー用取得結果を返す非同期型
++  try {
++    if (!isEventMonthCopyTargetMonth(input.targetMonth)) { // 対象月を厳密に検証する関数
++      return { outcome: "PREVIEW_FAILED" };
++    }
++    const actor = await database.clubMembership.findFirst({ // 最新の本人所属を取得するメソッド
++      where: {
++        id: input.membershipId,
++        clubId: input.clubId,
++        userId: input.userId,
++        status: "ACTIVE",
++      },
++      select: {
++        role: true,
++        club: {
++          select: {
++            timezone: true,
++            planType: true,
++          },
++        },
++      },
++    });
++    if (
++      !actor ||
++      !isClubAdminRole(actor.role) || // 現在のロールが管理者か判定する関数
++      !hasClubFeature(actor.club.planType, "CLUB_APP") // 現在のプランでアプリを使えるか判定する関数
++    ) {
++      return { outcome: "FORBIDDEN" };
++    }
++    const timezone = actor.club.timezone;
++    new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(0); // timezoneを検証する書式の生成 / 固定日時の書式化メソッド
++    const year = Number(input.targetMonth.slice(0, 4)); // 年を取り出すメソッド / 数値へ変換する関数
++    const month = Number(input.targetMonth.slice(5, 7)); // 月を取り出すメソッド / 数値へ変換する関数
++    const sourceYear = month === 1 ? year - 1 : year;
++    const sourceMonthNumber = month === 1 ? 12 : month - 1;
++    const sourceMonth =
++      `${String(sourceYear).padStart(4, "0")}-${String(sourceMonthNumber).padStart(2, "0")}`; // 年月の文字列化関数 / 桁を揃えるメソッド
++    // 元DRAFTも取得対象にする確定方針に従い、status条件は設けない。
++    const rows = await database.clubEvent.findMany({ // 前月開始の候補を上限付きで取得するメソッド
++      where: {
++        clubId: input.clubId,
++        startAt: {
++          gte: monthStart(sourceYear, sourceMonthNumber, timezone), // 前月の現地月初をUTCへ変換する関数
++          lt: monthStart(year, month, timezone), // 対象月の現地月初をUTCへ変換する関数
++        },
++      },
++      select: SOURCE_SELECT,
++      orderBy: [
++        { startAt: "asc" },
++        { id: "asc" },
++      ],
++      take: EVENT_MONTH_COPY_MAX_COUNT + 1,
++    });
++    if (rows.length > EVENT_MONTH_COPY_MAX_COUNT) {
++      return { outcome: "TOO_MANY" };
++    }
++    const candidates: EventMonthCopyFingerprintCandidate[] = []; // サーバー用の変換済み候補配列型
++    const duplicateIds = new Map<string, string | null>(); // 比較値と既存一致IDのMap生成 / 文字列または未一致の型
++    for (const row of rows) {
++      const source = {
++        ...pickEventMonthCopyEvent(row), // コピー列だけを検証・抽出する関数
++        id: row.id,
++        updatedAt: new Date(row.updatedAt.getTime()), // 更新版Dateの生成 / UTC値を取得するメソッド
++      };
++      const dateTimes = convertEventMonthCopyDateTimes(source, timezone); // 先行粒度の日時変換関数
++      let duplicateEventId: string | null = null; // 既存一致IDまたは未一致の型
++      if (dateTimes.success) {
++        const converted = {
++          ...source,
++          ...dateTimes.converted,
++        };
++        const key = buildEventMonthCopyKey(converted); // 全コピー列の比較値を作る関数。本文をログへ出さない
++        const cached = duplicateIds.get(key); // 既に照合した変換値の結果を取得するメソッド
++        if (cached !== undefined) {
++          duplicateEventId = cached;
++        } else {
++          const duplicate = await database.clubEvent.findFirst({ // 一致行を最大1件だけ取得するメソッド
++            where: duplicateWhere(input.clubId, converted), // 同クラブの全コピー列一致条件を作る関数
++            select: {
++              id: true,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          });
++          duplicateEventId = duplicate?.id ?? null;
++          duplicateIds.set(key, duplicateEventId); // 同一変換値の検索結果を記録するメソッド
++        }
++      }
++      candidates.push({ // 元データ・変換結果・既存一致IDを追加するメソッド
++        source,
++        dateTimes,
++        duplicateEventId,
++      });
++    }
++    return {
++      outcome: "READY",
++      targetMonth: input.targetMonth,
++      sourceMonth,
++      timezone,
++      candidates,
++    };
++  } catch {
++    return { outcome: "PREVIEW_FAILED" };
++  }
++}
+diff --git a/tests/event-month-copy-read-repository.test.ts b/tests/event-month-copy-read-repository.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..39f6a9196c4430073f2877cfccecf3e7da0abc1f
+--- /dev/null
++++ b/tests/event-month-copy-read-repository.test.ts
+@@ -0,0 +1,632 @@
++// tests/event-month-copy-read-repository.test.ts
++// 実DB・Auth・dotenvを評価せず、前月開始・最新権限・有限件数・限定selectを確認する。
++
++import {
++  afterEach,
++  beforeEach,
++  expect,
++  it,
++  vi,
++} from "vitest";
++import type { Prisma } from "@prisma/client";
++
++import {
++  EVENT_MONTH_COPY_FIELDS, // 変更できないコピー対象の項目名リスト
++} from "@/domain/club/event/event-month-copy-policy";
++import type {
++  EventMonthCopySource, // コピー列に複製元IDと更新日時を加えた型
++} from "@/domain/club/event/event-month-copy-types";
++import {
++  findEventMonthCopyPreviewData, // 現在の認可条件で上限付きpreview材料を取得する関数
++  type EventMonthCopyPreviewDataInput, // 認証済みscopeと対象月の入力型
++} from "@/src/infrastructure/prisma/repositories/event-month-copy-read-repository";
++import type {
++  ClubMemberRole, // Prisma由来の所属ロール型
++  ClubMembershipStatus, // Prisma由来の所属状態型
++  ContentStatus, // Prisma由来の公開・下書き状態型
++  PlanType, // Prisma由来のクラブプラン型
++} from "@/types/prisma";
++
++const mocks = vi.hoisted( // import前にDBモックを作るメソッド
++  /**
++   * 本物のPrisma Clientの初期化を防ぐ3つの読取delegateを作る。
++   */
++  () => ({ // DB読取モックを返すコールバック
++    actor: vi.fn(), // 所属読取のモック生成メソッド
++    events: vi.fn(), // 候補読取のモック生成メソッド
++    match: vi.fn(), // 既存完全一致読取のモック生成メソッド
++  }),
++);
++vi.mock("@/src/infrastructure/prisma/client", // dotenvを含む共有Clientの読込を置換するメソッド
++  /**
++   * 実接続を持たず、書込メソッドも提供しないClientを返す。
++   */
++  () => ({ // 読取専用Clientを返すモックコールバック
++    prisma: {
++      clubMembership: {
++        findFirst: mocks.actor, // 最新所属を読むモック関数の参照
++      },
++      clubEvent: {
++        findMany: mocks.events, // 前月候補を読むモック関数の参照
++        findFirst: mocks.match, // 既存一致を読むモック関数の参照
++      },
++    },
++  }),
++);
++
++const CLUB = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
++const MEMBER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
++const USER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
++const OTHER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
++const SOURCE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
++const INPUT: EventMonthCopyPreviewDataInput = { // 認証済みの呼出し元を模す入力型
++  clubId: CLUB,
++  membershipId: MEMBER,
++  userId: USER,
++  targetMonth: "2026-02",
++};
++
++/**
++ * DBが保持している所属のfixture。queryの本人・クラブ・ACTIVE条件で照合する。
++ */
++type Actor = { // 保存済み所属の試験用型
++  id: string; // 所属IDの文字列型
++  clubId: string; // クラブIDの文字列型
++  userId: string; // Auth本人IDの文字列型
++  role: ClubMemberRole; // 保存済みロール型
++  status: ClubMembershipStatus; // 保存済み所属状態型
++  club: { // 保存済みクラブ設定の構造型
++    timezone: string; // 保存済みtimezoneの文字列型
++    planType: PlanType; // 保存済みプラン型
++  };
++};
++
++/**
++ * select漏れの検出用に非コピー列も含めたDBイベントfixture。
++ */
++type StoredEvent = EventMonthCopySource & { // コピー元にDBの余分な列を加えた試験用型
++  clubId: string; // 保存先クラブIDの文字列型
++  status: ContentStatus; // 公開・下書き状態型
++  attachments: { id: string }[]; // 取得してはいけない添付行の型
++};
++let actor: Actor | null; // 所属がない場合も扱うfixture型
++let events: StoredEvent[]; // DB内イベントを模した配列型
++
++/**
++ * 独立したコピー元を作る。公開・下書きや日時などは試験ごとに上書きできる。
++ */
++function event( // コピー元fixtureを生成する関数
++  changes: Partial<StoredEvent> = {}, // fixtureの一部だけを上書きする型
++): StoredEvent { // 非コピー列も持つコピー元型
++  return {
++    id: SOURCE,
++    clubId: CLUB,
++    status: "PUBLISHED",
++    updatedAt: new Date("2026-01-01T00:00:00.000Z"), // 更新版Dateの生成
++    title: "練習",
++    content: "fixture-private-body",
++    genre: "PRACTICE",
++    targetRoles: ["OWNER", "MEMBER"],
++    startAt: new Date("2026-01-15T09:00:00.123Z"), // 開始Dateの生成
++    endAt: null,
++    isAllDay: false,
++    location: null,
++    meetingAt: null,
++    meetingLocation: "集合場所",
++    belongings: "水筒",
++    notes: "注意事項",
++    attachments: [{ id: "fixture-private-pdf" }],
++    ...changes,
++  };
++}
++
++/**
++ * ログが出たかをspyで観測し、試験中のconsole出力だけを抑える空処理。
++ */
++function silence() { // console出力を抑える試験用関数
++  return undefined;
++}
++
++beforeEach( // 各試験前の初期化を登録する関数
++  /**
++   * 初期のACTIVE管理者と、DB条件に応じてfixtureを絞る最小限の読取モックを設定する。
++   */
++  () => { // 初期fixtureを設定するコールバック
++    vi.resetAllMocks(); // モックの履歴・実装をリセットするメソッド
++    vi.spyOn(console, "error").mockImplementation(silence); // console監視メソッド / 出力置換メソッド / 空処理の関数参照
++    vi.spyOn(console, "warn").mockImplementation(silence); // console監視メソッド / 出力置換メソッド / 空処理の関数参照
++    vi.spyOn(console, "log").mockImplementation(silence); // console監視メソッド / 出力置換メソッド / 空処理の関数参照
++    actor = {
++      id: MEMBER,
++      clubId: CLUB,
++      userId: USER,
++      role: "OWNER",
++      status: "ACTIVE",
++      club: {
++        timezone: "UTC",
++        planType: "STANDARD",
++      },
++    };
++    events = [event()]; // 元イベントを生成する関数
++    mocks.actor.mockImplementation( // 所属読取の実装を差し替えるメソッド
++      /**
++       * 呼出し時点の保存済み所属を、queryが指定した識別子・状態で照合する。
++       */
++      async ({ where }: Prisma.ClubMembershipFindFirstArgs) => { // 所属読取の非同期コールバック / Prisma引数型
++        if (
++          actor === null ||
++          actor.id !== where?.id ||
++          actor.clubId !== where.clubId ||
++          actor.userId !== where.userId ||
++          actor.status !== where.status
++        ) {
++          return null;
++        }
++        return actor;
++      },
++    );
++    mocks.events.mockImplementation( // 候補読取の実装を差し替えるメソッド
++      /**
++       * 開始日時とクラブだけでfixtureを絞る。query形状とselectは各試験で別途検証する。
++       */
++      async (args: Prisma.ClubEventFindManyArgs) => { // 候補読取の非同期コールバック / Prisma引数型
++        const where = args.where as { // この試験で必要な検索条件へ限定する型アサーション
++          clubId: string; // 必須クラブIDの文字列型
++          startAt: { // 開始日時の半開区間を指定する構造型
++            gte: Date; // 前月開始境界のDate型
++            lt: Date; // 対象月開始境界のDate型
++          };
++        };
++        return events.filter( // 保存済みfixtureを絞り込むメソッド
++          /**
++           * 指定クラブ内で、開始が前月範囲に入る予定だけを残す。
++           */
++          (row) => ( // 予定の所属・開始範囲を確認するコールバック
++            row.clubId === where.clubId &&
++            row.startAt >= where.startAt.gte &&
++            row.startAt < where.startAt.lt
++          ),
++        ).slice(0, args.take ?? undefined); // 要求された取得上限で切り出すメソッド
++      },
++    );
++    mocks.match.mockResolvedValue(null); // 初期状態を既存一致なしにするメソッド
++  },
++);
++afterEach( // 各試験後の処理を登録する関数
++  /**
++   * 実装が本文・比較値・例外原文等をconsoleへ出していないことを確認して監視を解除する。
++   */
++  () => { // ログ非出力と監視解除を確認するコールバック
++    expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / ログ関数参照 / 未呼出し検証メソッド
++    expect(console.warn).not.toHaveBeenCalled(); // 期待値生成関数 / ログ関数参照 / 未呼出し検証メソッド
++    expect(console.log).not.toHaveBeenCalled(); // 期待値生成関数 / ログ関数参照 / 未呼出し検証メソッド
++    vi.restoreAllMocks(); // consoleの元の動作を戻すメソッド
++  },
++);
++
++it("本人・クラブ・ACTIVEを再確認し、コピー列とID・更新版だけを要求する", // 試験を登録する関数
++  /**
++   * staleな画面contextを信用せず、現在のDB所属と限定selectを使用することを確認する。
++   */
++  async () => { // 最小selectとscopeを確認する非同期コールバック
++    const result = await findEventMonthCopyPreviewData(INPUT); // 上限付きpreview材料を取得する関数
++    expect(result.outcome).toBe("READY"); // 期待値生成関数 / 結果の比較メソッド
++    expect(mocks.actor).toHaveBeenCalledWith({ // 期待値生成関数 / 所属モック参照 / query検証メソッド
++      where: {
++        id: MEMBER,
++        clubId: CLUB,
++        userId: USER,
++        status: "ACTIVE",
++      },
++      select: {
++        role: true,
++        club: {
++          select: {
++            timezone: true,
++            planType: true,
++          },
++        },
++      },
++    });
++    const query = mocks.events.mock.calls[0][0];
++    const expected = Object.fromEntries( // 許可されたselectを作るメソッド
++      [...EVENT_MONTH_COPY_FIELDS, "id", "updatedAt"].map( // 許可列をselectの組へ写すメソッド
++        /**
++         * 取得を許す列を明示する。
++         */
++        (field) => [field, true], // selectの組を作るコールバック
++      ),
++    );
++    expect(query.select).toEqual(expected); // 期待値生成関数 / select全体の比較メソッド
++    expect(query.take).toBe(101); // 期待値生成関数 / 超過検出用上限の検証メソッド
++    expect(query.orderBy).toEqual([ // 期待値生成関数 / 安定した順序の比較メソッド
++      { startAt: "asc" },
++      { id: "asc" },
++    ]);
++    expect(query.where).not.toHaveProperty("status"); // 期待値生成関数 / 元DRAFTも対象にする検証メソッド
++    if (result.outcome !== "READY") {
++      throw new Error("fixture-not-ready"); // fixture失敗用の固定例外の生成
++    }
++    expect(Object.keys(result.candidates[0].source).sort()).toEqual( // 期待値生成関数 / キー取得・整列メソッド / 構造比較メソッド
++      Object.keys(expected).sort(), // 許可列名の取得・整列メソッド
++    );
++    expect(result.candidates[0].source.startAt).not.toBe(events[0].startAt); // 期待値生成関数 / Date参照分離の検証メソッド
++    expect(mocks.match).toHaveBeenCalledTimes(1); // 期待値生成関数 / 一致読取モック参照 / Prisma読取呼出し数の検証メソッド
++  },
++);
++
++it.each(["OWNER", "COACH", "OFFICER"] as const)( // 管理者ロール別試験関数 / 読取専用タプル型
++  "現在のロールが%sなら利用できる",
++  /**
++   * 既存の管理者ロール規約をそのまま利用することを確認する。
++   */
++  async (role) => { // 管理者ロールを受け取る非同期コールバック
++    actor!.role = role;
++    expect((await findEventMonthCopyPreviewData(INPUT)).outcome).toBe("READY"); // 期待値生成関数 / 読取関数 / 比較メソッド
++  },
++);
++
++it.each(["INVITED", "SUSPENDED", "WITHDRAWN"] as const)( // 非ACTIVE状態別試験関数 / 読取専用タプル型
++  "保存済み所属が%sなら候補を取得しない",
++  /**
++   * 古い認可contextが残っていても、現在の所属失効を検出する。
++   */
++  async (status) => { // 所属状態を受け取る非同期コールバック
++    actor!.status = status;
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "FORBIDDEN" }); // 期待値生成関数 / 読取関数 / 固定結果比較メソッド
++    expect(mocks.events).not.toHaveBeenCalled(); // 期待値生成関数 / 候補モック参照 / 未呼出し検証メソッド
++    expect(mocks.match).not.toHaveBeenCalled(); // 期待値生成関数 / 一致モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it.each(["id", "clubId", "userId"] as const)( // 所属・クラブ・本人の照合試験関数 / 読取専用タプル型
++  "保存済み所属の%sが違えば取得しない",
++  /**
++   * 別所属・別クラブ・別Auth本人の識別子を流用できないことを確認する。
++   */
++  async (field) => { // 改変項目を受け取る非同期コールバック
++    actor![field] = OTHER;
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "FORBIDDEN" }); // 期待値生成関数 / 読取関数 / 固定結果比較メソッド
++    expect(mocks.events).not.toHaveBeenCalled(); // 期待値生成関数 / 候補モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it.each(["STARTER", "PRO"] as const)( // 利用不可プラン別試験関数 / 読取専用タプル型
++  "現在のプランが%sなら取得しない",
++  /**
++   * セッション時点のプランではなく、現在のプランで拒否する。
++   */
++  async (plan) => { // プランを受け取る非同期コールバック
++    actor!.club.planType = plan;
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "FORBIDDEN" }); // 期待値生成関数 / 読取関数 / 固定結果比較メソッド
++    expect(mocks.events).not.toHaveBeenCalled(); // 期待値生成関数 / 候補モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it("現在のロールがMEMBERまたは所属なしなら拒否する", // 試験を登録する関数
++  /**
++   * ACTIVEだけでは管理者向け複製材料を取得できないことを確認する。
++   */
++  async () => { // 権限不足と所属なしを確認する非同期コールバック
++    actor!.role = "MEMBER";
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "FORBIDDEN" }); // 期待値生成関数 / 読取関数 / 固定結果比較メソッド
++    actor = null;
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "FORBIDDEN" }); // 期待値生成関数 / 読取関数 / 固定結果比較メソッド
++    expect(mocks.events).not.toHaveBeenCalled(); // 期待値生成関数 / 候補モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it("前月のgte/ltだけを使い、継続予定・対象月開始・他クラブを除きDRAFTも含める", // 試験を登録する関数
++  /**
++   * 期間の重なり検索を流用せず、前月に開始した公開・下書きの両方を返すことを確認する。
++   */
++  async () => { // 境界と公開状態を確認する非同期コールバック
++    events = [
++      event({ startAt: new Date("2026-01-01T00:00:00Z") }), // 前月月初のイベント・Dateを生成する関数
++      event({ // 下書きの元イベントを作る関数
++        id: OTHER,
++        status: "DRAFT",
++      }), // 下書きの元イベントを生成する関数
++      event({ // 前々月から継続する元イベントを生成する関数
++        startAt: new Date("2025-12-31T23:59:59.999Z"), // 前々月末Dateの生成
++        endAt: new Date("2026-01-03T00:00:00Z"), // 前月まで続く終了Dateの生成
++      }),
++      event({ startAt: new Date("2026-02-01T00:00:00Z") }), // 対象月初のイベント・Dateを生成する関数
++      event({ clubId: OTHER }), // 他クラブのイベントを生成する関数
++    ];
++    const result = await findEventMonthCopyPreviewData(INPUT); // 前月候補を取得する関数
++    expect(mocks.events.mock.calls[0][0].where).toEqual({ // 期待値生成関数 / 前月条件の構造比較メソッド
++      clubId: CLUB,
++      startAt: {
++        gte: new Date("2026-01-01T00:00:00Z"), // 前月月初UTC Dateの生成
++        lt: new Date("2026-02-01T00:00:00Z"), // 対象月月初UTC Dateの生成
++      },
++    });
++    if (result.outcome !== "READY") {
++      throw new Error("fixture-not-ready"); // fixture失敗用の固定例外の生成
++    }
++    expect(result.candidates).toHaveLength(2); // 期待値生成関数 / 前月開始の2件だけを確認するメソッド
++    expect(result.candidates[1].source.id).toBe(OTHER); // 期待値生成関数 / 元DRAFTを含める比較メソッド
++  },
++);
++
++it.each([ // 条件別の試験を登録する関数
++  ["2026-04", "America/New_York", "2026-03-01T05:00:00Z", "2026-04-01T04:00:00Z"],
++  ["2026-02", "Asia/Tokyo", "2025-12-31T15:00:00Z", "2026-01-31T15:00:00Z"],
++  ["2027-01", "UTC", "2026-12-01T00:00:00Z", "2027-01-01T00:00:00Z"],
++  ["0001-02", "UTC", "0001-01-01T00:00:00Z", "0001-02-01T00:00:00Z"],
++  ["0100-01", "UTC", "0099-12-01T00:00:00Z", "0100-01-01T00:00:00Z"],
++  ["2020-12", "America/Havana", "2020-11-01T04:00:00Z", "2020-12-01T05:00:00Z"],
++  ["2012-05", "America/Havana", "2012-04-01T05:00:00Z", "2012-05-01T04:00:00Z"],
++] as const)( // 月境界のtable試験関数 / 読取専用タプル型
++  "%sの前月範囲は%sの現地月初から求める",
++  /**
++   * 現在DBのtimezone、DSTによる月のUTC長の差、年越し、年1〜99を確認する。
++   */
++  async (targetMonth, timezone, start, end) => { // 月・timezone・期待するUTC境界を受け取る非同期コールバック
++    actor!.club.timezone = timezone;
++    await findEventMonthCopyPreviewData({ // 新しい対象月で読取を行う関数
++      ...INPUT,
++      targetMonth,
++    });
++    expect(mocks.events.mock.calls[0][0].where.startAt).toEqual({ // 期待値生成関数 / UTC境界の構造比較メソッド
++      gte: new Date(start), // 期待する前月月初Dateの生成
++      lt: new Date(end), // 期待する対象月月初Dateの生成
++    });
++  },
++);
++
++it.each([0, 100, 101])("候補数%s件を除外前に判定してPrisma読取呼出し数を制限する", // 件数別の試験を登録する関数
++  /**
++   * 101件は変換・除外・重複検索より先に拒否し、100件までは有限回数だけ照合する。
++   */
++  async (count) => { // 候補数を受け取る非同期コールバック
++    events = Array.from({ length: count }, // 指定件数のfixture配列を作るメソッド
++      /**
++       * 異なる内容の候補を作り、キャッシュが効かない最大Prisma読取呼出し数を確認する。
++       */
++      (_, index) => event({ // 要素を作るコールバック / イベントfixture生成関数
++        id: `${index.toString(16).padStart(8, "0")}-eeee-4eee-8eee-eeeeeeeeeeee`, // ID用の16進文字列生成・桁補完メソッド
++        title: `練習${index}`,
++        endAt: count > 100 ? new Date(0) : null, // 101件では除外前に拒否する確認用Dateの生成
++      }),
++    );
++    const result = await findEventMonthCopyPreviewData(INPUT); // 上限付き読取関数
++    expect(result.outcome).toBe(count > 100 ? "TOO_MANY" : "READY"); // 期待値生成関数 / 上限判定の比較メソッド
++    expect(mocks.actor).toHaveBeenCalledTimes(1); // 期待値生成関数 / 所属モック参照 / Prisma読取呼出し数検証メソッド
++    expect(mocks.events).toHaveBeenCalledTimes(1); // 期待値生成関数 / 候補モック参照 / Prisma読取呼出し数検証メソッド
++    expect(mocks.match).toHaveBeenCalledTimes(count > 100 ? 0 : count); // 期待値生成関数 / 一致モック参照 / 最大Prisma読取呼出し数検証メソッド
++    if (count > 100) {
++      expect(result).toEqual({ outcome: "TOO_MANY" }); // 期待値生成関数 / 本文を含まない結果の比較メソッド
++    }
++  },
++);
++
++it.each(["DRAFT", "PUBLISHED"] as const)( // 既存側の公開状態別試験関数 / 読取専用タプル型
++  "既存側が%sでも、全コピー列とロール集合で一致IDを検索する",
++  /**
++   * 既存側のstatusをqueryへ含めず、順序に依存する配列equalsも使わないことを確認する。
++   */
++  async (status) => { // 既存行の状態を受け取る非同期コールバック
++    const existing = event({ // 既存イベントfixtureを作る関数
++      id: OTHER,
++      status,
++    }); // 既存イベントfixtureを作る関数
++    mocks.match.mockResolvedValue({ id: existing.id }); // 一致する既存IDを返すモック設定メソッド
++    events[0].targetRoles = ["MEMBER", "OWNER", "MEMBER"];
++    const result = await findEventMonthCopyPreviewData(INPUT); // 既存一致を含む材料を取得する関数
++    expect(mocks.match).toHaveBeenCalledWith({ // 期待値生成関数 / 一致モック参照 / query形状の検証メソッド
++      where: {
++        clubId: CLUB,
++        title: "練習",
++        content: "fixture-private-body",
++        genre: "PRACTICE",
++        startAt: new Date("2026-02-15T09:00:00.123Z"), // 秒・ミリ秒を保持した変換後Dateの生成
++        endAt: null,
++        isAllDay: false,
++        location: null,
++        meetingAt: null,
++        meetingLocation: "集合場所",
++        belongings: "水筒",
++        notes: "注意事項",
++        targetRoles: {
++          hasEvery: ["MEMBER", "OWNER"],
++        },
++        NOT: {
++          targetRoles: {
++            hasSome: ["COACH", "OFFICER"],
++          },
++        },
++      },
++      select: {
++        id: true,
++      },
++      orderBy: {
++        id: "asc",
++      },
++    });
++    if (result.outcome !== "READY") {
++      throw new Error("fixture-not-ready"); // fixture失敗用の固定例外の生成
++    }
++    expect(result.candidates[0].duplicateEventId).toBe(OTHER); // 期待値生成関数 / 代表一致IDの比較メソッド
++    expect(result.candidates[0]).not.toHaveProperty("initiallySelected"); // 期待値生成関数 / 初期選択を決めない検証メソッド
++  },
++);
++
++it("空ロール集合・null・空文字・空白を黙って変更しない", // 試験を登録する関数
++  /**
++   * コピー元の値をそのまま検索条件へ使い、フォーム用の正規化を混ぜないことを確認する。
++   */
++  async () => { // コピー値の保持を確認する非同期コールバック
++    events[0].targetRoles = [];
++    events[0].content = "";
++    events[0].meetingLocation = " ";
++    await findEventMonthCopyPreviewData(INPUT); // コピー値を保持して取得する関数
++    expect(mocks.match.mock.calls[0][0].where).toMatchObject({ // 期待値生成関数 / 値を変更しない構造比較メソッド
++      targetRoles: {
++        isEmpty: true,
++      },
++      content: "",
++      location: null,
++      meetingLocation: " ",
++    });
++  },
++);
++
++it("月末補正で同じ変換値になる候補は検索を共有し、候補自体は両方返す", // 試験を登録する関数
++  /**
++   * 同じ変換値の一致検索を繰り返さず、初期選択や候補の除外は後続へ残す。
++   */
++  async () => { // 検索結果の共有を確認する非同期コールバック
++    events = [
++      event({ startAt: new Date("2026-01-30T09:00:00Z") }), // 月末候補のイベント・Date生成関数
++      event({ // 別IDの月末候補を生成する関数
++        id: OTHER,
++        startAt: new Date("2026-01-31T09:00:00Z"), // 同じ補正後日時へ移るDateの生成
++      }),
++    ];
++    const result = await findEventMonthCopyPreviewData(INPUT); // 月末候補を取得する関数
++    expect(mocks.match).toHaveBeenCalledTimes(1); // 期待値生成関数 / 一致モック参照 / Prisma読取呼出し数検証メソッド
++    if (result.outcome !== "READY") {
++      throw new Error("fixture-not-ready"); // fixture失敗用の固定例外の生成
++    }
++    expect(result.candidates).toHaveLength(2); // 期待値生成関数 / 両候補を保持する検証メソッド
++  },
++);
++
++it("変換失敗を理由付きで保持し、既存一致検索は行わない", // 試験を登録する関数
++  /**
++   * DST gapやfold、期間逆転は取得失敗や件数ゼロとは区別して返す。
++   */
++  async () => { // 日時変換による除外材料を確認する非同期コールバック
++    actor!.club.timezone = "America/New_York";
++    events = [event({ startAt: new Date("2026-02-08T07:30:00Z") })]; // DST gapへ移るイベント・Date生成関数
++    const result = await findEventMonthCopyPreviewData({ // 対象月を変更して取得する関数
++      ...INPUT,
++      targetMonth: "2026-03",
++    });
++    if (result.outcome !== "READY") {
++      throw new Error("fixture-not-ready"); // fixture失敗用の固定例外の生成
++    }
++    expect(result.candidates[0].dateTimes).toMatchObject({ // 期待値生成関数 / 変換失敗材料の比較メソッド
++      success: false,
++      exclusionReason: "INVALID_DATE_TIME",
++      issue: "NONEXISTENT_LOCAL_TIME",
++    });
++    expect(result.candidates[0].duplicateEventId).toBeNull(); // 期待値生成関数 / 未照合の確認メソッド
++    expect(mocks.match).not.toHaveBeenCalled(); // 期待値生成関数 / 一致モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it.each(["actor", "events", "match"] as const)( // DB失敗箇所ごとの試験関数 / 読取専用タプル型
++  "%sの失敗で原文・本文を返さず、ログにも出さない",
++  /**
++   * Prismaの生例外を公開結果へ混入させず、固定結果で取得失敗を返す。
++   */
++  async (phase) => { // 失敗させる読取箇所を受け取る非同期コールバック
++    mocks[phase].mockRejectedValue(new Error("fixture-private-body database-secret")); // 失敗モック設定メソッド / 原文を含む試験用例外の生成
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "PREVIEW_FAILED" }); // 期待値生成関数 / 読取関数 / 安全な結果の比較メソッド
++  },
++);
++
++it.each(["2026-13", "0001-01", " 2026-02", "2026-02\n"])( // 不正対象月の試験関数
++  "不正な対象月%jをDB読取前に拒否する",
++  /**
++   * 現在月へのfallbackや、無効な前月範囲の生成を行わない。
++   */
++  async (targetMonth) => { // 不正な対象月を受け取る非同期コールバック
++    expect(await findEventMonthCopyPreviewData({ // 期待値生成関数 / 対象月を検証する読取関数
++      ...INPUT,
++      targetMonth,
++    })).toEqual({ outcome: "PREVIEW_FAILED" }); // 固定失敗結果を比較するメソッド
++    expect(mocks.actor).not.toHaveBeenCalled(); // 期待値生成関数 / 所属モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it("DBのtimezoneが不正なら元値を出さず固定失敗にする", // 試験を登録する関数
++  /**
++   * 現在の設定不正を黙ってUTCへ置き換えない。
++   */
++  async () => { // 不正timezoneを確認する非同期コールバック
++    actor!.club.timezone = "fixture-invalid-timezone";
++    expect(await findEventMonthCopyPreviewData(INPUT)).toEqual({ outcome: "PREVIEW_FAILED" }); // 期待値生成関数 / 読取関数 / 安全な結果の比較メソッド
++    expect(mocks.events).not.toHaveBeenCalled(); // 期待値生成関数 / 候補モック参照 / 未呼出し検証メソッド
++  },
++);
++
++it("指定transaction clientだけを使い、通常Clientへ戻らない", // 試験を登録する関数
++  /**
++   * 後続commit処理が渡すtransaction内でも、同じ認可と読取を実行できることを確認する。
++   */
++  async () => { // transaction client再利用を確認する非同期コールバック
++    const transactionActor = vi.fn().mockResolvedValue(actor); // transaction内所属モックの生成・返却設定メソッド
++    const transactionEvents = vi.fn().mockResolvedValue([]); // transaction内候補モックの生成・返却設定メソッド
++    const transactionMatch = vi.fn(); // transaction内一致モックの生成メソッド
++    const transaction = {
++      clubMembership: {
++        findFirst: transactionActor, // transaction内所属関数の参照
++      },
++      clubEvent: {
++        findMany: transactionEvents, // transaction内候補関数の参照
++        findFirst: transactionMatch, // transaction内一致関数の参照
++      },
++    } as unknown as Prisma.TransactionClient; // 試験用delegateをtransaction client型へ変換する型アサーション
++    expect((await findEventMonthCopyPreviewData(INPUT, transaction)).outcome).toBe("READY"); // 期待値生成関数 / 指定Clientでの読取関数 / 結果比較メソッド
++    expect(transactionActor).toHaveBeenCalledTimes(1); // 期待値生成関数 / 所属関数参照 / Prisma読取呼出し数検証メソッド
++    expect(transactionEvents).toHaveBeenCalledTimes(1); // 期待値生成関数 / 候補関数参照 / Prisma読取呼出し数検証メソッド
++    expect(mocks.actor).not.toHaveBeenCalled(); // 期待値生成関数 / 通常Client所属関数参照 / 未使用の検証メソッド
++    expect(mocks.events).not.toHaveBeenCalled(); // 期待値生成関数 / 通常Client候補関数参照 / 未使用の検証メソッド
++    expect(mocks.match).not.toHaveBeenCalled(); // 期待値生成関数 / 通常Client一致関数参照 / 未使用の検証メソッド
++  },
++);
++
++
++it("終日予定は排他的な終了境界と集合日時も変換して一致検索する", // 試験を登録する関数
++  /**
++   * 月跨ぎの終日予定でも、既存一致の検索を対象月内の終了日時へ切り詰めない。
++   */
++  async () => { // 終日予定の検索材料を確認する非同期コールバック
++    events = [event({ // 終日予定fixtureを作る関数
++      isAllDay: true,
++      startAt: new Date("2026-01-31T00:00:00Z"), // 月末の開始Dateの生成
++      endAt: new Date("2026-02-01T00:00:00Z"), // 排他的な終了Dateの生成
++      meetingAt: new Date("2026-01-31T08:00:00Z"), // 集合Dateの生成
++    })];
++    await findEventMonthCopyPreviewData(INPUT); // 終日の候補を取得する関数
++    expect(mocks.match.mock.calls[0][0].where).toMatchObject({ // 期待値生成関数 / 変換後全日時の比較メソッド
++      isAllDay: true,
++      startAt: new Date("2026-02-28T00:00:00Z"), // 補正後の開始Dateの生成
++      endAt: new Date("2026-03-01T00:00:00Z"), // 補正後の排他的な終了Dateの生成
++      meetingAt: new Date("2026-02-28T08:00:00Z"), // 補正後の集合Dateの生成
++    });
++  },
++);
++
++it.each([ // 条件別の試験を登録する関数
++  ["2026-10-01T05:30:00Z", null, "2026-11", "AMBIGUOUS_LOCAL_TIME"],
++  ["2026-01-15T09:00:00Z", "2026-01-15T08:00:00Z", "2026-02", "INVALID_INTERVAL"],
++] as const)( // foldと期間不正の試験関数 / 読取専用タプル型
++  "変換できない予定%jも理由を残して返す",
++  /**
++   * foldの時刻選択や期間修正を行わず、後続が除外表示に使える変換結果を保持する。
++   */
++  async (start, end, targetMonth, issue) => { // 不正候補の日時・月・理由を受け取る非同期コールバック
++    actor!.club.timezone = "America/New_York";
++    events = [event({ // 変換できない予定fixtureを作る関数
++      startAt: new Date(start), // 元の開始Dateの生成
++      endAt: end === null ? null : new Date(end), // 元の終了Dateの生成
++    })];
++    const result = await findEventMonthCopyPreviewData({ // 変換失敗を含む材料を取得する関数
++      ...INPUT,
++      targetMonth,
++    });
++    if (result.outcome !== "READY") {
++      throw new Error("fixture-not-ready"); // fixture失敗用の固定例外の生成
++    }
++    expect(result.candidates[0].dateTimes).toMatchObject({ // 期待値生成関数 / 失敗理由の比較メソッド
++      success: false,
++      issue,
++    });
++    expect(mocks.match).not.toHaveBeenCalled(); // 期待値生成関数 / 一致モック参照 / 未検索の検証メソッド
++  },
++);
