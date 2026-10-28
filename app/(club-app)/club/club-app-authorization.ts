@@ -31,7 +31,9 @@ export async function requireClubAppAccess(
   return context;
 }
 
-//ログイン中のユーザーのクラブ内の役割(OWNER / COACH / OFFICER)を確認した上で、アプリ内の管理者ページを使えるか確認する関数
+/** 
+ * ログイン中のユーザーのクラブ内の役割(OWNER / COACH / OFFICER)を確認した上で、アプリ内の管理者ページを使えるか確認する関数
+ */
 export async function requireClubAppAdminAccess(
   clubSlug: string,
 ): Promise<ClubAccessContext> {
