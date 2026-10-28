@@ -6,6 +6,10 @@ type FieldErrorListProps = {
   errors?: readonly string[];
 };
 
+
+/** 
+ * エラーを赤字の箇条書きで各入力項目に表示する関数
+ */
 export function FieldErrorList({
   id,
   errors,
