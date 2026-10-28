@@ -1,1056 +1,579 @@
-diff --git a/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm.tsx b/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..b5f2d4bc05ce39aac4410f676f8ea8c177569fa6
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm.tsx
-@@ -0,0 +1,359 @@
-+// app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm.tsx
-+// 新旧日時を確認して選択し、送信後は同じ操作・入力でだけ再送するフォーム。
-+"use client";
-+
-+import {
-+  useActionState,
-+  useId,
-+  useRef,
-+  useState,
-+  type FormEvent,
-+} from "react";
-+import { unstable_rethrow } from "next/navigation";
-+
-+import {
-+  FieldErrorList, // 項目エラー配列を関連付け可能なIDで表示するComponent
-+} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
-+import {
-+  FormErrorAlert, // フォーム全体のエラーをalertで表示するComponent
-+} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
-+import type {
-+  EventMonthCopyActionState, // 入力・エラー・保存済み結果を持つAction state型
-+  EventMonthCopyPreviewItem, // 本文を含まないpreview表示項目型
-+} from "@/domain/club/event/event-month-copy-types";
-+
+diff --git a/app/(club-app)/club/[clubSlug]/admin/events/page.tsx b/app/(club-app)/club/[clubSlug]/admin/events/page.tsx
+index 10b564a4eb1a952b1b7752a04e583be73077eaa8..9c9fa9fa888db91d0c7ef505825af978a4fc695d 100644
+--- a/app/(club-app)/club/[clubSlug]/admin/events/page.tsx
++++ b/app/(club-app)/club/[clubSlug]/admin/events/page.tsx
+@@ -36,7 +36,7 @@ import {
+ } from "@/app/(club-app)/club/admin/_components/ContentStatusTabs";
+ 
+ import {
+-  getClubEventToastMessage,
++  getClubEventToastMessage, // 【追加】既知のイベントtoastコードだけを固定文言へ変換する関数
+ } from "@/domain/club/event/event-toast";
+ 
+ import {
+@@ -48,33 +48,42 @@ import {
+  * Supabase Auth Cookieと現在のDBを利用するため、
+  * リクエストごとに最新データを取得する。
+  */
 +/**
-+ * Pageが用意した限定候補・同一操作のAction・認可済みクラブ内のリンクを受け取る型。
++ * 【追加】本人・所属・予定の最新情報を要求ごとに取得する動的描画設定。
 + */
-+type Props = { // 複製選択フォームのprops型
-+  action: ( // サーバーでbindされたActionの関数型
-+    previous: EventMonthCopyActionState, // 前回のAction state型
-+    data: FormData, // フォーム送信値の型
-+  ) => Promise<EventMonthCopyActionState>; // Action stateを返す非同期型
-+  initialState: EventMonthCopyActionState; // 操作IDと初期選択を固定するstate型
-+  items: readonly EventMonthCopyPreviewItem[]; // 限定DTOの読取専用配列型
-+  timezone: string; // クラブtimezoneの文字列型
-+  cancelHref: string; // 対象月の月別管理ページURL型
-+  previewHref: string; // 同じ対象月をサーバーで再previewするURL型
-+};
-+
-+const FIELD_LABELS = {
-+  startAt: "開始",
-+  endAt: "終了",
-+  meetingAt: "集合",
-+};
-+// 現行Action stateにはoutcomeがないため、安全と確認できる固定エラーだけ再previewを許可する。
-+// 未知のエラーや通信結果不明は許可せず、保持した同一入力の確認を先に行う。
-+const REPREVIEW_ERRORS = new Set([ // 再取得可能と確認したActionの固定メッセージを保持する集合
-+  "フォームが不正です。再読込してやり直してください。",
-+  "このクラブで予定を複製する権限を確認できません。",
-+  "このクラブで予定を複製する権限がありません。",
-+  "予定が変更されました。previewを再読込してください。",
-+  "選択した予定を複製できません。previewを再読込してください。",
-+  "この操作IDは別の内容で使用されています。previewを再読込してください。",
-+  "予定を複製できませんでした。同じ操作のまま再度お試しください。",
-+]);
-+
+ export const dynamic =
+   "force-dynamic";
+ 
+-type Props = {
+-  params: Promise<{
+-    clubSlug: string;
 +/**
-+ * UTC ISO日時を、クラブの現地日時・秒・ミリ秒・UTC offsetを含む文字列へ写す。
++ * 【追加】非同期route引数と月・状態・ジャンル・toastのqueryを受け取るPage引数型。
 + */
-+function dateLabel( // 日時表示用の関数
-+  value: string | null, // UTC ISO文字列または未設定の型
-+  formatter: Intl.DateTimeFormat, // クラブtimezoneを固定したIntl formatter型
-+): string { // 日時表示の文字列型
-+  return value === null ? "未設定" : formatter.format(new Date(value)); // Date生成コンストラクター / 現地日時を表示するメソッド
-+}
-+
++type Props = { // 【追加】入力項目をまとめる構造型
++  params: Promise<{ // 【追加】非同期に解決するPage引数の型 / 入力項目をまとめる構造型
++    clubSlug: string; // 【追加】文字列で受け取る入力・戻り値の型
+   }>;
+ 
+-  searchParams: Promise<{
++  searchParams: Promise<{ // 【追加】非同期に解決するPage引数の型 / 入力項目をまとめる構造型
+     month?:
+-      | string
+-      | string[];
+-    status?: string | string[];
+-    genre?: string | string[];
+-    toast?: string | string[];
+-    toastId?: string | string[];
++      | string // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
++      | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
++    status?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
++    genre?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
++    toast?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
++    toastId?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
+   }>;
+ };
+ 
+-export default async function AdminEventsMonthPage({
 +/**
-+ * 送信前は選択可能、送信後は選択を固定して同一payload・requestIdで再確認できるフォーム。
-+ * 連打は同期refで止め、通常の通信例外は固定案内へ変換して保持した入力を失わない。
++ * 【追加】管理者を再認可し、既存条件の月別一覧と表示月だけを渡す複製導線を表示する。
 + */
-+export function EventMonthCopyForm({ // 複製予定の選択フォームComponent
-+  action,
-+  initialState,
-+  items,
-+  timezone,
-+  cancelHref,
-+  previewHref,
-+}: Props) { // 選択フォームのprops型
-+  const id = useId(); // checkboxとエラー参照の一意な接頭辞を生成するhook
-+  const [selected, setSelected] = useState<readonly string[]>( // 選択IDを保持するhook / 読取専用文字列配列型
-+    initialState.values.selectedEventIds,
-+  );
-+  const [attempted, setAttempted] = useState(false); // 初回送信後の選択固定を保持するhook
-+  const attemptedRef = useRef(false); // 再描画前の選択変更を止める同期refのhook
-+  const inFlight = useRef(false); // 再描画前の連打を止める同期refのhook
-+  const snapshot = useRef<FormData | null>(null); // 初回送信payloadを保持するhook / フォームまたは未設定の型
-+  const [state, formAction, pending] = useActionState( // Action結果とpendingを保持するhook
-+    /**
-+     * 最初のpayloadを複製して保持し、以降は新しい選択や操作IDへ置き換えず送信する。
-+     */
-+    async (previous: EventMonthCopyActionState, data: FormData) => { // 同一操作を送る非同期コールバック / Action state型 / フォーム型
-+      attemptedRef.current = true;
-+      setAttempted(true); // 送信後の選択固定を表示へ反映するstate更新関数
-+      try {
-+        if (snapshot.current === null) {
-+          const copy = new FormData(); // 初回payloadの独立した複製を作るコンストラクター
-+          for (const [field, value] of data.entries()) { // 初回送信値を取り出すメソッド
-+            copy.append(field, value); // 反復選択を保持したまま複製するメソッド
-+          }
-+          snapshot.current = copy;
-+        }
-+        return await action(previous, snapshot.current); // 同じbound Actionへ同じpayloadを送る関数
-+      } catch (error) {
-+        unstable_rethrow(error); // Nextのredirectなどの制御例外を再送出する関数
-+        return {
-+          status: "error" as const, // エラーstateに限定するリテラル型
-+          values: {
-+            ...initialState.values,
-+            selectedEventIds: [...selected],
-+          },
-+          requestId: initialState.requestId,
-+          fieldErrors: {},
-+          formError: "通信結果を確認できません。同じ選択・操作IDで結果を確認してください。",
-+        };
-+      } finally {
-+        inFlight.current = false;
-+      }
-+    },
-+    initialState,
-+  );
-+  const formatter = new Intl.DateTimeFormat("ja-JP", { // クラブの現地日時を表示するformatter生成コンストラクター
-+    timeZone: timezone,
-+    year: "numeric",
-+    month: "2-digit",
-+    day: "2-digit",
-+    hour: "2-digit",
-+    minute: "2-digit",
-+    second: "2-digit",
-+    fractionalSecondDigits: 3,
-+    hourCycle: "h23",
-+    timeZoneName: "longOffset",
-+  });
-+  const saved = state.status === "success";
-+  const canRepreview = !attempted || (
-+    state.status === "error" &&
-+    REPREVIEW_ERRORS.has(state.formError ?? "") // 安全と確認した固定エラーか判定するメソッド
-+  );
-+  const selectable = items.filter( // 複製可能な候補を取り出すメソッド
-+    /**
-+     * 除外理由なし・日時変換成功の候補だけを数える。
-+     */
-+    (item) => item.exclusionReason === null && item.converted !== null, // 複製可能性を判定するコールバック
-+  );
-+  const selectedItems = items.filter( // 現在の選択候補だけを取り出すメソッド
-+    /**
-+     * 選択中の元IDに対応する表示候補を取り出す。
-+     */
-+    (item) => selected.includes(item.sourceEventId), // 選択を確認するコールバック / 選択ID検索メソッド
-+  );
-+  const groups = new Set(selectedItems.map( // 一致グループを保持する集合生成 / 選択をグループへ写すメソッド
-+    /**
-+     * 候補間一致は代表ID、それ以外は自身の元IDで識別する。
-+     */
-+    (item) => item.duplicateSourceEventId ?? item.sourceEventId, // 一致グループを返すコールバック
-+  ));
-+  const duplicateSelection = groups.size < selectedItems.length;
-+  /**
-+   * pending表示前の連打も拒否し、最初のsubmit時点から選択を固定する。
-+   */
-+  function beginSubmit(event: FormEvent<HTMLFormElement>) { // submitイベント処理関数 / フォーム送信イベント型
-+    if (
-+      inFlight.current ||
-+      pending ||
-+      saved ||
-+      selected.length === 0 ||
-+      duplicateSelection
-+    ) {
-+      event.preventDefault(); // 二重送信や空の送信を止めるメソッド
-+      return;
-+    }
-+    inFlight.current = true;
-+    attemptedRef.current = true;
-+    setAttempted(true); // checkboxを送信後の固定表示へ変えるstate更新関数
-+  }
-+  return (
-+    <form
-+      action={
-+        formAction // ReactのAction queueへ送信する関数の参照
-+      }
-+      onSubmit={
-+        beginSubmit // 再描画前の連打・空送信を止める関数の参照
-+      }
-+      className="space-y-5"
-+      aria-busy={pending}
-+    >
-+      <p>選択した予定をDRAFT（下書き）として作成します。公開・LINE通知は行いません。</p>
-+      <p>PDF・既読・個人メモ・LINE履歴はコピーしません。</p>
-+      <p>表示timezone: {timezone}（UTC offset・秒・ミリ秒を表示）</p>
-+      <p>終日予定の終了日時は、その日時を含まない境界です。</p>
-+      {/* フォーム全体の固定エラーを表示するComponent。 */}
-+      <FormErrorAlert message={state.formError} />
-+      {(["targetMonth", "requestId", "previewFingerprint", "selectedEventIds"] as const).map( // エラー項目の読取専用型 / 項目エラーを表示するメソッド
-+        /**
-+         * 各項目のエラーを固定したIDと関連付ける。
-+         */
-+        (field) => ( // 項目エラーComponentを描画するコールバック
-+          <FieldErrorList
-+            key={field}
-+            id={`${id}-${field}-errors`}
-+            errors={state.fieldErrors[field]}
-+          />
-+        ),
-+      )}
-+      <input type="hidden" name="targetMonth" value={initialState.values.targetMonth} />
-+      <input type="hidden" name="requestId" value={initialState.values.requestId} />
-+      <input
-+        type="hidden"
-+        name="previewFingerprint"
-+        value={initialState.values.previewFingerprint}
-+      />
-+      {selected.map( // 選択不能化されないhidden入力を描画するメソッド
-+        /**
-+         * disabledなcheckboxと分離し、初回submit後も選択IDを送信できるようにする。
-+         */
-+        (identifier) => ( // 選択IDをhiddenへ写すコールバック
-+          <input key={identifier} type="hidden" name="selectedEventIds" value={identifier} />
-+        ),
-+      )}
-+      {items.length === 0 ? <p role="status">前月に開始した予定はありません。</p> : null}
-+      {items.length > 0 && selectable.length === 0 ? (
-+        <p role="status">すべての候補が除外されているため、複製できません。</p>
-+      ) : null}
-+      <p aria-live="polite">選択件数: {selected.length} / {items.length}</p>
-+      {duplicateSelection ? (
-+        <p role="alert" id={`${id}-duplicate-error`}>同じ内容になる候補は1件だけ選択してください。</p>
-+      ) : null}
-+      <fieldset
-+        disabled={pending || attempted || saved}
-+        aria-describedby={duplicateSelection ? `${id}-duplicate-error` : undefined}
-+        className="space-y-4"
-+      >
-+        <legend className="font-bold">複製する予定</legend>
-+        {items.map( // 各候補の安全なテキスト表示を描画するメソッド
-+          /**
-+           * 新旧日時・補正・重複・除外と、関連付けたcheckboxを表示する。
-+           */
-+          (item) => { // 候補を表示するコールバック
-+            const itemId = `${id}-${item.sourceEventId}`;
-+            return (
-+              <div key={item.sourceEventId} className="space-y-2 rounded-lg border p-4">
-+                <input
-+                  id={itemId}
-+                  type="checkbox"
-+                  checked={
-+                    selected.includes(item.sourceEventId) // 選択IDの有無を調べるメソッド
-+                  }
-+                  disabled={item.exclusionReason !== null || item.converted === null}
-+                  aria-invalid={
-+                    Boolean(state.fieldErrors.selectedEventIds?.length) // 項目エラーの有無を真偽値へ変換する関数
-+                  }
-+                  aria-describedby={`${itemId}-details${state.fieldErrors.selectedEventIds?.length
-+                    ? ` ${id}-selectedEventIds-errors` : ""}`}
-+                  onChange={
-+                    /**
-+                     * 初回送信後の変更を同期refでも拒否し、初回送信前だけ選択を更新する。
-+                     */
-+                    (event) => { // checkbox変更イベントを扱うコールバック
-+                      if (
-+                        attemptedRef.current ||
-+                        item.exclusionReason !== null ||
-+                        !item.converted
-+                      ) {
-+                        return;
-+                      }
-+                      const checked = event.currentTarget.checked;
-+                      setSelected( // 選択IDを更新するstate更新関数
-+                        /**
-+                         * 連続変更でも最新の選択を使い、同じIDを重複追加しない。
-+                         */
-+                        (current) => { // 最新の選択配列を受けるコールバック
-+                          const without = current.filter( // 対象IDを取り除くメソッド
-+                            /**
-+                             * 対象候補以外のIDだけを保持する。
-+                             */
-+                            (identifier) => identifier !== item.sourceEventId, // 保持するIDを判定するコールバック
-+                          );
-+                          return checked ? [...without, item.sourceEventId] : without;
-+                        },
-+                      );
-+                    }
-+                  }
-+                />
-+                <label htmlFor={itemId} className="ml-2 font-bold">{item.title}</label>
-+                <div id={`${itemId}-details`} className="space-y-1 text-sm">
-+                  <p>{item.isAllDay ? "終日" : "時刻指定"}</p>
-+                  {(["startAt", "endAt", "meetingAt"] as const).map( // 日時項目の読取専用型 / 新旧日時を表示するメソッド
-+                    /**
-+                     * クラブ現地日時とoffsetで、新旧の同じ項目を比較表示する。
-+                     */
-+                    (field) => ( // 日時の比較行を表示するコールバック
-+                      <p key={field}>
-+                        {FIELD_LABELS[field]}: 元 {
-+                          dateLabel(item.original[field], formatter) // 元日時を現地表示へ変換する関数
-+                        }
-+                        {" → 複製後 "}
-+                        {item.converted
-+                          ? dateLabel(item.converted[field], formatter) // 変換後日時を現地表示へ変換する関数
-+                          : "変換不可"}
-+                      </p>
-+                    ),
-+                  )}
-+                  {item.correctedFields.length > 0 ? (
-+                    <p>月末補正: {item.correctedFields.map( // 補正項目を表示名へ変換するメソッド
-+                      /**
-+                       * 補正した開始・終了・集合を日本語名へ写す。
-+                       */
-+                      (field) => FIELD_LABELS[field], // 補正項目名を返すコールバック
-+                    ).join("・") // 補正項目を連結するメソッド
-+                    }</p>
-+                  ) : null}
-+                  {item.duplicateEventId ? <p>既存予定と完全一致（初期未選択・明示選択可能）</p> : null}
-+                  {item.duplicateSourceEventId ? (
-+                    <p>他の複製候補と完全一致。同じ内容の候補は1件だけ選択してください。</p>
-+                  ) : null}
-+                  {item.exclusionReason ? (
-+                    <p>除外: {item.exclusionReason === "INVALID_SOURCE"
-+                      ? "元データが複製条件を満たしません。"
-+                      : item.exclusionReason === "INVALID_INTERVAL"
-+                        ? "変換後の開始・終了の順序が不正です。"
-+                        : "存在しない、または曖昧な現地時刻のため変換できません。"}</p>
-+                  ) : null}
-+                </div>
-+              </div>
-+            );
-+          },
-+        )}
-+      </fieldset>
-+      {saved ? (
-+        <p role="status">
-+          保存済みです（{state.data?.createdCount}件）。再実行せず一覧を再読み込みしてください。
-+          <a href={cancelHref} className="ml-2 underline">月別管理ページを再読み込み</a>
-+        </p>
-+      ) : (
-+        <button
-+          type="submit"
-+          disabled={
-+            pending ||
-+            selected.length === 0 ||
-+            selectable.length === 0 ||
-+            duplicateSelection
-+          }
-+          className="rounded-lg bg-blue-700 px-4 py-2 font-bold text-white disabled:opacity-50"
-+        >
-+          {pending ? "確認・処理中…" : attempted ? "同じ選択・操作IDで再送して確認" : "選択した予定を下書きで複製"}
-+        </button>
-+      )}
-+      {attempted && !saved ? <p>送信後の選択は固定しています。変更には再previewが必要です。</p> : null}
-+      {!pending && !saved && canRepreview ? (
-+        <div className="flex gap-4">
-+          <a href={previewHref}>選択を変更・previewを再取得（新しい操作）</a>
-+          <a href={cancelHref}>月別管理ページへ戻る</a>
-+        </div>
-+      ) : null}
-+      {attempted && !saved && !canRepreview ? (
-+        <p role="status">新しい操作を始める前に、同じ入力で保存結果を確認してください。</p>
-+      ) : null}
-+    </form>
-+  );
-+}
-diff --git a/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/page.tsx b/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/page.tsx
-new file mode 100644
-index 0000000000000000000000000000000000000000..02cc61216a09e66666dcff30d62f83407e834e18
---- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/page.tsx
-@@ -0,0 +1,130 @@
-+// app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/page.tsx
-+// 管理者を再認可し、前月予定の限定previewを選択フォームへ渡す。
-+
-+import {
-+  requireClubAppAdminAccess, // 本人・ACTIVE所属・管理者ロール・アプリ利用プランを確認する関数
-+} from "@/app/(club-app)/club/club-app-authorization";
-+import {
-+  isEventMonthCopyTargetMonth, // 複製対象月を厳密に検証する関数
-+} from "@/domain/club/event/event-month-copy-form";
-+import type {
-+  EventMonthCopyActionState, // 入力・エラー・保存済み結果を持つAction state型
-+} from "@/domain/club/event/event-month-copy-types";
-+import {
-+  createRequestId, // 新しいUUID v4の操作IDを生成する関数
-+} from "@/domain/shared/request-id";
-+import {
-+  getEventMonthCopyPreview, // 認可済みcontextと対象月から限定previewを返すService
-+} from "@/src/application/club/event/get-event-month-copy";
-+import {
-+  copyPreviousMonthEventsAction, // 再認可・入力照合・保存・保存後処理を行うAction
-+} from "./actions";
-+import {
-+  EventMonthCopyForm, // previewの選択と同一操作の再送を扱うClientフォーム
-+} from "./EventMonthCopyForm";
-+
-+/**
-+ * 本人・所属・予定の最新情報を要求ごとに読み、操作IDを共有キャッシュへ残さない。
-+ */
-+export const dynamic = "force-dynamic";
-+
-+/**
-+ * 非同期のroute引数と、単一月か配列かを検証する前のqueryを表す型。
-+ */
-+type Props = { // Pageの非同期引数型
-+  params: Promise<{ // route引数が解決する非同期型
-+    clubSlug: string; // 対象クラブslugの文字列型
-+  }>;
-+  searchParams: Promise<{ // queryが解決する非同期型
-+    month?: string | string[]; // 単一月または重複queryの配列型
-+  }>;
-+};
-+
-+/**
-+ * Promise propsを解決して再認可し、厳密な対象月の限定DTOと新しいbound Actionを渡す。
-+ * GETでは予定を保存せず、候補上限・取得失敗・不正な月には送信フォームを出さない。
-+ */
-+export default async function EventMonthCopyPage({ // 前月予定の複製previewを表示するPage
-+  params,
-+  searchParams,
-+}: Props) { // Page引数型
-+  const [route, query] = await Promise.all([params, searchParams]); // 非同期引数を並行して解決するメソッド
-+  const access = await requireClubAppAdminAccess(route.clubSlug); // Pageでも本人・所属・管理権限・プランを確認する関数
-+  const base = `/club/${encodeURIComponent(access.club.slug)}/admin/events`; // 認可済みslugをパス用に符号化する関数
-+  if (!isEventMonthCopyTargetMonth(query.month)) { // 重複query・不正月・未指定を拒否する関数
-+    return (
-+      <section className="space-y-4">
-+        <h1 className="text-2xl font-bold">前月予定の複製</h1>
-+        <p role="alert">対象月をYYYY-MM形式で指定してください。</p>
-+        <a href={`${base}?status=ALL`}>月別管理ページへ戻る</a>
-+      </section>
-+    );
-+  }
-+  const month = query.month;
-+  const cancelHref = `${base}?month=${month}&status=ALL`;
-+  const previewHref = `${base}/copy-previous-month?month=${month}`;
-+  const preview = await getEventMonthCopyPreview(access, month); // 最新の前月候補と変換結果を限定DTOで取得するService
-+  if (preview.outcome !== "READY") {
-+    const message = preview.outcome === "TOO_MANY"
-+      ? "前月の候補が100件を超えています。一括複製は実行できません。"
-+      : preview.outcome === "FORBIDDEN"
-+        ? "このクラブで予定を複製する権限を確認できません。"
-+        : "複製予定を取得できませんでした。再読込してください。";
-+    return (
-+      <section className="space-y-4">
-+        <h1 className="text-2xl font-bold">前月予定の複製</h1>
-+        <p role="alert">{message}</p>
-+        <a href={previewHref}>previewを再読込</a>
-+        <a href={cancelHref}>月別管理ページへ戻る</a>
-+      </section>
-+    );
-+  }
-+  const requestId = createRequestId(); // このpreviewだけで保持する新しい操作IDを生成する関数
-+  const initialState: EventMonthCopyActionState = { // Clientへ渡す最小の初期state型
-+    status: "idle",
-+    values: {
-+      targetMonth: month,
-+      selectedEventIds: preview.items.filter( // 初期選択可能な候補だけを抽出するメソッド
-+        /**
-+         * Serviceが決めた初期選択を採用する。
-+         */
-+        (item) => item.initiallySelected, // 初期選択を確認するコールバック
-+      ).map( // 初期選択を元イベントIDへ変換するメソッド
-+        /**
-+         * 表示内容を送らず元IDだけを入力へ写す。
-+         */
-+        (item) => item.sourceEventId, // 元IDを返すコールバック
-+      ),
-+      requestId,
-+      previewFingerprint: preview.fingerprint,
-+    },
-+    fieldErrors: {},
-+    formError: null,
-+    requestId,
-+  };
-+  const action = copyPreviousMonthEventsAction.bind( // サーバーで検証したslug・月・操作ID・照合値を固定するメソッド
-+    null,
-+    access.club.slug,
++export default async function AdminEventsMonthPage({ // 【追加】管理月別一覧を描画する関数
+   params,
+   searchParams,
+-}: Props) {
++}: Props) { // 【追加】管理月別Pageの非同期引数型
+   const [//同時に処理し、resolvedParams と resolvedSearchParams という新しい変数に結果を入れる
+     resolvedParams,
+     resolvedSearchParams,
+-  ] = await Promise.all([
++  ] = await Promise.all([ // 【追加】独立した非同期処理を並行して解決するメソッド
+     params,
+     searchParams,
+   ]);
+@@ -85,11 +94,11 @@ export default async function AdminEventsMonthPage({
+     );
+ 
+   const status =
+-  parseContentAdminStatus(
++  parseContentAdminStatus( // 【追加】公開状態を既存の許可値へ正規化する関数
+     resolvedSearchParams.status,
+   );
+   const genre =
+-  parseClubEventGenreFilter(
++  parseClubEventGenreFilter( // 【追加】ジャンルを既存の許可値へ正規化する関数
+     resolvedSearchParams.genre,
+   );
+ 
+@@ -107,14 +116,14 @@ export default async function AdminEventsMonthPage({
+     );
+ 
+ const [events, counts] =
+-  await Promise.all([
+-    findAdminClubEventsInRange({
++  await Promise.all([ // 【追加】独立した非同期処理を並行して解決するメソッド
++    findAdminClubEventsInRange({ // 【追加】認可済みクラブの期間・状態・ジャンルに対応するイベント取得関数
+       clubId: context.club.id,
+       range,
+       status,
+       genre,
+     }),
+-    countAdminClubEventsInRangeByStatus({
++    countAdminClubEventsInRangeByStatus({ // 【追加】同じクラブ・期間・ジャンルの状態別件数を取得する関数
+       clubId: context.club.id,
+       range,
+       genre,
+@@ -127,7 +136,7 @@ const [events, counts] =
+    * ホワイトリストの固定メッセージへ変換する。
+    */
+   const toastMessage =
+-    getClubEventToastMessage(
++    getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
+       resolvedSearchParams.toast,
+     );
+ 
+@@ -140,13 +149,13 @@ const [events, counts] =
+     "event-delete-failed";
+ 
+   const previousMonth =//先月の文字列を出す
+-    shiftYearMonth(month, -1);
++    shiftYearMonth(month, -1); // 【追加】表示月を指定月数だけ前後へ移動する関数
+ 
+   const nextMonth =
+     shiftYearMonth(month, 1);//来月の文字列を出す
+ 
+   const encodedClubSlug =//クラブスラッグをURLに使える形に変更する
+-    encodeURIComponent(
++    encodeURIComponent( // 【追加】slugやイベントIDをURLパス用に符号化する関数
+       context.club.slug,
+     );
+ 
+@@ -155,7 +164,7 @@ const [events, counts] =
+ 
+ 
+     const memberMonthQuery =//月を重複せずにセットする
+-  new URLSearchParams({
++  new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
+     month,
+   });
+ 
+@@ -167,54 +176,67 @@ if (genre !== "ALL") {
+ }
+ 
+ const memberMonthHref =//会員用月別イベントページに遷移するURLを作成する
+-  `${basePath}/events?${memberMonthQuery.toString()}`;
++  `${basePath}/events?${memberMonthQuery.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
+ 
+ 
++  // 【追加】複製先は現在の表示月だけを渡し、一覧の絞り込み条件は引き継がない。
++  const copyMonthQuery = new URLSearchParams({ // 【追加】表示月だけのqueryを組み立てるコンストラクター
 +    month,
-+    requestId,
-+    preview.fingerprint,
-+  );
-+  return (
-+    <section className="space-y-6">
-+      <h1 className="text-2xl font-bold">前月予定の複製</h1>
-+      <p>{preview.sourceMonth}に開始した予定を{month}の下書きとして作成します。</p>
-+      {/* 限定DTOとbound Actionだけを受け取る選択フォームComponent。 */}
-+      <EventMonthCopyForm
-+        key={requestId}
-+        action={
-+          action // サーバーでslug・月・操作ID・照合値をbindしたActionの参照
-+        }
-+        initialState={initialState}
-+        items={preview.items}
-+        timezone={preview.timezone}
-+        cancelHref={cancelHref}
-+        previewHref={previewHref}
-+      />
-+    </section>
-+  );
-+}
-diff --git a/tests/event-month-copy-forms.test.ts b/tests/event-month-copy-forms.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..66fa519048a82a6635ae432a8dfebc0a6ae6c143
---- /dev/null
-+++ b/tests/event-month-copy-forms.test.ts
-@@ -0,0 +1,536 @@
-+// tests/event-month-copy-forms.test.ts
-+// hookを置換したnode試験。実DOM・React scheduler・通信断の挙動は手動受入で確認する。
++  });
++  const copyMonthHref =
++    `${basePath}/admin/events/copy-previous-month?${copyMonthQuery.toString()}`; // 【追加】表示月queryをURL文字列へ変換するメソッド
 +
-+import {
-+  isValidElement,
-+  type ReactElement,
-+  type ReactNode,
-+} from "react";
-+import { renderToStaticMarkup } from "react-dom/server";
-+import {
-+  beforeEach,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+
-+import {
-+  EventMonthCopyForm, // 新旧日時の確認・選択・同一操作再送を行うフォームComponent
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm";
-+import type {
-+  EventMonthCopyActionState, // 入力・エラー・保存結果を持つAction state型
-+  EventMonthCopyPreviewItem, // 本文なしの表示候補型
-+} from "@/domain/club/event/event-month-copy-types";
-+
-+const mocks = vi.hoisted( // import前にmockを作る関数
+   //月を移動してもstatusとgenreを維持するためのURL
+   //toastとtoastIdは一度だけ表示する値なので維持しない。
+-  function buildMonthHref(
+-    targetMonth: string,
+-  ): string {
 +  /**
-+   * React hookを試験用の小さな状態保持へ接続する。
++   * 【追加】移動先の月と現在の状態・ジャンルを保持し、toastを引き継がない月別URLを返す。
 +   */
-+  () => ({ // hook mockを生成するコールバック
-+    state: vi.fn(), // 選択状態のmock生成関数
-+    ref: vi.fn(), // 同期refのmock生成関数
-+    actionState: vi.fn(), // Action stateのmock生成関数
-+  }),
-+);
-+vi.mock("react", // hookだけを置換する関数
++  function buildMonthHref( // 【追加】状態・ジャンルを維持した月別URLを作る関数
++    targetMonth: string, // 【追加】文字列で受け取る入力・戻り値の型
++  ): string { // 【追加】文字列で受け取る入力・戻り値の型
+     const query =
+-      new URLSearchParams({
++      new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
+         status,
+         month: targetMonth,
+       });
+ 
+     if (genre !== "ALL") {
+-      query.set(
++      query.set( // 【追加】維持する絞り込み条件をqueryへ設定するメソッド
+         "genre",
+         genre,
+       );
+     }
+ 
+-    return `${basePath}/admin/events?${query.toString()}`;
++    return `${basePath}/admin/events?${query.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
+   }
+ 
+     //日別一覧へ移動するときにstatusとgenreを維持するためのURL
+   //toastとtoastIdは一度だけ表示する値なので維持しない。
+-  function buildDayHref(
+-    targetDate: string,
+-  ): string {
 +  /**
-+   * 実際の要素生成・静的描画は保ち、hook領域だけを試験側で管理する。
++   * 【追加】対象日と現在の状態・ジャンルを保持し、toastを引き継がない日別URLを返す。
 +   */
-+  async (original) => ({ // Reactモジュールを置換する非同期コールバック
-+    ...await original<typeof import("react")>(), // 実Reactを取得する関数 / Reactモジュール型
-+    useState: mocks.state, // state hook mock関数の参照
-+    useRef: mocks.ref, // ref hook mock関数の参照
-+    useActionState: mocks.actionState, // Action hook mock関数の参照
-+    useId:
++  function buildDayHref( // 【追加】状態・ジャンルを維持した日別URLを作る関数
++    targetDate: string, // 【追加】文字列で受け取る入力・戻り値の型
++  ): string { // 【追加】文字列で受け取る入力・戻り値の型
+     const query =
+-      new URLSearchParams({
++      new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
+         status,
+         date: targetDate,
+       });
+ 
+     if (genre !== "ALL") {
+-      query.set(
++      query.set( // 【追加】維持する絞り込み条件をqueryへ設定するメソッド
+         "genre",
+         genre,
+       );
+     }
+ 
+-    return `${basePath}/admin/events/list?${query.toString()}`;
++    return `${basePath}/admin/events/list?${query.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
+   }
+ 
+ // カレンダーの日付を押したときに維持する検索条件
+ const adminCalendarDayQueryParams:
+-  Record<string, string> = {
++  Record<string, string> = { // 【追加】query名と文字列を対応させる辞書型 / 文字列で受け取る入力・戻り値の型
+   status,
+ };
+ 
+@@ -227,7 +249,11 @@ if (genre !== "ALL") {
+ // Repositoryの取得結果を共通カレンダー用に変換する
+ const adminCalendarEvents:
+   ClubEventMonthCalendarItem[] =//各ページからカレンダーへ渡す表示用データ
+-    events.map((event) => ({
++    events.map( // 【追加】取得イベントを既存カレンダーの表示値へ写すメソッド
 +      /**
-+       * 関連付けの検証用に安定したIDを返す。
++       * 【追加】Repositoryのイベントを既存カレンダー表示用の値へ写す。
 +       */
-+      () => "copy-test", // ID生成を代替するコールバック
-+  }),
-+);
++      (event) => ({ // 【追加】取得イベントをカレンダー表示値へ写すコールバック
+       id: event.id,
+       title: event.title,
+       genre: event.genre,
+@@ -244,7 +270,7 @@ const adminCalendarEvents:
+ 
+       // 管理用バッジからは編集ページへ移動する
+       href:
+-        `${basePath}/admin/events/${encodeURIComponent(
++        `${basePath}/admin/events/${encodeURIComponent( // 【追加】slugやイベントIDをURLパス用に符号化する関数
+           event.id,
+         )}/edit`,
+ 
+@@ -268,6 +294,7 @@ const adminCalendarEvents:
+         <h1 className="text-2xl font-bold text-slate-900">
+           月別イベント管理
+         </h1>
++{/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+ <Link
+       href={memberMonthHref}
+       className="rounded-md border border-blue-300 bg-white px-4 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+@@ -309,6 +336,7 @@ const adminCalendarEvents:
+       ) : null}
+ 
+       <div className="flex flex-wrap gap-3">
++        {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+         <Link
+           href={`${basePath}/admin/events/new`}
+           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+@@ -316,8 +344,17 @@ const adminCalendarEvents:
+           ＋ 新しいイベントを作成
+         </Link>
+ 
++        {/* 【追加】表示月を複製先としてpreviewへ移動するLink Component。 */}
++        <Link
++          href={copyMonthHref}
++          className="rounded-md border border-blue-300 px-4 py-2 text-sm font-medium text-blue-700"
++        >
++          前月の予定を複製
++        </Link>
 +
-+/**
-+ * フォームの実装上のprops型。
-+ */
-+type Props = Parameters<typeof EventMonthCopyForm>[0]; // Component引数からpropsを取得する型
-+/**
-+ * hook内で呼ぶAction reducerの型。
-+ */
-+type Reducer = ( // Action reducerの関数型
-+  previous: EventMonthCopyActionState, // 前回のAction state型
-+  data: FormData, // 送信フォーム型
-+) => Promise<EventMonthCopyActionState>; // Action stateを返す非同期型
-+/**
-+ * JSXのpropsを参照するための要素型。
-+ */
-+type Element = ReactElement<Record<string, unknown>>; // JSX要素型 / 不明値の辞書型
-+/**
-+ * checkbox変更handlerの最小イベント型。
-+ */
-+type ChangeHandler = (event: { // checkbox変更関数型
-+  currentTarget: { // 変更元の構造型
-+    checked: boolean; // checkboxの真偽値型
-+  };
-+}) => void; // 戻り値を使わない型
-+/**
-+ * submit handlerに渡す最小イベント型。
-+ */
-+type SubmitHandler = (event: { // submit関数型
-+  preventDefault: () => void; // 送信を止める関数型
-+}) => void; // 戻り値を使わない型
++        {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+         <Link
+-  href={buildDayHref(
++  href={buildDayHref( // 【追加】状態・ジャンルを維持した日別リンクを作る関数
+     `${month}-01`,
+   )}
+           className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+@@ -328,12 +365,14 @@ const adminCalendarEvents:
+         {/* 【追加】OWNERだけにメンバー・LINE設定への導線を表示する。 */}
+         {context.membership.role === "OWNER" ? (
+           <>
++            {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+             <Link
+               href={`${basePath}/admin/members`}
+               className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+             >
+               メンバー管理
+             </Link>
++            {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+             <Link
+               href={`${basePath}/admin/settings/line`}
+               className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+@@ -346,6 +385,11 @@ const adminCalendarEvents:
+ 
+     
+ 
++      {/* 【追加】一覧の絞り込みによって複製候補が減ると誤解しない説明。 */}
++      <p className="text-sm text-slate-600">
++        複製候補は、表示月の前月に開始した公開済み・下書きの全ジャンルです。
++      </p>
 +
-+const REQUEST = "11111111-1111-4111-8111-111111111111";
-+const SOURCE = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1";
-+let cells: unknown[]; // hook保存領域の配列型
-+let cursor: number; // hookの読取位置の数値型
-+let state: EventMonthCopyActionState | null; // 現在のAction stateまたは未設定の型
-+let reducer: Reducer; // 現在描画のreducer関数型
-+let pending: boolean; // 試験で制御するpendingの真偽値型
-+
-+/**
-+ * 独立した表示候補を作る。
-+ */
-+function item(): EventMonthCopyPreviewItem { // 候補生成関数 / 候補表示型
-+  return {
-+    sourceEventId: SOURCE,
-+    title: "<img src=x onerror=alert(1)>",
-+    isAllDay: false,
-+    original: {
-+      startAt: "2026-01-31T00:00:00.123Z",
-+      endAt: null,
-+      meetingAt: null,
-+    },
-+    converted: {
-+      startAt: "2026-02-28T00:00:00.123Z",
-+      endAt: null,
-+      meetingAt: null,
-+    },
-+    correctedFields: ["startAt"],
-+    exclusionReason: null,
-+    duplicateEventId: null,
-+    duplicateSourceEventId: null,
-+    initiallySelected: true,
-+  };
-+}
-+
-+/**
-+ * 限定DTO・初期操作ID・Action mockを持つpropsを生成する。
-+ */
-+function props(): Props { // props生成関数 / フォームprops型
-+  return {
-+    action: vi.fn(), // Action呼出しを記録するmock生成関数
-+    initialState: {
-+      status: "idle",
-+      values: {
-+        targetMonth: "2026-02",
-+        requestId: REQUEST,
-+        previewFingerprint: "ab".repeat(32), // 照合値を作るメソッド
-+        selectedEventIds: [SOURCE],
-+      },
-+      requestId: REQUEST,
-+      fieldErrors: {},
-+      formError: null,
-+    },
-+    items: [item()], // 候補生成関数
-+    timezone: "Asia/Tokyo",
-+    cancelHref: "/club/club-a/admin/events?month=2026-02&status=ALL",
-+    previewHref: "/club/club-a/admin/events/copy-previous-month?month=2026-02",
-+  };
-+}
-+
-+/**
-+ * 同じComponentのhook領域を使って再描画する。
-+ */
-+function view(value: Props) { // 試験用のComponent描画関数 / props型
-+  cursor = 0;
-+  return EventMonthCopyForm(value); // フォームComponentを直接評価する関数
-+}
-+
-+/**
-+ * JSXから指定したタグの要素を取り出す。子Componentは実行しない。
-+ */
-+function nodes(tree: ReactNode, tag: string): Element[] { // 要素検索関数 / React子要素型 / タグ文字列型 / 要素配列型
-+  if (Array.isArray(tree)) { // 子要素が配列か判定するメソッド
-+    return tree.flatMap( // 子要素の検索結果を平坦化するメソッド
-+      /**
-+       * 各子要素を再帰的に検索する。
-+       */
-+      (child) => nodes(child, tag), // 検索を繰り返すコールバック / 要素検索関数
-+    );
-+  }
-+  if (!isValidElement(tree)) return []; // React要素であるか判定する関数
-+  const element = tree as Element; // propsを検査する要素型へのアサーション
-+  const own = element.type === tag ? [element] : [];
-+  return [...own, ...nodes(element.props.children as ReactNode, tag)]; // 要素検索関数 / React子要素型へのアサーション
-+}
-+
-+/**
-+ * checkbox handlerを呼んで選択を変更する。
-+ */
-+function check(tree: ReactNode, checked: boolean, index = 0) { // 選択変更関数 / React子要素型 / 真偽値型
-+  const boxes = nodes(tree, "input").filter( // input検索関数 / checkboxを抽出するメソッド
-+    /**
-+     * 送信用hiddenと表示用checkboxを分ける。
-+     */
-+    (node) => node.props.type === "checkbox", // checkboxを判定するコールバック
-+  );
-+  const handler = boxes[index].props.onChange as ChangeHandler; // 変更handler型へのアサーション
-+  handler({ currentTarget: { checked } }); // checkbox変更handlerを呼ぶ関数
-+}
-+
-+/**
-+ * disabled領域の外にあるhidden入力を送信フォームへ写す。
-+ */
-+function data(tree: ReactNode): FormData { // 送信値生成関数 / React子要素型 / フォーム型
-+  const value = new FormData(); // 送信フォームを作るコンストラクター
-+  for (const node of nodes(tree, "input")) { // inputを検索する関数
-+    if (node.props.type === "hidden") {
-+      value.append(node.props.name as string, node.props.value as string); // 値を追加するメソッド / 文字列型へのアサーション
-+    }
-+  }
-+  return value;
-+}
-+
-+/**
-+ * formの同期submit handlerを呼び、連打拒否の有無を返す。
-+ */
-+function begin(tree: ReactNode) { // submit試験関数 / React子要素型
-+  const preventDefault = vi.fn(); // 送信拒否を記録するmock生成関数
-+  const handler = nodes(tree, "form")[0].props.onSubmit as SubmitHandler; // 要素検索関数 / submit handler型へのアサーション
-+  handler({ preventDefault }); // 同期submit handlerを呼ぶ関数
-+  return preventDefault;
-+}
-+
-+/**
-+ * ReactのAction queueに代わり、現在のreducerを1回実行する。
-+ */
-+async function dispatch(value: FormData) { // 試験用のAction送信関数 / フォーム型
-+  pending = true;
-+  try {
-+    state = await reducer(state!, value); // 現在のreducerを呼ぶ関数
-+  } finally {
-+    pending = false;
-+  }
-+}
-+
-+beforeEach( // 試験準備を登録する関数
-+  /**
-+   * hookの保存領域・Action結果・pendingを独立して初期化する。
-+   */
-+  () => { // 初期化コールバック
-+    vi.resetAllMocks(); // mockを初期化する関数
-+    cells = [];
-+    cursor = 0;
-+    state = null;
-+    pending = false;
-+    mocks.state.mockImplementation( // state hookの代替を設定するメソッド
-+      /**
-+       * hook順に値を保持し、関数形式の更新も最新の値へ適用する。
-+       */
-+      (initial: unknown) => { // stateを保持するコールバック / 初期値の不明型
-+        const index = cursor++;
-+        if (!(index in cells)) cells[index] = initial;
-+        return [cells[index],
+       {/*
+        * ここに追加：
+        * ジャンル絞り込み。
+@@ -387,10 +431,13 @@ const adminCalendarEvents:
+               すべて
+             </option>
+ 
+-            {Object.entries(
++            {Object.entries( // 【追加】固定ジャンルを選択肢へ変換するメソッド / 固定ジャンルの値とラベルを取得するメソッド
+               EVENT_GENRE_LABELS,
+             ).map(
+-              ([
++              /**
++               * 【追加】固定ジャンルの値とラベルを選択肢として描画する。
++               */
++              ([ // 【追加】一覧の表示・リンクを構築するコールバック
+                 value,
+                 label,
+               ]) => (
+@@ -418,27 +465,32 @@ const adminCalendarEvents:
+        * 件数付きの共通ステータスタブを使用する。
+        * monthとgenreを維持する。
+        */}
++      {/* 【追加】状態別件数とリンクを表示する既存タブComponent。 */}
+       <ContentStatusTabs
+         currentStatus={status}
+         counts={counts}
+-        buildHref={(
++        buildHref={
 +          /**
-+           * Reactのstate更新に相当する値の差替えを行う。
++           * 【追加】選択した公開状態と現在月・ジャンルを保持するタブURLを返す。
 +           */
-+          (next: unknown) => { // state更新のコールバック / 更新値の不明型
-+            cells[index] = typeof next === "function" ? next(cells[index]) : next; // 関数形式のstate更新を実行する関数
-+          },
-+        ];
-+      },
-+    );
-+    mocks.ref.mockImplementation( // ref hookの代替を設定するメソッド
++          ( // 【追加】一覧の表示・リンクを構築するコールバック
+           nextStatus,
+         ) => {
+           const query =
+-            new URLSearchParams({
++            new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
+               status:
+                 nextStatus,
+               month,
+             });
+ 
+           if (genre !== "ALL") {
+-            query.set(
++            query.set( // 【追加】維持する絞り込み条件をqueryへ設定するメソッド
+               "genre",
+               genre,
+             );
+           }
+ 
+-          return `${basePath}/admin/events?${query.toString()}`;
++          return `${basePath}/admin/events?${query.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
+         }}
+       />
+ 
+@@ -452,8 +504,9 @@ const adminCalendarEvents:
+     aria-label="対象月の切り替え"
+     className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
+   >
++    {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+     <Link
+-      href={buildMonthHref(
++      href={buildMonthHref( // 【追加】状態・ジャンルを維持した月別リンクを作る関数
+         previousMonth,
+       )}
+       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+@@ -462,13 +515,14 @@ const adminCalendarEvents:
+     </Link>
+ 
+     <h2 className="font-bold text-slate-900">
+-      {formatYearMonthLabel(
++      {formatYearMonthLabel( // 【追加】年月を日本語の表示名へ変換する関数
+         month,
+       )}
+     </h2>
+ 
++    {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
+     <Link
+-      href={buildMonthHref(
++      href={buildMonthHref( // 【追加】状態・ジャンルを維持した月別リンクを作る関数
+         nextMonth,
+       )}
+       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+@@ -477,6 +531,7 @@ const adminCalendarEvents:
+     </Link>
+   </nav>
+ 
++  {/* 【追加】既存条件のイベントと日別リンクを表示するカレンダーComponent。 */}
+   <ClubEventMonthCalendar
+     month={month}
+     timeZone={
+@@ -502,6 +557,7 @@ const adminCalendarEvents:
+ 
+     {status === "ALL" &&
+     genre === "ALL" ? (
++      /* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */
+       <Link
+         href={`${basePath}/admin/events/new`}
+         className="mt-4 inline-block text-sm font-medium text-blue-700 underline"
+diff --git a/domain/club/event/event-toast.test.ts b/domain/club/event/event-toast.test.ts
+index 99f408450b2a4b80713815c33da8e475ebe3d1c1..75ee06f291549bce473dd0b000c387c5cf8b5df8 100644
+--- a/domain/club/event/event-toast.test.ts
++++ b/domain/club/event/event-toast.test.ts
+@@ -8,13 +8,16 @@ import {
+ } from "vitest";
+ 
+ import {
+-  getClubEventToastMessage,
++  getClubEventToastMessage, // 【追加】単一の既知コードを固定文言へ変換する関数
+ } from "./event-toast";
+ 
+-describe(
++describe( // 【追加】関連するtoast試験をまとめる関数
+   "getClubEventToastMessage",
+-  () => {
+-    it.each([
++  /**
++   * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
++   */
++  () => { // 【追加】固定文言への変換結果を検証するコールバック
++    it.each([ // 【追加】toastの変換試験を登録する関数
+       [
+         "event-created",
+         "イベントを作成しました。",
+@@ -31,42 +34,76 @@ describe(
+         "event-delete-failed",
+         "イベントを削除できませんでした。もう一度お試しください。",
+       ],
++      // 【追加】Actionが送る複製成功コードを固定文言へ変換する。
++      [
++        "event-month-copied",
++        "前月の予定を下書きとして複製しました。",
++      ],
+     ])(
+       "%sを固定メッセージへ変換する",
+-      (
 +      /**
-+       * 再描画しても同じcurrentオブジェクトを返す。
++       * 【追加】入力コードが対応する固定文言だけへ変換されることを確認する。
 +       */
-+      (initial: unknown) => { // refを保持するコールバック / 初期値の不明型
-+        const index = cursor++;
-+        if (!(index in cells)) cells[index] = { current: initial };
-+        return cells[index];
-+      },
-+    );
-+    mocks.actionState.mockImplementation( // Action hookの代替を設定するメソッド
++      ( // 【追加】固定文言への変換結果を検証するコールバック
+         value,
+         expected,
+       ) => {
+-        expect(
+-          getClubEventToastMessage(
++        expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
++          getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
+             value,
+           ),
+         ).toBe(expected);
+       },
+     );
+ 
+-    it("不明な値はnull", () => {
+-      expect(
+-        getClubEventToastMessage(
++    it("不明な値はnull",  // 【追加】toastの変換試験を登録する関数
 +      /**
-+       * 最新のreducerと、試験で保持した結果・pendingを接続する。
++       * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
 +       */
-+      (callback: Reducer, initial: EventMonthCopyActionState) => { // hook接続コールバック / reducer型 / Action state型
-+        reducer = callback;
-+        state ??= initial;
-+        return [state, dispatch, pending]; // Action送信関数の参照
-+      },
-+    );
-+  },
-+);
-+
-+it("XSS文字列を解釈せず、新旧日時・timezone・offset・補正・下書き条件を表示する", // 試験を登録する関数
-+  /**
-+   * 日時の秒・ミリ秒も表示し、本文のHTML解釈や添付コピーを行わない。
-+   */
-+  () => { // 安全な表示を検証するコールバック
-+    const html = renderToStaticMarkup(view(props())); // SSR描画関数 / 試験用描画関数 / props生成関数
-+    expect(html).not.toContain("<img"); // 期待値生成関数 / XSS非解釈を検証するメソッド
-+    for (const text of [
-+      "&lt;img", "2026/01/31", "2026/02/28", ".123", "GMT+09:00",
-+      "Asia/Tokyo", "月末補正", "DRAFT", "PDF",
-+    ]) {
-+      expect(html).toContain(text); // 期待値生成関数 / 表示文字列を検証するメソッド
-+    }
-+  },
-+);
-+
-+it("checkbox・label・説明と項目エラーのIDを接続する", // 試験を登録する関数
-+  /**
-+   * keyboardと読み上げのための参照を、静的な属性として確認する。
-+   */
-+  () => { // アクセシビリティ属性を検証するコールバック
-+    const value = props(); // props生成関数
-+    value.initialState.fieldErrors.selectedEventIds = ["選択を確認してください。"];
-+    const html = renderToStaticMarkup(view(value)); // SSR描画関数 / 試験用描画関数
-+    expect(html).toContain(`id="copy-test-${SOURCE}"`); // 期待値生成関数 / checkbox IDを検証するメソッド
-+    expect(html).toContain(`for="copy-test-${SOURCE}"`); // 期待値生成関数 / labelの関連付けを検証するメソッド
-+    expect(html).toContain("copy-test-selectedEventIds-errors"); // 期待値生成関数 / 項目エラー参照を検証するメソッド
-+    expect(html).toContain("選択を確認してください。"); // 期待値生成関数 / 項目エラー表示を検証するメソッド
-+  },
-+);
-+
-+it("初回送信前は選択を変更してもrequestIdを維持する", // 試験を登録する関数
-+  /**
-+   * 選択件数を更新しても、新しい操作IDをClientで発行しない。
-+   */
-+  () => { // 送信前の選択を検証するコールバック
-+    const value = props(); // props生成関数
-+    check(view(value), false); // checkbox変更関数 / 試験用描画関数
-+    expect(data(view(value)).getAll("selectedEventIds")).toEqual([]); // 期待値生成関数 / フォーム生成関数 / 再描画関数 / 選択取得・比較メソッド
-+    expect(data(view(value)).get("requestId")).toBe(REQUEST); // 期待値生成関数 / フォーム生成関数 / 再描画関数 / 操作ID取得・比較メソッド
-+    check(view(value), true); // checkbox変更関数 / 試験用描画関数
-+    expect(data(view(value)).getAll("selectedEventIds")).toEqual([SOURCE]); // 期待値生成関数 / フォーム生成関数 / 再描画関数 / 選択取得・比較メソッド
-+  },
-+);
-+
-+it("重複初期offでも、除外されていない候補は明示選択できる", // 試験を登録する関数
-+  /**
-+   * 既存一致はチェックを外すだけで、選択禁止にはしない。
-+   */
-+  () => { // 重複候補の選択を検証するコールバック
-+    const value = props(); // props生成関数
-+    value.items[0].duplicateEventId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-+    value.items[0].initiallySelected = false;
-+    value.initialState.values.selectedEventIds = [];
-+    const html = renderToStaticMarkup(view(value)); // SSR描画関数 / 試験用描画関数
-+    expect(html).toContain("既存予定と完全一致"); // 期待値生成関数 / 重複理由を検証するメソッド
-+    check(view(value), true); // checkbox変更関数 / 試験用描画関数
-+    expect(data(view(value)).getAll("selectedEventIds")).toEqual([SOURCE]); // 期待値生成関数 / フォーム生成関数 / 再描画関数 / 明示選択を検証するメソッド
-+  },
-+);
-+
-+it.each(["INVALID_SOURCE", "INVALID_INTERVAL", "INVALID_DATE_TIME"] as const)( // 除外理由試験を登録する関数 / 読取専用リテラル型
-+  "%sで全除外の場合は送信できず理由を表示する",
-+  /**
-+   * 除外された候補を表示しつつ、checkboxと実行を無効にする。
-+   */
-+  (reason) => { // 全除外を検証するコールバック
-+    const value = props(); // props生成関数
-+    value.items[0].exclusionReason = reason;
-+    value.items[0].converted = null;
-+    value.initialState.values.selectedEventIds = [];
-+    const html = renderToStaticMarkup(view(value)); // SSR描画関数 / 試験用描画関数
-+    expect(html).toContain("すべての候補が除外"); // 期待値生成関数 / 全除外の表示を検証するメソッド
-+    expect(html).toContain("除外:"); // 期待値生成関数 / 除外理由の表示を検証するメソッド
-+    expect(nodes(view(value), "button")[0].props.disabled).toBe(true); // 期待値生成関数 / 要素検索関数 / 再描画関数 / 送信禁止を比較するメソッド
-+  },
-+);
-+
-+it("候補0件では空表示と送信禁止を示す", // 試験を登録する関数
-+  /**
-+   * 空のpreviewから保存操作を始めない。
-+   */
-+  () => { // 空候補を検証するコールバック
-+    const value = props(); // props生成関数
-+    value.items = [];
-+    value.initialState.values.selectedEventIds = [];
-+    expect(renderToStaticMarkup(view(value))).toContain("前月に開始した予定はありません"); // 期待値生成関数 / SSR描画関数 / 再描画関数 / 空表示検証メソッド
-+    expect(begin(view(value))).toHaveBeenCalledOnce(); // 期待値生成関数 / submit試験関数 / 再描画関数 / 空送信拒否を検証するメソッド
-+  },
-+);
-+
-+it("pending表示前の連打と選択変更を同期refで止める", // 試験を登録する関数
-+  /**
-+   * 再描画が間に合わなくても二重submitと選択変更を受け付けない。
-+   */
-+  () => { // 同期ロックを検証するコールバック
-+    const value = props(); // props生成関数
-+    const tree = view(value); // 試験用描画関数
-+    expect(begin(tree)).not.toHaveBeenCalled(); // 期待値生成関数 / submit試験関数 / 初回許可を検証するメソッド
-+    expect(begin(tree)).toHaveBeenCalledOnce(); // 期待値生成関数 / submit試験関数 / 連打拒否を検証するメソッド
-+    check(tree, false); // 遅れて発火した変更handlerを呼ぶ関数
-+    expect(data(view(value)).getAll("selectedEventIds")).toEqual([SOURCE]); // 期待値生成関数 / フォーム生成関数 / 再描画関数 / 選択維持を検証するメソッド
-+    expect(nodes(view(value), "fieldset")[0].props.disabled).toBe(true); // 期待値生成関数 / 要素検索関数 / 再描画関数 / 選択固定を比較するメソッド
-+  },
-+);
-+
-+it("通常失敗後も同じpayload・requestIdだけを再送する", // 試験を登録する関数
-+  /**
-+   * 2回目の送信フォームを書き換えても、初回snapshotの選択を使う。
-+   */
-+  async () => { // 同一操作の再送を検証する非同期コールバック
-+    const value = props(); // props生成関数
-+    vi.mocked(value.action).mockResolvedValue({ // Action結果を設定するメソッド / 型付きmock取得関数
-+      ...value.initialState,
-+      status: "error",
-+      formError: "予定を複製できませんでした。同じ操作のまま再度お試しください。",
-+    });
-+    const first = view(value); // 試験用描画関数
-+    begin(first); // 同期submitを実行する関数
-+    await dispatch(data(first)); // reducer実行関数 / フォーム生成関数
-+    check(view(value), false); // 送信後の選択変更を試みる関数 / 再描画関数
-+    const altered = data(view(value)); // フォーム生成関数 / 再描画関数
-+    altered.set("selectedEventIds", "tampered"); // 2回目のpayloadを改変するメソッド
-+    await dispatch(altered); // 同じ操作のreducer実行関数
-+    const calls = vi.mocked(value.action).mock.calls; // Action mockの呼出し履歴を取得する関数
-+    expect(calls[1][1]).toBe(calls[0][1]); // 期待値生成関数 / snapshot参照の一致を検証するメソッド
-+    expect(calls[1][1].getAll("selectedEventIds")).toEqual([SOURCE]); // 期待値生成関数 / 選択取得・比較メソッド
-+    expect(calls[1][1].get("requestId")).toBe(REQUEST); // 期待値生成関数 / 操作ID取得・比較メソッド
-+  },
-+);
-+
-+it.each(["通信例外", "RESULT_UNKNOWN"])( // 結果不明のパラメーター試験を登録する関数
-+  "%sでは新操作リンクを出さず同じ操作の確認を案内する",
-+  /**
-+   * 通信結果不明のまま新しいrequestIdで複製を重ねない。
-+   */
-+  async (kind) => { // 結果不明を検証する非同期コールバック
-+    const value = props(); // props生成関数
-+    if (kind === "通信例外") {
-+      vi.mocked(value.action).mockRejectedValue(new Error("PRIVATE_SQL_TOKEN")); // 型付きmock取得関数 / 例外設定メソッド / 例外生成コンストラクター
-+    } else {
-+      vi.mocked(value.action).mockResolvedValue({ // 型付きmock取得関数 / 結果不明state設定メソッド
-+        ...value.initialState,
-+        status: "error",
-+        formError: "保存結果を確認できません。同じ選択・操作IDのまま再送して確認してください。",
-+      });
-+    }
-+    const tree = view(value); // 試験用描画関数
-+    begin(tree); // 同期submitを実行する関数
-+    await dispatch(data(tree)); // reducer実行関数 / フォーム生成関数
-+    const html = renderToStaticMarkup(view(value)); // SSR描画関数 / 再描画関数
-+    expect(html).toContain("同じ入力で保存結果を確認"); // 期待値生成関数 / 結果確認案内を検証するメソッド
-+    expect(html).not.toContain("再取得（新しい操作）"); // 期待値生成関数 / 新操作への誘導禁止を検証するメソッド
-+    expect(html).not.toContain("PRIVATE_SQL_TOKEN"); // 期待値生成関数 / 内部詳細非表示を検証するメソッド
-+    expect(nodes(view(value), "a")).toHaveLength(0); // 期待値生成関数 / 要素検索関数 / 再描画関数 / 新操作リンク非表示を比較するメソッド
-+  },
-+);
-+
-+it("PREVIEW_CHANGEDの固定案内ではサーバー再previewへのリンクを出す", // 試験を登録する関数
-+  /**
-+   * 選択をその場で解除せず、新しいGETとbound Actionで次の操作を始める。
-+   */
-+  async () => { // preview変更の再取得を検証する非同期コールバック
-+    const value = props(); // props生成関数
-+    vi.mocked(value.action).mockResolvedValue({ // 型付きmock取得関数 / 変更検出state設定メソッド
-+      ...value.initialState,
-+      status: "error",
-+      formError: "予定が変更されました。previewを再読込してください。",
-+    });
-+    const tree = view(value); // 試験用描画関数
-+    await dispatch(data(tree)); // reducer実行関数 / フォーム生成関数
-+    const html = renderToStaticMarkup(view(value)); // SSR描画関数 / 再描画関数
-+    expect(html).toContain("新しい操作"); // 期待値生成関数 / 再preview案内を検証するメソッド
-+    expect(html).toContain(value.previewHref); // 期待値生成関数 / サーバー再取得先を検証するメソッド
-+    expect(nodes(view(value), "fieldset")[0].props.disabled).toBe(true); // 期待値生成関数 / 要素検索関数 / 再描画関数 / 旧操作の選択固定を検証するメソッド
-+  },
-+);
-+
-+it("保存後の再検証失敗は保存済みと示し、再実行ボタンを出さない", // 試験を登録する関数
-+  /**
-+   * needsReloadの成功は一覧再読込へ誘導し、再保存へ誘導しない。
-+   */
-+  async () => { // 保存後障害の案内を検証する非同期コールバック
-+    const value = props(); // props生成関数
-+    vi.mocked(value.action).mockResolvedValue({ // 型付きmock取得関数 / 保存済みstate設定メソッド
-+      ...value.initialState,
-+      status: "success",
-+      data: {
-+        targetMonth: "2026-02",
-+        createdCount: 1,
-+        needsReload: true,
-+      },
-+    });
-+    const tree = view(value); // 試験用描画関数
-+    await dispatch(data(tree)); // reducer実行関数 / フォーム生成関数
-+    const html = renderToStaticMarkup(view(value)); // SSR描画関数 / 再描画関数
-+    expect(html).toContain("保存済みです"); // 期待値生成関数 / 保存済み案内を検証するメソッド
-+    expect(nodes(view(value), "button")).toHaveLength(0); // 期待値生成関数 / 要素検索関数 / 再描画関数 / 再実行ボタン非表示を比較するメソッド
-+    expect(begin(view(value))).toHaveBeenCalledOnce(); // 期待値生成関数 / submit試験関数 / 再描画関数 / 保存済み再送禁止を検証するメソッド
-+  },
-+);
-+
-+it("pending中は選択とsubmitを無効にし、hiddenの選択IDを保持する", // 試験を登録する関数
-+  /**
-+   * Actionが完了するまでdisabled領域の外に初回payloadを維持する。
-+   */
-+  async () => { // pending表示を検証する非同期コールバック
-+    const value = props(); // props生成関数
-+    let finish!: (result: EventMonthCopyActionState) => void; // Action結果を解決する関数型
-+    vi.mocked(value.action).mockReturnValue(new Promise( // 型付きmock取得関数 / 結果待機設定メソッド / Promise生成
++      () => { // 【追加】固定文言への変換結果を検証するコールバック
++      expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
++        getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
+           "unknown",
+         ),
+       ).toBeNull();
+     });
+ 
+-    it("複数指定はnull", () => {
+-      expect(
+-        getClubEventToastMessage([
++    it("複数指定はnull",  // 【追加】toastの変換試験を登録する関数
 +      /**
-+       * 試験中だけActionの応答を保留する。
++       * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
 +       */
-+      (resolve) => { // Promise解決関数を保存するコールバック
-+        finish = resolve; // Promiseを解決する関数の参照
-+      },
-+    ));
-+    const tree = view(value); // 試験用描画関数
-+    begin(tree); // 同期submitを実行する関数
-+    const task = dispatch(data(tree)); // reducer実行関数 / フォーム生成関数
-+    const waiting = view(value); // pending状態を再描画する関数
-+    expect(nodes(waiting, "fieldset")[0].props.disabled).toBe(true); // 期待値生成関数 / 要素検索関数 / 選択無効化を検証するメソッド
-+    expect(nodes(waiting, "button")[0].props.disabled).toBe(true); // 期待値生成関数 / 要素検索関数 / submit無効化を検証するメソッド
-+    expect(data(waiting).getAll("selectedEventIds")).toEqual([SOURCE]); // 期待値生成関数 / フォーム生成関数 / 選択取得・比較メソッド
-+    finish({ // Action待機を解決する関数
-+      ...value.initialState,
-+      status: "error",
-+      formError: "通常失敗",
-+    });
-+    await task;
-+  },
++      () => { // 【追加】固定文言への変換結果を検証するコールバック
++      expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
++        getClubEventToastMessage([ // 【追加】既知のコードだけを固定メッセージへ変換する関数
+           "event-created",
+         ]),
+       ).toBeNull();
+     });
+ 
+-    it("未指定はnull", () => {
+-      expect(
+-        getClubEventToastMessage(
++    it("未指定はnull",  // 【追加】toastの変換試験を登録する関数
++      /**
++       * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
++       */
++      () => { // 【追加】固定文言への変換結果を検証するコールバック
++      expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
++        getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
+           undefined,
+         ),
+       ).toBeNull();
+     });
+   },
+-);
+\ No newline at end of file
 +);
-+
-+it("同じ内容の候補を複数選択した場合は初回送信前に止める", // 試験を登録する関数
++// 【追加】成功コードも、任意文字列や配列へ変わった場合は表示しない。
++it.each([ // 【追加】不正な複製toastのパラメーター試験を登録する関数
++  "events-month-copied",
++  "event-month-copied?createdCount=999",
++  "event-month-copied<script>",
++  ["event-month-copied"],
++])("複製成功コード以外の%jは表示しない", // 【追加】試験を登録する関数
 +  /**
-+   * 先頭候補と一致候補を同時選択しても、操作を消費する前に変更できる。
++   * 【追加】未採用コード・任意文字列付きコード・配列を固定文言へ変換しない。
 +   */
-+  () => { // 一致候補の複数選択を検証するコールバック
-+    const value = props(); // props生成関数
-+    const second = item(); // 二つ目の候補を作る関数
-+    second.sourceEventId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2";
-+    second.duplicateSourceEventId = SOURCE;
-+    second.initiallySelected = false;
-+    value.items = [value.items[0], second];
-+    check(view(value), true, 1); // 一致する二つ目を選択する関数 / 再描画関数
-+    expect(renderToStaticMarkup(view(value))).toContain("同じ内容になる候補は1件だけ"); // 期待値生成関数 / SSR描画関数 / 再描画関数 / 拒否案内検証メソッド
-+    expect(begin(view(value))).toHaveBeenCalledOnce(); // 期待値生成関数 / submit試験関数 / 再描画関数 / submit拒否を検証するメソッド
-+    check(view(value), false); // 代表だけを外す関数 / 再描画関数
-+    expect(data(view(value)).getAll("selectedEventIds")).toEqual([second.sourceEventId]); // 期待値生成関数 / フォーム生成関数 / 再描画関数 / 選択取得・比較メソッド
-+    expect(begin(view(value))).not.toHaveBeenCalled(); // 期待値生成関数 / submit試験関数 / 再描画関数 / 片方だけの送信許可を検証するメソッド
++  (value) => { // 【追加】不正コードを検証するコールバック
++    expect(getClubEventToastMessage(value)).toBeNull(); // 【追加】期待値生成関数 / 固定文言変換関数 / 非表示を比較するメソッド
 +  },
 +);
-+
-+it("Nextの制御例外は通信エラーへ変換しない", // 試験を登録する関数
-+  /**
-+   * 本物のnotFound制御例外を再送出し、同じpayloadを捨てない。
-+   */
-+  async () => { // 制御例外の伝播を検証する非同期コールバック
-+    const { notFound } = await import("next/navigation"); // 実Nextの制御例外関数を取得する動的import
-+    let control: unknown; // Next制御例外の不明値型
-+    try {
-+      notFound(); // 実Nextの制御例外を発生させる関数
-+    } catch (error) {
-+      control = error;
-+    }
-+    const value = props(); // props生成関数
-+    vi.mocked(value.action).mockRejectedValue(control); // 型付きmock取得関数 / 制御例外を設定するメソッド
-+    const tree = view(value); // 試験用描画関数
-+    await expect(dispatch(data(tree))).rejects.toBe(control); // 期待値生成関数 / reducer実行関数 / フォーム生成関数 / 制御例外を検証するメソッド
-+  },
-+);
-diff --git a/tests/event-month-copy-pages.test.ts b/tests/event-month-copy-pages.test.ts
+diff --git a/domain/club/event/event-toast.ts b/domain/club/event/event-toast.ts
+index 7f4b60ca675e9edcd2dccd4c8130e037da9ec58a..9e3202cc866a234b66da019757070ea031ccda82 100644
+--- a/domain/club/event/event-toast.ts
++++ b/domain/club/event/event-toast.ts
+@@ -2,20 +2,27 @@
+ // イベントのURLのトースト識別子を固定メッセージへ変換する。
+ 
+ //イベントトーストのタイプ
+-export type ClubEventToastCode =
+-  | "event-created"
+-  | "event-updated"
+-  | "event-deleted"
+-  | "event-delete-failed";
++/**
++ * 【追加】イベント操作結果を表す、URLで受け取る固定toastコードの型。
++ */
++export type ClubEventToastCode = // 【追加】イベント操作結果の固定コード型
++  | "event-created" // 【追加】文字列で受け取る入力・戻り値の型 / 既存イベント操作の固定コード型
++  | "event-updated" // 【追加】既存イベント操作の固定コード型
++  | "event-deleted" // 【追加】既存イベント操作の固定コード型
++  | "event-delete-failed" // 【追加】既存イベント操作の固定コード型
++  | "event-month-copied"; // 【追加】前月予定の複製成功を表す固定コード型
+ 
+ 
+     //URLパラメータをトーストのメッセージに変換する関数
+-export function getClubEventToastMessage(
++/**
++ * 【追加】単一の既知コードだけを固定文言へ変換し、未知・配列・未指定はnullにする。
++ */
++export function getClubEventToastMessage( // 【追加】URL値を固定メッセージへ変換する関数
+   value:
+-    | string
+-    | string[]
+-    | undefined,
+-): string | null {
++    | string // 【追加】単一queryの文字列型
++    | string[] // 【追加】複数指定されたqueryの配列型
++    | undefined, // 【追加】query未指定の型
++): string | null { // 【追加】固定文言または非表示の型
+   if (typeof value !== "string") {
+     return null;
+   }
+@@ -29,6 +36,8 @@ export function getClubEventToastMessage(
+       return "イベントを削除しました。";
+     case "event-delete-failed":
+       return "イベントを削除できませんでした。もう一度お試しください。";
++    case "event-month-copied": // 【追加】保存Actionの既存コードに対応する
++      return "前月の予定を下書きとして複製しました。";
+     default:
+       return null;
+   }
+diff --git a/tests/event-month-copy-navigation.test.ts b/tests/event-month-copy-navigation.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a81566e6d194c6808cfae24e8b102765cf07aa2
+index 0000000000000000000000000000000000000000..d8987d49f39ab41c550adc83c9599cfc5a64176a
 --- /dev/null
-+++ b/tests/event-month-copy-pages.test.ts
-@@ -0,0 +1,328 @@
-+// tests/event-month-copy-pages.test.ts
-+// 実Auth・DBなしで、Promise props・Page再認可・限定DTO・bound Actionを検証する。
++++ b/tests/event-month-copy-navigation.test.ts
+@@ -0,0 +1,330 @@
++// tests/event-month-copy-navigation.test.ts
++// 実DB・Authなしで、表示月だけの複製導線と既存一覧・保存後toastの接続を検証する。
 +
 +import { renderToStaticMarkup } from "react-dom/server";
++import { redirect } from "next/navigation";
 +import {
 +  beforeEach,
 +  expect,
@@ -1058,130 +581,97 @@ index 0000000000000000000000000000000000000000..7a81566e6d194c6808cfae24e8b10276
 +  vi,
 +} from "vitest";
 +
-+import EventMonthCopyPage, { // 再認可して限定previewを取得するPage Component
-+  dynamic, // 要求ごとに最新の認可・preview・操作IDを取得する設定
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/page";
++import AdminEventsMonthPage from "@/app/(club-app)/club/[clubSlug]/admin/events/page"; // 表示月の管理一覧と複製導線を描画するPage
++import {
++  copyPreviousMonthEventsAction, // 再認可して複製し、同クラブの対象月へ遷移するAction
++} from "@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/actions";
 +import type {
-+  EventMonthCopyForm, // 限定DTOと同一操作のActionを受け取るフォームComponentの型参照
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm";
-+import type {
-+  EventMonthCopyPreview, // previewの成功・失敗結果型
-+  EventMonthCopyPreviewItem, // 本文を含まない候補表示型
++  EventMonthCopyActionState, // 前月複製の入力・エラー・保存済み結果を持つ型
 +} from "@/domain/club/event/event-month-copy-types";
++import {
++  getClubMonthUtcRange, // クラブtimezoneの月境界をUTC期間へ変換する関数
++} from "@/domain/shared/date-time/club-date-time";
 +
-+const mocks = vi.hoisted( // import前にmockを用意する関数
++const mocks = vi.hoisted( // importより先にmockを生成する関数
 +  /**
-+   * 実認可を使い、通信とService・Client描画・保存だけを置き換える。
++   * 認可・読取・カレンダー・保存・再検証の境界だけを置き換える。
 +   */
 +  () => ({ // mock群を作るコールバック
-+    user: vi.fn(), // Auth取得mockの生成関数
-+    member: vi.fn(), // 所属検索mockの生成関数
-+    read: vi.fn(), // preview取得mockの生成関数
-+    form: vi.fn(), // Client props観測mockの生成関数
-+    action: vi.fn(), // bound引数観測mockの生成関数
++    access: vi.fn(), // 認可context取得mock生成関数
++    events: vi.fn(), // 一覧取得mock生成関数
++    counts: vi.fn(), // 件数取得mock生成関数
++    calendar: vi.fn(), // カレンダーprops観測mock生成関数
++    copy: vi.fn(), // 保存Service mock生成関数
++    revalidate: vi.fn(), // 再検証mock生成関数
 +  }),
 +);
-+vi.mock("@/src/infrastructure/supabase/server", // 実Auth通信を置換する関数
++vi.mock("@/app/(club-app)/club/club-app-authorization", // 認可境界を置換する関数
 +  /**
-+   * 共通認可の本人取得だけをmockへつなぐ。
++   * 認可要求のslugを観測し、実Authを操作しない。
 +   */
-+  () => ({ // サーバーSDKを公開するコールバック
-+    createClient:
-+      /**
-+       * 通信しないAuth SDKを生成する。
-+       */
-+      async () => ({ // SDK生成の非同期コールバック
-+        auth: {
-+          getUser: mocks.user, // Auth取得mock関数の参照
-+        },
-+      }),
++  () => ({ // 認可関数を公開するコールバック
++    requireClubAppAdminAccess: mocks.access, // 認可mock関数の参照
 +  }),
 +);
-+vi.mock("@/src/infrastructure/prisma/client", // 実DB通信を置換する関数
++vi.mock("@/src/infrastructure/prisma/repositories/club-event-repository", // DB読取境界を置換する関数
 +  /**
-+   * ACTIVE所属を検索するmockだけを公開する。
++   * 既存一覧条件と件数条件を観測し、実DBへ接続しない。
 +   */
-+  () => ({ // DB境界を公開するコールバック
-+    prisma: {
-+      clubMembership: {
-+        findFirst: mocks.member, // 所属検索mock関数の参照
-+      },
-+    },
++  () => ({ // Repositoryを公開するコールバック
++    findAdminClubEventsInRange: mocks.events, // 一覧取得mock関数の参照
++    countAdminClubEventsInRangeByStatus: mocks.counts, // 件数取得mock関数の参照
 +  }),
 +);
-+vi.mock("@/src/application/club/event/get-event-month-copy", // preview取得を置換する関数
++vi.mock("@/app/(club-app)/club/[clubSlug]/_components/ClubEventMonthCalendar", // 既存カレンダー描画を置換する関数
 +  /**
-+   * DB由来の表示DTOを取得するService境界を制御する。
++   * カレンダーへ渡す値の互換性だけを確認する。
 +   */
-+  () => ({ // Serviceを公開するコールバック
-+    getEventMonthCopyPreview: mocks.read, // 取得mock関数の参照
++  () => ({ // カレンダーComponentを公開するコールバック
++    ClubEventMonthCalendar: mocks.calendar, // props観測mock関数の参照
 +  }),
 +);
-+vi.mock("@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm", // Client描画を置換する関数
++vi.mock("@/src/application/club/event/copy-event-month", // DB保存境界を置換する関数
 +  /**
-+   * PageがClientへ渡す値だけを観測する。
++   * 実際のActionが使う保存Serviceだけをmockへ置き換える。
 +   */
-+  () => ({ // Client Componentを公開するコールバック
-+    EventMonthCopyForm: mocks.form, // props観測mock関数の参照
++  () => ({ // 保存Serviceを公開するコールバック
++    copyPreviousMonthEvents: mocks.copy, // 保存mock関数の参照
 +  }),
 +);
-+vi.mock("@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/actions", // 保存Actionを置換する関数
++vi.mock("@/app/(club-app)/club/revalidate-club-paths", // 実キャッシュ更新を置換する関数
 +  /**
-+   * bindした値を観測し、DB保存やキャッシュ更新を行わない。
++   * 保存後の再検証要求を記録する。
 +   */
-+  () => ({ // Actionを公開するコールバック
-+    copyPreviousMonthEventsAction: mocks.action, // Action引数観測mock関数の参照
++  () => ({ // 再検証関数を公開するコールバック
++    revalidateClubEventPaths: mocks.revalidate, // 再検証mock関数の参照
 +  }),
++);
++vi.mock("next/navigation", // 実際の制御例外を保って遷移先を観測する関数
++  /**
++   * 導入済みNextのredirect例外をそのまま利用する。
++   */
++  async (original) => { // 実モジュールを取得する非同期コールバック
++    const actual = await original<typeof import("next/navigation")>(); // 実モジュール取得関数 / Nextモジュール型
++    return {
++      ...actual,
++      redirect: vi.fn(actual.redirect), // 実遷移関数を包むmock生成関数
++    };
++  },
 +);
 +
 +/**
-+ * Clientフォームが受け取る実装上のprops型。
++ * 月別Pageのqueryと、表示してはいけない任意の件数を表す試験入力型。
 + */
-+type FormProps = Parameters<typeof EventMonthCopyForm>[0]; // Component引数を取り出す型
++type Query = Awaited<Parameters<typeof AdminEventsMonthPage>[0]["searchParams"]> & { // Page引数から非同期queryを取り出す型
++  createdCount?: string; // URLから送られる任意件数の文字列型
++};
 +
 +/**
-+ * Promise propsと単一・重複月のqueryを用意してPageを静的描画する。
++ * 管理者として認可されたサーバーcontextを用意する。
 + */
-+async function page(month: string | string[] | undefined = "2026-02") { // Page描画関数 / 月queryの型
-+  return renderToStaticMarkup(await EventMonthCopyPage({ // SSR描画関数 / Page Component
-+    params: Promise.resolve({ clubSlug: "club-a" }), // 非同期route引数を生成するメソッド
-+    searchParams: Promise.resolve({ month }), // 非同期queryを生成するメソッド
-+  }));
-+}
-+
-+/**
-+ * 保存用本文を持たない候補DTOを生成する。
-+ */
-+function item(): EventMonthCopyPreviewItem { // 候補生成関数 / 候補表示型
++function context() { // 認可fixture生成関数
 +  return {
-+    sourceEventId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
-+    title: "練習",
-+    isAllDay: false,
-+    original: {
-+      startAt: "2026-01-31T00:00:00.123Z",
-+      endAt: null,
-+      meetingAt: null,
-+    },
-+    converted: {
-+      startAt: "2026-02-28T00:00:00.123Z",
-+      endAt: null,
-+      meetingAt: null,
-+    },
-+    correctedFields: ["startAt"],
-+    exclusionReason: null,
-+    duplicateEventId: null,
-+    duplicateSourceEventId: null,
-+    initiallySelected: true,
-+  };
-+}
-+
-+/**
-+ * 認可層の現在クラブ・所属を生成する。
-+ */
-+function member() { // 認可fixture生成関数
-+  return {
-+    id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-+    role: "OWNER",
++    userId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
 +    club: {
 +      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
 +      slug: "club-a",
@@ -1189,189 +679,223 @@ index 0000000000000000000000000000000000000000..7a81566e6d194c6808cfae24e8b10276
 +      timezone: "Asia/Tokyo",
 +      planType: "STANDARD",
 +    },
++    membership: {
++      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
++      role: "OWNER",
++    },
 +  };
 +}
 +
 +/**
-+ * 静的描画で観測したClient propsを取り出す。
++ * 非同期routeとqueryで月別管理Pageを静的描画する。
 + */
-+function captured(): FormProps { // propsを取り出す関数 / フォームprops型
-+  return mocks.form.mock.calls.at(-1)![0] as FormProps; // 最後の描画を取得するメソッド / props型へのアサーション
++async function page(query: Query = {}) { // Page描画関数 / 生queryの型
++  return renderToStaticMarkup(await AdminEventsMonthPage({ // SSR描画関数 / 管理月別Page
++    params: Promise.resolve({ clubSlug: "club-a" }), // 非同期route引数を生成するメソッド
++    searchParams: Promise.resolve(query), // 非同期queryを生成するメソッド
++  }));
++}
++
++/**
++ * HTMLから複製導線のURLを取り出す。
++ */
++function copyUrl(html: string): URL { // 複製URL取得関数 / HTML文字列型 / URL型
++  const match = /href="([^"]*\/copy-previous-month\?[^"]*)"/.exec(html); // 複製導線だけを検索するメソッド
++  if (!match) throw new Error("Missing copy link"); // 導線不足を報告する例外生成
++  return new URL(match[1].replaceAll("&amp;", "&"), "https://app.invalid"); // URL生成 / HTML entityを復元するメソッド
 +}
 +
 +beforeEach( // 各試験前の準備を登録する関数
 +  /**
-+   * 正常な本人・所属・限定DTOを用意し、実Client hookは評価しない。
++   * 既存の管理一覧・件数と、保存成功の応答を初期化する。
 +   */
-+  () => { // 初期化のコールバック
++  () => { // 初期化コールバック
 +    vi.resetAllMocks(); // mockを初期化する関数
-+    mocks.user.mockResolvedValue({ // 本人取得結果を設定するメソッド
-+      data: {
-+        user: {
-+          id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-+        },
++    // redirectの実装はresetAllMocksで初期実装へ戻る。
++    mocks.access.mockResolvedValue(context()); // 認可結果を設定するメソッド / fixture生成関数
++    mocks.events.mockResolvedValue([ // 一覧取得結果を設定するメソッド
++      {
++        id: "event-a",
++        title: "練習予定",
++        genre: "PRACTICE",
++        status: "DRAFT",
++        startAt: new Date("2026-01-31T15:00:00.000Z"), // 開始Dateを作るコンストラクター
++        endAt: null,
++        isAllDay: false,
++        attachments: [{ id: "attachment-a" }],
 +      },
-+      error: null,
-+    });
-+    mocks.member.mockResolvedValue(member()); // 所属検索結果を設定するメソッド / 認可fixture生成関数
-+    const preview: EventMonthCopyPreview = { // 成功previewの型
-+      outcome: "READY",
-+      targetMonth: "2026-02",
-+      sourceMonth: "2026-01",
-+      timezone: "Asia/Tokyo",
-+      fingerprint: "ab".repeat(32), // 照合値を生成するメソッド
-+      items: [item()], // 候補生成関数
-+    };
-+    mocks.read.mockResolvedValue(preview); // 取得結果を設定するメソッド
-+    mocks.form.mockReturnValue(null); // Client描画を評価しない設定メソッド
-+  },
-+);
-+
-+it("Promise propsを解決し、認可contextで取得して限定propsとbound値を渡す", // 試験を登録する関数
-+  /**
-+   * 現在の認可・DTO・一意な操作IDと、月別管理ページへのリンクを確認する。
-+   */
-+  async () => { // Page接続を検証する非同期コールバック
-+    expect(dynamic).toBe("force-dynamic"); // 期待値生成関数 / 動的描画設定の比較メソッド
-+    expect(await page()).toContain("2026-01"); // 期待値生成関数 / Page描画関数 / 複製元月を検証するメソッド
-+    const props = captured(); // Client props取得関数
-+    expect(Object.keys(props).sort()).toEqual([ // 期待値生成関数 / キー取得・整列メソッド / 限定props比較メソッド
-+      "action", "cancelHref", "initialState", "items", "previewHref", "timezone",
 +    ]);
-+    expect(props.cancelHref).toBe("/club/club-a/admin/events?month=2026-02&status=ALL"); // 期待値生成関数 / 月別管理ページURL比較メソッド
-+    expect(props.previewHref).toBe("/club/club-a/admin/events/copy-previous-month?month=2026-02"); // 期待値生成関数 / 再preview先URL比較メソッド
-+    expect(props.initialState.values.requestId).toBe(props.initialState.requestId); // 期待値生成関数 / 操作IDの一致を検証するメソッド
-+    expect(props.initialState.requestId).toMatch(/^[0-9a-f-]{36}$/); // 期待値生成関数 / 生成IDの形式を検証するメソッド
-+    expect(mocks.read.mock.calls[0][0].club.id).toBe(member().club.id); // 期待値生成関数 / 取得scopeを比較するメソッド / 認可fixture生成関数
-+    const data = new FormData(); // Action引数を観測するフォーム生成コンストラクター
-+    await props.action(props.initialState, data); // bound Actionを呼ぶ関数
-+    expect(mocks.action).toHaveBeenCalledWith( // 期待値生成関数 / bound引数を検証するメソッド
-+      "club-a", "2026-02", props.initialState.requestId, "ab".repeat(32), // 照合値を生成するメソッド
-+      props.initialState, data,
-+    );
-+  },
-+);
-+
-+it.each(["", "2026-13", "2026-2", " 2026-02", "0000-02", "0001-01", ["2026-02"]])( // 月入力のパラメーター試験登録関数
-+  "不正・配列月%jではServiceを呼ばない", // 月入力のパラメーター試験を登録する関数
-+  /**
-+   * 不正月を現在月へ置き換えず、送信フォームを表示しない。
-+   */
-+  async (month) => { // 月入力を検証する非同期コールバック
-+    expect(await page(month)).toContain("YYYY-MM"); // 期待値生成関数 / Page描画関数 / 拒否表示を検証するメソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // 期待値生成関数 / Service非呼出しを検証するメソッド
-+    expect(mocks.form).not.toHaveBeenCalled(); // 期待値生成関数 / フォーム非表示を検証するメソッド
-+  },
-+);
-+
-+it("月未指定でもServiceを呼ばない", // 試験を登録する関数
-+  /**
-+   * URL月の省略を暗黙の月へ補完しない。
-+   */
-+  async () => { // 未指定月を検証する非同期コールバック
-+    const tree = await EventMonthCopyPage({ // Pageを呼ぶ関数
-+      params: Promise.resolve({ clubSlug: "club-a" }), // 非同期route引数生成メソッド
-+      searchParams: Promise.resolve({}), // 月なしquery生成メソッド
++    mocks.counts.mockResolvedValue({ // 状態別件数を設定するメソッド
++      ALL: 3,
++      DRAFT: 1,
++      PUBLISHED: 2,
 +    });
-+    expect(renderToStaticMarkup(tree)).toContain("YYYY-MM"); // 期待値生成関数 / SSR描画関数 / 拒否表示検証メソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // 期待値生成関数 / Service非呼出し検証メソッド
-+  },
-+);
-+
-+it.each(["未ログイン", "MEMBER", "所属失効", "禁止プラン"])( // 認可試験を登録する関数
-+  "%sならPageでも拒否してServiceを呼ばない",
-+  /**
-+   * 共通認可の実処理で、画面へ到達した時点でも本人・所属・権限・プランを確認する。
-+   */
-+  async (reason) => { // Page認可を検証する非同期コールバック
-+    if (reason === "未ログイン") {
-+      mocks.user.mockResolvedValue({ // 未ログイン応答を設定するメソッド
-+        data: {
-+          user: null,
-+        },
-+        error: null,
-+      });
-+    } else if (reason === "所属失効") {
-+      mocks.member.mockResolvedValue(null); // ACTIVE所属なしを設定するメソッド
-+    } else {
-+      const value = member(); // 認可fixture生成関数
-+      if (reason === "MEMBER") value.role = "MEMBER";
-+      else value.club.planType = "STARTER";
-+      mocks.member.mockResolvedValue(value); // 権限・プランを設定するメソッド
-+    }
-+    await expect(page()).rejects.toThrow(); // 期待値生成関数 / Page描画関数 / 認可拒否を検証するメソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // 期待値生成関数 / Service非呼出しを検証するメソッド
-+  },
-+);
-+
-+it.each(["TOO_MANY", "FORBIDDEN", "PREVIEW_FAILED"])( // 取得失敗のパラメーター試験を登録する関数
-+  "%sでは操作IDや送信フォームを渡さない",
-+  /**
-+   * 候補101件以上・現在権限拒否・取得失敗は固定の案内だけを出す。
-+   */
-+  async (outcome) => { // 取得失敗を検証する非同期コールバック
-+    mocks.read.mockResolvedValue({ // Serviceの失敗を設定するメソッド
-+      outcome,
-+      detail: "PRIVATE_SQL_TOKEN",
++    mocks.calendar.mockReturnValue(null); // props観測だけにする設定メソッド
++    mocks.copy.mockResolvedValue({ // 保存完了結果を設定するメソッド
++      outcome: "CREATED",
++      receipt: {
++        targetMonth: "2026-02",
++        createdCount: 1,
++      },
 +    });
-+    const html = await page(); // Page描画関数
-+    expect(html).toContain('role="alert"'); // 期待値生成関数 / 固定エラー表示を検証するメソッド
-+    expect(html).not.toContain("PRIVATE_SQL_TOKEN"); // 期待値生成関数 / 内部詳細の非表示を検証するメソッド
-+    expect(mocks.form).not.toHaveBeenCalled(); // 期待値生成関数 / フォーム非表示を検証するメソッド
 +  },
 +);
 +
-+it.each([0, 100])("候補%d件も切り捨てずフォームへ渡す", // 件数境界のパラメーター試験を登録する関数
++it.each(["2026-02", "2027-01"])( // 表示月のパラメーター試験を登録する関数
++  "%sを複製先月として、表示月だけのリンクを生成する",
 +  /**
-+   * 空previewも上限ちょうども、Serviceの限定DTOをそのまま表示層へ渡す。
++   * 表示中の状態・ジャンル・toast・任意件数を複製条件へ混ぜない。
 +   */
-+  async (count) => { // 件数境界を検証する非同期コールバック
-+    const ready = mocks.read.getMockImplementation()!(); // 設定済み結果を取得するmock実装参照・呼出し
-+    const preview = await ready;
-+    preview.items = Array.from({ length: count }, // 件数分の候補配列を生成する関数
-+      /**
-+       * 件数境界を確認する表示候補を作る。
-+       */
-+      () => item(), // 候補を生成するコールバック / 候補生成関数
-+    );
-+    mocks.read.mockResolvedValue(preview); // 件数境界の結果を設定するメソッド
-+    await page(); // Page描画関数
-+    expect(captured().items).toHaveLength(count); // 期待値生成関数 / props取得関数 / 件数比較メソッド
++  async (month) => { // 導線を検証する非同期コールバック
++    const url = copyUrl(await page({ // URL取得関数 / Page描画関数
++      month,
++      status: "PUBLISHED",
++      genre: "TOURNAMENT",
++      toast: "event-created",
++      toastId: "arbitrary",
++      createdCount: "999",
++    }));
++    expect(url.pathname).toBe("/club/club-a/admin/events/copy-previous-month"); // 期待値生成関数 / 固定経路を比較するメソッド
++    expect([...url.searchParams.entries()]).toEqual([["month", month]]); // 期待値生成関数 / queryを取得するメソッド / 月だけのqueryを比較するメソッド
++    expect(mocks.copy).not.toHaveBeenCalled(); // 期待値生成関数 / GETで保存しないことを検証するメソッド
 +  },
 +);
 +
-+it("再previewごとに新しい操作IDとbound Actionを用意する", // 試験を登録する関数
++it("認可contextのslugをencodeしてリンクを生成する", // 試験を登録する関数
 +  /**
-+   * 選択変更を始める新しいGETが、以前の操作IDを使い回さないことを確認する。
++   * slug内のパス区切りや空白が新しいURL構造へ解釈されないことを確認する。
 +   */
-+  async () => { // 操作分離を検証する非同期コールバック
-+    await page(); // 最初のPage描画関数
-+    const first = captured(); // 最初のClient props取得関数
-+    await page(); // 再previewのPage描画関数
-+    const second = captured(); // 新しいClient props取得関数
-+    expect(second.initialState.requestId).not.toBe(first.initialState.requestId); // 期待値生成関数 / 新操作IDを比較するメソッド
++  async () => { // slugの符号化を検証する非同期コールバック
++    const value = context(); // 認可fixture生成関数
++    value.club.slug = "club/a b";
++    mocks.access.mockResolvedValue(value); // 特殊文字を含むslugを設定するメソッド
++    const url = copyUrl(await page({ month: "2026-02" })); // URL取得関数 / Page描画関数
++    expect(url.pathname).toBe("/club/club%2Fa%20b/admin/events/copy-previous-month"); // 期待値生成関数 / 符号化した経路を比較するメソッド
 +  },
 +);
 +
-+it("Serviceの初期off・除外理由を保ち、自動的に選択を追加しない", // 試験を登録する関数
++it("既存の一覧条件・状態別件数・カレンダーへの値を維持する", // 試験を登録する関数
 +  /**
-+   * 既存一致と全除外を含むDTOの選択方針をPageで上書きしない。
++   * 複製導線の追加によって、既存のクラブ・期間・状態・ジャンル条件を変えない。
 +   */
-+  async () => { // 初期選択の継承を検証する非同期コールバック
-+    const excluded = item(); // 候補生成関数
-+    excluded.initiallySelected = false;
-+    excluded.exclusionReason = "INVALID_DATE_TIME";
-+    excluded.converted = null;
-+    mocks.read.mockResolvedValue({ // 全除外previewを設定するメソッド
-+      outcome: "READY",
-+      targetMonth: "2026-02",
-+      sourceMonth: "2026-01",
-+      timezone: "Asia/Tokyo",
-+      fingerprint: "ab".repeat(32), // 照合値生成メソッド
-+      items: [excluded],
++  async () => { // 既存一覧の互換性を検証する非同期コールバック
++    const html = await page({ // Page描画関数
++      month: "2026-02",
++      status: "DRAFT",
++      genre: "PRACTICE",
 +    });
-+    await page(); // Page描画関数
-+    expect(captured().initialState.values.selectedEventIds).toEqual([]); // 期待値生成関数 / props取得関数 / 初期未選択を比較するメソッド
-+    expect(captured().items[0].exclusionReason).toBe("INVALID_DATE_TIME"); // 期待値生成関数 / props取得関数 / 除外理由の継承を比較するメソッド
++    const range = getClubMonthUtcRange("2026-02", "Asia/Tokyo"); // 既存の月境界変換関数
++    expect(mocks.events).toHaveBeenCalledExactlyOnceWith({ // 期待値生成関数 / 既存の取得条件を検証するメソッド
++      clubId: context().club.id, // 認可fixture生成関数
++      range,
++      status: "DRAFT",
++      genre: "PRACTICE",
++    });
++    expect(mocks.counts).toHaveBeenCalledExactlyOnceWith({ // 期待値生成関数 / 既存の件数取得条件を検証するメソッド
++      clubId: context().club.id, // 認可fixture生成関数
++      range,
++      genre: "PRACTICE",
++    });
++    const calendar = mocks.calendar.mock.calls[0][0];
++    expect(calendar.month).toBe("2026-02"); // 期待値生成関数 / カレンダー表示月を比較するメソッド
++    expect(calendar.dayQueryParams).toEqual({ // 期待値生成関数 / 既存の日別リンク条件を比較するメソッド
++      status: "DRAFT",
++      genre: "PRACTICE",
++    });
++    expect(calendar.events[0].hasAttachments).toBe(true); // 期待値生成関数 / 添付表示の互換性を検証するメソッド
++    expect(html).toContain("status=DRAFT&amp;month=2026-01&amp;genre=PRACTICE"); // 期待値生成関数 / 前月リンク条件を検証するメソッド
++    expect(html).toContain("status=DRAFT&amp;date=2026-02-01&amp;genre=PRACTICE"); // 期待値生成関数 / 日別リンク条件を検証するメソッド
++    expect(html).toContain("公開済み・下書きの全ジャンル"); // 期待値生成関数 / 複製候補の説明を検証するメソッド
++  },
++);
++
++it("保存成功toastは任意件数を表示せず固定の成功文言を出す", // 試験を登録する関数
++  /**
++   * URL由来の自由な文字列を成功文言に埋め込まない。
++   */
++  async () => { // 固定文言を検証する非同期コールバック
++    const html = await page({ // Page描画関数
++      month: "2026-02",
++      toast: "event-month-copied",
++      createdCount: "PRIVATE_COUNT_999<script>",
++    });
++    expect(html).toContain("前月の予定を下書きとして複製しました。"); // 期待値生成関数 / 固定成功文言を検証するメソッド
++    expect(html).toContain('role="status"'); // 期待値生成関数 / 成功の読み上げ役割を検証するメソッド
++    expect(html).not.toContain("PRIVATE_COUNT_999"); // 期待値生成関数 / 自由文言の非表示を検証するメソッド
++  },
++);
++
++it.each(["unknown<script>", ["event-month-copied"]])( // toast境界のパラメーター試験を登録する関数
++  "未知・配列toast %jは表示しない", // toast境界のパラメーター試験を登録する関数
++  /**
++   * 既知コードの配列を含め、単一の既知コード以外は表示しない。
++   */
++  async (toast) => { // toast境界を検証する非同期コールバック
++    const html = await page({ // 管理月別Pageを描画する関数
++      month: "2026-02",
++      toast,
++    }); // Page描画関数
++    expect(html).not.toContain("前月の予定を下書きとして複製しました。"); // 期待値生成関数 / 不正toastの非表示を検証するメソッド
++    expect(html).not.toContain("unknown"); // 期待値生成関数 / 任意文言の非表示を検証するメソッド
++  },
++);
++
++it("既存の削除失敗toastのalert表示を維持する", // 試験を登録する関数
++  /**
++   * 複製成功を追加しても、既存エラーの色分けと読み上げを変更しない。
++   */
++  async () => { // 既存toastの互換性を検証する非同期コールバック
++    const html = await page({ // 管理月別Pageを描画する関数
++      month: "2026-02",
++      toast: "event-delete-failed",
++    }); // Page描画関数
++    expect(html).toContain('role="alert"'); // 期待値生成関数 / 既存エラー役割を検証するメソッド
++    expect(html).toContain("イベントを削除できませんでした。"); // 期待値生成関数 / 既存文言を検証するメソッド
++  },
++);
++
++it("Actionの実際の成功遷移から対象月と成功toastを表示できる", // 試験を登録する関数
++  /**
++   * 現行のsingularコードと月別管理URLの接続を、既存Actionを変更せず確認する。
++   */
++  async () => { // 保存後表示の接続を検証する非同期コールバック
++    const requestId = "11111111-1111-4111-8111-111111111111";
++    const fingerprint = "ab".repeat(32); // 照合値を生成するメソッド
++    const previous: EventMonthCopyActionState = { // Actionの初期state型
++      status: "idle",
++      values: {
++        targetMonth: "2026-02",
++        selectedEventIds: [],
++        requestId,
++        previewFingerprint: fingerprint,
++      },
++      fieldErrors: {},
++      formError: null,
++      requestId,
++    };
++    const data = new FormData(); // 送信フォーム生成コンストラクター
++    data.set("targetMonth", "2026-02"); // 対象月設定メソッド
++    data.set("requestId", requestId); // 操作ID設定メソッド
++    data.set("previewFingerprint", fingerprint); // 照合値設定メソッド
++    data.append("selectedEventIds", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"); // 選択ID追加メソッド
++    await expect(copyPreviousMonthEventsAction( // 期待値生成関数 / 既存複製Action
++      "club-a",
++      "2026-02",
++      requestId,
++      fingerprint,
++      previous,
++      data,
++    )).rejects.toThrow("NEXT_REDIRECT"); // Nextの制御例外を検証するメソッド
++    const path = vi.mocked(redirect).mock.calls[0][0]; // 型付きmock取得関数
++    const url = new URL(path, "https://app.invalid"); // 遷移先を解釈するURL生成コンストラクター
++    expect(url.pathname).toBe("/club/club-a/admin/events"); // 期待値生成関数 / 月別管理URLを比較するメソッド
++    const html = await page({ // 実際の遷移queryでPageを描画する関数
++      month: url.searchParams.get("month")!, // 遷移先の対象月を取得するメソッド
++      status: url.searchParams.get("status")!, // 遷移先の表示状態を取得するメソッド
++      toast: url.searchParams.get("toast")!, // 遷移先の固定コードを取得するメソッド
++    });
++    expect(copyUrl(html).searchParams.get("month")).toBe("2026-02"); // 期待値生成関数 / 導線URL取得関数 / 表示月取得・比較メソッド
++    expect(html).toContain("前月の予定を下書きとして複製しました。"); // 期待値生成関数 / 成功文言を検証するメソッド
++    expect(mocks.events.mock.calls[0][0].status).toBe("ALL"); // 期待値生成関数 / 成功後の表示状態を比較するメソッド
 +  },
 +);

@@ -32,11 +32,11 @@ import {
 } from "@/domain/club/event/event-list-query";
 
 import {
-  ContentStatusTabs//管理用イベントのステータスタブ（下書きか公開中か）
+  ContentStatusTabs//管理用イベントのステータスタブ（下書きか公開中か）（ステータスタブの選択により 自動的にURLが変更される）
 } from "@/app/(club-app)/club/admin/_components/ContentStatusTabs";
 
 import {
-  getClubEventToastMessage,
+  getClubEventToastMessage, //イベントトーストコードを固定メッセージに変える関数
 } from "@/domain/club/event/event-toast";
 
 import {
@@ -44,37 +44,40 @@ import {
   type ClubEventMonthCalendarItem,//各ページからカレンダーへ渡す表示用データ
 } from "@/app/(club-app)/club/[clubSlug]/_components/ClubEventMonthCalendar";
 
-/*
- * Supabase Auth Cookieと現在のDBを利用するため、
- * リクエストごとに最新データを取得する。
- */
+
+//キャッシュしない
 export const dynamic =
   "force-dynamic";
 
-type Props = {
-  params: Promise<{
-    clubSlug: string;
+
+type Props = { // 入力項目をまとめる構造型
+  params: Promise<{ 
+    clubSlug: string; 
   }>;
 
-  searchParams: Promise<{
+  searchParams: Promise<{ 
     month?:
-      | string
-      | string[];
-    status?: string | string[];
-    genre?: string | string[];
-    toast?: string | string[];
-    toastId?: string | string[];
+      | string 
+      | string[]; 
+    status?: string | string[]; 
+    genre?: string | string[]; 
+    toast?: string | string[]; 
+    toastId?: string | string[]; 
   }>;
 };
 
-export default async function AdminEventsMonthPage({
+/**
+ * 管理者用月別イベントページ
+ * 管理者を再認可し、既存条件の月別一覧とイベント複製導線を表示する。
+ */
+export default async function AdminEventsMonthPage({ 
   params,
   searchParams,
-}: Props) {
-  const [//同時に処理し、resolvedParams と resolvedSearchParams という新しい変数に結果を入れる
+}: Props) { // 管理月別Pageの非同期引数型
+  const [
     resolvedParams,
     resolvedSearchParams,
-  ] = await Promise.all([
+  ] = await Promise.all([ 
     params,
     searchParams,
   ]);
@@ -85,54 +88,49 @@ export default async function AdminEventsMonthPage({
     );
 
   const status =
-  parseContentAdminStatus(
+  parseContentAdminStatus( //入力値をステータスの型に変換する正規化関数
     resolvedSearchParams.status,
   );
   const genre =
-  parseClubEventGenreFilter(
+  parseClubEventGenreFilter( //選択されたイベントのジャンルタブを正規な形式にする関数（不正な値や未選択は全てALL）
     resolvedSearchParams.genre,
   );
 
 
   const month =
-    parseMonthSearchParam(//URLの月から正常なら文字列（YYYY-MM）を取得する
+    parseMonthSearchParam(//URLから年月を読み取って、正常なら文字列（YYYY-MM）を返し、壊れているならクラブ現地の月のYYYY-MM形式（文字列）を返す関数
       resolvedSearchParams.month,
       context.club.timezone,
     );
 
   const range =
-    getClubMonthUtcRange(//DBに保存できるUTCに変換する
+    getClubMonthUtcRange(//クラブの現地時間（年・月）とタイムゾーンを受け取り、それを世界共通の基準時である『UTCのDate型（オブジェクト）』に変換しDBに保存できる形：UTCにする関数
       month,
       context.club.timezone,
     );
 
 const [events, counts] =
-  await Promise.all([
-    findAdminClubEventsInRange({
+  await Promise.all([ 
+    findAdminClubEventsInRange({ //特定の期間内のイベントをDBから取得する関数
       clubId: context.club.id,
       range,
       status,
       genre,
     }),
-    countAdminClubEventsInRangeByStatus({
+    countAdminClubEventsInRangeByStatus({ //管理画面でイベントの総数、公開中の数、下書きの数を数えるための関数
       clubId: context.club.id,
       range,
       genre,
     }),
   ]);
 
-   /*
-   * ここに追加・変更：
-   * URLの値そのものは表示せず、
-   * ホワイトリストの固定メッセージへ変換する。
-   */
+
   const toastMessage =
-    getClubEventToastMessage(
+    getClubEventToastMessage( //イベントトーストコードを固定メッセージに変える関数
       resolvedSearchParams.toast,
     );
 
   /*
-   * ここに追加・変更：
    * 削除失敗だけエラー用の見た目・読み上げにする。
    */
   const isErrorToast =
@@ -140,13 +138,13 @@ const [events, counts] =
     "event-delete-failed";
 
   const previousMonth =//先月の文字列を出す
-    shiftYearMonth(month, -1);
+    shiftYearMonth(month, -1); //年月の文字列(2026-08)を指定して月数分だけ前後にずらす関数
 
-  const nextMonth =
-    shiftYearMonth(month, 1);//来月の文字列を出す
+  const nextMonth =//来月の文字列を出す
+    shiftYearMonth(month, 1);//年月の文字列(2026-08)を指定して月数分だけ前後にずらす関数
 
   const encodedClubSlug =//クラブスラッグをURLに使える形に変更する
-    encodeURIComponent(
+    encodeURIComponent( // slugをURLパス用に符号化する関数
       context.club.slug,
     );
 
@@ -155,7 +153,7 @@ const [events, counts] =
 
 
     const memberMonthQuery =//月を重複せずにセットする
-  new URLSearchParams({
+  new URLSearchParams({ // 指定項目だけのqueryを構築する
     month,
   });
 
@@ -170,51 +168,64 @@ const memberMonthHref =//会員用月別イベントページに遷移するURL�
   `${basePath}/events?${memberMonthQuery.toString()}`;
 
 
-  //月を移動してもstatusとgenreを維持するためのURL
-  //toastとtoastIdは一度だけ表示する値なので維持しない。
-  function buildMonthHref(
-    targetMonth: string,
-  ): string {
+  // 複製先は現在の表示月だけを渡し、一覧の絞り込み条件は引き継がない。
+  const copyMonthQuery = new URLSearchParams({ // 表示月だけのqueryを組み立てるコンストラクター
+    month,
+  });
+  //複製月のURL
+  const copyMonthHref =
+    `${basePath}/admin/events/copy-previous-month?${copyMonthQuery.toString()}`; // 表示月queryをURL文字列へ変換するメソッド
+
+
+  /**
+   * 移動先の月と現在のステータス・ジャンルを保持した月別URLを作成する
+   * 月を移動してもstatusとgenreを維持するためのURL
+   */
+  function buildMonthHref( 
+    targetMonth: string, 
+  ): string { 
     const query =
-      new URLSearchParams({
+      new URLSearchParams({ //指定項目だけのqueryを構築するコンストラクター
         status,
         month: targetMonth,
       });
 
     if (genre !== "ALL") {
-      query.set(
+      query.set( // 維持する絞り込み条件をqueryへ設定するメソッド
         "genre",
         genre,
       );
     }
 
-    return `${basePath}/admin/events?${query.toString()}`;
+    return `${basePath}/admin/events?${query.toString()}`; // queryをURL文字列へ変換するメソッド
   }
 
-    //日別一覧へ移動するときにstatusとgenreを維持するためのURL
-  //toastとtoastIdは一度だけ表示する値なので維持しない。
-  function buildDayHref(
-    targetDate: string,
-  ): string {
+  /**
+   *  日別一覧へ移動するときにstatusとgenreを維持するためのURL
+   *  対象日と現在のステータス・ジャンルを保持し、toastを引き継がない日別URLを返す。
+   */
+  function buildDayHref( 
+    targetDate: string, 
+  ): string { 
     const query =
-      new URLSearchParams({
+      new URLSearchParams({ //指定項目だけのqueryを構築するコンストラクター
         status,
         date: targetDate,
       });
 
     if (genre !== "ALL") {
-      query.set(
+      query.set( // 維持する絞り込み条件をqueryへ設定するメソッド
         "genre",
         genre,
       );
     }
 
-    return `${basePath}/admin/events/list?${query.toString()}`;
+    return `${basePath}/admin/events/list?${query.toString()}`; // queryをURL文字列へ変換するメソッド
   }
 
-// カレンダーの日付を押したときに維持する検索条件
+// カレンダーの日付を押したときに維持する検索条件（ジャンルとステータスを維持）
 const adminCalendarDayQueryParams:
-  Record<string, string> = {
+  Record<string, string> = { 
   status,
 };
 
@@ -224,10 +235,11 @@ if (genre !== "ALL") {
 }
 
 
-// Repositoryの取得結果を共通カレンダー用に変換する
+// DBからの取得イベントをカレンダー表示値に変換する
 const adminCalendarEvents:
   ClubEventMonthCalendarItem[] =//各ページからカレンダーへ渡す表示用データ
-    events.map((event) => ({
+    events.map( 
+      (event) => ({ //取得イベントをカレンダー表示値へ写すコールバック
       id: event.id,
       title: event.title,
       genre: event.genre,
@@ -244,7 +256,7 @@ const adminCalendarEvents:
 
       // 管理用バッジからは編集ページへ移動する
       href:
-        `${basePath}/admin/events/${encodeURIComponent(
+        `${basePath}/admin/events/${encodeURIComponent( // slugやイベントIDをURLパス用に符号化する関数
           event.id,
         )}/edit`,
 
@@ -317,7 +329,14 @@ const adminCalendarEvents:
         </Link>
 
         <Link
-  href={buildDayHref(
+          href={copyMonthHref}
+          className="rounded-md border border-blue-300 px-4 py-2 text-sm font-medium text-blue-700"
+        >
+          前月の予定を複製
+        </Link>
+
+        <Link
+  href={buildDayHref( 
     `${month}-01`,
   )}
           className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
@@ -325,15 +344,17 @@ const adminCalendarEvents:
           日別一覧へ
         </Link>
 
-        {/* 【追加】OWNERだけにメンバー・LINE設定への導線を表示する。 */}
+        {/* OWNERだけにメンバー・LINE設定への導線を表示する。 */}
         {context.membership.role === "OWNER" ? (
           <>
+
             <Link
               href={`${basePath}/admin/members`}
               className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
             >
               メンバー管理
             </Link>
+
             <Link
               href={`${basePath}/admin/settings/line`}
               className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
@@ -346,12 +367,10 @@ const adminCalendarEvents:
 
     
 
-      {/*
-       * ここに追加：
-       * ジャンル絞り込み。
-       * monthとstatusはhiddenで維持する。
-       * qとpageは作成しない。
-       */}
+
+      <p className="text-sm text-slate-600">
+        複製候補は、表示月の前月に開始した公開済み・下書きの全ジャンルです。
+      </p>
       <form
         action={`${basePath}/admin/events`}
         method="get"
@@ -387,10 +406,13 @@ const adminCalendarEvents:
               すべて
             </option>
 
-            {Object.entries(
+            {Object.entries( // 【追加】固定ジャンルを選択肢へ変換するメソッド / 固定ジャンルの値とラベルを取得するメソッド
               EVENT_GENRE_LABELS,
             ).map(
-              ([
+              /**
+               * 【追加】固定ジャンルの値とラベルを選択肢として描画する。
+               */
+              ([ // 【追加】一覧の表示・リンクを構築するコールバック
                 value,
                 label,
               ]) => (
@@ -414,31 +436,30 @@ const adminCalendarEvents:
       </form>
 
       {/*
-       * ここに追加：
-       * 件数付きの共通ステータスタブを使用する。
-       * monthとgenreを維持する。
+       * ステータスタブの選択により 自動的にURLが変更される
        */}
       <ContentStatusTabs
         currentStatus={status}
         counts={counts}
-        buildHref={(
+        buildHref={
+          ( 
           nextStatus,
         ) => {
           const query =
-            new URLSearchParams({
+            new URLSearchParams({ //指定項目だけのqueryを構築するコンストラクター
               status:
                 nextStatus,
               month,
             });
 
           if (genre !== "ALL") {
-            query.set(
+            query.set( //維持する絞り込み条件をqueryへ設定するメソッド
               "genre",
               genre,
             );
           }
 
-          return `${basePath}/admin/events?${query.toString()}`;
+          return `${basePath}/admin/events?${query.toString()}`; // URLを自動作成する
         }}
       />
 
@@ -452,8 +473,9 @@ const adminCalendarEvents:
     aria-label="対象月の切り替え"
     className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
   >
+ 
     <Link
-      href={buildMonthHref(
+      href={buildMonthHref( // 状態・ジャンルを維持した月別リンクを作る関数
         previousMonth,
       )}
       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
@@ -462,13 +484,14 @@ const adminCalendarEvents:
     </Link>
 
     <h2 className="font-bold text-slate-900">
-      {formatYearMonthLabel(
+      {formatYearMonthLabel( // 年月を日本語の表示名へ変換する関数
         month,
       )}
     </h2>
 
+    {/* 指定したクラブ内URLへの導線を描画するLink Component。 */}
     <Link
-      href={buildMonthHref(
+      href={buildMonthHref( // 状態・ジャンルを維持した月別リンクを作る関数
         nextMonth,
       )}
       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
@@ -477,6 +500,7 @@ const adminCalendarEvents:
     </Link>
   </nav>
 
+  {/* 【追加】既存条件のイベントと日別リンクを表示するカレンダーComponent。 */}
   <ClubEventMonthCalendar
     month={month}
     timeZone={

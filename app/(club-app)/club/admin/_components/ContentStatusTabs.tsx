@@ -1,5 +1,5 @@
 //app/(club-app)/club/admin/_components/ContentStatusTabs.tsx
-//イベントのステータスタブ（下書きか公開中か）
+//イベントのステータスタブ（下書きか公開中か）（タブの選択により自動的にURlが変更される）
 
 
 import Link from "next/link";
@@ -17,6 +17,10 @@ const STATUS_TABS = [
   { value: "DRAFT", label: "下書き" },
 ] as const;
 
+
+/** 
+ * イベントのステータスタブ（下書きか公開中か）（タブの選択により自動的にURlが変更される）
+ */
 export function ContentStatusTabs({
   currentStatus,
   counts,
