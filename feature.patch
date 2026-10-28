@@ -1,901 +1,1299 @@
-diff --git a/app/(club-app)/club/[clubSlug]/admin/events/page.tsx b/app/(club-app)/club/[clubSlug]/admin/events/page.tsx
-index 10b564a4eb1a952b1b7752a04e583be73077eaa8..9c9fa9fa888db91d0c7ef505825af978a4fc695d 100644
---- a/app/(club-app)/club/[clubSlug]/admin/events/page.tsx
-+++ b/app/(club-app)/club/[clubSlug]/admin/events/page.tsx
-@@ -36,7 +36,7 @@ import {
- } from "@/app/(club-app)/club/admin/_components/ContentStatusTabs";
- 
- import {
--  getClubEventToastMessage,
-+  getClubEventToastMessage, // 【追加】既知のイベントtoastコードだけを固定文言へ変換する関数
- } from "@/domain/club/event/event-toast";
- 
- import {
-@@ -48,33 +48,42 @@ import {
-  * Supabase Auth Cookieと現在のDBを利用するため、
-  * リクエストごとに最新データを取得する。
-  */
-+/**
-+ * 【追加】本人・所属・予定の最新情報を要求ごとに取得する動的描画設定。
-+ */
- export const dynamic =
-   "force-dynamic";
- 
--type Props = {
--  params: Promise<{
--    clubSlug: string;
-+/**
-+ * 【追加】非同期route引数と月・状態・ジャンル・toastのqueryを受け取るPage引数型。
-+ */
-+type Props = { // 【追加】入力項目をまとめる構造型
-+  params: Promise<{ // 【追加】非同期に解決するPage引数の型 / 入力項目をまとめる構造型
-+    clubSlug: string; // 【追加】文字列で受け取る入力・戻り値の型
-   }>;
- 
--  searchParams: Promise<{
-+  searchParams: Promise<{ // 【追加】非同期に解決するPage引数の型 / 入力項目をまとめる構造型
-     month?:
--      | string
--      | string[];
--    status?: string | string[];
--    genre?: string | string[];
--    toast?: string | string[];
--    toastId?: string | string[];
-+      | string // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
-+      | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
-+    status?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
-+    genre?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
-+    toast?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
-+    toastId?: string | string[]; // 【追加】単一値または複数queryの配列を受ける型 / 文字列で受け取る入力・戻り値の型
-   }>;
- };
- 
--export default async function AdminEventsMonthPage({
-+/**
-+ * 【追加】管理者を再認可し、既存条件の月別一覧と表示月だけを渡す複製導線を表示する。
-+ */
-+export default async function AdminEventsMonthPage({ // 【追加】管理月別一覧を描画する関数
-   params,
-   searchParams,
--}: Props) {
-+}: Props) { // 【追加】管理月別Pageの非同期引数型
-   const [//同時に処理し、resolvedParams と resolvedSearchParams という新しい変数に結果を入れる
-     resolvedParams,
-     resolvedSearchParams,
--  ] = await Promise.all([
-+  ] = await Promise.all([ // 【追加】独立した非同期処理を並行して解決するメソッド
-     params,
-     searchParams,
-   ]);
-@@ -85,11 +94,11 @@ export default async function AdminEventsMonthPage({
-     );
- 
-   const status =
--  parseContentAdminStatus(
-+  parseContentAdminStatus( // 【追加】公開状態を既存の許可値へ正規化する関数
-     resolvedSearchParams.status,
-   );
-   const genre =
--  parseClubEventGenreFilter(
-+  parseClubEventGenreFilter( // 【追加】ジャンルを既存の許可値へ正規化する関数
-     resolvedSearchParams.genre,
-   );
- 
-@@ -107,14 +116,14 @@ export default async function AdminEventsMonthPage({
-     );
- 
- const [events, counts] =
--  await Promise.all([
--    findAdminClubEventsInRange({
-+  await Promise.all([ // 【追加】独立した非同期処理を並行して解決するメソッド
-+    findAdminClubEventsInRange({ // 【追加】認可済みクラブの期間・状態・ジャンルに対応するイベント取得関数
-       clubId: context.club.id,
-       range,
-       status,
-       genre,
-     }),
--    countAdminClubEventsInRangeByStatus({
-+    countAdminClubEventsInRangeByStatus({ // 【追加】同じクラブ・期間・ジャンルの状態別件数を取得する関数
-       clubId: context.club.id,
-       range,
-       genre,
-@@ -127,7 +136,7 @@ const [events, counts] =
-    * ホワイトリストの固定メッセージへ変換する。
-    */
-   const toastMessage =
--    getClubEventToastMessage(
-+    getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
-       resolvedSearchParams.toast,
-     );
- 
-@@ -140,13 +149,13 @@ const [events, counts] =
-     "event-delete-failed";
- 
-   const previousMonth =//先月の文字列を出す
--    shiftYearMonth(month, -1);
-+    shiftYearMonth(month, -1); // 【追加】表示月を指定月数だけ前後へ移動する関数
- 
-   const nextMonth =
-     shiftYearMonth(month, 1);//来月の文字列を出す
- 
-   const encodedClubSlug =//クラブスラッグをURLに使える形に変更する
--    encodeURIComponent(
-+    encodeURIComponent( // 【追加】slugやイベントIDをURLパス用に符号化する関数
-       context.club.slug,
-     );
- 
-@@ -155,7 +164,7 @@ const [events, counts] =
- 
- 
-     const memberMonthQuery =//月を重複せずにセットする
--  new URLSearchParams({
-+  new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
-     month,
-   });
- 
-@@ -167,54 +176,67 @@ if (genre !== "ALL") {
- }
- 
- const memberMonthHref =//会員用月別イベントページに遷移するURLを作成する
--  `${basePath}/events?${memberMonthQuery.toString()}`;
-+  `${basePath}/events?${memberMonthQuery.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
- 
- 
-+  // 【追加】複製先は現在の表示月だけを渡し、一覧の絞り込み条件は引き継がない。
-+  const copyMonthQuery = new URLSearchParams({ // 【追加】表示月だけのqueryを組み立てるコンストラクター
-+    month,
-+  });
-+  const copyMonthHref =
-+    `${basePath}/admin/events/copy-previous-month?${copyMonthQuery.toString()}`; // 【追加】表示月queryをURL文字列へ変換するメソッド
-+
-   //月を移動してもstatusとgenreを維持するためのURL
-   //toastとtoastIdは一度だけ表示する値なので維持しない。
--  function buildMonthHref(
--    targetMonth: string,
--  ): string {
-+  /**
-+   * 【追加】移動先の月と現在の状態・ジャンルを保持し、toastを引き継がない月別URLを返す。
-+   */
-+  function buildMonthHref( // 【追加】状態・ジャンルを維持した月別URLを作る関数
-+    targetMonth: string, // 【追加】文字列で受け取る入力・戻り値の型
-+  ): string { // 【追加】文字列で受け取る入力・戻り値の型
-     const query =
--      new URLSearchParams({
-+      new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
-         status,
-         month: targetMonth,
-       });
- 
-     if (genre !== "ALL") {
--      query.set(
-+      query.set( // 【追加】維持する絞り込み条件をqueryへ設定するメソッド
-         "genre",
-         genre,
-       );
-     }
- 
--    return `${basePath}/admin/events?${query.toString()}`;
-+    return `${basePath}/admin/events?${query.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
-   }
- 
-     //日別一覧へ移動するときにstatusとgenreを維持するためのURL
-   //toastとtoastIdは一度だけ表示する値なので維持しない。
--  function buildDayHref(
--    targetDate: string,
--  ): string {
-+  /**
-+   * 【追加】対象日と現在の状態・ジャンルを保持し、toastを引き継がない日別URLを返す。
-+   */
-+  function buildDayHref( // 【追加】状態・ジャンルを維持した日別URLを作る関数
-+    targetDate: string, // 【追加】文字列で受け取る入力・戻り値の型
-+  ): string { // 【追加】文字列で受け取る入力・戻り値の型
-     const query =
--      new URLSearchParams({
-+      new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
-         status,
-         date: targetDate,
-       });
- 
-     if (genre !== "ALL") {
--      query.set(
-+      query.set( // 【追加】維持する絞り込み条件をqueryへ設定するメソッド
-         "genre",
-         genre,
-       );
-     }
- 
--    return `${basePath}/admin/events/list?${query.toString()}`;
-+    return `${basePath}/admin/events/list?${query.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
-   }
- 
- // カレンダーの日付を押したときに維持する検索条件
- const adminCalendarDayQueryParams:
--  Record<string, string> = {
-+  Record<string, string> = { // 【追加】query名と文字列を対応させる辞書型 / 文字列で受け取る入力・戻り値の型
-   status,
- };
- 
-@@ -227,7 +249,11 @@ if (genre !== "ALL") {
- // Repositoryの取得結果を共通カレンダー用に変換する
- const adminCalendarEvents:
-   ClubEventMonthCalendarItem[] =//各ページからカレンダーへ渡す表示用データ
--    events.map((event) => ({
-+    events.map( // 【追加】取得イベントを既存カレンダーの表示値へ写すメソッド
-+      /**
-+       * 【追加】Repositoryのイベントを既存カレンダー表示用の値へ写す。
-+       */
-+      (event) => ({ // 【追加】取得イベントをカレンダー表示値へ写すコールバック
-       id: event.id,
-       title: event.title,
-       genre: event.genre,
-@@ -244,7 +270,7 @@ const adminCalendarEvents:
- 
-       // 管理用バッジからは編集ページへ移動する
-       href:
--        `${basePath}/admin/events/${encodeURIComponent(
-+        `${basePath}/admin/events/${encodeURIComponent( // 【追加】slugやイベントIDをURLパス用に符号化する関数
-           event.id,
-         )}/edit`,
- 
-@@ -268,6 +294,7 @@ const adminCalendarEvents:
-         <h1 className="text-2xl font-bold text-slate-900">
-           月別イベント管理
-         </h1>
-+{/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
- <Link
-       href={memberMonthHref}
-       className="rounded-md border border-blue-300 bg-white px-4 py-2 text-sm font-bold text-blue-700 transition hover:bg-blue-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-@@ -309,6 +336,7 @@ const adminCalendarEvents:
-       ) : null}
- 
-       <div className="flex flex-wrap gap-3">
-+        {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
-         <Link
-           href={`${basePath}/admin/events/new`}
-           className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-@@ -316,8 +344,17 @@ const adminCalendarEvents:
-           ＋ 新しいイベントを作成
-         </Link>
- 
-+        {/* 【追加】表示月を複製先としてpreviewへ移動するLink Component。 */}
-+        <Link
-+          href={copyMonthHref}
-+          className="rounded-md border border-blue-300 px-4 py-2 text-sm font-medium text-blue-700"
-+        >
-+          前月の予定を複製
-+        </Link>
-+
-+        {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
-         <Link
--  href={buildDayHref(
-+  href={buildDayHref( // 【追加】状態・ジャンルを維持した日別リンクを作る関数
-     `${month}-01`,
-   )}
-           className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-@@ -328,12 +365,14 @@ const adminCalendarEvents:
-         {/* 【追加】OWNERだけにメンバー・LINE設定への導線を表示する。 */}
-         {context.membership.role === "OWNER" ? (
-           <>
-+            {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
-             <Link
-               href={`${basePath}/admin/members`}
-               className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-             >
-               メンバー管理
-             </Link>
-+            {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
-             <Link
-               href={`${basePath}/admin/settings/line`}
-               className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
-@@ -346,6 +385,11 @@ const adminCalendarEvents:
- 
-     
- 
-+      {/* 【追加】一覧の絞り込みによって複製候補が減ると誤解しない説明。 */}
-+      <p className="text-sm text-slate-600">
-+        複製候補は、表示月の前月に開始した公開済み・下書きの全ジャンルです。
-+      </p>
-+
-       {/*
-        * ここに追加：
-        * ジャンル絞り込み。
-@@ -387,10 +431,13 @@ const adminCalendarEvents:
-               すべて
-             </option>
- 
--            {Object.entries(
-+            {Object.entries( // 【追加】固定ジャンルを選択肢へ変換するメソッド / 固定ジャンルの値とラベルを取得するメソッド
-               EVENT_GENRE_LABELS,
-             ).map(
--              ([
-+              /**
-+               * 【追加】固定ジャンルの値とラベルを選択肢として描画する。
-+               */
-+              ([ // 【追加】一覧の表示・リンクを構築するコールバック
-                 value,
-                 label,
-               ]) => (
-@@ -418,27 +465,32 @@ const adminCalendarEvents:
-        * 件数付きの共通ステータスタブを使用する。
-        * monthとgenreを維持する。
-        */}
-+      {/* 【追加】状態別件数とリンクを表示する既存タブComponent。 */}
-       <ContentStatusTabs
-         currentStatus={status}
-         counts={counts}
--        buildHref={(
-+        buildHref={
-+          /**
-+           * 【追加】選択した公開状態と現在月・ジャンルを保持するタブURLを返す。
-+           */
-+          ( // 【追加】一覧の表示・リンクを構築するコールバック
-           nextStatus,
-         ) => {
-           const query =
--            new URLSearchParams({
-+            new URLSearchParams({ // 【追加】指定項目だけのqueryを構築するコンストラクター
-               status:
-                 nextStatus,
-               month,
-             });
- 
-           if (genre !== "ALL") {
--            query.set(
-+            query.set( // 【追加】維持する絞り込み条件をqueryへ設定するメソッド
-               "genre",
-               genre,
-             );
-           }
- 
--          return `${basePath}/admin/events?${query.toString()}`;
-+          return `${basePath}/admin/events?${query.toString()}`; // 【追加】queryをURL文字列へ変換するメソッド
-         }}
-       />
- 
-@@ -452,8 +504,9 @@ const adminCalendarEvents:
-     aria-label="対象月の切り替え"
-     className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
-   >
-+    {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
-     <Link
--      href={buildMonthHref(
-+      href={buildMonthHref( // 【追加】状態・ジャンルを維持した月別リンクを作る関数
-         previousMonth,
-       )}
-       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-@@ -462,13 +515,14 @@ const adminCalendarEvents:
-     </Link>
- 
-     <h2 className="font-bold text-slate-900">
--      {formatYearMonthLabel(
-+      {formatYearMonthLabel( // 【追加】年月を日本語の表示名へ変換する関数
-         month,
-       )}
-     </h2>
- 
-+    {/* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */}
-     <Link
--      href={buildMonthHref(
-+      href={buildMonthHref( // 【追加】状態・ジャンルを維持した月別リンクを作る関数
-         nextMonth,
-       )}
-       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
-@@ -477,6 +531,7 @@ const adminCalendarEvents:
-     </Link>
-   </nav>
- 
-+  {/* 【追加】既存条件のイベントと日別リンクを表示するカレンダーComponent。 */}
-   <ClubEventMonthCalendar
-     month={month}
-     timeZone={
-@@ -502,6 +557,7 @@ const adminCalendarEvents:
- 
-     {status === "ALL" &&
-     genre === "ALL" ? (
-+      /* 【追加】指定したクラブ内URLへの導線を描画するLink Component。 */
-       <Link
-         href={`${basePath}/admin/events/new`}
-         className="mt-4 inline-block text-sm font-medium text-blue-700 underline"
-diff --git a/domain/club/event/event-toast.test.ts b/domain/club/event/event-toast.test.ts
-index 99f408450b2a4b80713815c33da8e475ebe3d1c1..75ee06f291549bce473dd0b000c387c5cf8b5df8 100644
---- a/domain/club/event/event-toast.test.ts
-+++ b/domain/club/event/event-toast.test.ts
-@@ -8,13 +8,16 @@ import {
- } from "vitest";
- 
- import {
--  getClubEventToastMessage,
-+  getClubEventToastMessage, // 【追加】単一の既知コードを固定文言へ変換する関数
- } from "./event-toast";
- 
--describe(
-+describe( // 【追加】関連するtoast試験をまとめる関数
-   "getClubEventToastMessage",
--  () => {
--    it.each([
-+  /**
-+   * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
-+   */
-+  () => { // 【追加】固定文言への変換結果を検証するコールバック
-+    it.each([ // 【追加】toastの変換試験を登録する関数
-       [
-         "event-created",
-         "イベントを作成しました。",
-@@ -31,42 +34,76 @@ describe(
-         "event-delete-failed",
-         "イベントを削除できませんでした。もう一度お試しください。",
-       ],
-+      // 【追加】Actionが送る複製成功コードを固定文言へ変換する。
-+      [
-+        "event-month-copied",
-+        "前月の予定を下書きとして複製しました。",
-+      ],
-     ])(
-       "%sを固定メッセージへ変換する",
--      (
-+      /**
-+       * 【追加】入力コードが対応する固定文言だけへ変換されることを確認する。
-+       */
-+      ( // 【追加】固定文言への変換結果を検証するコールバック
-         value,
-         expected,
-       ) => {
--        expect(
--          getClubEventToastMessage(
-+        expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
-+          getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
-             value,
-           ),
-         ).toBe(expected);
-       },
-     );
- 
--    it("不明な値はnull", () => {
--      expect(
--        getClubEventToastMessage(
-+    it("不明な値はnull",  // 【追加】toastの変換試験を登録する関数
-+      /**
-+       * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
-+       */
-+      () => { // 【追加】固定文言への変換結果を検証するコールバック
-+      expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
-+        getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
-           "unknown",
-         ),
-       ).toBeNull();
-     });
- 
--    it("複数指定はnull", () => {
--      expect(
--        getClubEventToastMessage([
-+    it("複数指定はnull",  // 【追加】toastの変換試験を登録する関数
-+      /**
-+       * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
-+       */
-+      () => { // 【追加】固定文言への変換結果を検証するコールバック
-+      expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
-+        getClubEventToastMessage([ // 【追加】既知のコードだけを固定メッセージへ変換する関数
-           "event-created",
-         ]),
-       ).toBeNull();
-     });
- 
--    it("未指定はnull", () => {
--      expect(
--        getClubEventToastMessage(
-+    it("未指定はnull",  // 【追加】toastの変換試験を登録する関数
-+      /**
-+       * 【追加】既知・未知・配列・未指定queryに対するtoast変換を検証する。
-+       */
-+      () => { // 【追加】固定文言への変換結果を検証するコールバック
-+      expect( // 【追加】既存の表示・queryを構築する関数またはメソッド / 検証する値の期待値を作る関数
-+        getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
-           undefined,
-         ),
-       ).toBeNull();
-     });
+diff --git a/package.json b/package.json
+index d3c43855ae5cbf69a82bb9c8f5c43f6fb831acbd..4058697e536662a86680f817b79812b6251b761c 100644
+--- a/package.json
++++ b/package.json
+@@ -28,7 +28,8 @@
+     "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts",
+     "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts",
+     "test:support-report:local": "RUN_SUPPORT_REPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/support-report.flow.integration.test.ts",
+-    "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts"
++    "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts",
++    "test:event-month-copy:local": "RUN_EVENT_MONTH_COPY_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-month-copy.flow.integration.test.ts"
    },
--);
-\ No newline at end of file
-+);
-+// 【追加】成功コードも、任意文字列や配列へ変わった場合は表示しない。
-+it.each([ // 【追加】不正な複製toastのパラメーター試験を登録する関数
-+  "events-month-copied",
-+  "event-month-copied?createdCount=999",
-+  "event-month-copied<script>",
-+  ["event-month-copied"],
-+])("複製成功コード以外の%jは表示しない", // 【追加】試験を登録する関数
-+  /**
-+   * 【追加】未採用コード・任意文字列付きコード・配列を固定文言へ変換しない。
-+   */
-+  (value) => { // 【追加】不正コードを検証するコールバック
-+    expect(getClubEventToastMessage(value)).toBeNull(); // 【追加】期待値生成関数 / 固定文言変換関数 / 非表示を比較するメソッド
-+  },
-+);
-diff --git a/domain/club/event/event-toast.ts b/domain/club/event/event-toast.ts
-index 7f4b60ca675e9edcd2dccd4c8130e037da9ec58a..9e3202cc866a234b66da019757070ea031ccda82 100644
---- a/domain/club/event/event-toast.ts
-+++ b/domain/club/event/event-toast.ts
-@@ -2,20 +2,27 @@
- // イベントのURLのトースト識別子を固定メッセージへ変換する。
- 
- //イベントトーストのタイプ
--export type ClubEventToastCode =
--  | "event-created"
--  | "event-updated"
--  | "event-deleted"
--  | "event-delete-failed";
-+/**
-+ * 【追加】イベント操作結果を表す、URLで受け取る固定toastコードの型。
-+ */
-+export type ClubEventToastCode = // 【追加】イベント操作結果の固定コード型
-+  | "event-created" // 【追加】文字列で受け取る入力・戻り値の型 / 既存イベント操作の固定コード型
-+  | "event-updated" // 【追加】既存イベント操作の固定コード型
-+  | "event-deleted" // 【追加】既存イベント操作の固定コード型
-+  | "event-delete-failed" // 【追加】既存イベント操作の固定コード型
-+  | "event-month-copied"; // 【追加】前月予定の複製成功を表す固定コード型
- 
- 
-     //URLパラメータをトーストのメッセージに変換する関数
--export function getClubEventToastMessage(
-+/**
-+ * 【追加】単一の既知コードだけを固定文言へ変換し、未知・配列・未指定はnullにする。
-+ */
-+export function getClubEventToastMessage( // 【追加】URL値を固定メッセージへ変換する関数
-   value:
--    | string
--    | string[]
--    | undefined,
--): string | null {
-+    | string // 【追加】単一queryの文字列型
-+    | string[] // 【追加】複数指定されたqueryの配列型
-+    | undefined, // 【追加】query未指定の型
-+): string | null { // 【追加】固定文言または非表示の型
-   if (typeof value !== "string") {
-     return null;
-   }
-@@ -29,6 +36,8 @@ export function getClubEventToastMessage(
-       return "イベントを削除しました。";
-     case "event-delete-failed":
-       return "イベントを削除できませんでした。もう一度お試しください。";
-+    case "event-month-copied": // 【追加】保存Actionの既存コードに対応する
-+      return "前月の予定を下書きとして複製しました。";
-     default:
-       return null;
-   }
-diff --git a/tests/event-month-copy-navigation.test.ts b/tests/event-month-copy-navigation.test.ts
+   "dependencies": {
+     "@axiomhq/js": "^1.8.0",
+diff --git a/tests/event-month-copy.flow.integration.test.ts b/tests/event-month-copy.flow.integration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d8987d49f39ab41c550adc83c9599cfc5a64176a
+index 0000000000000000000000000000000000000000..eff6b6373e69455f654eced7fa43298fe05b2c38
 --- /dev/null
-+++ b/tests/event-month-copy-navigation.test.ts
-@@ -0,0 +1,330 @@
-+// tests/event-month-copy-navigation.test.ts
-+// 実DB・Authなしで、表示月だけの複製導線と既存一覧・保存後toastの接続を検証する。
++++ b/tests/event-month-copy.flow.integration.test.ts
+@@ -0,0 +1,1279 @@
++// tests/event-month-copy.flow.integration.test.ts
++// ガード後だけ専用clientを生成する。DBケースは専用の使い捨て環境でだけ実行する。
++// P2034・件数不一致は明示した障害注入、並列競合・CHECK違反・rollbackは実DBで確認する。
 +
-+import { renderToStaticMarkup } from "react-dom/server";
-+import { redirect } from "next/navigation";
++import { randomUUID } from "node:crypto";
++import type {
++  ClubEvent,
++  Prisma,
++  PrismaClient,
++} from "@prisma/client";
 +import {
++  afterAll,
++  afterEach,
++  beforeAll,
 +  beforeEach,
++  describe,
 +  expect,
 +  it,
 +  vi,
 +} from "vitest";
 +
-+import AdminEventsMonthPage from "@/app/(club-app)/club/[clubSlug]/admin/events/page"; // 表示月の管理一覧と複製導線を描画するPage
-+import {
-+  copyPreviousMonthEventsAction, // 再認可して複製し、同クラブの対象月へ遷移するAction
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/actions";
 +import type {
-+  EventMonthCopyActionState, // 前月複製の入力・エラー・保存済み結果を持つ型
++  ClubAccessContext, // 本人・所属・クラブをまとめた認可context型。Auth通信の代用はしない
++} from "@/app/(club-app)/club/club-membership-authorization";
++import type {
++  EventMonthCopyInput, // 正規化済みの複製入力型
 +} from "@/domain/club/event/event-month-copy-types";
-+import {
-+  getClubMonthUtcRange, // クラブtimezoneの月境界をUTC期間へ変換する関数
-+} from "@/domain/shared/date-time/club-date-time";
 +
-+const mocks = vi.hoisted( // importより先にmockを生成する関数
-+  /**
-+   * 認可・読取・カレンダー・保存・再検証の境界だけを置き換える。
-+   */
-+  () => ({ // mock群を作るコールバック
-+    access: vi.fn(), // 認可context取得mock生成関数
-+    events: vi.fn(), // 一覧取得mock生成関数
-+    counts: vi.fn(), // 件数取得mock生成関数
-+    calendar: vi.fn(), // カレンダーprops観測mock生成関数
-+    copy: vi.fn(), // 保存Service mock生成関数
-+    revalidate: vi.fn(), // 再検証mock生成関数
-+  }),
-+);
-+vi.mock("@/app/(club-app)/club/club-app-authorization", // 認可境界を置換する関数
-+  /**
-+   * 認可要求のslugを観測し、実Authを操作しない。
-+   */
-+  () => ({ // 認可関数を公開するコールバック
-+    requireClubAppAdminAccess: mocks.access, // 認可mock関数の参照
-+  }),
-+);
-+vi.mock("@/src/infrastructure/prisma/repositories/club-event-repository", // DB読取境界を置換する関数
-+  /**
-+   * 既存一覧条件と件数条件を観測し、実DBへ接続しない。
-+   */
-+  () => ({ // Repositoryを公開するコールバック
-+    findAdminClubEventsInRange: mocks.events, // 一覧取得mock関数の参照
-+    countAdminClubEventsInRangeByStatus: mocks.counts, // 件数取得mock関数の参照
-+  }),
-+);
-+vi.mock("@/app/(club-app)/club/[clubSlug]/_components/ClubEventMonthCalendar", // 既存カレンダー描画を置換する関数
-+  /**
-+   * カレンダーへ渡す値の互換性だけを確認する。
-+   */
-+  () => ({ // カレンダーComponentを公開するコールバック
-+    ClubEventMonthCalendar: mocks.calendar, // props観測mock関数の参照
-+  }),
-+);
-+vi.mock("@/src/application/club/event/copy-event-month", // DB保存境界を置換する関数
-+  /**
-+   * 実際のActionが使う保存Serviceだけをmockへ置き換える。
-+   */
-+  () => ({ // 保存Serviceを公開するコールバック
-+    copyPreviousMonthEvents: mocks.copy, // 保存mock関数の参照
-+  }),
-+);
-+vi.mock("@/app/(club-app)/club/revalidate-club-paths", // 実キャッシュ更新を置換する関数
-+  /**
-+   * 保存後の再検証要求を記録する。
-+   */
-+  () => ({ // 再検証関数を公開するコールバック
-+    revalidateClubEventPaths: mocks.revalidate, // 再検証mock関数の参照
-+  }),
-+);
-+vi.mock("next/navigation", // 実際の制御例外を保って遷移先を観測する関数
-+  /**
-+   * 導入済みNextのredirect例外をそのまま利用する。
-+   */
-+  async (original) => { // 実モジュールを取得する非同期コールバック
-+    const actual = await original<typeof import("next/navigation")>(); // 実モジュール取得関数 / Nextモジュール型
-+    return {
-+      ...actual,
-+      redirect: vi.fn(actual.redirect), // 実遷移関数を包むmock生成関数
-+    };
-+  },
-+);
++const GUARD_ERROR = "F10専用の使い捨てローカルDB設定と明示flagを確認してください。";
++const CHECK_ERROR = "F10統合確認に失敗しました。対象ケースと実行条件を確認してください。";
++const MONTH = "2026-02";
 +
 +/**
-+ * 月別Pageのqueryと、表示してはいけない任意の件数を表す試験入力型。
++ * URLや明示flagを、秘密情報の出力なしで検証する環境設定の型。
 + */
-+type Query = Awaited<Parameters<typeof AdminEventsMonthPage>[0]["searchParams"]> & { // Page引数から非同期queryを取り出す型
-+  createdCount?: string; // URLから送られる任意件数の文字列型
++type Environment = Record<string, string | undefined>; // 接続用の環境設定型 / キーと値の対応を表す型 / 文字列型 / 未設定を表す型
++
++/**
++ * 件数不一致・DB制約違反の注入箇所を指定する型。
++ */
++type FaultMode = "none" | "count" | "constraint"; // 書込み障害の注入箇所を指定する型
++
++/**
++ * 書込み前に登録したクラブ・ユーザー・所属・元イベントIDの型。
++ */
++type Fixture = { // 事前登録したfixture IDを保持する型
++  clubs: string[]; // 文字列型
++  users: string[]; // 文字列型
++  memberships: string[]; // 文字列型
++  events: Set<string>; // 重複のないID集合の型 / 文字列型
 +};
 +
 +/**
-+ * 管理者として認可されたサーバーcontextを用意する。
++ * 実transactionのclientを受け取りRepository処理を実行する関数型。
 + */
-+function context() { // 認可fixture生成関数
++type Operation = (transaction: Prisma.TransactionClient) => Promise<unknown>; // transaction処理の関数型 / transaction内のPrismaクライアント型 / 非同期結果の型 / 値が未確定の型
++
++/**
++ * Repositoryが実transactionへ渡す分離レベルと待機時間の型。
++ */
++type Options = { // transaction設定型
++  isolationLevel?: Prisma.TransactionIsolationLevel; // Prismaのtransaction分離レベル型
++  maxWait?: number; // 数値型
++  timeout?: number; // 数値型
++};
++
++const bridge = vi.hoisted( // import前に試験状態を用意する関数
++  /**
++   * import評価前に専用clientの参照と障害注入の状態だけを用意する。
++   */
++  () => ({ // 処理を受け取るコールバック
++    client: undefined as PrismaClient | undefined, // 専用DBクライアントの型 / 未設定を表す型
++    prisma: undefined as typeof import("@prisma/client").Prisma | undefined, // 実モジュールの型だけを参照 / 未設定を表す型
++    mode: "none" as FaultMode, // 書込み障害の注入箇所を指定する型
++    remaining: 0,
++    transactions: 0,
++    external: 0,
++  }));
++
++/**
++ * 専用flagが両方揃うまで、接続URLを評価しない。
++ */
++function enabled(environment: Environment): boolean { // 専用の実行flagを照合する関数 / 接続用の環境設定型 / 真偽値型
++  return (
++    environment.RUN_EVENT_MONTH_COPY_TESTS === "1" &&
++    environment.RUN_DB_INTEGRATION_TESTS === "1"
++  );
++}
++
++/**
++ * 既存のローカルSupabase用54322/postgresだけを許し、URL・例外原文を出さない。
++ */
++function localConfiguration(environment: Environment): string { // 使い捨てローカルDBの接続条件を検証する関数 / 接続用の環境設定型 / 文字列型
++  try {
++    if (!enabled(environment)) { // 専用の実行flagを照合する関数
++      throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
++    }
++    const source = environment.DATABASE_URL ?? "";
++    const url = new URL(source); // 接続URLを解析するコンストラクター
++    if (
++      environment.EVENT_MONTH_COPY_DISPOSABLE !== "1" ||
++      environment.NODE_ENV === "production" ||
++      environment.VERCEL_ENV === "production" ||
++      source !== source.trim() || // 前後の空白を除くメソッド
++      source.includes("?") || // 値の含有を判定するメソッド
++      source.includes("#") || // 値の含有を判定するメソッド
++      !["postgres:", "postgresql:"].includes(url.protocol) || // 値の含有を判定するメソッド
++      !["127.0.0.1", "localhost"].includes(url.hostname) || // 値の含有を判定するメソッド
++      url.port !== "54322" ||
++      url.pathname !== "/postgres" ||
++      !url.username ||
++      !url.password ||
++      Object.keys(environment).some( // 条件に合う要素の有無を判定するメソッド / 環境設定のキーを列挙する関数
++        /**
++         * 各値が、このケースで許可・期待した条件を満たすか判定する。
++         */
++        (key) => ( // 処理を受け取るコールバック
++          key.startsWith("PG") && // 接頭辞を比較するメソッド
++          Boolean(environment[key]) // 値を真偽値へ変換する関数
++        ))
++    ) {
++      throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
++    }
++    return url.toString(); // 解析済みURLを文字列にするメソッド
++  } catch {
++    throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
++  }
++}
++
++/**
++ * SQL・接続・assertionの原文やcauseを、固定の失敗文へ置き換える。
++ */
++async function safeCheck(operation: () => Promise<void>): Promise<void> { // 例外原文を固定メッセージへ置き換える関数 / 非同期結果の型 / 値を返さない型
++  try {
++    await operation(); // 受け取った試験またはRepository処理を実行する関数
++  } catch {
++    throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++  }
++}
++
++/**
++ * 実環境の秘密情報を使わず、ガード単体試験用の架空設定を作る。
++ */
++function sampleEnvironment(): Environment { // 架空の接続設定を作る関数 / 接続用の環境設定型
 +  return {
-+    userId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-+    club: {
-+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-+      slug: "club-a",
-+      name: "クラブ",
-+      timezone: "Asia/Tokyo",
-+      planType: "STANDARD",
-+    },
-+    membership: {
-+      id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-+      role: "OWNER",
-+    },
++    RUN_EVENT_MONTH_COPY_TESTS: "1",
++    RUN_DB_INTEGRATION_TESTS: "1",
++    EVENT_MONTH_COPY_DISPOSABLE: "1",
++    NODE_ENV: "test",
++    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
 +  };
 +}
 +
 +/**
-+ * 非同期routeとqueryで月別管理Pageを静的描画する。
++ * ガード後に生成した専用clientだけを返し、共有client・dotenvの初期化を拒否する。
 + */
-+async function page(query: Query = {}) { // Page描画関数 / 生queryの型
-+  return renderToStaticMarkup(await AdminEventsMonthPage({ // SSR描画関数 / 管理月別Page
-+    params: Promise.resolve({ clubSlug: "club-a" }), // 非同期route引数を生成するメソッド
-+    searchParams: Promise.resolve(query), // 非同期queryを生成するメソッド
-+  }));
++function database(): PrismaClient { // 専用DB client取得関数 / 専用DBクライアントの型
++  if (!bridge.client) {
++    throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
++  }
++  return bridge.client;
 +}
 +
 +/**
-+ * HTMLから複製導線のURLを取り出す。
++ * 実際のtransactionを維持し、テストが指定した書込み箇所だけへ障害を注入する。
 + */
-+function copyUrl(html: string): URL { // 複製URL取得関数 / HTML文字列型 / URL型
-+  const match = /href="([^"]*\/copy-previous-month\?[^"]*)"/.exec(html); // 複製導線だけを検索するメソッド
-+  if (!match) throw new Error("Missing copy link"); // 導線不足を報告する例外生成
-+  return new URL(match[1].replaceAll("&amp;", "&"), "https://app.invalid"); // URL生成 / HTML entityを復元するメソッド
++function transactionProxy(transaction: Prisma.TransactionClient): Prisma.TransactionClient { // 実transactionの指定箇所へ障害を注入する関数 / transaction内のPrismaクライアント型
++  return new Proxy(transaction, { // 実処理の参照を制御するコンストラクター
++    /**
++     * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
++     */
++    get(target, property) { // 参照先を制御するメソッドを定義
++      if (
++        property === "clubEvent" &&
++        bridge.mode === "count"
++      ) {
++        return new Proxy(target.clubEvent, { // 実処理の参照を制御するコンストラクター
++          /**
++           * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
++           */
++          get(delegate, method) { // 参照先を制御するメソッドを定義
++            if (method === "createMany") {
++              return (
++                /**
++                 * 実DBでイベントを保存した後、件数不一致を返してrollbackを促す。
++                 */
++                async (args: Prisma.ClubEventCreateManyArgs) => { // 非同期処理を行うコールバック / イベント一括作成の引数型
++                  await delegate.createMany(args); // 複数のfixtureまたは複製予定をDBへ保存するメソッド
++                  return { count: 0 };
++                });
++            }
++            const value = Reflect.get(delegate, method); // 参照先を取得するメソッド
++            return typeof value === "function" ? value.bind(delegate) : value; // 呼出し元を維持してメソッドを返す関数
++          },
++        });
++      }
++      if (
++        property === "clubEventBatchOperation" &&
++        bridge.mode === "constraint"
++      ) {
++        return new Proxy(target.clubEventBatchOperation, { // 実処理の参照を制御するコンストラクター
++          /**
++           * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
++           */
++          get(delegate, method) { // 参照先を制御するメソッドを定義
++            if (method === "create") {
++              return (
++                /**
++                 * 操作記録の件数を0へ変え、実DBのCHECK違反を起こす。
++                 */
++                async (args: Prisma.ClubEventBatchOperationCreateArgs) => delegate.create({ // 非同期処理を行うコールバック / 操作記録作成の引数型 / fixtureまたは操作記録をDBへ保存するメソッド
++                  ...args,
++                  data: {
++                    ...args.data,
++                    createdCount: 0,
++                  },
++                }));
++            }
++            const value = Reflect.get(delegate, method); // 参照先を取得するメソッド
++            return typeof value === "function" ? value.bind(delegate) : value; // 呼出し元を維持してメソッドを返す関数
++          },
++        });
++      }
++      const value = Reflect.get(target, property); // 参照先を取得するメソッド
++      return typeof value === "function" ? value.bind(target) : value; // 呼出し元を維持してメソッドを返す関数
++    },
++  });
 +}
 +
-+beforeEach( // 各試験前の準備を登録する関数
++/**
++ * 実DBのcommit直前へP2034を注入し、実rollbackとRepositoryの有限再試行を照合する。
++ */
++async function transaction( // 実transactionとP2034注入を接続する関数
++  operation: Operation, // transaction処理の関数型
++  options?: Options // transaction設定型
++): Promise<unknown> { // 非同期結果の型 / 値が未確定の型
++  bridge.transactions += 1;
++  return database().$transaction( // 実DBのtransactionを実行するメソッド / 専用DB client取得関数
++    /**
++     * 実transaction内でRepositoryを実行し、指定回数だけcommit前にP2034を注入する。
++     */
++    async (tx) => { // 非同期処理を行うコールバック
++      const result = await operation(transactionProxy(tx)); // 受け取った試験またはRepository処理を実行する関数 / 実transactionの指定箇所へ障害を注入する関数
++      if (bridge.remaining > 0) {
++        bridge.remaining -= 1;
++        throw new bridge.prisma!.PrismaClientKnownRequestError("F10 injected serialization failure", { // P2034を再現するPrisma例外のコンストラクター
++          code: "P2034",
++          clientVersion: "F10-test",
++        });
++      }
++      return result;
++    }, options);
++}
++
++vi.mock("@/src/infrastructure/prisma/client", // 対象モジュールを試験用の境界へ置き換える関数
 +  /**
-+   * 既存の管理一覧・件数と、保存成功の応答を初期化する。
++   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
 +   */
-+  () => { // 初期化コールバック
-+    vi.resetAllMocks(); // mockを初期化する関数
-+    // redirectの実装はresetAllMocksで初期実装へ戻る。
-+    mocks.access.mockResolvedValue(context()); // 認可結果を設定するメソッド / fixture生成関数
-+    mocks.events.mockResolvedValue([ // 一覧取得結果を設定するメソッド
-+      {
-+        id: "event-a",
-+        title: "練習予定",
-+        genre: "PRACTICE",
-+        status: "DRAFT",
-+        startAt: new Date("2026-01-31T15:00:00.000Z"), // 開始Dateを作るコンストラクター
-+        endAt: null,
-+        isAllDay: false,
-+        attachments: [{ id: "attachment-a" }],
++  () => ({ // 処理を受け取るコールバック
++    prisma: new Proxy({} as PrismaClient, { // 実処理の参照を制御するコンストラクター / 専用DBクライアントの型
++      /**
++       * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
++       */
++      get(_target, property) { // 参照先を制御するメソッドを定義
++        if (property === "$transaction") {
++          return transaction; // 実transactionとP2034注入を接続する関数
++        }
++        const client = database(); // 専用DB client取得関数
++        const value = Reflect.get(client, property); // 参照先を取得するメソッド
++        return typeof value === "function" ? value.bind(client) : value; // 呼出し元を維持してメソッドを返す関数
 +      },
-+    ]);
-+    mocks.counts.mockResolvedValue({ // 状態別件数を設定するメソッド
-+      ALL: 3,
-+      DRAFT: 1,
-+      PUBLISHED: 2,
-+    });
-+    mocks.calendar.mockReturnValue(null); // props観測だけにする設定メソッド
-+    mocks.copy.mockResolvedValue({ // 保存完了結果を設定するメソッド
-+      outcome: "CREATED",
-+      receipt: {
-+        targetMonth: "2026-02",
-+        createdCount: 1,
++    }),
++  }));
++
++/**
++ * dotenv・実Auth・Next・メールの誤ったimportを検出し、外部処理を行わせない。
++ */
++function forbidden(): never { // 外部依存の評価を拒否する関数 / 正常復帰しない型
++  bridge.external += 1;
++  throw new Error("F10 external dependency forbidden"); // 例外を生成するコンストラクター
++}
++vi.mock("dotenv/config", // 対象モジュールを試験用の境界へ置き換える関数
++  /**
++   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
++   */
++  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
++vi.mock("@/src/infrastructure/supabase/server", // 対象モジュールを試験用の境界へ置き換える関数
++  /**
++   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
++   */
++  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
++vi.mock("next/navigation", // 対象モジュールを試験用の境界へ置き換える関数
++  /**
++   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
++   */
++  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
++vi.mock("next/cache", // 対象モジュールを試験用の境界へ置き換える関数
++  /**
++   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
++   */
++  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
++vi.mock("@/lib/mail/resend", // 対象モジュールを試験用の境界へ置き換える関数
++  /**
++   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
++   */
++  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
++
++describe("F10接続ガード（実DB・SDK・dotenvなし）", // 試験群を登録する関数
++  /**
++   * ガード単体試験、または明示flagで有効になる専用DBケースを登録する。
++   */
++  () => { // 処理を受け取るコールバック
++    it.each(["RUN_EVENT_MONTH_COPY_TESTS", "RUN_DB_INTEGRATION_TESTS"])( // 値ごとの試験を登録する関数 / 値ごとに試験を登録する関数
++      "%sがない場合はDBケースを有効にしない",
++      /**
++       * 架空の設定を変更して接続前の拒否条件を確認する。
++       */
++      (field) => { // 処理を受け取るコールバック
++        const environment = sampleEnvironment(); // 架空の接続設定を作る関数
++        delete environment[field];
++        expect(enabled(environment)).toBe(false); // 一致を検証するメソッド / 期待値を取得する関数 / 専用の実行flagを照合する関数
++        expect( // 期待値を取得する関数
++          /**
++           * 不正な設定をガードへ渡し、接続前の例外を検証する。
++           */
++          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // ガード例外を検証するメソッド / 処理を受け取るコールバック / 使い捨てローカルDBの接続条件を検証する関数
 +      },
-+    });
-+  },
-+);
++    );
++    it.each([ // 値ごとに試験を登録する関数
++      ["EVENT_MONTH_COPY_DISPOSABLE", "0"],
++      ["NODE_ENV", "production"],
++      ["VERCEL_ENV", "production"],
++      ["DATABASE_URL", "private-invalid-url"],
++      ["DATABASE_URL", "https://fixture:fixture@127.0.0.1:54322/postgres"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@remote.invalid:54322/postgres"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@localhost.remote.invalid:54322/postgres"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.invalid"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#"],
++      ["DATABASE_URL", " postgresql://fixture:fixture@127.0.0.1:54322/postgres"],
++      ["DATABASE_URL", "postgresql://fixture@127.0.0.1:54322/postgres"],
++      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.2:54322/postgres"],
++      ["PGHOST", "remote.invalid"],
++      ["PGOPTIONS", "private-options"],
++    ])("危険な設定%sを接続前に固定エラーで拒否する", // 値ごとの試験を登録する関数
++      /**
++       * 架空の設定を変更して接続前の拒否条件を確認する。
++       */
++      (field, value) => { // 処理を受け取るコールバック
++        const environment = sampleEnvironment(); // 架空の接続設定を作る関数
++        environment[field] = value;
++        expect( // 期待値を取得する関数
++          /**
++           * 不正な接続設定を渡し、ガードが例外を返すか検証する。
++           */
++          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // ガード例外を検証するメソッド / 処理を受け取るコールバック / 使い捨てローカルDBの接続条件を検証する関数
++      });
++    it.each(["localhost", "127.0.0.1"])("固定loopback %sだけを許可する", // 値ごとの試験を登録する関数 / 値ごとに試験を登録する関数
++      /**
++       * 架空の設定を変更して接続前の拒否条件を確認する。
++       */
++      (host) => { // 処理を受け取るコールバック
++        const environment = sampleEnvironment(); // 架空の接続設定を作る関数
++        environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
++        expect(localConfiguration(environment)).toBe(environment.DATABASE_URL); // 一致を検証するメソッド / 期待値を取得する関数 / 使い捨てローカルDBの接続条件を検証する関数
++      });
++    it("例外のmessage・causeを安全な失敗へ置き換える", // 試験を登録する関数
++      /**
++       * 接続ガードと固定エラーの振る舞いを、実DBなしで照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const error = await safeCheck( // 例外原文を固定メッセージへ置き換える関数
++          /**
++           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
++           */
++          async () => { // 非同期処理を行うコールバック
++            throw new Error("PRIVATE_SQL_TOKEN", { cause: "PRIVATE_CONNECTION" }); // 例外を生成するコンストラクター
++          }).catch( // 例外を検証用の値として受け取るメソッド
++            /**
++             * 例外を値として受け取り、messageとcauseの抑止を照合する。
++             */
++            (failure: unknown) => failure); // 処理を受け取るコールバック / 値が未確定の型
++        expect(error).toBeInstanceOf(Error); // 例外の種類を検証するメソッド / 期待値を取得する関数 / 例外のクラスを参照
++        expect(error).toHaveProperty("message", CHECK_ERROR); // プロパティの有無や値を検証するメソッド / 期待値を取得する関数
++        expect(error).not.toHaveProperty("cause"); // プロパティの有無や値を検証するメソッド / 期待値を取得する関数
++        expect(bridge.client).toBeUndefined(); // 未設定であることを検証するメソッド / 期待値を取得する関数
++        expect(bridge.external).toBe(0); // 一致を検証するメソッド / 期待値を取得する関数
++      });
++  });
 +
-+it.each(["2026-02", "2027-01"])( // 表示月のパラメーター試験を登録する関数
-+  "%sを複製先月として、表示月だけのリンクを生成する",
++// flag判定ではDATABASE_URLや.envを評価しない。無指定のDBケースは成功ではなくskipとなる。
++const describeDatabase = enabled(process.env) ? describe : describe.skip; // 専用の実行flagを照合する関数
++describeDatabase("F10専用使い捨てDB統合（flag未指定はskip）", // 明示flagに応じてDB試験群を登録またはskipする関数
 +  /**
-+   * 表示中の状態・ジャンル・toast・任意件数を複製条件へ混ぜない。
++   * ガード単体試験、または明示flagで有効になる専用DBケースを登録する。
 +   */
-+  async (month) => { // 導線を検証する非同期コールバック
-+    const url = copyUrl(await page({ // URL取得関数 / Page描画関数
-+      month,
-+      status: "PUBLISHED",
-+      genre: "TOURNAMENT",
-+      toast: "event-created",
-+      toastId: "arbitrary",
-+      createdCount: "999",
-+    }));
-+    expect(url.pathname).toBe("/club/club-a/admin/events/copy-previous-month"); // 期待値生成関数 / 固定経路を比較するメソッド
-+    expect([...url.searchParams.entries()]).toEqual([["month", month]]); // 期待値生成関数 / queryを取得するメソッド / 月だけのqueryを比較するメソッド
-+    expect(mocks.copy).not.toHaveBeenCalled(); // 期待値生成関数 / GETで保存しないことを検証するメソッド
-+  },
-+);
++  () => { // 処理を受け取るコールバック
++    let fixture: Fixture | undefined; // 事前登録したfixture IDを保持する型 / 未設定を表す型
++    let read: typeof import("@/src/application/club/event/get-event-month-copy"); // 実モジュールの型だけを参照
++    let write: typeof import("@/src/application/club/event/copy-event-month"); // 実モジュールの型だけを参照
++    let repository: typeof import("@/src/infrastructure/prisma/repositories/event-month-copy-mutation-repository"); // 実モジュールの型だけを参照
 +
-+it("認可contextのslugをencodeしてリンクを生成する", // 試験を登録する関数
-+  /**
-+   * slug内のパス区切りや空白が新しいURL構造へ解釈されないことを確認する。
-+   */
-+  async () => { // slugの符号化を検証する非同期コールバック
-+    const value = context(); // 認可fixture生成関数
-+    value.club.slug = "club/a b";
-+    mocks.access.mockResolvedValue(value); // 特殊文字を含むslugを設定するメソッド
-+    const url = copyUrl(await page({ month: "2026-02" })); // URL取得関数 / Page描画関数
-+    expect(url.pathname).toBe("/club/club%2Fa%20b/admin/events/copy-previous-month"); // 期待値生成関数 / 符号化した経路を比較するメソッド
-+  },
-+);
++    /**
++     * このケースの作成前登録UUIDだけを持つfixtureを返す。
++     */
++    function current(): Fixture { // 事前登録したfixture IDを取得する関数 / 事前登録したfixture IDを保持する型
++      if (!fixture) {
++        throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++      }
++      return fixture;
++    }
 +
-+it("既存の一覧条件・状態別件数・カレンダーへの値を維持する", // 試験を登録する関数
-+  /**
-+   * 複製導線の追加によって、既存のクラブ・期間・状態・ジャンル条件を変えない。
-+   */
-+  async () => { // 既存一覧の互換性を検証する非同期コールバック
-+    const html = await page({ // Page描画関数
-+      month: "2026-02",
-+      status: "DRAFT",
-+      genre: "PRACTICE",
-+    });
-+    const range = getClubMonthUtcRange("2026-02", "Asia/Tokyo"); // 既存の月境界変換関数
-+    expect(mocks.events).toHaveBeenCalledExactlyOnceWith({ // 期待値生成関数 / 既存の取得条件を検証するメソッド
-+      clubId: context().club.id, // 認可fixture生成関数
-+      range,
-+      status: "DRAFT",
-+      genre: "PRACTICE",
-+    });
-+    expect(mocks.counts).toHaveBeenCalledExactlyOnceWith({ // 期待値生成関数 / 既存の件数取得条件を検証するメソッド
-+      clubId: context().club.id, // 認可fixture生成関数
-+      range,
-+      genre: "PRACTICE",
-+    });
-+    const calendar = mocks.calendar.mock.calls[0][0];
-+    expect(calendar.month).toBe("2026-02"); // 期待値生成関数 / カレンダー表示月を比較するメソッド
-+    expect(calendar.dayQueryParams).toEqual({ // 期待値生成関数 / 既存の日別リンク条件を比較するメソッド
-+      status: "DRAFT",
-+      genre: "PRACTICE",
-+    });
-+    expect(calendar.events[0].hasAttachments).toBe(true); // 期待値生成関数 / 添付表示の互換性を検証するメソッド
-+    expect(html).toContain("status=DRAFT&amp;month=2026-01&amp;genre=PRACTICE"); // 期待値生成関数 / 前月リンク条件を検証するメソッド
-+    expect(html).toContain("status=DRAFT&amp;date=2026-02-01&amp;genre=PRACTICE"); // 期待値生成関数 / 日別リンク条件を検証するメソッド
-+    expect(html).toContain("公開済み・下書きの全ジャンル"); // 期待値生成関数 / 複製候補の説明を検証するメソッド
-+  },
-+);
++    /**
++     * DBに登録した本人・所属・クラブから、Serviceへ渡すcontextを作る。
++     */
++    function context(other = false): ClubAccessContext { // 認可contextを作る関数 / 本人・所属・クラブをまとめた認可context型
++      const f = current(); // 事前登録したfixture IDを取得する関数
++      return {
++        userId: f.users[other ? 1 : 0],
++        club: {
++          id: f.clubs[0],
++          name: "F10 fixture",
++          slug: `f10-${f.clubs[0]}`,
++          planType: "STANDARD",
++          timezone: "Asia/Tokyo",
++        },
++        membership: {
++          id: f.memberships[other ? 1 : 0],
++          role: "OWNER",
++        },
++      };
++    }
 +
-+it("保存成功toastは任意件数を表示せず固定の成功文言を出す", // 試験を登録する関数
-+  /**
-+   * URL由来の自由な文字列を成功文言に埋め込まない。
-+   */
-+  async () => { // 固定文言を検証する非同期コールバック
-+    const html = await page({ // Page描画関数
-+      month: "2026-02",
-+      toast: "event-month-copied",
-+      createdCount: "PRIVATE_COUNT_999<script>",
-+    });
-+    expect(html).toContain("前月の予定を下書きとして複製しました。"); // 期待値生成関数 / 固定成功文言を検証するメソッド
-+    expect(html).toContain('role="status"'); // 期待値生成関数 / 成功の読み上げ役割を検証するメソッド
-+    expect(html).not.toContain("PRIVATE_COUNT_999"); // 期待値生成関数 / 自由文言の非表示を検証するメソッド
-+  },
-+);
++    /**
++     * SourceのIDをDB作成前に登録し、本文・null・ロール・公開状態を持つfixtureを作る。
++     */
++    async function sources(count: number): Promise<ClubEvent[]> { // 元予定IDを事前登録してDB行を作る関数 / 数値型 / 非同期結果の型 / 保存済みイベント行の型
++      const f = current(); // 事前登録したfixture IDを取得する関数
++      const data = Array.from({ length: count }, // 件数分の元予定データを生成する関数
++        /**
++         * 書込み前にイベントIDを登録して、独立した元予定を生成する。
++         */
++        (_, index) => { // 処理を受け取るコールバック
++          const id = randomUUID(); // UUIDを生成する関数
++          f.events.add(id); // 元予定IDを集合へ事前登録するメソッド
++          return {
++            id,
++            clubId: f.clubs[0],
++            title: `F10 ${index} ${id}`,
++            content: " 本文\nそのまま保存 ",
++            targetRoles: ["OWNER", "MEMBER"] as ("OWNER" | "MEMBER")[],
++            genre: "PRACTICE" as const, // 値のリテラルを保持する型指定
++            startAt: new Date("2026-01-31T01:02:03.004Z"), // UTC日時を生成するコンストラクター
++            endAt: new Date("2026-02-01T02:03:04.005Z"), // UTC日時を生成するコンストラクター
++            meetingAt: new Date("2026-01-30T23:00:00.006Z"), // UTC日時を生成するコンストラクター
++            meetingLocation: " 集合場所 ",
++            location: null,
++            belongings: " ボール ",
++            notes: null,
++            isAllDay: false,
++            status: index % 2 === 0 ? "PUBLISHED" as const : "DRAFT" as const, // 値のリテラルを保持する型指定
++            firstPublishedAt: index % 2 === 0 ? new Date("2026-01-01T00:00:00Z") : null, // UTC日時を生成するコンストラクター
++            readRequiredAt: index % 2 === 0 ? new Date("2026-01-01T00:00:00Z") : null, // UTC日時を生成するコンストラクター
++            createdByMembershipId: f.memberships[0],
++            updatedByMembershipId: f.memberships[0],
++          };
++        });
++      await database().clubEvent.createMany({ data }); // 複数のfixtureまたは複製予定をDBへ保存するメソッド / 専用DB client取得関数
++      return database().clubEvent.findMany({ // 条件に合うDB行を取得するメソッド / 専用DB client取得関数
++        where: {
++          id: {
++            in: data.map( // 各要素を必要な値へ写すメソッド
++              /**
++               * fixture IDや取得結果を、保存・照合に必要な値へ写す。
++               */
++              (value) => value.id) // 処理を受け取るコールバック
++          }
++        }
++      });
++    }
 +
-+it.each(["unknown<script>", ["event-month-copied"]])( // toast境界のパラメーター試験を登録する関数
-+  "未知・配列toast %jは表示しない", // toast境界のパラメーター試験を登録する関数
-+  /**
-+   * 既知コードの配列を含め、単一の既知コード以外は表示しない。
-+   */
-+  async (toast) => { // toast境界を検証する非同期コールバック
-+    const html = await page({ // 管理月別Pageを描画する関数
-+      month: "2026-02",
-+      toast,
-+    }); // Page描画関数
-+    expect(html).not.toContain("前月の予定を下書きとして複製しました。"); // 期待値生成関数 / 不正toastの非表示を検証するメソッド
-+    expect(html).not.toContain("unknown"); // 期待値生成関数 / 任意文言の非表示を検証するメソッド
-+  },
-+);
++    /**
++     * fixtureクラブ内で、登録済み元ID以外の生成イベントだけを取得する。
++     */
++    async function generated(): Promise<ClubEvent[]> { // fixture内の生成予定を取得する関数 / 非同期結果の型 / 保存済みイベント行の型
++      return database().clubEvent.findMany({ // 条件に合うDB行を取得するメソッド / 専用DB client取得関数
++        where: {
++          clubId: current().clubs[0], // 事前登録したfixture IDを取得する関数
++          id: { notIn: [...current().events] }, // 事前登録したfixture IDを取得する関数
++        },
++        orderBy: { title: "asc" },
++      });
++    }
 +
-+it("既存の削除失敗toastのalert表示を維持する", // 試験を登録する関数
-+  /**
-+   * 複製成功を追加しても、既存エラーの色分けと読み上げを変更しない。
-+   */
-+  async () => { // 既存toastの互換性を検証する非同期コールバック
-+    const html = await page({ // 管理月別Pageを描画する関数
-+      month: "2026-02",
-+      toast: "event-delete-failed",
-+    }); // Page描画関数
-+    expect(html).toContain('role="alert"'); // 期待値生成関数 / 既存エラー役割を検証するメソッド
-+    expect(html).toContain("イベントを削除できませんでした。"); // 期待値生成関数 / 既存文言を検証するメソッド
-+  },
-+);
++    /**
++     * 実previewの照合値と選択元IDを持つ、新規操作入力を作る。
++     */
++    async function input(selected?: readonly string[]): Promise<EventMonthCopyInput> { // 実previewから保存入力を作る関数 / 文字列型 / 非同期結果の型 / 正規化済みの複製入力型
++      const preview = await read.getEventMonthCopyPreview(context(), MONTH); // 前月候補と照合値を取得するService関数 / 認可contextを作る関数
++      if (preview.outcome !== "READY") {
++        throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++      }
++      return {
++        targetMonth: MONTH,
++        selectedEventIds: selected ?? preview.items.map( // 各要素を必要な値へ写すメソッド
++          /**
++           * fixture IDや取得結果を、保存・照合に必要な値へ写す。
++           */
++          (item) => item.sourceEventId).sort(), // 選択元IDを順序付けるメソッド / 処理を受け取るコールバック
++        requestId: randomUUID(), // UUIDを生成する関数
++        previewFingerprint: preview.fingerprint,
++      };
++    }
 +
-+it("Actionの実際の成功遷移から対象月と成功toastを表示できる", // 試験を登録する関数
-+  /**
-+   * 現行のsingularコードと月別管理URLの接続を、既存Actionを変更せず確認する。
-+   */
-+  async () => { // 保存後表示の接続を検証する非同期コールバック
-+    const requestId = "11111111-1111-4111-8111-111111111111";
-+    const fingerprint = "ab".repeat(32); // 照合値を生成するメソッド
-+    const previous: EventMonthCopyActionState = { // Actionの初期state型
-+      status: "idle",
-+      values: {
-+        targetMonth: "2026-02",
-+        selectedEventIds: [],
-+        requestId,
-+        previewFingerprint: fingerprint,
-+      },
-+      fieldErrors: {},
-+      formError: null,
-+      requestId,
-+    };
-+    const data = new FormData(); // 送信フォーム生成コンストラクター
-+    data.set("targetMonth", "2026-02"); // 対象月設定メソッド
-+    data.set("requestId", requestId); // 操作ID設定メソッド
-+    data.set("previewFingerprint", fingerprint); // 照合値設定メソッド
-+    data.append("selectedEventIds", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"); // 選択ID追加メソッド
-+    await expect(copyPreviousMonthEventsAction( // 期待値生成関数 / 既存複製Action
-+      "club-a",
-+      "2026-02",
-+      requestId,
-+      fingerprint,
-+      previous,
-+      data,
-+    )).rejects.toThrow("NEXT_REDIRECT"); // Nextの制御例外を検証するメソッド
-+    const path = vi.mocked(redirect).mock.calls[0][0]; // 型付きmock取得関数
-+    const url = new URL(path, "https://app.invalid"); // 遷移先を解釈するURL生成コンストラクター
-+    expect(url.pathname).toBe("/club/club-a/admin/events"); // 期待値生成関数 / 月別管理URLを比較するメソッド
-+    const html = await page({ // 実際の遷移queryでPageを描画する関数
-+      month: url.searchParams.get("month")!, // 遷移先の対象月を取得するメソッド
-+      status: url.searchParams.get("status")!, // 遷移先の表示状態を取得するメソッド
-+      toast: url.searchParams.get("toast")!, // 遷移先の固定コードを取得するメソッド
-+    });
-+    expect(copyUrl(html).searchParams.get("month")).toBe("2026-02"); // 期待値生成関数 / 導線URL取得関数 / 表示月取得・比較メソッド
-+    expect(html).toContain("前月の予定を下書きとして複製しました。"); // 期待値生成関数 / 成功文言を検証するメソッド
-+    expect(mocks.events.mock.calls[0][0].status).toBe("ALL"); // 期待値生成関数 / 成功後の表示状態を比較するメソッド
-+  },
-+);
++    /**
++     * 操作記録と生成イベントの数を、このfixtureクラブに限定して比較する。
++     */
++    async function counts( // 生成予定と操作記録の件数を照合する関数
++      events: number, // 数値型
++      records: number // 数値型
++    ): Promise<void> { // 非同期結果の型 / 値を返さない型
++      expect(await generated()).toHaveLength(events); // 要素数を検証するメソッド / 期待値を取得する関数 / fixture内の生成予定を取得する関数
++      expect(await database().clubEventBatchOperation.count({ // 期待値を取得する関数 / 条件に合うDB行の件数を取得するメソッド / 専用DB client取得関数
++        where: { clubId: current().clubs[0] }, // 事前登録したfixture IDを取得する関数
++      })).toBe(records); // 一致を検証するメソッド
++    }
++
++    /**
++     * DB試験の例外原文を常に固定文へ置換し、十分な実行時間を確保する。
++     */
++    function dbCase( // 例外を固定文に限定したDB試験を登録する関数
++      name: string, // 文字列型
++      check: () => Promise<void> // 非同期結果の型 / 値を返さない型
++    ): void { // 値を返さない型
++      it(name, // 試験を登録する関数
++        /**
++         * DBケースの処理を実行し、例外原文を固定文へ置き換える。
++         */
++        async () => safeCheck(check), 60_000); // 非同期処理を行うコールバック / 例外原文を固定メッセージへ置き換える関数
++    }
++
++    beforeAll( // ガード後の初期化を登録する関数
++      /**
++       * 全ガード条件を確認した後だけ専用clientと対象Serviceを初期化する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await safeCheck( // 例外原文を固定メッセージへ置き換える関数
++          /**
++           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
++           */
++          async () => { // 非同期処理を行うコールバック
++            const connectionString = localConfiguration(process.env); // 使い捨てローカルDBの接続条件を検証する関数
++            const prismaModule = await import("@prisma/client"); // ガード後に実装モジュールを遅延読込みする関数
++            const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後に実装モジュールを遅延読込みする関数
++            const db = new prismaModule.PrismaClient({ // 専用DBクライアントを生成するコンストラクター
++              adapter: new PrismaPg({ // 専用PostgreSQL接続を構成するコンストラクター
++                connectionString,
++                max: 4,
++                connectionTimeoutMillis: 3000,
++              }),
++              log: [],
++            });
++            bridge.client = db;
++            bridge.prisma = prismaModule.Prisma;
++            await db.$connect(); // ガード後の専用DBへ接続するメソッド
++            const metadata = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
++              database: string; // 文字列型
++              ledger: string | null; // 文字列型
++            }[]>
++              `
++        SELECT current_database() AS database,
++          to_regclass('public."ClubEventBatchOperation"')::text AS ledger
++      `;
++            expect(metadata[0].database).toBe("postgres"); // 一致を検証するメソッド / 期待値を取得する関数
++            expect(metadata[0].ledger).not.toBeNull(); // nullであることを検証するメソッド / 期待値を取得する関数
++            read = await import("@/src/application/club/event/get-event-month-copy"); // ガード後に実装モジュールを遅延読込みする関数
++            write = await import("@/src/application/club/event/copy-event-month"); // ガード後に実装モジュールを遅延読込みする関数
++            repository = await import("@/src/infrastructure/prisma/repositories/event-month-copy-mutation-repository"); // ガード後に実装モジュールを遅延読込みする関数
++          });
++      }, 20_000);
++
++    beforeEach( // fixtureの準備を登録する関数
++      /**
++       * 作成前にfixture UUIDを登録し、このケースの専用データだけを用意する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        bridge.mode = "none";
++        bridge.remaining = 0;
++        bridge.transactions = 0;
++        await safeCheck( // 例外原文を固定メッセージへ置き換える関数
++          /**
++           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
++           */
++          async () => { // 非同期処理を行うコールバック
++            fixture = {
++              clubs: [randomUUID(), randomUUID()], // UUIDを生成する関数
++              users: [randomUUID(), randomUUID()], // UUIDを生成する関数
++              memberships: [randomUUID(), randomUUID(), randomUUID()], // UUIDを生成する関数
++              events: new Set(), // 重複のない集合を生成するコンストラクター
++            };
++            const f = current(); // 事前登録したfixture IDを取得する関数
++            await database().club.createMany({ // 複数のfixtureまたは複製予定をDBへ保存するメソッド / 専用DB client取得関数
++              data: f.clubs.map( // 各要素を必要な値へ写すメソッド
++                /**
++                 * fixture IDや取得結果を、保存・照合に必要な値へ写す。
++                 */
++                (id) => ({ // 処理を受け取るコールバック
++                  id,
++                  name: "F10 fixture",
++                  slug: `f10-${id}`,
++                  timezone: "Asia/Tokyo",
++                  planType: "STANDARD",
++                })),
++            });
++            await database().appUser.createMany({ // 複数のfixtureまたは複製予定をDBへ保存するメソッド / 専用DB client取得関数
++              data: f.users.map( // 各要素を必要な値へ写すメソッド
++                /**
++                 * fixture IDや取得結果を、保存・照合に必要な値へ写す。
++                 */
++                (id) => ({ // 処理を受け取るコールバック
++                  id,
++                  email: `${id}@fixture.example.test`,
++                })),
++            });
++            await database().clubMembership.createMany({ // 複数のfixtureまたは複製予定をDBへ保存するメソッド / 専用DB client取得関数
++              data: [
++                {
++                  id: f.memberships[0],
++                  clubId: f.clubs[0],
++                  userId: f.users[0],
++                  role: "OWNER",
++                },
++                {
++                  id: f.memberships[1],
++                  clubId: f.clubs[0],
++                  userId: f.users[1],
++                  role: "COACH",
++                },
++                {
++                  id: f.memberships[2],
++                  clubId: f.clubs[1],
++                  userId: f.users[0],
++                  role: "OWNER",
++                },
++              ],
++            });
++          });
++      }, 30_000);
++
++    afterEach( // fixture限定の削除処理を登録する関数
++      /**
++       * 障害注入を解除し、登録済みfixtureのクラブ・ユーザーだけをcleanupする。
++       */
++      async () => { // 非同期処理を行うコールバック
++        bridge.mode = "none";
++        bridge.remaining = 0;
++        const f = fixture;
++        fixture = undefined;
++        if (!f) {
++          return;
++        }
++        await safeCheck( // 例外原文を固定メッセージへ置き換える関数
++          /**
++           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
++           */
++          async () => { // 非同期処理を行うコールバック
++            try {
++              // DB生成IDの行も登録済みfixtureクラブだけに限定して削除する。
++              await database().clubLineDelivery.deleteMany({ where: { clubId: { in: f.clubs } } }); // 事前登録したfixture範囲をDBから削除するメソッド / 専用DB client取得関数
++              await database().club.deleteMany({ where: { id: { in: f.clubs } } }); // 事前登録したfixture範囲をDBから削除するメソッド / 専用DB client取得関数
++            } finally {
++              await database().appUser.deleteMany({ where: { id: { in: f.users } } }); // 事前登録したfixture範囲をDBから削除するメソッド / 専用DB client取得関数
++            }
++            expect(bridge.external).toBe(0); // 一致を検証するメソッド / 期待値を取得する関数
++          });
++      }, 30_000);
++
++    afterAll( // 専用接続の切断を登録する関数
++      /**
++       * 生成済みの専用clientだけを切断する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const db = bridge.client;
++        bridge.client = undefined;
++        if (db) {
++          await safeCheck( // 例外原文を固定メッセージへ置き換える関数
++            /**
++             * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
++             */
++            async () => { // 非同期処理を行うコールバック
++              await db.$disconnect(); // 専用DB接続を閉じるメソッド
++            });
++        }
++      });
++
++    dbCase("100件を一体保存し、元データ・別クラブ・前々月開始を変更せず関連行を複製しない", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const original = await sources(100); // 元予定IDを事前登録してDB行を作る関数
++        const f = current(); // 事前登録したfixture IDを取得する関数
++        const foreign = randomUUID(); // UUIDを生成する関数
++        const old = randomUUID(); // UUIDを生成する関数
++        f.events.add(foreign); // 元予定IDを集合へ事前登録するメソッド
++        f.events.add(old); // 元予定IDを集合へ事前登録するメソッド
++        await database().clubEvent.createMany({ // 複数のfixtureまたは複製予定をDBへ保存するメソッド / 専用DB client取得関数
++          data: [
++            {
++              id: foreign,
++              clubId: f.clubs[1],
++              title: "他クラブ",
++              startAt: original[0].startAt,
++              targetRoles: ["OWNER"],
++            },
++            {
++              id: old,
++              clubId: f.clubs[0],
++              title: "前々月開始で前月まで継続",
++              startAt: new Date("2025-12-31T00:00:00Z"), // UTC日時を生成するコンストラクター
++              endAt: new Date("2026-01-31T00:00:00Z"), // UTC日時を生成するコンストラクター
++              targetRoles: ["OWNER"],
++            },
++          ],
++        });
++        const related = original[0];
++        await database().clubEventAttachment.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++          data: {
++            id: randomUUID(), // UUIDを生成する関数
++            clubId: f.clubs[0],
++            eventId: related.id,
++            storagePath: `f10-fixture/${randomUUID()}.pdf`, // UUIDを生成する関数
++            fileName: "fixture.pdf",
++            mimeType: "application/pdf",
++            sizeBytes: 1,
++          },
++        });
++        await database().clubEventRead.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++          data: {
++            clubId: f.clubs[0],
++            eventId: related.id,
++            membershipId: f.memberships[0],
++          },
++        });
++        await database().clubEventMemo.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++          data: {
++            clubId: f.clubs[0],
++            eventId: related.id,
++            membershipId: f.memberships[0],
++            content: "個人メモ",
++          },
++        });
++        const setting = randomUUID(); // UUIDを生成する関数
++        const target = randomUUID(); // UUIDを生成する関数
++        await database().clubLineSetting.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++          data: {
++            id: setting,
++            clubId: f.clubs[0],
++          }
++        });
++        await database().clubLineTarget.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++          data: {
++            id: target,
++            clubId: f.clubs[0],
++            lineSettingId: setting,
++            lineGroupId: `fixture-${target}`,
++            targetRoles: ["OWNER"],
++          },
++        });
++        await database().clubLineDelivery.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++          data: {
++            clubId: f.clubs[0],
++            targetId: target,
++            eventId: related.id,
++            contentType: "EVENT",
++            contentTitle: related.title,
++            status: "SENT",
++            idempotencyKey: randomUUID(), // UUIDを生成する関数
++            requestId: randomUUID(), // UUIDを生成する関数
++            requestedByMembershipId: f.memberships[0],
++          },
++        });
++        const sourceSnapshot = await database().clubEvent.findMany({ // 条件に合うDB行を取得するメソッド / 専用DB client取得関数
++          where: { id: { in: [...f.events] } },
++          orderBy: { id: "asc" },
++        });
++        const preview = await read.getEventMonthCopyPreview(context(), MONTH); // 前月候補と照合値を取得するService関数 / 認可contextを作る関数
++        if (preview.outcome !== "READY") {
++          throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++        }
++        expect(preview.items).toHaveLength(100); // 要素数を検証するメソッド / 期待値を取得する関数
++        expect(preview.items.every( // 期待値を取得する関数 / 全要素が条件を満たすか判定するメソッド
++          /**
++           * 各値が、このケースで許可・期待した条件を満たすか判定する。
++           */
++          (item) => original.some( // 処理を受け取るコールバック / 条件に合う要素の有無を判定するメソッド
++            /**
++             * 各値が、このケースで許可・期待した条件を満たすか判定する。
++             */
++            (source) => source.id === item.sourceEventId))).toBe(true); // 一致を検証するメソッド / 処理を受け取るコールバック
++        const value = await input(); // 実previewから保存入力を作る関数
++        expect(await write.copyPreviousMonthEvents(context(), value)).toEqual({ // 構造と一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++          outcome: "CREATED",
++          receipt: {
++            targetMonth: MONTH,
++            createdCount: 100,
++          },
++        });
++        const copies = await database().clubEvent.findMany({ // 条件に合うDB行を取得するメソッド / 専用DB client取得関数
++          where: {
++            clubId: f.clubs[0],
++            id: { notIn: [...f.events] },
++          },
++          include: {
++            attachments: true,
++            reads: true,
++            personalMemos: true,
++            lineDeliveries: true,
++          },
++        });
++        expect(copies).toHaveLength(100); // 要素数を検証するメソッド / 期待値を取得する関数
++        for (const source of original) {
++          const copy = copies.find( // 条件に合う照合対象を探すメソッド
++            /**
++             * 照合対象のID・見出し・制約名に一致する行を探す。
++             */
++            (row) => row.title === source.title)!; // 処理を受け取るコールバック
++          const item = preview.items.find( // 条件に合う照合対象を探すメソッド
++            /**
++             * 照合対象のID・見出し・制約名に一致する行を探す。
++             */
++            (row) => row.sourceEventId === source.id)!; // 処理を受け取るコールバック
++          for (const field of [
++            "title", "content", "genre", "targetRoles", "isAllDay", "location",
++            "meetingLocation", "belongings", "notes",
++          ] as const) { // 値のリテラルを保持する型指定
++            expect(copy[field]).toEqual(source[field]); // 構造と一致を検証するメソッド / 期待値を取得する関数
++          }
++          expect(copy.startAt.toISOString()).toBe(item.converted!.startAt); // 一致を検証するメソッド / 期待値を取得する関数 / UTC日時をISO文字列へ変換するメソッド
++          expect(copy.endAt?.toISOString()).toBe(item.converted!.endAt); // 一致を検証するメソッド / 期待値を取得する関数 / UTC日時をISO文字列へ変換するメソッド
++          expect(copy.meetingAt?.toISOString()).toBe(item.converted!.meetingAt); // 一致を検証するメソッド / 期待値を取得する関数 / UTC日時をISO文字列へ変換するメソッド
++          expect(copy.status).toBe("DRAFT"); // 一致を検証するメソッド / 期待値を取得する関数
++          expect(copy.firstPublishedAt).toBeNull(); // nullであることを検証するメソッド / 期待値を取得する関数
++          expect(copy.readRequiredAt).toBeNull(); // nullであることを検証するメソッド / 期待値を取得する関数
++          expect(copy.createdByMembershipId).toBe(f.memberships[0]); // 一致を検証するメソッド / 期待値を取得する関数
++          expect(copy.updatedByMembershipId).toBe(f.memberships[0]); // 一致を検証するメソッド / 期待値を取得する関数
++          expect(copy.attachments).toHaveLength(0); // 要素数を検証するメソッド / 期待値を取得する関数
++          expect(copy.reads).toHaveLength(0); // 要素数を検証するメソッド / 期待値を取得する関数
++          expect(copy.personalMemos).toHaveLength(0); // 要素数を検証するメソッド / 期待値を取得する関数
++          expect(copy.lineDeliveries).toHaveLength(0); // 要素数を検証するメソッド / 期待値を取得する関数
++        }
++        expect(await database().clubEvent.findMany({ // 期待値を取得する関数 / 条件に合うDB行を取得するメソッド / 専用DB client取得関数
++          where: { id: { in: [...f.events] } },
++          orderBy: { id: "asc" },
++        })).toEqual(sourceSnapshot); // 構造と一致を検証するメソッド
++        await counts(100, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("101件はpreviewで拒否し、100件時の古い入力からも保存できない", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await sources(100); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input(); // 実previewから保存入力を作る関数
++        await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        expect(await read.getEventMonthCopyPreview(context(), MONTH)).toEqual({ outcome: "TOO_MANY" }); // 構造と一致を検証するメソッド / 期待値を取得する関数 / 前月候補と照合値を取得するService関数 / 認可contextを作る関数
++        expect(await write.copyPreviousMonthEvents(context(), value)).toEqual({ outcome: "PREVIEW_CHANGED" }); // 構造と一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        await counts(0, 0); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("逐次replayは元・生成予定の変更や削除後も増えない", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const [source] = await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input(); // 実previewから保存入力を作る関数
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("CREATED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        await database().clubEvent.update({ // 指定したDB行を更新するメソッド / 専用DB client取得関数
++          where: { id: source.id },
++          data: { content: "変更後" },
++        });
++        const [copy] = await generated(); // fixture内の生成予定を取得する関数
++        await database().clubEvent.update({ // 指定したDB行を更新するメソッド / 専用DB client取得関数
++          where: { id: copy.id },
++          data: { content: "生成後変更" },
++        });
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("ALREADY_COMPLETED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        await database().clubEvent.delete({ where: { id: source.id } }); // 指定したDB行を削除するメソッド / 専用DB client取得関数
++        await database().clubEvent.delete({ where: { id: copy.id } }); // 指定したDB行を削除するメソッド / 専用DB client取得関数
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("ALREADY_COMPLETED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        await counts(0, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("同requestIdの実並列送信は1群・1記録となり、同じ入力で確定結果を確認できる", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input(); // 実previewから保存入力を作る関数
++        const results = await Promise.all([ // 複数の保存処理を並列に実行する関数
++          write.copyPreviousMonthEvents(context(), value), // 一括複製するService関数 / 認可contextを作る関数
++          write.copyPreviousMonthEvents(context(), value), // 一括複製するService関数 / 認可contextを作る関数
++        ]);
++        expect(results.filter( // 期待値を取得する関数 / 指定した結果だけを抽出するメソッド
++          /**
++           * 作成完了など、指定した結果だけを抽出する。
++           */
++          (result) => result.outcome === "CREATED")).toHaveLength(1); // 要素数を検証するメソッド / 処理を受け取るコールバック
++        expect(results.every( // 期待値を取得する関数 / 全要素が条件を満たすか判定するメソッド
++          /**
++           * 各値が、このケースで許可・期待した条件を満たすか判定する。
++           */
++          (result) => ["CREATED", "ALREADY_COMPLETED", "RESULT_UNKNOWN"].includes(result.outcome))).toBe(true); // 一致を検証するメソッド / 処理を受け取るコールバック / 値の含有を判定するメソッド
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("ALREADY_COMPLETED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("同requestIdの異入力・異actorは衝突し、他clubの所属を流用できない", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const rows = await sources(2); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input([rows[0].id]); // 実previewから保存入力を作る関数
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("CREATED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        expect((await write.copyPreviousMonthEvents(context(), { // 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++          ...value,
++          selectedEventIds: [rows[1].id],
++        })).outcome).toBe("CONFLICT"); // 一致を検証するメソッド
++        expect((await write.copyPreviousMonthEvents(context(true), value)).outcome).toBe("CONFLICT"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        expect(await repository.createEventMonthCopyBatch({ // 期待値を取得する関数 / 最新認可・照合・一体保存を行うRepository関数
++          clubId: current().clubs[0], // 事前登録したfixture IDを取得する関数
++          membershipId: current().memberships[2], // 事前登録したfixture IDを取得する関数
++          userId: current().users[0], // 事前登録したfixture IDを取得する関数
++        }, value)).toEqual({ outcome: "FORBIDDEN" }); // 構造と一致を検証するメソッド
++        await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    for (const mode of ["count", "constraint"] as const) { // 値のリテラルを保持する型指定
++      dbCase(`${mode}の途中障害で実DBの全イベントとledgerをrollbackする`, // 例外を固定文に限定したDB試験を登録する関数
++        /**
++         * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++         */
++        async () => { // 非同期処理を行うコールバック
++          await sources(2); // 元予定IDを事前登録してDB行を作る関数
++          const value = await input(); // 実previewから保存入力を作る関数
++          bridge.mode = mode;
++          expect((await write.copyPreviousMonthEvents(context(), value)).outcome) // 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++            .toBe(mode === "count" ? "CREATE_FAILED" : "RESULT_UNKNOWN"); // 一致を検証するメソッド
++          await counts(0, 0); // 生成予定と操作記録の件数を照合する関数
++          bridge.mode = "none";
++          expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("CREATED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++          await counts(2, 1); // 生成予定と操作記録の件数を照合する関数
++        });
++    }
++
++    dbCase("P2034注入後はrollbackして有限再試行し、作成は一度だけになる", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input(); // 実previewから保存入力を作る関数
++        bridge.remaining = 2;
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("CREATED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        expect(bridge.transactions).toBe(3); // 一致を検証するメソッド / 期待値を取得する関数
++        await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("P2034の上限後は結果不明とし、同一入力で確認・replayできる", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input(); // 実previewから保存入力を作る関数
++        bridge.remaining = 4;
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("RESULT_UNKNOWN"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        expect(bridge.transactions).toBe(4); // 一致を検証するメソッド / 期待値を取得する関数
++        await counts(0, 0); // 生成予定と操作記録の件数を照合する関数
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("CREATED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("ALREADY_COMPLETED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++        await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    for (const change of ["source", "timezone", "duplicate"] as const) { // 値のリテラルを保持する型指定
++      dbCase(`preview後の${change}変更を検出して黙って保存しない`, // 例外を固定文に限定したDB試験を登録する関数
++        /**
++         * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++         */
++        async () => { // 非同期処理を行うコールバック
++          const [source] = await sources(1); // 元予定IDを事前登録してDB行を作る関数
++          const value = await input(); // 実previewから保存入力を作る関数
++          if (change === "source") {
++            await database().clubEvent.update({ // 指定したDB行を更新するメソッド / 専用DB client取得関数
++              where: { id: source.id },
++              data: {
++                content: "変更後",
++                updatedAt: new Date("2030-01-01T00:00:00Z"), // UTC日時を生成するコンストラクター
++              },
++            });
++          } else if (change === "timezone") {
++            await database().club.update({ // 指定したDB行を更新するメソッド / 専用DB client取得関数
++              where: { id: current().clubs[0] }, // 事前登録したfixture IDを取得する関数
++              data: { timezone: "UTC" },
++            });
++          } else {
++            const preview = await read.getEventMonthCopyPreview(context(), MONTH); // 前月候補と照合値を取得するService関数 / 認可contextを作る関数
++            if (preview.outcome !== "READY") {
++              throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++            }
++            const id = randomUUID(); // UUIDを生成する関数
++            current().events.add(id); // 元予定IDを集合へ事前登録するメソッド / 事前登録したfixture IDを取得する関数
++            await database().clubEvent.create({ // fixtureまたは操作記録をDBへ保存するメソッド / 専用DB client取得関数
++              data: {
++                ...source,
++                id,
++                startAt: new Date(preview.items[0].converted!.startAt), // UTC日時を生成するコンストラクター
++                endAt: new Date(preview.items[0].converted!.endAt!), // UTC日時を生成するコンストラクター
++                meetingAt: new Date(preview.items[0].converted!.meetingAt!), // UTC日時を生成するコンストラクター
++                status: "DRAFT",
++              },
++            });
++          }
++          expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("PREVIEW_CHANGED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++          await counts(0, 0); // 生成予定と操作記録の件数を照合する関数
++        });
++    }
++
++    dbCase("異なるrequestIdの実並列操作でも古いpreviewから重複群を黙って作らない", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        const first = await input(); // 実previewから保存入力を作る関数
++        const second = {
++          ...first,
++          requestId: randomUUID(), // UUIDを生成する関数
++        };
++        const results = await Promise.all([ // 複数の保存処理を並列に実行する関数
++          write.copyPreviousMonthEvents(context(), first), // 一括複製するService関数 / 認可contextを作る関数
++          write.copyPreviousMonthEvents(context(), second), // 一括複製するService関数 / 認可contextを作る関数
++        ]);
++        expect(results.filter( // 期待値を取得する関数 / 指定した結果だけを抽出するメソッド
++          /**
++           * 作成完了など、指定した結果だけを抽出する。
++           */
++          (result) => result.outcome === "CREATED")).toHaveLength(1); // 要素数を検証するメソッド / 処理を受け取るコールバック
++        expect(results.every( // 期待値を取得する関数 / 全要素が条件を満たすか判定するメソッド
++          /**
++           * 各値が、このケースで許可・期待した条件を満たすか判定する。
++           */
++          (result) => ["CREATED", "PREVIEW_CHANGED", "RESULT_UNKNOWN"].includes(result.outcome))).toBe(true); // 一致を検証するメソッド / 処理を受け取るコールバック / 値の含有を判定するメソッド
++        await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    for (const change of ["withdrawn", "role", "STARTER", "PRO"] as const) { // 値のリテラルを保持する型指定
++      dbCase(`保存直前の${change}変更は新規もreplayも拒否する`, // 例外を固定文に限定したDB試験を登録する関数
++        /**
++         * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++         */
++        async () => { // 非同期処理を行うコールバック
++          await sources(1); // 元予定IDを事前登録してDB行を作る関数
++          const value = await input(); // 実previewから保存入力を作る関数
++          expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("CREATED"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++          if (
++            change === "withdrawn" ||
++            change === "role"
++          ) {
++            await database().clubMembership.update({ // 指定したDB行を更新するメソッド / 専用DB client取得関数
++              where: { id: current().memberships[0] }, // 事前登録したfixture IDを取得する関数
++              data: change === "withdrawn" ? { status: "WITHDRAWN" } : { role: "MEMBER" },
++            });
++          } else {
++            await database().club.update({ // 指定したDB行を更新するメソッド / 専用DB client取得関数
++              where: { id: current().clubs[0] }, // 事前登録したfixture IDを取得する関数
++              data: { planType: change },
++            });
++          }
++          expect((await write.copyPreviousMonthEvents(context(), value)).outcome).toBe("FORBIDDEN"); // 一致を検証するメソッド / 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++          expect((await write.copyPreviousMonthEvents(context(), { // 期待値を取得する関数 / 一括複製するService関数 / 認可contextを作る関数
++            ...value,
++            requestId: randomUUID(), // UUIDを生成する関数
++          })).outcome).toBe("FORBIDDEN"); // 一致を検証するメソッド
++          await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++        });
++    }
++
++    dbCase("実行者削除時はSetNullにし、クラブ・件数・完了日時の履歴を保持する", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        await sources(1); // 元予定IDを事前登録してDB行を作る関数
++        const value = await input(); // 実previewから保存入力を作る関数
++        await write.copyPreviousMonthEvents(context(), value); // 一括複製するService関数 / 認可contextを作る関数
++        const before = await database().clubEventBatchOperation.findUniqueOrThrow({ // 操作記録を一意条件で取得するメソッド / 専用DB client取得関数
++          where: {
++            clubId_requestId: {
++              clubId: current().clubs[0], // 事前登録したfixture IDを取得する関数
++              requestId: value.requestId,
++            }
++          },
++        });
++        await database().clubMembership.delete({ where: { id: current().memberships[0] } }); // 指定したDB行を削除するメソッド / 専用DB client取得関数 / 事前登録したfixture IDを取得する関数
++        const after = await database().clubEventBatchOperation.findUniqueOrThrow({ where: { id: before.id } }); // 操作記録を一意条件で取得するメソッド / 専用DB client取得関数
++        expect(after).toEqual({ // 構造と一致を検証するメソッド / 期待値を取得する関数
++          ...before,
++          executedByMembershipId: null,
++        });
++        await counts(1, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("同クラブunique・同クラブFK・clubId不変と件数CHECKをDB自身で拒否する", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const db = database(); // 専用DB client取得関数
++        const base = {
++          id: randomUUID(), // UUIDを生成する関数
++          clubId: current().clubs[0], // 事前登録したfixture IDを取得する関数
++          requestId: randomUUID(), // UUIDを生成する関数
++          operation: "COPY_PREVIOUS_MONTH",
++          targetMonth: MONTH,
++          inputHash: "ab".repeat(32), // 照合用の文字列を繰り返すメソッド
++          executedByMembershipId: current().memberships[0], // 事前登録したfixture IDを取得する関数
++          createdCount: 1,
++          completedAt: new Date(), // UTC日時を生成するコンストラクター
++        };
++        await db.clubEventBatchOperation.create({ data: base }); // fixtureまたは操作記録をDBへ保存するメソッド
++        await expect(db.clubEventBatchOperation.create({ // 期待値を取得する関数 / fixtureまたは操作記録をDBへ保存するメソッド
++          data: {
++            ...base,
++            id: randomUUID(), // UUIDを生成する関数
++          }
++        })).rejects.toBeDefined(); // DB操作が例外で拒否されたことを検証するメソッド
++        await expect(db.clubEventBatchOperation.create({ // 期待値を取得する関数 / fixtureまたは操作記録をDBへ保存するメソッド
++          data: {
++            ...base,
++            id: randomUUID(), // UUIDを生成する関数
++            requestId: randomUUID(), // UUIDを生成する関数
++            executedByMembershipId: current().memberships[2], // 事前登録したfixture IDを取得する関数
++          },
++        })).rejects.toBeDefined(); // DB操作が例外で拒否されたことを検証するメソッド
++        await expect(db.clubEventBatchOperation.update({ // 期待値を取得する関数 / 指定したDB行を更新するメソッド
++          where: { id: base.id },
++          data: { clubId: current().clubs[1] }, // 事前登録したfixture IDを取得する関数
++        })).rejects.toBeDefined(); // DB操作が例外で拒否されたことを検証するメソッド
++        for (const createdCount of [0, 101]) {
++          await expect(db.clubEventBatchOperation.create({ // 期待値を取得する関数 / fixtureまたは操作記録をDBへ保存するメソッド
++            data: {
++              ...base,
++              id: randomUUID(), // UUIDを生成する関数
++              requestId: randomUUID(), // UUIDを生成する関数
++              createdCount,
++            },
++          })).rejects.toBeDefined(); // DB操作が例外で拒否されたことを検証するメソッド
++        }
++        const invalid: Partial<Prisma.ClubEventBatchOperationUncheckedCreateInput>[] = [ // 指定したプロパティだけを持つ部分入力型 / 操作記録の外部キーを直接指定する作成入力型
++          { operation: "OTHER" },
++          { targetMonth: "2026-13" },
++          { targetMonth: "0001-01" },
++          { targetMonth: "0000-02" },
++          { inputHash: "ZZ".repeat(32) }, // 照合用の文字列を繰り返すメソッド
++          { requestId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA" },
++          { executedByMembershipId: randomUUID() }, // UUIDを生成する関数
++        ];
++        for (const change of invalid) {
++          await expect(db.clubEventBatchOperation.create({ // 期待値を取得する関数 / fixtureまたは操作記録をDBへ保存するメソッド
++            data: {
++              ...base,
++              id: randomUUID(), // UUIDを生成する関数
++              requestId: randomUUID(), // UUIDを生成する関数
++              ...change,
++            },
++          })).rejects.toBeDefined(); // DB操作が例外で拒否されたことを検証するメソッド
++        }
++        await db.clubEventBatchOperation.create({ // fixtureまたは操作記録をDBへ保存するメソッド
++          data: {
++            ...base,
++            id: randomUUID(), // UUIDを生成する関数
++            clubId: current().clubs[1], // 事前登録したfixture IDを取得する関数
++            executedByMembershipId: current().memberships[2], // 事前登録したfixture IDを取得する関数
++          },
++        });
++        await counts(0, 1); // 生成予定と操作記録の件数を照合する関数
++      });
++
++    dbCase("CHECK・FK・trigger・unique・RLSとData API権限metadataを照合する", // 例外を固定文に限定したDB試験を登録する関数
++      /**
++       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
++       */
++      async () => { // 非同期処理を行うコールバック
++        const db = database(); // 専用DB client取得関数
++        const tables = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
++          relrowsecurity: boolean; // 真偽値型
++          policies: bigint; // bigint型
++          publicGrants: bigint; // bigint型
++          anon: boolean; // 真偽値型
++          authenticated: boolean; // 真偽値型
++        }[]>
++          `
++      SELECT c.relrowsecurity,
++        (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
++        (SELECT count(*) FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
++          WHERE a.grantee = 0) AS "publicGrants",
++        has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS anon,
++        has_table_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS authenticated
++      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
++      WHERE n.nspname = 'public' AND c.relname = 'ClubEventBatchOperation'
++    `;
++        expect(tables).toEqual([{ // 構造と一致を検証するメソッド / 期待値を取得する関数
++          relrowsecurity: true,
++          policies: BigInt(0), // 整数をbigintへ変換する関数
++          publicGrants: BigInt(0), // 整数をbigintへ変換する関数
++          anon: false,
++          authenticated: false,
++        }]);
++        const constraints = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
++          conname: string; // 文字列型
++          confdeltype: string; // 文字列型
++        }[]>
++          `
++      SELECT conname, confdeltype::text FROM pg_constraint
++      WHERE conrelid = 'public."ClubEventBatchOperation"'::regclass
++    `;
++        expect(constraints.map( // 期待値を取得する関数 / 各要素を必要な値へ写すメソッド
++          /**
++           * fixture IDや取得結果を、保存・照合に必要な値へ写す。
++           */
++          (row) => row.conname)).toEqual(expect.arrayContaining([ // 構造と一致を検証するメソッド / 処理を受け取るコールバック / 期待した項目の包含を検証する関数
++            "ClubEventBatchOperation_operation_check",
++            "ClubEventBatchOperation_request_id_check",
++            "ClubEventBatchOperation_target_month_check",
++            "ClubEventBatchOperation_input_hash_check",
++            "ClubEventBatchOperation_created_count_check",
++          ]));
++        expect(constraints.find( // 期待値を取得する関数 / 条件に合う照合対象を探すメソッド
++          /**
++           * 照合対象のID・見出し・制約名に一致する行を探す。
++           */
++          (row) => row.conname === "ClubEventBatchOperation_executedByMembershipId_fkey")?.confdeltype).toBe("n"); // 一致を検証するメソッド / 処理を受け取るコールバック
++        const triggers = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
++          tgname: string; // 文字列型
++        }[]>
++          `
++      SELECT tgname FROM pg_trigger
++      WHERE tgrelid = 'public."ClubEventBatchOperation"'::regclass AND NOT tgisinternal
++    `;
++        expect(triggers.map( // 期待値を取得する関数 / 各要素を必要な値へ写すメソッド
++          /**
++           * fixture IDや取得結果を、保存・照合に必要な値へ写す。
++           */
++          (row) => row.tgname)).toEqual(expect.arrayContaining([ // 構造と一致を検証するメソッド / 処理を受け取るコールバック / 期待した項目の包含を検証する関数
++            "ClubEventBatchOperation_executor_club_match",
++            "ClubEventBatchOperation_club_id_immutable",
++          ]));
++        const indexes = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
++          indexname: string; // 文字列型
++          indexdef: string; // 文字列型
++        }[]>
++          `
++      SELECT indexname, indexdef FROM pg_indexes
++      WHERE schemaname = 'public' AND tablename = 'ClubEventBatchOperation'
++    `;
++        expect(indexes.find( // 期待値を取得する関数 / 条件に合う照合対象を探すメソッド
++          /**
++           * 照合対象のID・見出し・制約名に一致する行を探す。
++           */
++          (row) => row.indexname === "ClubEventBatchOperation_clubId_requestId_key")?.indexdef).toContain("UNIQUE"); // 文字列に期待した値が含まれるか検証するメソッド / 処理を受け取るコールバック
++      });
++  });

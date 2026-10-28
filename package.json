@@ -28,7 +28,8 @@
     "test:club-invitation:acceptance:local": "RUN_CLUB_INVITATION_ACCEPTANCE_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 RUN_CLUB_INVITATION_AUTH_TESTS=1 vitest run tests/club-invitation-acceptance.flow.integration.test.ts",
     "test:club-account:local": "RUN_CLUB_ACCOUNT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-account.flow.integration.test.ts",
     "test:support-report:local": "RUN_SUPPORT_REPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/support-report.flow.integration.test.ts",
-    "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts"
+    "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts",
+    "test:event-month-copy:local": "RUN_EVENT_MONTH_COPY_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-month-copy.flow.integration.test.ts"
   },
   "dependencies": {
     "@axiomhq/js": "^1.8.0",
