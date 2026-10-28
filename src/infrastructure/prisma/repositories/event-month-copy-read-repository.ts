@@ -134,7 +134,7 @@ function duplicateWhere( // 既存イベントの完全一致検索条件を組�
 
 /**
  * 前月のイベントを翌月に丸ごと複製するための、事前プレビューデータ作成（重複チェック付き）関数
- * 本人認証、先月の年月を作成、重複を検出してClient表示へ変換する前のプレビューデータ結果にまとめる
+ * 本人認証、先月の年月を作成、イベントデータを取得して、重複を検出してClient表示へ変換する前のプレビューデータ結果にまとめる
  */
 export async function findEventMonthCopyPreviewData( 
   input: EventMonthCopyPreviewDataInput, // 最新認可から得たクラブ・所属・Auth本人の識別子と、複製先年月。
