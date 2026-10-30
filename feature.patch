@@ -1,298 +1,420 @@
-diff --git a/domain/club/event/event-practice-batch-date-times.ts b/domain/club/event/event-practice-batch-date-times.ts
+diff --git a/domain/club/event/event-practice-batch-policy.ts b/domain/club/event/event-practice-batch-policy.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bee157ce71b01fc99714ddebac9f3e1074aa88f4
+index 0000000000000000000000000000000000000000..b923d4f7c45b984fc91d6d498729d8e740abbc5d
 --- /dev/null
-+++ b/domain/club/event/event-practice-batch-date-times.ts
-@@ -0,0 +1,251 @@
-+// domain/club/event/event-practice-batch-date-times.ts
-+// 同月の現地カレンダー日を走査し、曜日に合う練習日時をDBなしで生成する。
++++ b/domain/club/event/event-practice-batch-policy.ts
+@@ -0,0 +1,76 @@
++// domain/club/event/event-practice-batch-policy.ts
++// F11の固定保存列を組み立て、既存の12列比較をイベントの値だけで再利用する。
 +
 +import {
-+  isValidTimeZone, // タイムゾーンが正しく利用できるかを検証する関数
-+  utcCandidates, // 指定した現地成分と一致するUTC候補を列挙する関数
-+  type LocalDateTime, // クラブ現地の年・月・日・時・分・秒・ミリ秒の型
-+} from "@/domain/shared/date-time/club-local-date-time";
++  buildEventMonthCopyKey, // コピー対象12列から決定的な比較値を作る関数
++  pickEventMonthCopyEvent, // コピーするイベントの必要列だけを検証・抽出する関数
++} from "./event-month-copy-policy";
 +import type {
-+  EventUtcDateTimes, // 開始・終了・集合のUTC日時をまとめる型
-+} from "./event-date-times";
++  EventMonthCopyEvent, // コピー対象のイベント12列の型
++} from "./event-month-copy-types";
++import type {
++  EventPracticeBatchUtcDateTimes, // 終了必須の練習イベントが持つUTC日時型
++} from "./event-practice-batch-date-times";
 +import {
-+  validateEventPracticeBatchPreviewInput, // プレビュー準備段階の入力値だけを検証・正規化する関数
++  validateEventPracticeBatchPreviewInput, // プレビュー準備段階の共通入力を検証・正規化する関数
 +} from "./event-practice-batch-form";
++import type {
++  EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力値の型
++} from "./event-practice-batch-types";
++
++const INVALID_DATA_MESSAGE = "定期練習の内容を確認できません。";
++
++/**
++ * 共通入力と生成済みUTC日時からF11の比較・保存対象列を組み立て、Dateと配列を分離する。
++ * 公開状態・実行者・PDF等は含めず、genre・終日区分・本文等はサーバー側の固定値にする。
++ */
++export function buildEventPracticeBatchEvent( // F11の固定比較・保存列を組み立てる関数
++  input: EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
++  dates: EventPracticeBatchUtcDateTimes, // 終了必須の練習イベントのUTC日時型
++): EventMonthCopyEvent { // コピー対象のイベント12列の型
++  try {
++    const validation = validateEventPracticeBatchPreviewInput(input); // 共通入力を検証・正規化する関数
++    if (!validation.success) {
++      throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++    }
++    const values = validation.data;
++    const event = pickEventMonthCopyEvent({ // コピー対象12列を検証・抽出する関数
++      title: values.title,
++      content: null,
++      genre: "PRACTICE",
++      targetRoles: values.targetRoles,
++      startAt: dates.startAt,
++      endAt: dates.endAt,
++      isAllDay: false,
++      location: values.location,
++      meetingAt: dates.meetingAt,
++      meetingLocation: values.meetingLocation,
++      belongings: null,
++      notes: null,
++    });
++    if (
++      event.endAt === null ||
++      event.endAt.getTime() <= event.startAt.getTime() // UTCミリ秒値を得るメソッド
++    ) {
++      throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++    }
++    return event;
++  } catch {
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++  }
++}
++
++/**
++ * F11の生成イベントを既存イベントと比較するための内部キーを作る。Client返却・ログ用ではない。
++ * F10の候補型や複製元IDを作らず、比較対象の値だけを既存関数へ渡す。
++ */
++export function buildEventPracticeBatchKey( // F11の12列比較の内部キーを作る関数
++  input: EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
++  dates: EventPracticeBatchUtcDateTimes, // 終了必須の練習イベントのUTC日時型
++): string { // 文字列型
++  try {
++    return buildEventMonthCopyKey(buildEventPracticeBatchEvent(input, dates)); // コピー対象12列から決定的な比較値を作る関数 / F11の固定比較・保存列を組み立てる関数
++  } catch {
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++  }
++}
+diff --git a/src/infrastructure/security/event-practice-batch-fingerprint.ts b/src/infrastructure/security/event-practice-batch-fingerprint.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a18f2284757971af8f1a82ce8048d8125fd056c9
+--- /dev/null
++++ b/src/infrastructure/security/event-practice-batch-fingerprint.ts
+@@ -0,0 +1,278 @@
++// src/infrastructure/security/event-practice-batch-fingerprint.ts
++// F11のpreviewと送信内容を、用途・版・認可scopeを分けたSHA-256へ変換する。
++
++import "server-only";
++
++import { createHash } from "node:crypto";
++import { z } from "zod";
++
++import type {
++  EventPracticeBatchDateTimeCandidate, // 現地日付と生成日時または除外理由を持つ候補型
++} from "@/domain/club/event/event-practice-batch-date-times";
++import {
++  validateEventPracticeBatchInput, // 保存段階の入力値を検証・正規化する関数
++  validateEventPracticeBatchPreviewInput, // プレビュー準備段階の共通入力を検証・正規化する関数
++} from "@/domain/club/event/event-practice-batch-form";
++import {
++  buildEventPracticeBatchKey, // F11の固定列を組み立て、12列比較の内部キーを作る関数
++} from "@/domain/club/event/event-practice-batch-policy";
 +import {
 +  EVENT_PRACTICE_BATCH_MAX_COUNT, // 定期練習作成の最大件数31件
 +  type EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力値の型
 +  type EventPracticeBatchExclusionReason, // 練習イベントを作成できない日時の理由の型
-+  type EventPracticeBatchWarning, // 集合時刻が練習開始時刻より後であることを表す警告型
-+} from "./event-practice-batch-types";
++  type EventPracticeBatchInput, // 共通入力に選択日と操作識別子を加えた保存入力型
++} from "@/domain/club/event/event-practice-batch-types";
++import {
++  isValidTimeZone, // タイムゾーンが正しく利用できるかを検証する関数
++} from "@/domain/shared/date-time/club-local-date-time";
++
++// 比較列・正規化・照合の意味を変更するときは、保存済み操作との互換性を確認して版を上げる。
++const FORMAT_VERSION = 1;
++const INVALID_DATA_MESSAGE = "定期練習の照合内容を確認できません。";
++const identifierSchema = z.uuid(); // UUID識別子のスキーマを作る関数
++const warningsSchema = z.array(z.literal("MEETING_AFTER_START")).max(1); // 上限を制限するメソッド / 配列のスキーマを作る関数 / 固定値のスキーマを作る関数
++const exclusionSchema = z.enum([ // 許可値のスキーマを作る関数
++  "NONEXISTENT_LOCAL_TIME",
++  "AMBIGUOUS_LOCAL_TIME",
++  "INVALID_INTERVAL",
++  "OUT_OF_RANGE",
++  "INVALID_DATE_TIME",
++]);
 +
 +/**
-+ * 終了必須の練習予定が持つUTC日時。DB保存や既存イベントとの一致判定は含めない。
++ * 最新認可から得るクラブ・実行所属・Auth本人の識別情報。Client指定値の認可には使わない。
 + */
-+export type EventPracticeBatchUtcDateTimes = EventUtcDateTimes & { // 終了必須のUTC日時型 / 開始・終了・集合のUTC日時の型
-+  endAt: Date; // 日時型
++export type EventPracticeBatchFingerprintScope = { // 認可済みクラブ・所属・本人の識別情報型
++  clubId: string; // 文字列型
++  membershipId: string; // 文字列型
++  userId: string; // 文字列型
 +};
 +
 +/**
-+ * 現地日を識別子とする生成候補。変換できない日も理由付きで保持し、部分日時は返さない。
++ * 生成候補にDBで調べた既存完全一致の代表IDを加えた、サーバー内部だけの照合素材。
 + */
-+export type EventPracticeBatchDateTimeCandidate = // 日付と生成日時・除外理由を持つ候補型
-+  | {
-+      date: string; // 文字列型
-+      dates: EventPracticeBatchUtcDateTimes; // 終了必須のUTC日時型
-+      exclusionReason: null; // 未設定を表すnull型
-+      warnings: readonly EventPracticeBatchWarning[]; // 開始後の集合時刻の警告型
-+    }
-+  | {
-+      date: string; // 文字列型
-+      dates: null; // 未設定を表すnull型
-+      exclusionReason: EventPracticeBatchExclusionReason; // 日時を作成できない理由の型
-+      warnings: readonly EventPracticeBatchWarning[]; // 開始後の集合時刻の警告型
-+    };
++export type EventPracticeBatchFingerprintCandidate = EventPracticeBatchDateTimeCandidate & { // 既存完全一致の代表IDを加えた内部候補型 / 現地日付と生成日時または除外理由の候補型
++  duplicateEventId: string | null; // 文字列型 / 未設定を表すnull型
++};
 +
 +/**
-+ * 空候補・全件除外は件数で区別し、入力不正・timezone不正・上限・予期しない失敗を分ける。
++ * 共通入力・現在のtimezone・全候補を認可scopeへ結び付けるpreview照合入力。
 + */
-+export type EventPracticeBatchDateTimeResult = // 候補生成の成功・失敗結果型
-+  | {
-+      outcome: "READY"; // 値を限定するリテラル型
-+      items: readonly EventPracticeBatchDateTimeCandidate[]; // 日付と生成日時・除外理由を持つ候補型
-+      candidateCount: number; // 数値型
-+      selectableCount: number; // 数値型
-+    }
-+  | {
-+      outcome: "INVALID_INPUT" | "INVALID_TIMEZONE" | "TOO_MANY" | "GENERATION_FAILED"; // 値を限定するリテラル型
-+    };
++export type EventPracticeBatchFingerprintInput = EventPracticeBatchFingerprintScope & { // scope・共通入力・timezone・全候補の照合入力型 / 認可済みクラブ・所属・本人の識別情報型
++  input: EventPracticeBatchCommonInput; // 正規化した定期練習の共通入力型
++  timezone: string; // 文字列型
++  candidates: readonly EventPracticeBatchFingerprintCandidate[]; // 既存完全一致の代表IDを加えた内部候補型
++};
 +
 +/**
-+ * 単一時刻の厳密な解決結果。候補が複数あっても勝手に採用しない。
++ * UUIDの形式を検証し、scopeと既存イベントIDの大小文字差を取り除く。
 + */
-+type ResolvedTime = // 単一時刻の解決結果型
-+  | {
-+      success: true; // 値を限定するリテラル型
-+      value: Date; // 日時型
-+    }
-+  | {
-+      success: false; // 値を限定するリテラル型
-+      reason: EventPracticeBatchExclusionReason; // 日時を作成できない理由の型
-+    };
-+
-+/**
-+ * 検証済みの現地日を曜日計算用のUTCカレンダーへ置く。実際のUTC保存日時ではない。
-+ */
-+function calendarDate(value: string): Date { // 検証済み日付を曜日計算用のカレンダーへ置く関数 / 文字列型 / 日時型
-+  const result = new Date(0); // 日時を生成するコンストラクター
-+  result.setUTCFullYear( // 年0〜99の特例なしでUTC年月日を設定するメソッド
-+    Number(value.slice(0, 4)), // 値を数値へ変換する関数 / 文字列の指定範囲を得るメソッド
-+    Number(value.slice(5, 7)) - 1, // 値を数値へ変換する関数 / 文字列の指定範囲を得るメソッド
-+    Number(value.slice(8, 10)), // 値を数値へ変換する関数 / 文字列の指定範囲を得るメソッド
-+  );
-+  result.setUTCHours(0, 0, 0, 0); // UTCの時分秒ミリ秒を設定するメソッド
-+  return result;
-+}
-+
-+/**
-+ * カレンダー成分とHH:mmを厳密なUTC候補へ変換し、不存在・曖昧・変換不能を分ける。
-+ */
-+function resolveTime( // 現地時刻を厳密にUTCへ解決する関数
-+  calendar: Date, // 日時型
-+  time: string, // 文字列型
-+  timeZone: string, // 文字列型
-+): ResolvedTime { // 単一時刻の解決結果型
-+  try {
-+    const parts: LocalDateTime = { // クラブ現地の日時成分の型
-+      year: calendar.getUTCFullYear(), // UTCカレンダーの年を得るメソッド
-+      month: calendar.getUTCMonth() + 1, // UTCカレンダーの0始まり月を得るメソッド
-+      day: calendar.getUTCDate(), // UTCカレンダーの日を得るメソッド
-+      hour: Number(time.slice(0, 2)), // 値を数値へ変換する関数 / 文字列の指定範囲を得るメソッド
-+      minute: Number(time.slice(3, 5)), // 値を数値へ変換する関数 / 文字列の指定範囲を得るメソッド
-+      second: 0,
-+      millisecond: 0,
-+    };
-+    const candidates = utcCandidates(parts, timeZone); // 現地成分と一致するUTC候補を列挙する関数
-+    if (candidates.length === 0) {
-+      return {
-+        success: false,
-+        reason: "NONEXISTENT_LOCAL_TIME",
-+      };
-+    }
-+    if (candidates.length > 1) {
-+      return {
-+        success: false,
-+        reason: "AMBIGUOUS_LOCAL_TIME",
-+      };
-+    }
-+    if (!Number.isFinite(candidates[0].getTime())) { // 有限の数値かを確認する関数 / UTCミリ秒値を得るメソッド
-+      return {
-+        success: false,
-+        reason: "INVALID_DATE_TIME",
-+      };
-+    }
-+    return {
-+      success: true,
-+      value: candidates[0],
-+    };
-+  } catch {
-+    return {
-+      success: false,
-+      reason: "INVALID_DATE_TIME",
-+    };
-+  }
-+}
-+
-+/**
-+ * 変換途中のUTC値を公開せず、日付と固定の除外理由だけを持つ候補を作る。
-+ */
-+function excluded( // 固定理由の除外候補を作る関数
-+  date: string, // 文字列型
-+  reason: EventPracticeBatchExclusionReason, // 日時を作成できない理由の型
-+): EventPracticeBatchDateTimeCandidate { // 日付と生成日時・除外理由を持つ候補型
-+  return {
-+    date,
-+    dates: null,
-+    exclusionReason: reason,
-+    warnings: [],
-+  };
-+}
-+
-+/**
-+ * 1日の開始・終了・任意集合を生成し、UTCでの終了順序と集合警告を確認する。
-+ */
-+function generateDay( // 1日分の開始・終了・任意集合を生成する関数
-+  calendar: Date, // 日時型
-+  input: EventPracticeBatchCommonInput, // 正規化した共通入力型
-+  timeZone: string, // 文字列型
-+): EventPracticeBatchDateTimeCandidate { // 日付と生成日時・除外理由を持つ候補型
-+  const date = calendar.toISOString().slice(0, 10); // 文字列の指定範囲を得るメソッド / UTC ISO文字列へ変換するメソッド
-+  const start = resolveTime(calendar, input.startTime, timeZone); // 現地時刻を厳密にUTCへ解決する関数
-+  if (!start.success) {
-+    return excluded(date, start.reason); // 固定理由の除外候補を作る関数
-+  }
-+  const end = resolveTime(calendar, input.endTime, timeZone); // 現地時刻を厳密にUTCへ解決する関数
-+  if (!end.success) {
-+    return excluded(date, end.reason); // 固定理由の除外候補を作る関数
-+  }
-+  if (end.value.getTime() <= start.value.getTime()) { // UTCミリ秒値を得るメソッド
-+    return excluded(date, "INVALID_INTERVAL"); // 固定理由の除外候補を作る関数
-+  }
-+  let meetingAt: Date | null = null; // 日時型 / 未設定を表すnull型
-+  if (input.meetingTime !== null) {
-+    const meeting = resolveTime(calendar, input.meetingTime, timeZone); // 現地時刻を厳密にUTCへ解決する関数
-+    if (!meeting.success) {
-+      return excluded(date, meeting.reason); // 固定理由の除外候補を作る関数
-+    }
-+    meetingAt = meeting.value;
-+  }
-+  const warnings: EventPracticeBatchWarning[] = []; // 開始後の集合時刻の警告型
++function identifier(value: string): string { // UUIDを検証し小文字へ正規化する関数 / 文字列型
 +  if (
-+    meetingAt !== null &&
-+    meetingAt.getTime() > start.value.getTime() // UTCミリ秒値を得るメソッド
++    typeof value !== "string" ||
++    value.length !== 36 ||
++    !identifierSchema.safeParse(value).success // 検証成功と検証エラーを結果で返すメソッド
 +  ) {
-+    warnings.push("MEETING_AFTER_START"); // 配列へ要素を加えるメソッド
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
 +  }
-+  return {
-+    date,
-+    dates: {
-+      startAt: start.value,
-+      endAt: end.value,
-+      meetingAt,
-+    },
-+    exclusionReason: null,
-+    warnings,
-+  };
++  return value.toLowerCase(); // 小文字へ変換するメソッド
 +}
 +
 +/**
-+ * 正規化共通入力とクラブtimezoneから、最大31現地日の曜日候補を日付昇順で生成する。
-+ * 不正入力は拒否し、既存一致・初期選択・hash・認証認可・保存は後続へ委ねる。
++ * 最新認可の識別子を固定順・小文字UUIDにする。
 + */
-+export function generateEventPracticeBatchDateTimes( // 現地曜日候補とUTC日時を生成する関数
-+  input: EventPracticeBatchCommonInput, // 正規化した共通入力型
-+  timeZone: string, // 文字列型
-+): EventPracticeBatchDateTimeResult { // 候補生成の成功・失敗結果型
++function scopeValues(scope: EventPracticeBatchFingerprintScope): readonly string[] { // 認可scopeの識別子を固定順へ揃える関数 / 認可済みクラブ・所属・本人の識別情報型 / 文字列型
++  return [
++    identifier(scope.clubId), // UUIDを検証し小文字へ正規化する関数
++    identifier(scope.membershipId), // UUIDを検証し小文字へ正規化する関数
++    identifier(scope.userId), // UUIDを検証し小文字へ正規化する関数
++  ];
++}
++
++/**
++ * 検証・正規化した全共通fieldを固定順の値へ写し、独自toJSONや余分な入力を素材へ入れない。
++ */
++function commonValues(input: EventPracticeBatchCommonInput): readonly unknown[] { // 全共通fieldを固定順の値へ写す関数 / 正規化した定期練習の共通入力型 / 型未確定の内部素材を表す型
++  return [
++    input.targetMonth,
++    input.periodStart,
++    input.periodEnd,
++    [...input.weekdays],
++    input.title,
++    input.startTime,
++    input.endTime,
++    input.location,
++    input.meetingTime,
++    input.meetingLocation,
++    [...input.targetRoles],
++  ];
++}
++
++/**
++ * 候補IDを、入力期間内かつ選択曜日に合う実在の現地YYYY-MM-DDとして検証する。
++ * 候補集合の再生成・DB照合・認可は、保存時に後続のServiceとRepositoryが行う。
++ */
++function candidateDate( // 候補の現地日付・期間・曜日を検証する関数
++  value: string, // 文字列型
++  input: EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
++): string { // 文字列型
++  if (
++    typeof value !== "string" ||
++    value.length !== 10 ||
++    !/^\d{4}-\d{2}-\d{2}$/.test(value) || // 正規表現との一致を検証するメソッド
++    value.slice(0, 7) !== input.targetMonth || // 文字列や配列の指定範囲を得るメソッド
++    value < input.periodStart ||
++    value > input.periodEnd
++  ) {
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++  }
++  const calendar = new Date(`${value}T00:00:00.000Z`); // 日時を生成するコンストラクター
++  if (
++    !Number.isFinite(calendar.getTime()) || // 有限の数値かを確認する関数 / UTCミリ秒値を得るメソッド
++    calendar.toISOString().slice(0, 10) !== value || // 文字列や配列の指定範囲を得るメソッド / UTC ISO文字列へ変換するメソッド
++    !input.weekdays.some( // 条件に合う要素の有無を調べるメソッド
++      /**
++       * 保存用UTC日付ではなく、現地カレンダーの曜日番号と比較する。
++       */
++      (weekday) => weekday === calendar.getUTCDay(), // 検証・変換に使うコールバック / UTCカレンダーの曜日番号を得るメソッド
++    )
++  ) {
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++  }
++  return value;
++}
++
++/**
++ * F11固有の用途・版・PREVIEW／INPUT区分を含む、固定順の素材からSHA-256だけを返す。
++ */
++function digest( // 用途・版を含む素材からSHA-256を計算する関数
++  kind: "PREVIEW" | "INPUT", // 用途を限定するリテラル型
++  payload: readonly unknown[], // 型未確定の内部素材を表す型
++): string { // 文字列型
++  return createHash("sha256") // SHA-256の計算器を作る関数
++    .update(JSON.stringify([ // UTF-8素材をhashへ加えるメソッド / 値を固定順のJSON文字列へ変換する関数
++      "F11_CREATE_PRACTICE_BATCH",
++      FORMAT_VERSION,
++      kind,
++      payload,
++    ]), "utf8")
++    .digest("hex"); // SHA-256を16進文字列で得るメソッド
++}
++
++/**
++ * 全候補の日時・除外・警告・既存一致を含む、現在のpreview内容のfingerprintを計算する。
++ * 既存IDと内部比較キーは返さず、認可や改ざん防止の署名の代わりにはしない。
++ */
++export function buildEventPracticeBatchFingerprint( // 全preview候補の照合hashを計算する関数
++  input: EventPracticeBatchFingerprintInput, // scope・共通入力・timezone・全候補の照合入力型
++): string { // 文字列型
 +  try {
-+    const validated = validateEventPracticeBatchPreviewInput(input); // 共通入力を検証・正規化する関数
-+    if (!validated.success) {
-+      return { outcome: "INVALID_INPUT" };
-+    }
-+    if (!isValidTimeZone(timeZone)) { // 利用可能なtimezoneを検証する関数
-+      return { outcome: "INVALID_TIMEZONE" };
++    const common = input.input;
++    const timezone = input.timezone;
++    const candidates = input.candidates;
++    const validated = validateEventPracticeBatchPreviewInput(common); // 共通入力を検証・正規化する関数
++    if (
++      !validated.success ||
++      !isValidTimeZone(timezone) || // 利用可能なtimezoneを検証する関数
++      !Array.isArray(candidates) || // 配列かを確認する関数
++      candidates.length > EVENT_PRACTICE_BATCH_MAX_COUNT
++    ) {
++      throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
 +    }
 +    const values = validated.data;
-+    const first = calendarDate(values.periodStart); // 検証済み日付を曜日計算用のカレンダーへ置く関数
-+    const last = calendarDate(values.periodEnd); // 検証済み日付を曜日計算用のカレンダーへ置く関数
-+    // これはUTC上に置いた現地カレンダーの差。現地1日の長さを24時間と仮定しない。
-+    const dayCount = (last.getTime() - first.getTime()) / 86400000 + 1; // UTCミリ秒値を得るメソッド
-+    if (dayCount > EVENT_PRACTICE_BATCH_MAX_COUNT) {
-+      return { outcome: "TOO_MANY" };
++    const seen = new Set<string>(); // 重複しない集合を作るコンストラクター / 文字列型
++    const rows: {
++      date: string; // 文字列型
++      value: readonly unknown[]; // 型未確定の内部素材を表す型
++    }[] = [];
++    for (const candidate of candidates) {
++      const date = candidateDate(candidate.date, values); // 候補の現地日付・期間・曜日を検証する関数
++      if (seen.has(date)) { // 集合内の有無を確認するメソッド
++        throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++      }
++      seen.add(date); // 集合へ値を記録するメソッド
++      const warnings = warningsSchema.safeParse(candidate.warnings); // 検証成功と検証エラーを結果で返すメソッド
++      if (!warnings.success) {
++        throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++      }
++      const dates = candidate.dates;
++      const reason = candidate.exclusionReason;
++      const duplicateEventId = candidate.duplicateEventId;
++      let eventKey: string | null = null; // 文字列型 / 未設定を表すnull型
++      let exclusionReason: EventPracticeBatchExclusionReason | null = null; // 練習日時を作成できない理由の型 / 未設定を表すnull型
++      if (dates === null) {
++        const exclusion = exclusionSchema.safeParse(reason); // 検証成功と検証エラーを結果で返すメソッド
++        if (
++          !exclusion.success ||
++          duplicateEventId !== null
++        ) {
++          throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++        }
++        exclusionReason = exclusion.data;
++      } else {
++        if (reason !== null) {
++          throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++        }
++        eventKey = buildEventPracticeBatchKey(values, dates); // F11の12列比較の内部キーを作る関数
++      }
++      rows.push({ // 配列へ値を加えるメソッド
++        date,
++        value: [
++          date,
++          eventKey,
++          exclusionReason,
++          warnings.data,
++          duplicateEventId === null ? null : identifier(duplicateEventId), // UUIDを検証し小文字へ正規化する関数
++        ],
++      });
 +    }
-+    const items: EventPracticeBatchDateTimeCandidate[] = []; // 日付と生成日時・除外理由を持つ候補型
-+    let selectableCount = 0;
-+    for (let offset = 0; offset < dayCount; offset += 1) {
-+      const calendar = new Date(first.getTime()); // 日時を生成するコンストラクター / UTCミリ秒値を得るメソッド
-+      calendar.setUTCDate(first.getUTCDate() + offset); // UTCカレンダーの日付を設定するメソッド / UTCカレンダーの日を得るメソッド
-+      // 曜日は現地カレンダー成分から求め、ホストtimezoneや保存用UTC日付で判定しない。
-+      if (!values.weekdays.some( // 条件に合う要素の有無を調べるメソッド
++    rows.sort( // 配列を並べ替えるメソッド
++      /**
++       * 候補の取得順による差をなくし、現地日付の昇順へ揃える。
++       */
++      (left, right) => { // 候補を現地日付順で比較するコールバック
++        if (left.date === right.date) {
++          return 0;
++        }
++        return left.date < right.date ? -1 : 1;
++      },
++    );
++    return digest("PREVIEW", [ // 用途・版を含む素材からSHA-256を計算する関数
++      scopeValues(input), // 認可scopeの識別子を固定順へ揃える関数
++      commonValues(values), // 全共通fieldを固定順の値へ写す関数
++      timezone,
++      rows.map( // 各要素を変換するメソッド
 +        /**
-+         * 検証済みの選択曜日と、現在の現地カレンダー曜日を照合する。
++         * サーバー内部の必要な値だけをhashへ渡す。
 +         */
-+        (weekday) => weekday === calendar.getUTCDay(), // 検証・変換に使うコールバック / UTCカレンダーの曜日番号を得るメソッド
-+      )) {
-+        continue;
-+      }
-+      const item = generateDay(calendar, values, timeZone); // 1日分の開始・終了・任意集合を生成する関数
-+      items.push(item); // 配列へ要素を加えるメソッド
-+      if (item.dates !== null) {
-+        selectableCount += 1;
-+      }
-+    }
-+    return {
-+      outcome: "READY",
-+      items,
-+      candidateCount: items.length,
-+      selectableCount,
-+    };
++        (row) => row.value, // 検証・変換に使うコールバック
++      ),
++    ]);
 +  } catch {
-+    return { outcome: "GENERATION_FAILED" };
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
 +  }
 +}
-diff --git a/tests/event-practice-batch-date-times.test.ts b/tests/event-practice-batch-date-times.test.ts
++
++/**
++ * 送信済みfingerprint・正規化共通入力・選択日だけをscopeへ結び付け、実行inputHashを作る。
++ * requestIdはledgerの一意キーで扱い、現在のDB・timezone・候補から再計算しない。
++ */
++export function buildEventPracticeBatchInputHash( // 送信済み入力の照合hashを計算する関数
++  scope: EventPracticeBatchFingerprintScope, // 認可済みクラブ・所属・本人の識別情報型
++  input: EventPracticeBatchInput, // 共通入力・選択日・操作識別子の保存入力型
++): string { // 文字列型
++  try {
++    const validated = validateEventPracticeBatchInput(input); // 保存入力を検証・正規化する関数
++    if (!validated.success) {
++      throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++    }
++    return digest("INPUT", [ // 用途・版を含む素材からSHA-256を計算する関数
++      scopeValues(scope), // 認可scopeの識別子を固定順へ揃える関数
++      commonValues(validated.data), // 全共通fieldを固定順の値へ写す関数
++      validated.data.selectedDates,
++      validated.data.previewFingerprint,
++    ]);
++  } catch {
++    throw new Error(INVALID_DATA_MESSAGE); // 原文やcauseを含めない固定例外のコンストラクター
++  }
++}
+diff --git a/tests/event-practice-batch-fingerprint.test.ts b/tests/event-practice-batch-fingerprint.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..4e8b29c7fdb29bcd19f7653970d6d558be02dd34
+index 0000000000000000000000000000000000000000..c0ec60c2f606861ed9d75a5da281ec0ec3720fb8
 --- /dev/null
-+++ b/tests/event-practice-batch-date-times.test.ts
-@@ -0,0 +1,466 @@
-+// tests/event-practice-batch-date-times.test.ts
-+// DB・Auth通信なしで、現地曜日・UTC固定値・DST・除外理由・入力不変性を確認する。
++++ b/tests/event-practice-batch-fingerprint.test.ts
+@@ -0,0 +1,630 @@
++// tests/event-practice-batch-fingerprint.test.ts
++// 実DB・AuthなしでF11の用途分離、正規化、全fieldの変更検出とreplay用入力の安定性を検証する。
 +
 +import {
 +  afterEach,
 +  expect,
 +  it,
-+  vi,
++  vi
 +} from "vitest";
 +
 +import {
-+  generateEventPracticeBatchDateTimes, // 正規化共通入力から現地曜日候補とUTC日時を生成する関数
-+  type EventPracticeBatchDateTimeResult, // 候補生成の成功と入力・timezone等の失敗を分ける型
++  buildEventPracticeBatchFingerprint, // 全preview候補の照合hashを計算する関数
++  buildEventPracticeBatchInputHash, // 送信済み入力の照合hashを計算する関数
++  type EventPracticeBatchFingerprintCandidate, // 既存完全一致の代表IDを加えた内部候補型
++  type EventPracticeBatchFingerprintInput, // scope・共通入力・timezone・全候補の照合入力型
++  type EventPracticeBatchFingerprintScope, // 認可済みクラブ・所属・本人の識別情報型
++} from "@/src/infrastructure/security/event-practice-batch-fingerprint";
++import {
++  generateEventPracticeBatchDateTimes, // 現地曜日候補とUTC日時を生成する関数
 +} from "@/domain/club/event/event-practice-batch-date-times";
 +import type {
-+  EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力値の型
++  EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
++  EventPracticeBatchInput, // 共通入力・選択日・操作識別子の保存入力型
 +} from "@/domain/club/event/event-practice-batch-types";
-+import * as resolver from "@/domain/shared/date-time/club-local-date-time"; // 厳密な現地日時解決の関数群
-+import * as formValidator from "@/domain/club/event/event-practice-batch-form"; // 共通入力の検証関数群
++import {
++  buildEventMonthCopyFingerprint, // F10専用preview照合hashを計算する関数
++  buildEventMonthCopyInputHash, // F10専用実行inputHashを計算する関数
++} from "@/src/infrastructure/security/event-month-copy-fingerprint";
 +
-+const PRIVATE = "PRIVATE_DATE_TIME_SQL_TOKEN";
++const REQUEST = "11111111-1111-4111-8111-111111111111";
++const EXISTING = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
++const OTHER = "ffffffff-ffff-4fff-8fff-ffffffffffff";
++const SENT_FINGERPRINT = "ab".repeat(32); // 文字列を繰り返すメソッド
++const PRIVATE = "PRIVATE_INPUT_SQL_TOKEN";
 +
 +/**
-+ * 上書きした項目だけを持つ、独立した定期練習の共通入力を作る。
++ * 正規化の基準となる独立した共通入力を作る。
 + */
-+function input( // 試験用の共通入力を作る関数
-+  overrides: Partial<EventPracticeBatchCommonInput> = {}, // 指定した型の項目を任意にする型 / 正規化した共通入力型
-+): EventPracticeBatchCommonInput { // 正規化した共通入力型
++function common( // 試験用の正規化共通入力を作る関数
++  changes: Partial<EventPracticeBatchCommonInput> = {}, // 指定した型の項目を任意にする型 / 正規化した定期練習の共通入力型
++): EventPracticeBatchCommonInput { // 正規化した定期練習の共通入力型
 +  return {
 +    targetMonth: "2026-01",
 +    periodStart: "2026-01-01",
-+    periodEnd: "2026-01-31",
++    periodEnd: "2026-01-02",
 +    weekdays: [0, 1, 2, 3, 4, 5, 6],
 +    title: "練習",
 +    startTime: "18:00",
@@ -301,429 +423,840 @@ index 0000000000000000000000000000000000000000..4e8b29c7fdb29bcd19f7653970d6d558
 +    meetingTime: null,
 +    meetingLocation: null,
 +    targetRoles: ["OWNER", "MEMBER"],
-+    ...overrides,
++    ...changes,
 +  };
 +}
 +
 +/**
-+ * 単日の変換を検証する共通入力を作る。曜日選択は全曜日にする。
++ * 最新認可から取得する3種類の識別情報を作る。
 + */
-+function singleDay( // 単日の試験入力を作る関数
-+  date: string, // 文字列型
-+  overrides: Partial<EventPracticeBatchCommonInput> = {}, // 指定した型の項目を任意にする型 / 正規化した共通入力型
-+): EventPracticeBatchCommonInput { // 正規化した共通入力型
-+  return input({ // 試験用の共通入力を作る関数
-+    targetMonth: date.slice(0, 7), // 文字列の指定範囲を得るメソッド
-+    periodStart: date,
-+    periodEnd: date,
-+    ...overrides,
-+  });
++function scope(): EventPracticeBatchFingerprintScope { // 試験用の認可scopeを作る関数 / 認可済みクラブ・所属・本人の識別情報型
++  return {
++    clubId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
++    membershipId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
++    userId: "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
++  };
 +}
 +
 +/**
-+ * 生成成功を検証し、候補と件数を持つ結果へ型を絞る。
++ * 実際の日時生成と既存一致未検出の候補から、新しいpreview照合素材を作る。
 + */
-+function ready( // 生成成功を確認する関数
-+  value: EventPracticeBatchCommonInput, // 正規化した共通入力型
-+  zone = "Asia/Tokyo",
-+) {
-+  const result = generateEventPracticeBatchDateTimes(value, zone); // 現地曜日候補とUTC日時を生成する関数
-+  expect(result.outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+  if (result.outcome !== "READY") {
-+    throw new Error("生成成功を期待しました。"); // 固定メッセージの例外を作るコンストラクター
++function snapshot( // 実際の日時生成から照合素材を作る関数
++  values = common(), // 試験用の正規化共通入力を作る関数
++  timezone = "UTC",
++): EventPracticeBatchFingerprintInput { // scope・共通入力・timezone・全候補の照合入力型
++  const generated = generateEventPracticeBatchDateTimes(values, timezone); // 現地曜日候補とUTC日時を生成する関数
++  if (generated.outcome !== "READY") {
++    throw new Error("fixture-generation"); // 原文やcauseを含めない固定例外のコンストラクター
 +  }
-+  return result;
++  return {
++    ...scope(), // 試験用の認可scopeを作る関数
++    input: values,
++    timezone,
++    candidates: generated.items.map( // 各要素を変換するメソッド
++      /**
++       * 偽の複製元IDを作らず、現地日付候補へ既存一致の状態だけを加える。
++       */
++      (item) => ({ // 検証・変換に使うコールバック
++        ...item,
++        duplicateEventId: null
++      }),
++    ),
++  };
 +}
 +
 +/**
-+ * 失敗結果に部分候補・入力値・例外原文が含まれないことを確認する。
++ * DBの現在値に依存しない、送信済みfingerprintを持つ保存入力を作る。
 + */
-+function rejected(result: EventPracticeBatchDateTimeResult) { // 安全な失敗結果を確認する関数 / 候補生成の成功・失敗結果型
-+  expect(result.outcome).not.toBe("READY"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+  expect(result).not.toHaveProperty("items"); // プロパティの存在を検証するメソッド / 期待値を検証する関数
-+  expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を検証する関数 / 値をJSON文字列へ変換する関数
++function operation(values = common()): EventPracticeBatchInput { // 送信済みfingerprintを持つ保存入力を作る関数 / 試験用の正規化共通入力を作る関数 / 共通入力・選択日・操作識別子の保存入力型
++  return {
++    ...values,
++    selectedDates: [values.periodEnd],
++    requestId: REQUEST,
++    previewFingerprint: SENT_FINGERPRINT,
++  };
++}
++
++/**
++ * 固定エラーだけを返し、raw入力・cause・内部比較素材を公開しないことを確認する。
++ */
++function rejected(run: () => unknown): void { // 固定エラーと秘密値の非公開を確認する関数 / 型未確定の内部素材を表す型 / 戻り値を持たない型
++  try {
++    run(); // 失敗を確認する試験用コールバック
++    expect.unreachable("不正な照合素材は拒否される必要があります。"); // 到達してはいけない試験経路を失敗にする関数
++  } catch (error) {
++    expect(error).toHaveProperty("message", "定期練習の照合内容を確認できません。"); // プロパティを検証するメソッド / 期待値を検証する関数
++    expect(error).not.toHaveProperty("cause"); // プロパティを検証するメソッド / 期待値を検証する関数
++    expect(String(error)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を検証する関数 / 値を文字列へ変換する関数
++  }
 +}
 +
 +afterEach( // 試験後の処理を登録する関数
 +  /**
-+   * 異常系で置き換えた共有resolverやvalidatorを元へ戻す。
++   * セキュリティ境界を検証したmockを他の試験へ残さない。
 +   */
 +  () => { // 検証・変換に使うコールバック
-+    vi.restoreAllMocks(); // 置換した関数を元に戻す関数
++    vi.restoreAllMocks(); // 置換した関数を元へ戻す関数
 +  },
 +);
 +
-+it.each([ // 表形式の試験を登録する関数
-+  ["2026-01", 31],
-+  ["2026-02", 28],
-+  ["2028-02", 29],
-+  ["1900-02", 28],
-+  ["2000-02", 29],
-+  ["2026-04", 30],
-+])(
-+  "%sの全曜日を実在する%i日だけ、重複なしの日付順で生成する",
++it("SHA-256の64桁だけを返し、同じ内容で再現し、用途を分ける", // 試験を登録する関数
 +  /**
-+   * 月初末を含み、平年・閏年の各日付を固定の件数と照合する。
++   * 内部key・raw入力を返さず、PREVIEWとINPUTを別の照合値にする。
 +   */
-+  (month, days) => { // 検証・変換に使うコールバック
-+    const result = ready(input({ // 生成成功を確認する関数 / 試験用の共通入力を作る関数
-+      targetMonth: month,
-+      periodStart: `${month}-01`,
-+      periodEnd: `${month}-${days}`,
-+    }), "UTC");
-+    const dates = result.items.map( // 各要素を変換するメソッド
-+      /**
-+       * 生成候補から識別子として使う現地日付を取り出す。
-+       */
-+      (item) => item.date, // 検証・変換に使うコールバック
-+    );
-+    const expected = Array.from({ length: days }, // 配列を生成する関数
-+      /**
-+       * 月内の連番だけから期待する現地日付を作る。
-+       */
-+      (_, index) => `${month}-${String(index + 1).padStart(2, "0")}`, // 検証・変換に使うコールバック / 文字列の先頭を補うメソッド / 値を文字列へ変換する関数
-+    );
-+    expect(dates).toEqual(expected); // 内容の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.candidateCount).toBe(days); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.selectableCount).toBe(days); // 値の一致を検証するメソッド / 期待値を検証する関数
++  () => { // 検証・変換に使うコールバック
++    const preview = buildEventPracticeBatchFingerprint(snapshot()); // 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++    const inputHash = buildEventPracticeBatchInputHash(scope(), operation()); // 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
++    expect(preview).toMatch(/^[0-9a-f]{64}$/); // 文字列の形式を検証するメソッド / 期待値を検証する関数
++    expect(inputHash).toMatch(/^[0-9a-f]{64}$/); // 文字列の形式を検証するメソッド / 期待値を検証する関数
++    expect(preview).toBe(buildEventPracticeBatchFingerprint(snapshot())); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++    expect(inputHash).toBe(buildEventPracticeBatchInputHash(scope(), operation())); // 値の一致を検証するメソッド / 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
++    expect(preview).not.toBe(inputHash); // 値の一致を検証するメソッド / 期待値を検証する関数
++    expect(preview).not.toContain("練習"); // 値の包含を検証するメソッド / 期待値を検証する関数
 +  },
 +);
 +
-+it("曜日を日付順に絞り、重複曜日で候補を重複させない", // 試験を登録する関数
++it("候補順・曜日順・ロール順・空欄・UUID大小文字は同じ照合値になる", // 試験を登録する関数
 +  /**
-+   * 2026年1月の日曜と木曜をホストの曜日関数に依存せず固定値で確認する。
++   * 入力や配列を変更せず、同じ意味のpreviewと実行内容を正規化する。
 +   */
 +  () => { // 検証・変換に使うコールバック
-+    const result = ready(input({ weekdays: [4, 0, 4] })); // 生成成功を確認する関数 / 試験用の共通入力を作る関数
-+    expect(result.items.map( // 期待値を検証する関数 / 各要素を変換するメソッド
-+      /**
-+       * 曜日候補の現地識別子を比較する。
-+       */
-+      (item) => item.date, // 検証・変換に使うコールバック
-+    )).toEqual([ // 内容の一致を検証するメソッド
-+      "2026-01-01",
-+      "2026-01-04",
-+      "2026-01-08",
-+      "2026-01-11",
-+      "2026-01-15",
-+      "2026-01-18",
-+      "2026-01-22",
-+      "2026-01-25",
-+      "2026-01-29",
-+    ]);
-+  },
-+);
-+
-+it("単日で曜日が一致しなければ0件となり、空の曜日入力とは区別する", // 試験を登録する関数
-+  /**
-+   * 有効な曜日選択でも期間内に対象日がなければ空の成功結果を返す。
-+   */
-+  () => { // 検証・変換に使うコールバック
-+    expect(ready(singleDay("2026-01-01", { weekdays: [0] }))).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数 / 生成成功を確認する関数 / 単日の試験入力を作る関数
-+      outcome: "READY",
-+      items: [],
-+      candidateCount: 0,
-+      selectableCount: 0,
-+    });
-+    expect(generateEventPracticeBatchDateTimes( // 期待値を検証する関数 / 現地曜日候補とUTC日時を生成する関数
-+      input({ weekdays: [] }), // 試験用の共通入力を作る関数
-+      "UTC",
-+    )).toEqual({ outcome: "INVALID_INPUT" }); // 内容の一致を検証するメソッド
-+  },
-+);
-+
-+it("東京の月初0時はUTCの前日でも、現地の月・曜日を維持する", // 試験を登録する関数
-+  /**
-+   * 曜日・識別子・期間判定を保存用UTC日付へ置き換えないことを確認する。
-+   */
-+  () => { // 検証・変換に使うコールバック
-+    const result = ready(singleDay("2026-01-01", { // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+      weekdays: [4],
-+      startTime: "00:30",
-+      endTime: "01:30",
-+      meetingTime: "00:00",
++    const before = snapshot(); // 実際の日時生成から照合素材を作る関数
++    const after = snapshot(common({ // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
++      weekdays: [6, 5, 4, 3, 2, 1, 0],
++      title: " 練習 ",
++      location: " ",
++      meetingLocation: "",
++      targetRoles: ["MEMBER", "OWNER", "MEMBER"],
 +    }));
-+    expect(result.items[0].date).toBe("2026-01-01"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    const dates = result.items[0].dates;
-+    expect(dates?.startAt.toISOString()).toBe("2025-12-31T15:30:00.000Z"); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    expect(dates?.endAt.toISOString()).toBe("2025-12-31T16:30:00.000Z"); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    expect(dates?.meetingAt?.toISOString()).toBe("2025-12-31T15:00:00.000Z"); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
++    after.candidates = [...after.candidates].reverse(); // 配列の順序を反転するメソッド
++    after.clubId = after.clubId.toUpperCase(); // 大文字へ変換するメソッド
++    after.membershipId = after.membershipId.toUpperCase(); // 大文字へ変換するメソッド
++    after.userId = after.userId.toUpperCase(); // 大文字へ変換するメソッド
++    const copy = structuredClone(after); // 値を複製する関数
++    expect(buildEventPracticeBatchFingerprint(after)).toBe( // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数 / 値の一致を検証するメソッド
++      buildEventPracticeBatchFingerprint(before), // 全preview候補の照合hashを計算する関数
++    );
++    expect(after).toEqual(copy); // 内容の一致を検証するメソッド / 期待値を検証する関数
++    const first = {
++      ...operation(), // 送信済みfingerprintを持つ保存入力を作る関数
++      selectedDates: ["2026-01-01", "2026-01-02"]
++    };
++    const second = {
++      ...operation(after.input), // 送信済みfingerprintを持つ保存入力を作る関数
++      requestId: "22222222-2222-4222-8222-222222222222",
++      selectedDates: ["2026-01-02", "2026-01-01"],
++      previewFingerprint: SENT_FINGERPRINT.toUpperCase(), // 大文字へ変換するメソッド
++    };
++    expect(buildEventPracticeBatchInputHash(after, second)) // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数
++      .toBe(buildEventPracticeBatchInputHash(before, first)); // 値の一致を検証するメソッド / 送信済み入力の照合hashを計算する関数
 +  },
 +);
 +
-+it.each([ // 表形式の試験を登録する関数
-+  ["2026-03-08", "2026-03-08T05:30:00.000Z", "2026-03-08T07:30:00.000Z", 2],
-+  ["2026-11-01", "2026-11-01T04:30:00.000Z", "2026-11-01T08:30:00.000Z", 4],
-+])(
-+  "23／25時間日の%sは、現地00:30〜03:30を固定UTC値へ変換する",
++const changes: {
++  field: keyof EventPracticeBatchCommonInput; // 正規化した定期練習の共通入力型
++  value: Partial<EventPracticeBatchCommonInput>; // 指定した型の項目を任意にする型 / 正規化した定期練習の共通入力型
++}[] = [
++    {
++      field: "targetMonth",
++      value: {
++        targetMonth: "2026-02",
++        periodStart: "2026-02-01",
++        periodEnd: "2026-02-02",
++      }
++    },
++    {
++      field: "periodStart",
++      value: { periodStart: "2026-01-02" }
++    },
++    {
++      field: "periodEnd",
++      value: { periodEnd: "2026-01-01" }
++    },
++    {
++      field: "weekdays",
++      value: { weekdays: [4, 5] }
++    },
++    {
++      field: "title",
++      value: { title: "別の練習" }
++    },
++    {
++      field: "startTime",
++      value: { startTime: "18:15" }
++    },
++    {
++      field: "endTime",
++      value: { endTime: "20:15" }
++    },
++    {
++      field: "location",
++      value: { location: "体育館" }
++    },
++    {
++      field: "meetingTime",
++      value: { meetingTime: "17:00" }
++    },
++    {
++      field: "meetingLocation",
++      value: { meetingLocation: "入口" }
++    },
++    {
++      field: "targetRoles",
++      value: { targetRoles: ["OWNER", "COACH"] }
++    },
++  ];
++
++it.each(changes)( // 表形式の試験を登録する関数
++  "$fieldの変更がpreviewとinputHashの両方へ反映される",
 +  /**
-+   * 同じ現地時刻の差でも、DSTを跨ぐ実際の経過時間が変わることを確認する。
++   * 同じ候補日時になるfieldも含め、全共通入力をhashから落とさない。
 +   */
-+  (date, expectedStart, expectedEnd, hours) => { // 検証・変換に使うコールバック
-+    const result = ready(singleDay(date, { // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+      startTime: "00:30",
-+      endTime: "03:30",
-+    }), "America/New_York");
-+    const dates = result.items[0].dates;
-+    expect(dates?.startAt.toISOString()).toBe(expectedStart); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    expect(dates?.endAt.toISOString()).toBe(expectedEnd); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    if (dates === null) {
-+      throw new Error("有効なDST日のUTC日時を期待しました。"); // 固定メッセージの例外を作るコンストラクター
-+    }
-+    expect(dates.endAt.getTime() - dates.startAt.getTime()).toBe(hours * 3600000); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTCミリ秒値を得るメソッド
++  ({ value }) => { // 検証・変換に使うコールバック
++    const changed = common(value); // 試験用の正規化共通入力を作る関数
++    expect(buildEventPracticeBatchFingerprint(snapshot(changed))) // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++      .not.toBe(buildEventPracticeBatchFingerprint(snapshot())); // 値の一致を検証するメソッド / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++    expect(buildEventPracticeBatchInputHash(scope(), operation(changed))) // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
++      .not.toBe(buildEventPracticeBatchInputHash(scope(), operation())); // 値の一致を検証するメソッド / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
 +  },
 +);
 +
-+it.each([ // 表形式の試験を登録する関数
-+  ["2026-03-08", "02:30", "04:00", null, "America/New_York", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-03-08", "01:00", "02:30", null, "America/New_York", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-03-08", "03:30", "04:30", "02:30", "America/New_York", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-11-01", "01:30", "03:30", null, "America/New_York", "AMBIGUOUS_LOCAL_TIME"],
-+  ["2026-11-01", "00:30", "01:30", null, "America/New_York", "AMBIGUOUS_LOCAL_TIME"],
-+  ["2026-11-01", "03:00", "04:00", "01:30", "America/New_York", "AMBIGUOUS_LOCAL_TIME"],
-+  ["2026-10-04", "02:15", "03:30", null, "Australia/Lord_Howe", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-04-05", "01:45", "03:00", null, "Australia/Lord_Howe", "AMBIGUOUS_LOCAL_TIME"],
-+  ["2011-12-30", "12:00", "13:00", null, "Pacific/Apia", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-09-06", "00:30", "01:30", null, "America/Santiago", "NONEXISTENT_LOCAL_TIME"],
-+] as const)( // リテラルを保持する型アサーション
-+  "%sの変換不能な開始・終了・集合を理由付きの除外候補として残すケース%#",
++it.each(["clubId", "membershipId", "userId"] as const)( // 表形式の試験を登録する関数 / リテラル値を保持する型アサーション
++  "%sの変更を両用途のhashへ反映する",
 +  /**
-+   * 不存在・曖昧時刻・消失日を自動補正せず、部分UTC日時も返さない。
++   * 別クラブ・別所属・別本人へ照合値を流用しない。
 +   */
-+  (date, startTime, endTime, meetingTime, zone, reason) => { // 検証・変換に使うコールバック
-+    const result = ready(singleDay(date, { // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+      startTime,
-+      endTime,
-+      meetingTime,
-+    }), zone);
-+    expect(result).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数
-+      outcome: "READY",
-+      items: [{
-+        date,
-+        dates: null,
-+        exclusionReason: reason,
-+        warnings: [],
-+      }],
-+      candidateCount: 1,
-+      selectableCount: 0,
-+    });
++  (field) => { // 検証・変換に使うコールバック
++    const changed = {
++      ...scope(), // 試験用の認可scopeを作る関数
++      [field]: OTHER
++    };
++    expect(buildEventPracticeBatchFingerprint({ // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++      ...snapshot(), // 実際の日時生成から照合素材を作る関数
++      ...changed
++    }))
++      .not.toBe(buildEventPracticeBatchFingerprint(snapshot())); // 値の一致を検証するメソッド / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++    expect(buildEventPracticeBatchInputHash(changed, operation())) // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 送信済みfingerprintを持つ保存入力を作る関数
++      .not.toBe(buildEventPracticeBatchInputHash(scope(), operation())); // 値の一致を検証するメソッド / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
 +  },
 +);
 +
-+it("除外日があっても、前後の現地日を落とさず順序と件数を維持する", // 試験を登録する関数
++it("timezone・候補集合・既存一致の代表IDをpreviewの変更として検出する", // 試験を登録する関数
 +  /**
-+   * gapの1日だけを選択不可にし、0件の成功と全件除外を混同しない。
++   * 共通入力が同じでも、現在の生成結果と既存一致状態を確認する。
 +   */
 +  () => { // 検証・変換に使うコールバック
-+    const result = ready(input({ // 生成成功を確認する関数 / 試験用の共通入力を作る関数
++    const baseline = buildEventPracticeBatchFingerprint(snapshot()); // 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++    const tokyo = snapshot(common(), "Asia/Tokyo"); // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
++    const reduced = snapshot(); // 実際の日時生成から照合素材を作る関数
++    reduced.candidates = reduced.candidates.slice(0, 1); // 文字列や配列の指定範囲を得るメソッド
++    const duplicate = snapshot(); // 実際の日時生成から照合素材を作る関数
++    duplicate.candidates = [{
++      ...duplicate.candidates[0],
++      duplicateEventId: EXISTING
++    }];
++    for (const changed of [tokyo, reduced, duplicate, {
++      ...snapshot(), // 実際の日時生成から照合素材を作る関数
++      candidates: []
++    }]) {
++      expect(buildEventPracticeBatchFingerprint(changed)).not.toBe(baseline); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++    }
++    const lower = buildEventPracticeBatchFingerprint(duplicate); // 全preview候補の照合hashを計算する関数
++    duplicate.candidates = [{
++      ...duplicate.candidates[0],
++      duplicateEventId: EXISTING.toUpperCase() // 大文字へ変換するメソッド
++    }];
++    expect(buildEventPracticeBatchFingerprint(duplicate)).toBe(lower); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++    duplicate.candidates = [{
++      ...duplicate.candidates[0],
++      duplicateEventId: OTHER
++    }];
++    expect(buildEventPracticeBatchFingerprint(duplicate)).not.toBe(lower); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++  },
++);
++
++it.each(["startAt", "endAt", "meetingAt"] as const)( // 表形式の試験を登録する関数 / リテラル値を保持する型アサーション
++  "生成済み%sの1ミリ秒差を検出する",
++  /**
++   * rawのDateではなく、固定列比較で精度を保持した素材を照合する。
++   */
++  (field) => { // 検証・変換に使うコールバック
++    const value = snapshot(common({ meetingTime: "17:00" })); // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
++    const before = buildEventPracticeBatchFingerprint(value); // 全preview候補の照合hashを計算する関数
++    const row = value.candidates[0];
++    if (row.dates === null) {
++      throw new Error("fixture-valid-dates"); // 原文やcauseを含めない固定例外のコンストラクター
++    }
++    row.dates[field]?.setTime(row.dates[field]!.getTime() + 1); // UTCミリ秒値を設定するメソッド / UTCミリ秒値を得るメソッド
++    expect(buildEventPracticeBatchFingerprint(value)).not.toBe(before); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++  },
++);
++
++it("除外理由・警告もpreview照合へ含める", // 試験を登録する関数
++  /**
++   * 保存不可の日や注意情報も表示内容として変更を検出する。
++   */
++  () => { // 検証・変換に使うコールバック
++    const value = snapshot(common({ // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
 +      targetMonth: "2026-03",
-+      periodStart: "2026-03-07",
-+      periodEnd: "2026-03-09",
++      periodStart: "2026-03-08",
++      periodEnd: "2026-03-08",
 +      startTime: "02:30",
 +      endTime: "04:00",
 +    }), "America/New_York");
-+    expect(result.items.map( // 期待値を検証する関数 / 各要素を変換するメソッド
++    const before = buildEventPracticeBatchFingerprint(value); // 全preview候補の照合hashを計算する関数
++    value.candidates = [{
++      ...value.candidates[0],
++      dates: null,
++      exclusionReason: "AMBIGUOUS_LOCAL_TIME",
++    }];
++    expect(buildEventPracticeBatchFingerprint(value)).not.toBe(before); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++    const warning = snapshot(); // 実際の日時生成から照合素材を作る関数
++    const plain = buildEventPracticeBatchFingerprint(warning); // 全preview候補の照合hashを計算する関数
++    warning.candidates[0].warnings = ["MEETING_AFTER_START"];
++    expect(buildEventPracticeBatchFingerprint(warning)).not.toBe(plain); // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++  },
++);
++
++it("replayのinputHashは送信済みfingerprintを使い、後から変わったDB値を使わない", // 試験を登録する関数
++  /**
++   * timezoneや既存一致で新しいpreview値が変わっても、同じ送信の照合値を維持する。
++   */
++  () => { // 検証・変換に使うコールバック
++    const sent = operation(); // 送信済みfingerprintを持つ保存入力を作る関数
++    const before = buildEventPracticeBatchInputHash(scope(), sent); // 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数
++    const current = snapshot(common(), "Asia/Tokyo"); // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
++    current.candidates = [{
++      ...current.candidates[0],
++      duplicateEventId: EXISTING
++    }];
++    expect(buildEventPracticeBatchFingerprint(current)) // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++      .not.toBe(buildEventPracticeBatchFingerprint(snapshot())); // 値の一致を検証するメソッド / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++    expect(buildEventPracticeBatchInputHash(current, sent)).toBe(before); // 値の一致を検証するメソッド / 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数
++    expect(buildEventPracticeBatchInputHash(scope(), { // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数
++      ...sent,
++      previewFingerprint: buildEventPracticeBatchFingerprint(current), // 全preview候補の照合hashを計算する関数
++    })).not.toBe(before); // 値の一致を検証するメソッド
++    expect(buildEventPracticeBatchInputHash(scope(), { // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数
++      ...sent,
++      selectedDates: ["2026-01-01"],
++    })).not.toBe(before); // 値の一致を検証するメソッド
++  },
++);
++
++it("F10のhashとは用途・版を分け、F10の空previewや入力を再利用しない", // 試験を登録する関数
++  /**
++   * F10のFORMAT_VERSIONやledgerを変更せず、F11独自の形式を使う。
++   */
++  () => { // 検証・変換に使うコールバック
++    const f10 = {
++      ...scope(), // 試験用の認可scopeを作る関数
++      targetMonth: "2026-01",
++      timezone: "UTC",
++      candidates: [],
++    };
++    expect(buildEventPracticeBatchFingerprint({ // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数
++      ...snapshot(), // 実際の日時生成から照合素材を作る関数
++      candidates: []
++    }))
++      .not.toBe(buildEventMonthCopyFingerprint(f10)); // 値の一致を検証するメソッド / F10専用preview照合hashを計算する関数
++    expect(buildEventPracticeBatchInputHash(scope(), operation())) // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
++      .not.toBe(buildEventMonthCopyInputHash(scope(), { // 値の一致を検証するメソッド / F10専用実行inputHashを計算する関数 / 試験用の認可scopeを作る関数
++        targetMonth: "2026-01",
++        selectedEventIds: [EXISTING],
++        requestId: REQUEST,
++        previewFingerprint: SENT_FINGERPRINT,
++      }));
++  },
++);
++
++it("同じ現地日を2回含めたpreview・実行選択は拒否する", // 試験を登録する関数
++  /**
++   * 候補順の正規化で重複日を消して受理しない。
++   */
++  () => { // 検証・変換に使うコールバック
++    const value = snapshot(); // 実際の日時生成から照合素材を作る関数
++    value.candidates = [value.candidates[0], value.candidates[0]];
++    rejected( // 固定エラーと秘密値の非公開を確認する関数
 +      /**
-+       * 各候補の現地日付と除外理由を取り出す。
++       * 重複したpreview日を渡す。
 +       */
-+      (item) => [item.date, item.exclusionReason], // 検証・変換に使うコールバック
-+    )).toEqual([ // 内容の一致を検証するメソッド
-+      ["2026-03-07", null],
-+      ["2026-03-08", "NONEXISTENT_LOCAL_TIME"],
-+      ["2026-03-09", null],
-+    ]);
-+    expect(result.candidateCount).toBe(3); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.selectableCount).toBe(2); // 値の一致を検証するメソッド / 期待値を検証する関数
-+  },
-+);
-+
-+it.each([ // 表形式の試験を登録する関数
-+  [null, null, []],
-+  ["17:00", "2026-01-01T08:00:00.000Z", []],
-+  ["18:00", "2026-01-01T09:00:00.000Z", []],
-+  ["18:30", "2026-01-01T09:30:00.000Z", ["MEETING_AFTER_START"]],
-+])(
-+  "任意集合%sのUTC日時と開始後警告を確認する",
-+  /**
-+   * 未設定を補完せず、開始と同時刻なら警告せず、開始後は作成可能なまま警告する。
-+   */
-+  (meetingTime, expected, warnings) => { // 検証・変換に使うコールバック
-+    const result = ready(singleDay("2026-01-01", { // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+      meetingTime: meetingTime as string | null, // 文字列型 / 未設定を表すnull型
-+    }));
-+    const item = result.items[0];
-+    expect(item.dates?.meetingAt?.toISOString() ?? null).toBe(expected); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    expect(item.warnings).toEqual(warnings); // 内容の一致を検証するメソッド / 期待値を検証する関数
-+    expect(item.exclusionReason).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
-+  },
-+);
-+
-+it.each([ // 表形式の試験を登録する関数
-+  ["0001-01-01", "09:30", "10:30", "Asia/Tokyo", "0001-01-01T00:11:01.000Z"],
-+  ["0001-01-01", "00:00", "01:00", "UTC", "0001-01-01T00:00:00.000Z"],
-+  ["0099-12-31", "18:00", "20:00", "UTC", "0099-12-31T18:00:00.000Z"],
-+  ["9999-12-31", "18:00", "20:00", "UTC", "9999-12-31T18:00:00.000Z"],
-+])(
-+  "年境界%sを1900年代へ補正せず生成する",
-+  /**
-+   * 業務上の最小年・最大年と、東京の秒単位offsetを固定UTC値で確認する。
-+   */
-+  (date, startTime, endTime, zone, expected) => { // 検証・変換に使うコールバック
-+    const result = ready(singleDay(date, { // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+      startTime,
-+      endTime,
-+    }), zone);
-+    expect(result.items[0].date).toBe(date); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.items[0].dates?.startAt.toISOString()).toBe(expected); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    expect(result.candidateCount).toBe(1); // 値の一致を検証するメソッド / 期待値を検証する関数
-+  },
-+);
-+
-+it.each([ // 表形式の試験を登録する関数
-+  ["32日間", { periodEnd: "2026-02-01" }],
-+  ["31日でも別月", {
-+    periodStart: "2026-01-02",
-+    periodEnd: "2026-02-01",
-+  }],
-+  ["不正日", { periodStart: "2026-01-32" }],
-+  ["平年の2月29日", {
-+    targetMonth: "2026-02",
-+    periodStart: "2026-02-29",
-+    periodEnd: "2026-02-29",
-+  }],
-+  ["逆期間", {
-+    periodStart: "2026-01-20",
-+    periodEnd: "2026-01-10",
-+  }],
-+  ["同時刻終了", {
-+    startTime: "18:00",
-+    endTime: "18:00",
-+  }],
-+  ["逆転終了", {
-+    startTime: "18:00",
-+    endTime: "17:59",
-+  }],
-+  ["翌日終了", {
-+    startTime: "23:00",
-+    endTime: "01:00",
-+  }],
-+  ["年0", {
-+    targetMonth: "0000-01",
-+    periodStart: "0000-01-01",
-+  }],
-+  ["年10000", {
-+    targetMonth: "10000-01",
-+    periodStart: "10000-01-01",
-+  }],
-+  ["不正曜日", { weekdays: [7] }],
-+  ["不正集合", { meetingTime: "24:00" }],
-+] as const)( // リテラルを保持する型アサーション
-+  "%sは生成前に拒否し、部分候補を返さない",
-+  /**
-+   * 型付き呼出しでも境界を再検証し、月を跨ぐ長期間走査を行わない。
-+   */
-+  (_, overrides) => { // 検証・変換に使うコールバック
-+    const result = generateEventPracticeBatchDateTimes( // 現地曜日候補とUTC日時を生成する関数
-+      input(overrides as Partial<EventPracticeBatchCommonInput>), // 試験用の共通入力を作る関数 / 指定した型の項目を任意にする型 / 正規化した共通入力型
-+      "UTC",
++      () => buildEventPracticeBatchFingerprint(value), // 検証・変換に使うコールバック / 全preview候補の照合hashを計算する関数
 +    );
-+    expect(result.outcome).toBe("INVALID_INPUT"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    rejected(result); // 安全な失敗結果を確認する関数
-+  },
-+);
-+
-+it.each(["", "Not/A_Zone", PRIVATE])( // 表形式の試験を登録する関数
-+  "不正timezoneのケース%#は固定結果だけを返す",
-+  /**
-+   * 設定値やSDKの例外原文を生成結果へ含めない。
-+   */
-+  (zone) => { // 検証・変換に使うコールバック
-+    const result = generateEventPracticeBatchDateTimes(input(), zone); // 現地曜日候補とUTC日時を生成する関数 / 試験用の共通入力を作る関数
-+    expect(result).toEqual({ outcome: "INVALID_TIMEZONE" }); // 内容の一致を検証するメソッド / 期待値を検証する関数
-+    rejected(result); // 安全な失敗結果を確認する関数
-+  },
-+);
-+
-+it("UTC変換後の終了が開始以下なら、現地入力が正しくても除外する", // 試験を登録する関数
-+  /**
-+   * resolverの異常な終了結果でも、保存に使える逆転期間を返さない。
-+   */
-+  () => { // 検証・変換に使うコールバック
-+    vi.spyOn(resolver, "utcCandidates") // 関数を一時的に置き換える関数
-+      .mockReturnValueOnce([new Date("2026-01-01T18:00:00.000Z")]) // 次の1回の返却値を設定するメソッド / 日時を生成するコンストラクター
-+      .mockReturnValueOnce([new Date("2026-01-01T17:00:00.000Z")]); // 次の1回の返却値を設定するメソッド / 日時を生成するコンストラクター
-+    const result = ready(singleDay("2026-01-01"), "UTC"); // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+    expect(result.items[0].exclusionReason).toBe("INVALID_INTERVAL"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.items[0].dates).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
-+  },
-+);
-+
-+it("resolverの例外原文を出さず、当日の除外と翌日の生成を続ける", // 試験を登録する関数
-+  /**
-+   * SDKの通常例外を固定理由へ変え、候補の件数と現地日付を保持する。
-+   */
-+  () => { // 検証・変換に使うコールバック
-+    vi.spyOn(resolver, "utcCandidates").mockImplementationOnce( // 次の1回の処理を設定するメソッド / 関数を一時的に置き換える関数
++    rejected( // 固定エラーと秘密値の非公開を確認する関数
 +      /**
-+       * 機密原文を持つSDK障害を再現する。
++       * 重複した実行選択日を渡す。
++       */
++      () => buildEventPracticeBatchInputHash(scope(), { // 検証・変換に使うコールバック / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数
++        ...operation(), // 送信済みfingerprintを持つ保存入力を作る関数
++        selectedDates: ["2026-01-02", "2026-01-02"],
++      }),
++    );
++  },
++);
++
++it.each(["2026-01-32", "2026-02-01", "2026-01-01\n", PRIVATE])( // 表形式の試験を登録する関数
++  "不正な候補日%#を原文なしで拒否する",
++  /**
++   * 実在日・対象月・期間の候補識別子を厳密に検証する。
++   */
++  (date) => { // 検証・変換に使うコールバック
++    const value = snapshot(); // 実際の日時生成から照合素材を作る関数
++    value.candidates = [{
++      ...value.candidates[0],
++      date
++    }];
++    rejected( // 固定エラーと秘密値の非公開を確認する関数
++      /**
++       * 不正な候補識別子を渡す。
++       */
++      () => buildEventPracticeBatchFingerprint(value), // 検証・変換に使うコールバック / 全preview候補の照合hashを計算する関数
++    );
++  },
++);
++
++it("候補の曜日違い・上限超過・不正scope・timezoneを安全に拒否する", // 試験を登録する関数
++  /**
++   * 比較前に候補の構造を検証し、DB取得や再生成を認可の代用にしない。
++   */
++  () => { // 検証・変換に使うコールバック
++    const weekday = snapshot(); // 実際の日時生成から照合素材を作る関数
++    weekday.input = common({ weekdays: [5] }); // 試験用の正規化共通入力を作る関数
++    const oversized = snapshot(); // 実際の日時生成から照合素材を作る関数
++    oversized.candidates = Array(32).fill(oversized.candidates[0]); // 配列を指定値で埋めるメソッド / 配列を生成する関数
++    for (const value of [weekday, oversized, {
++      ...snapshot(), // 実際の日時生成から照合素材を作る関数
++      clubId: PRIVATE
++    }, {
++        ...snapshot(), // 実際の日時生成から照合素材を作る関数
++        timezone: PRIVATE
++      }]) {
++      rejected( // 固定エラーと秘密値の非公開を確認する関数
++        /**
++         * 不正なpreview素材を渡す。
++         */
++        () => buildEventPracticeBatchFingerprint(value), // 検証・変換に使うコールバック / 全preview候補の照合hashを計算する関数
++      );
++    }
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  { warnings: [PRIVATE] },
++  { duplicateEventId: PRIVATE },
++  { exclusionReason: "INVALID_DATE_TIME" },
++  {
++    dates: null,
++    exclusionReason: PRIVATE
++  },
++])(
++  "候補構造の不正ケース%#を拒否する",
++  /**
++   * 成功日時と除外理由の矛盾や未許可の警告をhashへ入れない。
++   */
++  (change) => { // 検証・変換に使うコールバック
++    const value = snapshot(); // 実際の日時生成から照合素材を作る関数
++    value.candidates = [{
++      ...value.candidates[0],
++      ...change
++    } as EventPracticeBatchFingerprintCandidate]; // 既存完全一致の代表IDを加えた内部候補型
++    rejected( // 固定エラーと秘密値の非公開を確認する関数
++      /**
++       * 型を偽装した不正候補を渡す。
++       */
++      () => buildEventPracticeBatchFingerprint(value), // 検証・変換に使うコールバック / 全preview候補の照合hashを計算する関数
++    );
++  },
++);
++
++it("raw入力・内部比較値を返却やログへ出さず、素材の独自toJSONを呼ばない", // 試験を登録する関数
++  /**
++   * 固定順の必要値だけを取り出し、本文や秘密値を含む独自JSON処理を使わない。
++   */
++  () => { // 検証・変換に使うコールバック
++    const spies = [vi.spyOn(console, "log"), vi.spyOn(console, "warn"), vi.spyOn(console, "error")]; // 関数の呼出しを記録する関数
++    const value = snapshot(common({ title: PRIVATE })); // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
++    const poison = vi.fn( // 呼出しを記録するmockを作る関数
++      /**
++       * 呼ばれてはいけない独自JSON処理を用意する。
++       */
++      () => PRIVATE, // 検証・変換に使うコールバック
++    );
++    Object.assign(value, { toJSON: poison }); // プロパティを写す関数
++    Object.assign(value.candidates[0], { toJSON: poison }); // プロパティを写す関数
++    if (value.candidates[0].dates !== null) {
++      Object.assign(value.candidates[0].dates.startAt, { toJSON: poison }); // プロパティを写す関数
++    }
++    const result = buildEventPracticeBatchFingerprint(value); // 全preview候補の照合hashを計算する関数
++    expect(result).toMatch(/^[0-9a-f]{64}$/); // 文字列の形式を検証するメソッド / 期待値を検証する関数
++    expect(result).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を検証する関数
++    expect(poison).not.toHaveBeenCalled(); // 関数の呼出しを検証するメソッド / 期待値を検証する関数
++    for (const spy of spies) {
++      expect(spy).not.toHaveBeenCalled(); // 関数の呼出しを検証するメソッド / 期待値を検証する関数
++    }
++    rejected( // 固定エラーと秘密値の非公開を確認する関数
++      /**
++       * 同じ秘密値を不正なscopeへ混入する。
++       */
++      () => buildEventPracticeBatchInputHash({ // 検証・変換に使うコールバック / 送信済み入力の照合hashを計算する関数
++        ...scope(), // 試験用の認可scopeを作る関数
++        userId: PRIVATE
++      }, operation()), // 送信済みfingerprintを持つ保存入力を作る関数
++    );
++  },
++);
++
++it("hashモジュールのserver-only境界を維持する", // 試験を登録する関数
++  /**
++   * Client側からの読込拒否を模した場合、hashモジュールの読込自体も失敗する。
++   */
++  async () => { // 検証・変換に使うコールバック
++    vi.resetModules(); // モジュールの評価状態をリセットする関数
++    vi.doMock("server-only", // 後続のモジュール読込を置き換える関数
++      /**
++       * server-onlyの読込拒否を再現する。
 +       */
 +      () => { // 検証・変換に使うコールバック
-+        throw new Error(PRIVATE); // 固定メッセージの例外を作るコンストラクター
++        throw new Error("fixture-server-only"); // 原文やcauseを含めない固定例外のコンストラクター
 +      },
 +    );
-+    const result = ready(input({ periodEnd: "2026-01-02" }), "UTC"); // 生成成功を確認する関数 / 試験用の共通入力を作る関数
-+    expect(result.items[0].exclusionReason).toBe("INVALID_DATE_TIME"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.items[1].exclusionReason).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
-+    expect(result.candidateCount).toBe(2); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(result.selectableCount).toBe(1); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を検証する関数 / 値をJSON文字列へ変換する関数
++    try {
++      await expect(import("@/src/infrastructure/security/event-practice-batch-fingerprint")) // 期待値を検証する関数 / モジュールを動的に読み込む関数
++        .rejects.toMatchObject({ // 部分的な構造の一致を検証するメソッド
++          cause: {
++            message: "fixture-server-only",
++          },
++        });
++    } finally {
++      vi.doUnmock("server-only"); // モジュールの置換を解除する関数
++      vi.resetModules(); // モジュールの評価状態をリセットする関数
++    }
 +  },
 +);
 +
-+it("予期しない共通処理の障害でも、部分候補や例外原文を返さない", // 試験を登録する関数
++it("F11の用途名・版1・素材順を固定した照合値を維持する", // 試験を登録する関数
 +  /**
-+   * validatorが通常例外を投げた場合の最後の失敗境界を確認する。
++   * 独立して計算した固定ベクトルと照合し、既存ledgerとの互換性を意図せず変えない。
 +   */
 +  () => { // 検証・変換に使うコールバック
-+    vi.spyOn(formValidator, "validateEventPracticeBatchPreviewInput").mockImplementationOnce( // 次の1回の処理を設定するメソッド / 関数を一時的に置き換える関数
++    expect(buildEventPracticeBatchFingerprint(snapshot())).toBe( // 値の一致を検証するメソッド / 期待値を検証する関数 / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++      "6b6b4c8112f721c373fc9677d266f3ca953f2ffdf57b481cefba0ecf8b188819",
++    );
++    expect(buildEventPracticeBatchInputHash(scope(), operation())).toBe( // 値の一致を検証するメソッド / 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
++      "71f1ed79dc7319f3d5701b10e95e10d181deceeae992ae6260a594e9c1e41fba",
++    );
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  { selectedDates: [] },
++  { selectedDates: ["2026-02-01"] },
++  { requestId: PRIVATE },
++  { previewFingerprint: PRIVATE },
++  { status: PRIVATE },
++])(
++  "不正な実行入力ケース%#から素材や検証原文を返さない",
++  /**
++   * 保存入力の構造を照合境界でも検証し、固定エラーへ限定する。
++   */
++  (change) => { // 検証・変換に使うコールバック
++    rejected( // 固定エラーと秘密値の非公開を確認する関数
 +      /**
-+       * 想定外の検証処理障害を再現する。
++       * 実行入力の項目を欠落・改変させる。
++       */
++      () => buildEventPracticeBatchInputHash(scope(), { // 検証・変換に使うコールバック / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数
++        ...operation(), // 送信済みfingerprintを持つ保存入力を作る関数
++        ...change,
++      }),
++    );
++  },
++);
++
++it("F11の最小月0001-01と31候補をF10の対象月・100件規約へ依存せず扱う", // 試験を登録する関数
++  /**
++   * F11固有の年境界と最大候補・選択件数を照合できることを確認する。
++   */
++  () => { // 年境界と上限を確認するコールバック
++    const earliest = common({ // 試験用の正規化共通入力を作る関数
++      targetMonth: "0001-01",
++      periodStart: "0001-01-01",
++      periodEnd: "0001-01-01",
++    });
++    expect(buildEventPracticeBatchFingerprint(snapshot(earliest))) // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数 / 実際の日時生成から照合素材を作る関数
++      .toMatch(/^[0-9a-f]{64}$/); // 文字列の形式を検証するメソッド
++    expect(buildEventPracticeBatchInputHash(scope(), operation(earliest))) // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数 / 送信済みfingerprintを持つ保存入力を作る関数
++      .toMatch(/^[0-9a-f]{64}$/); // 文字列の形式を検証するメソッド
++    const full = snapshot(common({ periodEnd: "2026-01-31" })); // 実際の日時生成から照合素材を作る関数 / 試験用の正規化共通入力を作る関数
++    expect(full.candidates).toHaveLength(31); // 期待値を検証する関数 / 件数を検証するメソッド
++    expect(buildEventPracticeBatchFingerprint(full)).toMatch(/^[0-9a-f]{64}$/); // 期待値を検証する関数 / 全preview候補の照合hashを計算する関数 / 文字列の形式を検証するメソッド
++    expect(buildEventPracticeBatchInputHash(scope(), { // 期待値を検証する関数 / 送信済み入力の照合hashを計算する関数 / 試験用の認可scopeを作る関数
++      ...operation(full.input), // 送信済みfingerprintを持つ保存入力を作る関数
++      selectedDates: full.candidates.map( // 各候補を選択日へ変換するメソッド
++        /**
++         * 全31候補の現地日付を実行選択へ写す。
++         */
++        (candidate) => candidate.date, // 現地日付を取り出すコールバック
++      ),
++    })).toMatch(/^[0-9a-f]{64}$/); // 文字列の形式を検証するメソッド
++  },
++);
+diff --git a/tests/event-practice-batch-policy.test.ts b/tests/event-practice-batch-policy.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd4471a12861f7592c615c7ad8615a2965abc734
+--- /dev/null
++++ b/tests/event-practice-batch-policy.test.ts
+@@ -0,0 +1,254 @@
++// tests/event-practice-batch-policy.test.ts
++// 実DBなしでF11の固定列、既存12列との一致、入力の参照分離と安全な失敗を確認する。
++
++import {
++  expect,
++  it,
++  vi
++} from "vitest";
++
++import {
++  buildEventPracticeBatchEvent, // F11の比較・保存対象列を組み立てる関数
++  buildEventPracticeBatchKey, // F11の12列比較の内部キーを作る関数
++} from "@/domain/club/event/event-practice-batch-policy";
++import {
++  buildEventMonthCopyKey, // コピー対象12列から決定的な比較値を作る関数
++  EVENT_MONTH_COPY_FIELDS, // 既存のコピー対象12列の項目名リスト
++} from "@/domain/club/event/event-month-copy-policy";
++import type {
++  EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力値の型
++} from "@/domain/club/event/event-practice-batch-types";
++import type {
++  EventPracticeBatchUtcDateTimes, // 終了必須の練習イベントが持つUTC日時型
++} from "@/domain/club/event/event-practice-batch-date-times";
++
++/**
++ * 比較列を組み立てるための独立した共通入力を作る。
++ */
++function input(): EventPracticeBatchCommonInput { // 試験用の共通入力を作る関数 / 正規化した定期練習の共通入力型
++  return {
++    targetMonth: "2026-01",
++    periodStart: "2026-01-01",
++    periodEnd: "2026-01-31",
++    weekdays: [4],
++    title: " 練習 ",
++    startTime: "18:00",
++    endTime: "20:00",
++    location: " 体育館 ",
++    meetingTime: "17:30",
++    meetingLocation: " 入口 ",
++    targetRoles: ["MEMBER", "OWNER"],
++  };
++}
++
++/**
++ * 秒・ミリ秒も比較から落ちないことを確認できるUTC日時を作る。
++ */
++function dates(): EventPracticeBatchUtcDateTimes { // 試験用のUTC日時を作る関数 / 終了必須の練習イベントのUTC日時型
++  return {
++    startAt: new Date("2026-01-01T09:00:00.123Z"), // 日時を生成するコンストラクター
++    endAt: new Date("2026-01-01T11:00:00.123Z"), // 日時を生成するコンストラクター
++    meetingAt: new Date("2026-01-01T08:30:00.123Z"), // 日時を生成するコンストラクター
++  };
++}
++
++it("F11の固定列をサーバーで組み立て、既存12列だけを返す", // 試験を登録する関数
++  /**
++   * 初期列を固定し、F10候補や偽の複製元IDを作らず値だけを比較する。
++   */
++  () => { // 検証・変換に使うコールバック
++    const value = buildEventPracticeBatchEvent(input(), dates()); // F11の固定比較・保存列を組み立てる関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++    expect(value).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数
++      title: "練習",
++      content: null,
++      genre: "PRACTICE",
++      targetRoles: ["OWNER", "MEMBER"],
++      startAt: new Date("2026-01-01T09:00:00.123Z"), // 日時を生成するコンストラクター
++      endAt: new Date("2026-01-01T11:00:00.123Z"), // 日時を生成するコンストラクター
++      isAllDay: false,
++      location: "体育館",
++      meetingAt: new Date("2026-01-01T08:30:00.123Z"), // 日時を生成するコンストラクター
++      meetingLocation: "入口",
++      belongings: null,
++      notes: null,
++    });
++    expect(Object.keys(value).sort()).toEqual([...EVENT_MONTH_COPY_FIELDS].sort()); // 内容の一致を検証するメソッド / 期待値を検証する関数 / 配列を並べ替えるメソッド / オブジェクトの項目名を取得する関数
++    expect(Object.keys(value)).toHaveLength(12); // 件数を検証するメソッド / 期待値を検証する関数 / オブジェクトの項目名を取得する関数
++  },
++);
++
++it("既存側の公開状態・作者・ID・PDF等を比較に含めず、ロールを集合として比較する", // 試験を登録する関数
++  /**
++   * 既存イベントの余分な列を渡してもF11生成イベントとの完全一致が変わらない。
++   */
++  () => { // 検証・変換に使うコールバック
++    const existing = {
++      ...buildEventPracticeBatchEvent(input(), dates()), // F11の固定比較・保存列を組み立てる関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++      id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
++      status: "PUBLISHED",
++      createdByMembershipId: "private-actor",
++      firstPublishedAt: new Date(0), // 日時を生成するコンストラクター
++      attachments: ["private-pdf"],
++      reads: ["private-read"],
++      targetRoles: ["MEMBER", "OWNER", "MEMBER"] as const, // リテラル値を保持する型アサーション
++    };
++    expect(buildEventPracticeBatchKey(input(), dates())).toBe(buildEventMonthCopyKey(existing)); // 値の一致を検証するメソッド / 期待値を検証する関数 / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数 / コピー対象12列から決定的な比較値を作る関数
++    existing.status = "DRAFT";
++    expect(buildEventPracticeBatchKey(input(), dates())).toBe(buildEventMonthCopyKey(existing)); // 値の一致を検証するメソッド / 期待値を検証する関数 / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数 / コピー対象12列から決定的な比較値を作る関数
++    expect(buildEventMonthCopyKey({ // 期待値を検証する関数 / コピー対象12列から決定的な比較値を作る関数
++      ...existing,
++      targetRoles: ["MEMBER"],
++    })).not.toBe(buildEventPracticeBatchKey(input(), dates())); // 値の一致を検証するメソッド / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  { title: "別の練習" },
++  { location: "別の体育館" },
++  { meetingLocation: "別の入口" },
++  { targetRoles: ["OWNER", "COACH"] as const }, // リテラル値を保持する型アサーション
++])(
++  "共通内容の変更ケース%#を比較値へ反映する",
++  /**
++   * 書き込む文字列と対象ロールの差を完全一致へ混ぜない。
++   */
++  (change) => { // 検証・変換に使うコールバック
++    expect(buildEventPracticeBatchKey({ // 期待値を検証する関数 / F11の12列比較の内部キーを作る関数
++      ...input(), // 試験用の共通入力を作る関数
++      ...change
++    }, dates())) // 試験用のUTC日時を作る関数
++      .not.toBe(buildEventPracticeBatchKey(input(), dates())); // 値の一致を検証するメソッド / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++  },
++);
++
++it.each(["startAt", "endAt", "meetingAt"] as const)( // 表形式の試験を登録する関数 / リテラル値を保持する型アサーション
++  "%sの1ミリ秒差を比較値へ反映する",
++  /**
++   * F11の生成日時を比較時に分単位へ丸めない。
++   */
++  (field) => { // 検証・変換に使うコールバック
++    const value = dates(); // 試験用のUTC日時を作る関数
++    value[field]?.setTime(value[field]!.getTime() + 1); // UTCミリ秒値を設定するメソッド / UTCミリ秒値を得るメソッド
++    expect(buildEventPracticeBatchKey(input(), value)) // 期待値を検証する関数 / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数
++      .not.toBe(buildEventPracticeBatchKey(input(), dates())); // 値の一致を検証するメソッド / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++  },
++);
++
++it("正規化後に同じ文字列・ロールであれば同じ比較値になり、入力やDateを共有しない", // 試験を登録する関数
++  /**
++   * 返却値の変更と独自toJSONが元データや比較の意味を変えないことを確認する。
++   */
++  () => { // 検証・変換に使うコールバック
++    const source = input(); // 試験用の共通入力を作る関数
++    const utc = dates(); // 試験用のUTC日時を作る関数
++    const before = structuredClone({ // 値を複製する関数
++      source,
++      utc
++    });
++    const poison = vi.fn( // 呼出しを記録するmockを作る関数
++      /**
++       * 呼ばれてはいけない入力独自のJSON処理を用意する。
++       */
++      () => "private-toJSON", // 検証・変換に使うコールバック
++    );
++    Object.assign(utc.startAt, { toJSON: poison }); // プロパティを写す関数
++    const result = buildEventPracticeBatchEvent(source, utc); // F11の固定比較・保存列を組み立てる関数
++    expect(buildEventPracticeBatchKey(source, utc)).toBe(buildEventPracticeBatchKey({ // 値の一致を検証するメソッド / 期待値を検証する関数 / F11の12列比較の内部キーを作る関数
++      ...source,
++      title: "練習",
++      targetRoles: ["OWNER", "MEMBER", "MEMBER"],
++    }, dates())); // 試験用のUTC日時を作る関数
++    result.startAt.setTime(0); // UTCミリ秒値を設定するメソッド
++    result.targetRoles = ["OWNER"];
++    expect(source).toEqual(before.source); // 内容の一致を検証するメソッド / 期待値を検証する関数
++    expect(utc.startAt.getTime()).toBe(before.utc.startAt.getTime()); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTCミリ秒値を得るメソッド
++    expect(poison).not.toHaveBeenCalled(); // 関数の呼出しを検証するメソッド / 期待値を検証する関数
++  },
++);
++
++it("未設定の任意列をnullのまま保持する", // 試験を登録する関数
++  /**
++   * 集合時刻や場所を生成・補完せず、空欄は共通入力の規約に従う。
++   */
++  () => { // 検証・変換に使うコールバック
++    const result = buildEventPracticeBatchEvent({ // F11の固定比較・保存列を組み立てる関数
++      ...input(), // 試験用の共通入力を作る関数
++      location: " ",
++      meetingTime: null,
++      meetingLocation: "",
++    }, {
++      ...dates(), // 試験用のUTC日時を作る関数
++      meetingAt: null,
++    });
++    expect(result.location).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
++    expect(result.meetingAt).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
++    expect(result.meetingLocation).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
++  },
++);
++
++it.each(["genre", "status", "isAllDay", "content", "belongings", "notes", "clubId"])( // 表形式の試験を登録する関数
++  "共通入力に%sを混入して固定列やscopeを上書きできない",
++  /**
++   * 比較キーや本文・秘密値を返さない固定例外で入力を拒否する。
++   */
++  (field) => { // 検証・変換に使うコールバック
++    expect( // 期待値を検証する関数
++      /**
++       * 共通入力へ未許可の保存列を混入する。
++       */
++      () => buildEventPracticeBatchEvent({ // 検証・変換に使うコールバック / F11の固定比較・保存列を組み立てる関数
++        ...input(), // 試験用の共通入力を作る関数
++        [field]: "PRIVATE_INPUT_SQL_TOKEN",
++      }, dates()), // 試験用のUTC日時を作る関数
++    ).toThrow("定期練習の内容を確認できません。"); // 例外を検証するメソッド
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  { endAt: null },
++  { endAt: new Date("2026-01-01T09:00:00.123Z") }, // 日時を生成するコンストラクター
++  { startAt: new Date(NaN) }, // 日時を生成するコンストラクター
++  { meetingAt: new Date(NaN) }, // 日時を生成するコンストラクター
++])(
++  "不正な生成日時のケース%#を部分値やcauseなしで拒否する",
++  /**
++   * 終了必須・正しいDate・UTC順序を再確認し、既存の生エラーを公開しない。
++   */
++  (change) => { // 検証・変換に使うコールバック
++    try {
++      buildEventPracticeBatchKey(input(), { // F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数
++        ...dates(), // 試験用のUTC日時を作る関数
++        ...change
++      } as EventPracticeBatchUtcDateTimes); // 終了必須の練習イベントのUTC日時型
++      expect.unreachable("不正日時は拒否される必要があります。"); // 到達してはいけない試験経路を失敗にする関数
++    } catch (error) {
++      expect(error).toHaveProperty("message", "定期練習の内容を確認できません。"); // プロパティを検証するメソッド / 期待値を検証する関数
++      expect(error).not.toHaveProperty("cause"); // プロパティを検証するメソッド / 期待値を検証する関数
++    }
++  },
++);
++
++it("比較DomainはNode cryptoを読み込まず利用できる", // 試験を登録する関数
++  /**
++   * hash計算のNode依存をDomainへ持ち込まないことを確認する。
++   */
++  async () => { // 検証・変換に使うコールバック
++    vi.resetModules(); // モジュールの評価状態をリセットする関数
++    vi.doMock("node:crypto", // 後続のモジュール読込を置き換える関数
++      /**
++       * Domainから到達してはいけないNode依存を検出する。
 +       */
 +      () => { // 検証・変換に使うコールバック
-+        throw new Error(PRIVATE); // 固定メッセージの例外を作るコンストラクター
++        throw new Error("private-node-import"); // 原文やcauseを含めない固定例外のコンストラクター
 +      },
 +    );
-+    const result = generateEventPracticeBatchDateTimes(input(), "UTC"); // 現地曜日候補とUTC日時を生成する関数 / 試験用の共通入力を作る関数
-+    expect(result.outcome).toBe("GENERATION_FAILED"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    rejected(result); // 安全な失敗結果を確認する関数
-+  },
-+);
-+
-+it("入力の正規化・生成で元入力や配列を変更せず、返却Dateも共有しない", // 試験を登録する関数
-+  /**
-+   * 曜日順の差を正規化しても入力を保ち、結果のDate変更が次の生成へ影響しない。
-+   */
-+  () => { // 検証・変換に使うコールバック
-+    const source = singleDay("2026-01-01", { weekdays: [4, 4, 0] }); // 単日の試験入力を作る関数
-+    const before = structuredClone(source); // 値を複製する関数
-+    const first = ready(source); // 生成成功を確認する関数
-+    expect(source).toEqual(before); // 内容の一致を検証するメソッド / 期待値を検証する関数
-+    expect(first.items[0].dates).not.toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
-+    first.items[0].dates?.startAt.setTime(0); // UTCミリ秒値を設定するメソッド
-+    const second = ready(source); // 生成成功を確認する関数
-+    expect(second.items[0].dates?.startAt.toISOString()).toBe("2026-01-01T09:00:00.000Z"); // 値の一致を検証するメソッド / 期待値を検証する関数 / UTC ISO文字列へ変換するメソッド
-+    expect(source).toEqual(before); // 内容の一致を検証するメソッド / 期待値を検証する関数
-+  },
-+);
-+
-+it("resolverが無効なDateを返しても、選択可能な候補として公開しない", // 試験を登録する関数
-+  /**
-+   * SDK境界の無効な値を固定の除外理由にし、Invalid Dateを結果へ含めない。
-+   */
-+  () => { // 検証・変換に使うコールバック
-+    vi.spyOn(resolver, "utcCandidates").mockReturnValueOnce([new Date(NaN)]); // 次の1回の返却値を設定するメソッド / 関数を一時的に置き換える関数 / 日時を生成するコンストラクター
-+    const result = ready(singleDay("2026-01-01"), "UTC"); // 生成成功を確認する関数 / 単日の試験入力を作る関数
-+    expect(result.items[0].dates).toBeNull(); // nullかを検証するメソッド / 期待値を検証する関数
-+    expect(result.items[0].exclusionReason).toBe("INVALID_DATE_TIME"); // 値の一致を検証するメソッド / 期待値を検証する関数
++    try {
++      const policy = await import("@/domain/club/event/event-practice-batch-policy"); // モジュールを動的に読み込む関数
++      expect(policy.buildEventPracticeBatchKey(input(), dates())) // 期待値を検証する関数 / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++        .toBe(buildEventPracticeBatchKey(input(), dates())); // 値の一致を検証するメソッド / F11の12列比較の内部キーを作る関数 / 試験用の共通入力を作る関数 / 試験用のUTC日時を作る関数
++    } finally {
++      vi.doUnmock("node:crypto"); // モジュールの置換を解除する関数
++      vi.resetModules(); // モジュールの評価状態をリセットする関数
++    }
 +  },
 +);
