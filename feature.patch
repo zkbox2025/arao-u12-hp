@@ -1,323 +1,1516 @@
-diff --git a/docs/runbooks/event-month-copy.md b/docs/runbooks/event-month-copy.md
+diff --git a/docs/implementation/phases/F11.md b/docs/implementation/phases/F11.md
+index 2418b665e45c6483ecfc3e20d38d26f5a0ba33bd..54a699ba716a1585e59fe7fe8d5923cc175d0fd8 100644
+--- a/docs/implementation/phases/F11.md
++++ b/docs/implementation/phases/F11.md
+@@ -37,3 +37,66 @@ MVP 1.0での推奨仕様
+ * 前月複製と定期練習一括作成で共有する部分・分ける部分
+ * 日付列挙の純粋関数とDB transactionの境界
+ * previewと実保存の入力hashを一致させる理由
++
++【追加：粒度1】仕様補足・入力・preview／結果契約
++
++ユーザー確定事項
++* 対象期間は、管理者一覧で選んだ同じ対象月内の開始日〜終了日に限定する。
++  両端を含め、画面の初期値はその月全体とする。月跨ぎの任意31日間にはしない。
++* 終了時刻は必須で、同日の開始時刻より後だけを許可する。
++  同時刻・逆転・翌日への自動送りは認めず、翌日終了は通常編集で対応する。
++* 既存イベントとの完全一致は初期未選択とし、明示選択された場合は作成を許可する。
++
++この入力契約で採用する補足
++* 通常の時刻付き練習だけを扱い、生成時のisAllDayはfalseに固定する。
++  content・belongings・notesはnullとする。終日・本文等の追加入力は含めない。
++* 共通入力はtargetMonth・periodStart・periodEnd・weekdays・title・startTime・endTime・
++  location・meetingTime・meetingLocation・targetRolesとする。
++  保存専用のselectedDates・requestId・previewFingerprintとは分ける。
++* targetMonthは西暦1〜9999年の単一YYYY-MM文字列、期間は実在するYYYY-MM-DD。
++  年0・不正月・配列・余分な空白や改行を拒否し、現在月へfallbackしない。
++  F11は前月を使わないため0001-01も入力契約で許可する。
++  現在のF10 ledgerの0001-01拒否との整合は、後続の操作別DB制約で扱う。
++* 曜日は日曜0〜土曜6。共通入力のオブジェクトは数値、FormDataでは単一桁の文字列を受ける。
++  反復数は正規化前に1〜7個へ制限し、重複除去・数値昇順にする。
++* タイトルはtrim後1〜120文字、場所・集合場所はtrim後200文字以内。
++  任意文字列の未指定・空欄はnull、超過は切り捨てず拒否する。
++  文字数の正本は既存event-form.tsの定数とする。
++* 時刻はHH:mm形式。集合時刻は各発生日の同日の任意入力で、未指定・空欄はnull。
++  開始後の集合も入力として許容し、後続previewで警告する。前日集合の入力は含めない。
++* 公開対象はOWNERを常に含め、COACH・OFFICER・MEMBERを追加選択できる。
++  OWNERだけも有効。不正roleを拒否した後、既存buildContentTargetRolesで重複・順序を揃える。
++  role入力の反復は正規化前に最大4個。任意roleを選ばないFormDataはOWNERだけになる。
++* 選択日は実在する日付の配列で1〜31件。重複と入力期間外を拒否し、昇順へ正規化する。
++  元イベントUUIDやClient指定のUTC日時を選択値にしない。
++* requestIdは既存isRequestIdで検証するUUID v4、previewFingerprintは64桁16進文字列。
++  どちらも小文字へ正規化する。この検証は識別子の真正性・保存済み判定を保証しない。
++* FormDataの反復項目はweekdays・targetRolesと、保存時のselectedDatesだけ。
++  単一項目の重複は同じ値でも拒否する。File値・未許可項目も拒否する。
++  Nextが付ける$ACTION_接頭辞の輸送用項目は業務入力として利用しない。
++* clientからclubId・実行者・genre・status・isAllDay・公開日時・本文・通知指定・
++  任意遷移先・生成済みUTC値を受け取らない。固定値でも入力への混入は拒否する。
++* preview用validatorは保存専用項目を受け取らない。保存用validatorは共通入力を再検証する。
++  正規化済み入力を再検証しても値が変わらないようにする。
++  エラーには入力値、未許可キー名、ネイティブ検証message、生Error・causeを含めない。
++
++限定DTOと結果の契約
++* previewはREADY（候補0件も含む）・TOO_MANY・FORBIDDEN・PREVIEW_FAILEDを区別する。
++  正規化共通入力、timezone、fingerprint、候補日・UTC ISO日時・除外理由・警告・
++  既存一致フラグ・初期選択、候補件数・選択可能件数を持つ。
++  既存イベントの本文・全モデル・既存IDをClientへ返す契約にはしない。
++* 日時変換不能・曖昧な現地時刻・存在しない現地時刻・期間逆転等は、
++  後続の生成処理で理由付きの選択不可候補にする。31件上限は除外前の候補数にも適用する。
++* 実行結果はCREATED・ALREADY_COMPLETED・VALIDATION_FAILED・FORBIDDEN・PREVIEW_CHANGED・
++  CONFLICT・CREATE_FAILED・RESULT_UNKNOWN。成功receiptは対象月と作成件数だけとする。
++* previewと保存のAction stateを分ける。statusとoutcomeで成功・拒否・結果不明を区別し、
++  成功時だけ必須のdataを持つ。保存済みsuccessのneedsReloadは一覧再読込の案内に使う。
++  メッセージ文字列を比較して結果不明と再preview可否を判別する契約にはしない。
++
++粒度1で保証しないもの
++* この粒度は入力構造と限定結果の契約だけ。画面・Action・候補日列挙・UTC変換・
++  hash生成・DB・Prisma・認証認可・保存は未接続で、DB変更は発生しない。
++* 選択日が曜日条件と一致するか、DST等で生成可能か、既存完全一致か、
++  fingerprintが現在のpreviewと一致するかは後続で再照合する。
++* 最新の本人・ACTIVE所属・管理ロール・プラン・他クラブ防止・同操作の冪等性は、
++  後続のAction・Service・Repository・DB制約で保証する。
+diff --git a/domain/club/event/event-practice-batch-form.ts b/domain/club/event/event-practice-batch-form.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..337ab46c007902c336ada53b24f8e935847a1efc
+index 0000000000000000000000000000000000000000..9eae759952de88545f76faebe2008e5e9ae16550
 --- /dev/null
-+++ b/docs/runbooks/event-month-copy.md
-@@ -0,0 +1,317 @@
-+<!-- docs/runbooks/event-month-copy.md -->
++++ b/domain/club/event/event-practice-batch-form.ts
+@@ -0,0 +1,487 @@
++// domain/club/event/event-practice-batch-form.ts
++// preview共通入力と保存入力を検証し、日付・時刻・選択・識別子の構造だけを保証する。
 +
-+# F10 前月予定の複製：運用手順と受入確認表
++import { z } from "zod";
 +
-+F10粒度12の運用書です。調査基準はコミット `c8a999c` です。
-+文書の作成・patch適用だけで、DB試験や実ブラウザーでの受入を完了にしません。
-+今回の文書作成では実DB・Auth・Storage・LINE・メールを操作しません。
-+過去の実行結果はこの調査では未確認のため、結果欄は証跡を確認した担当者が更新します。
++import {
++  buildContentTargetRoles, // OWNERを常に含め、正しいロールを既存の順序に正規化する関数
++} from "@/domain/club/content/content-policy";
++import {
++  EVENT_LOCATION_MAX_LENGTH, // イベント開催場所の最大文字数
++  EVENT_TITLE_MAX_LENGTH, // イベントタイトルの最大文字数
++} from "@/domain/club/event/event-form";
++import type {
++  FieldErrors, // 項目ごとの安全なエラーメッセージを保持する型
++} from "@/domain/shared/action-state";
++import {
++  isRequestId, // UUID v4形式の操作IDかを検証する関数。認証・認可の代用にしない
++} from "@/domain/shared/request-id";
++import type {
++  ClubMemberRole, // Prisma由来のクラブ所属ロール型
++} from "@/types/prisma";
++import {
++  EVENT_PRACTICE_BATCH_MAX_COUNT, // 除外前候補と選択の最大件数31件
++  type EventPracticeBatchCommonInput, // 構造検証・正規化済みの共通入力型
++  type EventPracticeBatchField, // previewと実行入力の項目名型
++  type EventPracticeBatchInput, // 共通入力・選択日・操作識別子をまとめた型
++  type EventPracticeBatchValidation, // 正規化済み入力と安全なエラーを分ける結果型
++  type EventPracticeBatchWeekday, // 日曜0〜土曜6の曜日型
++} from "./event-practice-batch-types";
 +
-+仕様の根拠は [F10.md](../implementation/phases/F10.md)、
-+対象範囲は [粒度12の計画](../implementation/phases/F10-granular-plan.md) です。
-+F10.md末尾の「未確定事項」は粒度1時点の記録です。
-+以下は、その後のユーザー確定事項と基準コミットの実装で採用済みの挙動です。
-+既存仕様書・既存runbook・ソースは、この文書の追加では変更しません。
++const INVALID_FORM = "定期練習の入力を確認してください。";
++const COMMON_FIELDS = new Set([ // 重複しない集合を作るコンストラクター
++  "targetMonth",
++  "periodStart",
++  "periodEnd",
++  "weekdays",
++  "title",
++  "startTime",
++  "endTime",
++  "location",
++  "meetingTime",
++  "meetingLocation",
++  "targetRoles",
++]);
++const EXECUTION_FIELDS = new Set([ // 重複しない集合を作るコンストラクター
++  ...COMMON_FIELDS,
++  "selectedDates",
++  "requestId",
++  "previewFingerprint",
++]);
++const FIELD_MESSAGES: Record<EventPracticeBatchField, string> = { // キーと値の対応を表す型 / 入力項目名型 / 文字列型
++  targetMonth: "対象月を西暦1〜9999年のYYYY-MM形式で指定してください。",
++  periodStart: "対象月内の実在する開始日を指定してください。",
++  periodEnd: "対象月内で開始日以降の終了日を指定してください。",
++  weekdays: "曜日を日曜0〜土曜6で1〜7個指定してください。",
++  title: `タイトルを1〜${EVENT_TITLE_MAX_LENGTH}文字で入力してください。`,
++  startTime: "開始時刻をHH:mm形式で入力してください。",
++  endTime: "同日の開始時刻より後の終了時刻をHH:mm形式で入力してください。",
++  location: `場所は${EVENT_LOCATION_MAX_LENGTH}文字以内で入力してください。`,
++  meetingTime: "集合時刻はHH:mm形式で入力するか、未設定にしてください。",
++  meetingLocation: `集合場所は${EVENT_LOCATION_MAX_LENGTH}文字以内で入力してください。`,
++  targetRoles: "公開対象に正しいクラブ所属ロールを指定してください。",
++  selectedDates: "期間内の実在する日付を1〜31件、重複なしで選択してください。",
++  requestId: "操作の識別値が不正です。再previewしてください。",
++  previewFingerprint: "生成予定の識別値が不正です。再previewしてください。",
++};
 +
-+## 利用権限と複製する範囲
++/**
++ * 前月を必要としないF11の対象月を、空白を補正せず厳密に検証する。
++ */
++export function isEventPracticeBatchTargetMonth( // F11の対象月を厳密に検証する関数
++  value: unknown, // 未検証の値を表す型
++): value is string { // 文字列型への絞り込み
++  return (
++    typeof value === "string" &&
++    value.length === 7 &&
++    /^\d{4}-(0[1-9]|1[0-2])$/.test(value) && // 正規表現との一致を検証するメソッド
++    !value.startsWith("0000-") // 接頭辞を判定するメソッド
++  );
++}
 +
-+- Auth本人に対応する、同クラブのACTIVEな所属が必要です。
-+  ロールはOWNER・COACH・OFFICER、プランは現在の設定でCLUB_APPを持つSTANDARDです。
-+  MEMBER、所属失効、他クラブ、STARTER・PROは拒否します。
-+  Page・Actionに加え、Repositoryも新規作成とreplayの前に最新の権限を確認します。
-+- 対象月は単一の `YYYY-MM` です。例えば `2026-02` を表示して実行すると、
-+  クラブtimezone上で2026年1月に開始したイベントを複製します。
-+  前々月に開始して前月にも継続する予定は含みません。
-+- 元予定は公開済み・下書きの両方、全ジャンルが対象です。
-+  管理者月別一覧の公開状態・ジャンルの絞込みは、複製候補の条件へ引き継ぎません。
-+- 除外前の前月候補が101件以上なら、previewで拒否します。
-+  選択を100件以下に減らしたり、不正・重複候補を除いたりして上限を回避できません。
-+  0件は空表示、実行する選択は1〜100件です。
-+- コピー列は `title`、`content`、`genre`、`targetRoles`、`startAt`、`endAt`、
-+  `isAllDay`、`location`、`meetingAt`、`meetingLocation`、`belongings`、`notes` です。
-+  日時以外の正常な値・nullを保持します。不正な元データを黙って修復して保存しません。
-+- 生成行はすべてDRAFTです。`firstPublishedAt`・`readRequiredAt`はnull、
-+  作成者・更新者は実行したMembershipです。元予定は変更しません。
-+  PDF添付、既読、個人メモ、LINE履歴はコピーせず、LINE通知も作成しません。
-+  公開や通知が必要なら、生成後に既存の別操作で確認・実行します。
++/**
++ * UTC変換や候補列挙を行わず、西暦1〜9999年の実在日だけを検証する。
++ */
++function isDateOnly( // 西暦1〜9999年の実在日を検証する関数
++  value: string, // 文字列型
++): boolean { // 真偽値型
++  if (
++    value.length !== 10 ||
++    !/^\d{4}-\d{2}-\d{2}$/.test(value) // 正規表現との一致を検証するメソッド
++  ) {
++    return false;
++  }
++  const year = Number(value.slice(0, 4)); // 値を数値へ変換する関数 / 指定範囲を取り出すメソッド
++  const month = Number(value.slice(5, 7)); // 値を数値へ変換する関数 / 指定範囲を取り出すメソッド
++  const day = Number(value.slice(8, 10)); // 値を数値へ変換する関数 / 指定範囲を取り出すメソッド
++  const leap = (
++    year % 4 === 0 &&
++    (
++      year % 100 !== 0 ||
++      year % 400 === 0
++    )
++  );
++  const lastDay = month === 2
++    ? (leap ? 29 : 28)
++    : [4, 6, 9, 11].includes(month) // 要素の包含を判定するメソッド
++      ? 30
++      : 31;
++  return (
++    year >= 1 &&
++    month >= 1 &&
++    month <= 12 &&
++    day >= 1 &&
++    day <= lastDay
++  );
++}
 +
-+根拠：`app/(club-app)/club/club-app-authorization.ts / requireClubAppAdminAccess`、
-+`domain/club/plan-features.ts / hasClubFeature`、
-+`src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts / findEventMonthCopyPreviewData`、
-+`src/infrastructure/prisma/repositories/event-month-copy-mutation-repository.ts / isCurrentActor / eventData`。
++/**
++ * 文字列を小文字へ揃え、UUIDとfingerprintの表記差を除く。
++ */
++function lowercase( // 識別子を小文字へ揃える関数
++  value: string, // 文字列型
++): string { // 文字列型
++  return value.toLowerCase(); // 小文字へ変換するメソッド
++}
 +
-+## 日時・重複候補の読み方
++/**
++ * 任意文字列をtrimし、空欄を未設定のnullに揃える。
++ */
++function optionalValue( // 任意文字列と空欄を正規化する関数
++  value: string | null, // 文字列型 / 未設定を表すnull型
++): string | null { // 文字列型 / 未設定を表すnull型
++  return value === null ? null : value.trim() || null; // 前後の空白を除くメソッド
++}
 +
-+| 項目 | 現行の扱い |
-+| --- | --- |
-+| 月送り | UTCの月ではなく、クラブtimezoneの現地日時を1か月進める。存在しない日付は移動先の月末へ補正する |
-+| 終了・集合 | 開始と同様にそれぞれ1か月進める。対象月の外へ跨っても、対象月内へ切り詰めない。nullは保持する |
-+| 終日 | 終了日時はその時点を含まない境界。表示上の最終日を月送りしてから翌日境界を作り直す。UTCで常に24時間とは限らない |
-+| 精度・表示 | 秒・ミリ秒を保持し、新旧日時・クラブtimezone・UTC offset・補正項目をpreviewで確認する |
-+| DST・不正な期間 | 存在しない現地時刻、UTC候補が2つある曖昧な現地時刻、終了が開始以下になる期間等は選択不可。foldで片方のUTCを自動選択しない |
-+| 既存予定との完全一致 | 変換後のコピー列と対象ロール集合で比較。既存側のDRAFT／PUBLISHED、作成者・公開日時・添付等は比較条件にしない |
-+| 既存一致の初期選択 | 初期未選択。選択可能な候補は明示選択すれば複製できるため、意図した重複かを確認する |
-+| 候補同士の完全一致 | 元の開始日時・ID順で先頭の代表だけ初期選択する。既存予定とも一致する代表は初期未選択。同じ内容になる候補の複数選択はUI・保存時とも拒否し、片方だけの選択は許す |
-+| 不正な元予定 | OWNERを対象に含まない等の不正値や変換不能は除外する。理由を確認し、必要な元予定の修正後に再previewする |
++/**
++ * 検証済みの0〜6の曜日を、重複なしの数値昇順へ正規化する。
++ */
++function normalizeWeekdays( // 曜日を重複なしの昇順へ揃える関数
++  value: number[], // 数値型
++): EventPracticeBatchWeekday[] { // クラブ現地の曜日型
++  return [...new Set(value)].sort( // 配列を並べ替えるメソッド / 重複しない集合を作るコンストラクター
++    /**
++     * 曜日番号を小さい順に比較する。
++     */
++    (left, right) => left - right, // 検証や試験に使うコールバック
++  ) as EventPracticeBatchWeekday[]; // クラブ現地の曜日型
++}
 +
-+根拠：`domain/club/event/event-month-copy-date-times.ts / convertEventMonthCopyDateTimes`、
-+`domain/club/event/event-month-copy-policy.ts / findEventMonthCopyCandidateDuplicates`、
-+`src/application/club/event/get-event-month-copy.ts / getEventMonthCopyPreview`。
-+画面の除外区分はINVALID_SOURCE・INVALID_DATE_TIME・INVALID_INTERVALです。
-+内部のDST詳細理由が、そのまま同じコード名で画面へ表示されるとは限りません。
++const dateSchema = z.string() // 文字列のスキーマを作る関数
++  .length(10) // 長さを制限するメソッド
++  .refine(isDateOnly); // 追加の形式検証を登録するメソッド / 西暦1〜9999年の実在日を検証する関数
++const timeSchema = z.string() // 文字列のスキーマを作る関数
++  .length(5) // 長さを制限するメソッド
++  .regex(/^([01]\d|2[0-3]):[0-5]\d$/); // 正規表現の制約を設定するメソッド
++const optionalTextSchema = z.union([ // 複数の入力型を許可する関数
++  z.string().trim() // 前後の空白を除くメソッド / 文字列のスキーマを作る関数
++    .max(EVENT_LOCATION_MAX_LENGTH), // 上限を制限するメソッド
++  z.null(), // nullのスキーマを作る関数
++])
++  .default(null) // 未指定値の既定値を設定するメソッド
++  .transform(optionalValue); // 正規化を登録するメソッド / 任意文字列と空欄を正規化する関数
++const commonShape = {
++  targetMonth: z.string() // 文字列のスキーマを作る関数
++    .refine(isEventPracticeBatchTargetMonth), // 追加の形式検証を登録するメソッド / F11の対象月を厳密に検証する関数
++  periodStart: dateSchema,
++  periodEnd: dateSchema,
++  weekdays: z.array(z.number().int() // 配列のスキーマを作る関数 / 整数へ制限するメソッド / 数値のスキーマを作る関数
++    .min(0) // 下限を制限するメソッド
++    .max(6)) // 上限を制限するメソッド
++    .min(1) // 下限を制限するメソッド
++    .max(7) // 上限を制限するメソッド
++    .transform(normalizeWeekdays), // 正規化を登録するメソッド / 曜日を重複なしの昇順へ揃える関数
++  title: z.string().trim() // 前後の空白を除くメソッド / 文字列のスキーマを作る関数
++    .min(1) // 下限を制限するメソッド
++    .max(EVENT_TITLE_MAX_LENGTH), // 上限を制限するメソッド
++  startTime: timeSchema,
++  endTime: timeSchema,
++  location: optionalTextSchema,
++  meetingTime: z.union([ // 複数の入力型を許可する関数
++    timeSchema,
++    z.literal(""), // 固定値のスキーマを作る関数
++    z.null(), // nullのスキーマを作る関数
++  ])
++    .default(null) // 未指定値の既定値を設定するメソッド
++    .transform(optionalValue), // 正規化を登録するメソッド / 任意文字列と空欄を正規化する関数
++  meetingLocation: optionalTextSchema,
++  targetRoles: z.array(z.enum([ // 配列のスキーマを作る関数 / 許可した値のスキーマを作る関数
++    "OWNER",
++    "COACH",
++    "OFFICER",
++    "MEMBER",
++  ] satisfies readonly ClubMemberRole[])) // クラブ所属ロール型
++    .max(4) // 上限を制限するメソッド
++    .transform(buildContentTargetRoles), // 正規化を登録するメソッド / OWNERを含む公開対象へ正規化する関数
++};
 +
-+## 適用順とローカル試験の準備
++/**
++ * 共通入力の期間・同月・同日終了を検証する。timezoneによるUTC検証は後続で行う。
++ */
++function refineCommon( // 共通入力の期間・同月・同日終了を検証する関数
++  input: EventPracticeBatchCommonInput, // 構造検証・正規化した共通入力型
++  context: z.RefinementCtx, // 追加検証のエラーを登録する型
++): void { // 戻り値を持たない型
++  if (input.periodStart.slice(0, 7) !== input.targetMonth) { // 指定範囲を取り出すメソッド
++    context.addIssue({ // 項目エラーを登録するメソッド
++      code: "custom",
++      path: ["periodStart"],
++      message: FIELD_MESSAGES.periodStart,
++    });
++  }
++  if (
++    input.periodEnd.slice(0, 7) !== input.targetMonth || // 指定範囲を取り出すメソッド
++    input.periodEnd < input.periodStart
++  ) {
++    context.addIssue({ // 項目エラーを登録するメソッド
++      code: "custom",
++      path: ["periodEnd"],
++      message: FIELD_MESSAGES.periodEnd,
++    });
++  }
++  if (input.endTime <= input.startTime) {
++    context.addIssue({ // 項目エラーを登録するメソッド
++      code: "custom",
++      path: ["endTime"],
++      message: FIELD_MESSAGES.endTime,
++    });
++  }
++}
 +
-+この文書patch自体にはschema・migration・アプリの変更はありません。
-+F10を新しい環境へ導入する場合は、以下の順で準備します。
-+本番反映・接続先変更・DB初期化は、本手順を読むだけで実行済みにはしません。
++/**
++ * 選択日が重複せず入力期間内にあることを検証する。曜日・DSTの候補所属は後続の責務。
++ */
++function refineSelection( // 選択日が重複せず入力期間内にあることを検証する関数
++  input: EventPracticeBatchInput, // 保存入力型
++  context: z.RefinementCtx, // 追加検証のエラーを登録する型
++): void { // 戻り値を持たない型
++  const seen = new Set<string>(); // 重複しない集合を作るコンストラクター / 文字列型
++  for (const date of input.selectedDates) {
++    if (
++      seen.has(date) || // 要素や項目の有無を調べるメソッド
++      date < input.periodStart ||
++      date > input.periodEnd
++    ) {
++      context.addIssue({ // 項目エラーを登録するメソッド
++        code: "custom",
++        path: ["selectedDates"],
++        message: FIELD_MESSAGES.selectedDates,
++      });
++      return;
++    }
++    seen.add(date); // 集合へ要素を加えるメソッド
++  }
++}
 +
-+1. 対象環境、バックアップ・復旧担当、DB接続先を確認する。
-+   DB統合試験は、破棄可能なローカルSupabase相当の環境だけで行う。
-+   接続先がlocalhostでも使い捨てである保証にはならないため、担当者が用途を確認する。
-+2. `prisma/schema.prisma`と既存のmigration履歴を含むF10のコードを用意する。
-+   `prisma/migrations/20261027000000_f10_event_month_copy/migration.sql`は、
-+   先行する同クラブ参照・SetNull補正・clubId不変の共通関数に依存する。
-+   適用済みmigrationを編集しない。
-+3. 新しいF10アプリを稼働させる前に、既存migrationをDBへ適用する。
-+   ローカルDBを起動し、下記のstatusを確認して、未適用分がある場合だけdeployする。
-+4. schemaを検証し、同じコードからPrisma Clientを生成する。
-+   生成済みClient・DBの両方を整えてからアプリを起動・再起動する。
-+5. 接続ガード・コード試験・専用DB試験を実施し、後述の実ブラウザー・HTTP受入を記録する。
++const previewSchema = z.strictObject(commonShape) // 未許可キーを拒否するスキーマを作る関数
++  .superRefine(refineCommon); // 項目間の検証を登録するメソッド / 共通入力の期間・同月・同日終了を検証する関数
++const executionSchema = z.strictObject({ // 未許可キーを拒否するスキーマを作る関数
++  ...commonShape,
++  selectedDates: z.array(dateSchema) // 配列のスキーマを作る関数
++    .min(1) // 下限を制限するメソッド
++    .max(EVENT_PRACTICE_BATCH_MAX_COUNT), // 上限を制限するメソッド
++  requestId: z.string() // 文字列のスキーマを作る関数
++    .length(36) // 長さを制限するメソッド
++    .refine(isRequestId) // 追加の形式検証を登録するメソッド / UUID v4の形式を検証する関数
++    .transform(lowercase), // 正規化を登録するメソッド / 識別子を小文字へ揃える関数
++  previewFingerprint: z.string() // 文字列のスキーマを作る関数
++    .length(64) // 長さを制限するメソッド
++    .regex(/^[0-9a-f]{64}$/i) // 正規表現の制約を設定するメソッド
++    .transform(lowercase), // 正規化を登録するメソッド / 識別子を小文字へ揃える関数
++})
++  .superRefine(refineCommon) // 項目間の検証を登録するメソッド / 共通入力の期間・同月・同日終了を検証する関数
++  .superRefine(refineSelection) // 項目間の検証を登録するメソッド / 選択日が重複せず入力期間内にあることを検証する関数
++  .transform( // 正規化を登録するメソッド
++    /**
++     * 呼出し元の選択配列を変更せず、保存・hash計算に渡す日付順を固定する。
++     */
++    (value) => ({ // 検証や試験に使うコールバック
++      ...value,
++      selectedDates: [...value.selectedDates].sort(), // 配列を並べ替えるメソッド
++    }),
++  );
 +
-+`.env.local`が確認済みのローカルDBを指している場合の手動コマンドです。
-+この文書作成では実行しません。読込ファイルと、実行シェルの既存の環境変数が
-+意図したDBを指すことを確認します。環境ファイルの値・接続URLをチャットや受入記録へ転記しません。
++/**
++ * 入力・例外原文を含まないフォーム全体の失敗結果を作る。
++ */
++function invalid( // フォーム全体の安全な失敗結果を作る関数
++): EventPracticeBatchValidation<never> { // 入力検証の結果型 / 成功データを許可しない型
++  return {
++    success: false,
++    fieldErrors: {},
++    formError: INVALID_FORM,
++  };
++}
 +
-+```sh
-+npx dotenv-cli -e .env.local -- npx prisma migrate status
-+```
++/**
++ * 単一項目の大量重複等でも入力値を返さず、安全な項目エラーだけを作る。
++ */
++function invalidField( // 安全な項目エラーを作る関数
++  field: EventPracticeBatchField, // 入力項目名型
++): EventPracticeBatchValidation<never> { // 入力検証の結果型 / 値を許可しない型
++  return {
++    success: false,
++    fieldErrors: {
++      [field]: [FIELD_MESSAGES[field]],
++    },
++    formError: null,
++  };
++}
 +
-+未適用migrationがある場合だけ実行します。
++/**
++ * plainな値だけをschemaへ渡し、ネイティブ検証messageや例外のcauseを公開しない。
++ */
++function validate<T>( // 入力を安全に検証する関数 / 検証成功時のデータ型
++  schema: z.ZodType<T>, // 検証結果を指定するZodの型 / 検証成功時のデータ型
++  fields: ReadonlySet<string>, // 読取専用集合の型 / 文字列型
++  input: unknown, // 未検証の値を表す型
++): EventPracticeBatchValidation<T> { // 入力検証の結果型 / 検証成功時のデータ型
++  try {
++    if (
++      typeof input !== "object" ||
++      input === null ||
++      Array.isArray(input) // 配列かを調べる関数
++    ) {
++      return invalid(); // 安全なフォームエラーを作る関数
++    }
++    const prototype = Object.getPrototypeOf(input); // オブジェクトのprototypeを取得する関数
++    if (
++      prototype !== Object.prototype &&
++      prototype !== null
++    ) {
++      return invalid(); // 安全なフォームエラーを作る関数
++    }
++    for (const key of Reflect.ownKeys(input)) { // 所有するキーを取得する関数
++      if (
++        typeof key !== "string" ||
++        !fields.has(key) // 要素や項目の有無を調べるメソッド
++      ) {
++        return invalid(); // 安全なフォームエラーを作る関数
++      }
++      const descriptor = Object.getOwnPropertyDescriptor(input, key); // プロパティの定義を取得する関数
++      if (
++        !descriptor ||
++        !descriptor.enumerable ||
++        !("value" in descriptor)
++      ) {
++        return invalid(); // 安全なフォームエラーを作る関数
++      }
++    }
++    const result = schema.safeParse(input); // 検証成功と検証エラーを結果で返すメソッド
++    if (result.success) {
++      return {
++        success: true,
++        data: result.data,
++      };
++    }
++    const fieldErrors: FieldErrors<EventPracticeBatchField> = {}; // 項目別エラーの型 / 入力項目名型
++    for (const issue of result.error.issues) {
++      const field = issue.path[0];
++      if (
++        typeof field !== "string" ||
++        !fields.has(field) // 要素や項目の有無を調べるメソッド
++      ) {
++        return invalid(); // 安全なフォームエラーを作る関数
++      }
++      const knownField = field as EventPracticeBatchField; // 入力項目名型
++      fieldErrors[knownField] = [FIELD_MESSAGES[knownField]];
++    }
++    return {
++      success: false,
++      fieldErrors,
++      formError: null,
++    };
++  } catch {
++    return invalid(); // 安全なフォームエラーを作る関数
++  }
++}
 +
-+```sh
-+npx dotenv-cli -e .env.local -- npx prisma migrate deploy
-+```
++/**
++ * 共通入力だけを検証・正規化する。DB認可・曜日列挙・UTC変換・保存は行わない。
++ */
++export function validateEventPracticeBatchPreviewInput( // 共通入力を検証・正規化する関数
++  input: unknown, // 未検証の値を表す型
++): EventPracticeBatchValidation<EventPracticeBatchCommonInput> { // 入力検証の結果型 / 構造検証・正規化した共通入力型
++  return validate(previewSchema, COMMON_FIELDS, input); // 入力を安全に検証する関数
++}
 +
-+```sh
-+npx dotenv-cli -e .env.local -- npx prisma validate
-+npx dotenv-cli -e .env.local -- npx prisma generate
-+```
++/**
++ * 共通入力と選択日・操作ID・fingerprintの構造を検証・正規化する。
++ */
++export function validateEventPracticeBatchInput( // 保存入力を検証・正規化する関数
++  input: unknown, // 未検証の値を表す型
++): EventPracticeBatchValidation<EventPracticeBatchInput> { // 入力検証の結果型 / 保存入力型
++  return validate(executionSchema, EXECUTION_FIELDS, input); // 入力を安全に検証する関数
++}
 +
-+既存SQLを適用するために、新しいmigrationの生成、`db push`、`migrate reset`は不要です。
-+この試験のためのseedも不要です。試験自身が専用fixtureを作成・削除します。
-+`prisma.config.ts`はdotenvを評価するため、上記は対象環境を確認して行う運用操作です。
-+後述の試験ファイルが、ガード前に.envを自動読込みするという意味ではありません。
-+適用時の既存手順は [docs/ops2.md](../ops2.md) のmigration・Client生成の記述も参照します。
++/**
++ * FormDataの単一・反復項目を制限し、文字列の曜日を0〜6へ変換して検証する。
++ */
++function parse( // FormDataの項目を解析する関数
++  formData: FormData, // 送信フォームの型・コンストラクター
++  execute: boolean, // 真偽値型
++): EventPracticeBatchValidation<Record<string, unknown>> { // 入力検証の結果型 / キーと値の対応を表す型 / 文字列型 / 未検証の値を表す型
++  try {
++    if (!(formData instanceof FormData)) { // 送信フォームのコンストラクター参照
++      return invalid(); // 安全なフォームエラーを作る関数
++    }
++    const fields = execute ? EXECUTION_FIELDS : COMMON_FIELDS;
++    const weekdays: number[] = []; // 数値型
++    const targetRoles: string[] = []; // 文字列型
++    const selectedDates: string[] = []; // 文字列型
++    const record: Record<string, unknown> = { // キーと値の対応を表す型 / 文字列型 / 未検証の値を表す型
++      weekdays,
++      targetRoles,
++    };
++    if (execute) {
++      record.selectedDates = selectedDates;
++    }
++    for (const [field, value] of formData.entries()) { // キーと値の組を取得するメソッド
++      if (field.startsWith("$ACTION_")) { // 接頭辞を判定するメソッド
++        continue;
++      }
++      if (
++        !fields.has(field) || // 要素や項目の有無を調べるメソッド
++        typeof value !== "string"
++      ) {
++        return invalid(); // 安全なフォームエラーを作る関数
++      }
++      if (field === "weekdays") {
++        if (
++          weekdays.length >= 7 ||
++          value.length !== 1 ||
++          !/^[0-6]$/.test(value) // 正規表現との一致を検証するメソッド
++        ) {
++          return invalidField("weekdays"); // 安全な項目エラーを作る関数
++        }
++        weekdays.push(Number(value)); // 配列へ要素を追加するメソッド / 値を数値へ変換する関数
++      } else if (field === "targetRoles") {
++        if (targetRoles.length >= 4) {
++          return invalidField("targetRoles"); // 安全な項目エラーを作る関数
++        }
++        targetRoles.push(value); // 配列へ要素を追加するメソッド
++      } else if (field === "selectedDates") {
++        if (selectedDates.length >= EVENT_PRACTICE_BATCH_MAX_COUNT) {
++          return invalidField("selectedDates"); // 安全な項目エラーを作る関数
++        }
++        selectedDates.push(value); // 配列へ要素を追加するメソッド
++      } else {
++        if (Object.hasOwn(record, field)) { // 自身のプロパティかを調べる関数
++          return invalid(); // 安全なフォームエラーを作る関数
++        }
++        record[field] = value;
++      }
++    }
++    return {
++      success: true,
++      data: record,
++    };
++  } catch {
++    return invalid(); // 安全なフォームエラーを作る関数
++  }
++}
 +
-+復旧でコードを戻す場合も、適用済みmigrationや完了記録を安易に削除しません。
-+まず新しい複製操作を止め、対象環境・保存結果を確認して復旧担当へ引き継ぎます。
++/**
++ * preview用の送信を検証する。保存専用項目は受け取らない。
++ */
++export function parseEventPracticeBatchPreviewFormData( // preview用FormDataを検証する関数
++  formData: FormData, // 送信フォームの型・コンストラクター
++): EventPracticeBatchValidation<EventPracticeBatchCommonInput> { // 入力検証の結果型 / 構造検証・正規化した共通入力型
++  const result = parse(formData, false); // FormDataの項目を解析する関数
++  return result.success
++    ? validateEventPracticeBatchPreviewInput(result.data) // 共通入力を検証・正規化する関数
++    : result;
++}
 +
-+## 通常の操作
++/**
++ * 保存用の送信を検証し、操作ID等が揃った実行入力だけを返す。
++ */
++export function parseEventPracticeBatchFormData( // 保存用FormDataを検証する関数
++  formData: FormData, // 送信フォームの型・コンストラクター
++): EventPracticeBatchValidation<EventPracticeBatchInput> { // 入力検証の結果型 / 保存入力型
++  const result = parse(formData, true); // FormDataの項目を解析する関数
++  if (!result.success) {
++    return result;
++  }
++  return validateEventPracticeBatchInput(result.data); // 保存入力を検証・正規化する関数
++}
+diff --git a/domain/club/event/event-practice-batch-types.ts b/domain/club/event/event-practice-batch-types.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf6052fb3e9c9e2cbdc5c8c3f60360c4fd971f5f
+--- /dev/null
++++ b/domain/club/event/event-practice-batch-types.ts
+@@ -0,0 +1,238 @@
++// domain/club/event/event-practice-batch-types.ts
++// 定期練習の共通入力、限定preview、保存結果とAction stateの契約。
 +
-+1. 管理者の月別一覧 `/club/{clubSlug}/admin/events?month=YYYY-MM` を開く。
-+   対象月を確認し、「前月の予定を複製」から
-+   `/club/{clubSlug}/admin/events/copy-previous-month?month=YYYY-MM` を開く。
-+2. コピー元の月、クラブtimezone、新旧日時、終日、月末補正、除外・重複を確認する。
-+   初期選択は必要に応じて変更できる。選択0件・同内容候補の複数選択では送信できない。
-+3. 「選択した予定を下書きで複製」を押す。初回送信後は選択を固定する。
-+   処理中の連打はUIで抑止し、サーバーでも同じ操作を照合する。
-+4. 通常成功と同一操作のreplay成功は、同クラブの対象月の管理者一覧へ戻る。
-+   遷移先は `/club/{clubSlug}/admin/events?month=YYYY-MM&status=ALL` に
-+   `toast=event-month-copied`・`toastId={requestId}`を付けた固定の経路。
-+   成功文言は「前月の予定を下書きとして複製しました。」で、任意の件数をURLから表示しない。
-+5. 一覧の総件数ではなく、今回の下書きが選択件数分作成されたことを確認する。
-+   自動公開・添付コピー・外部通知は行われない。toastのURLだけを保存成功の証拠にしない。
++import type {
++  ActionState, // フォームの入力・エラー・成功データ・操作IDをまとめる型
++  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
++} from "@/domain/shared/action-state";
++import type {
++  ClubMemberRole, // Prisma由来のクラブ所属ロール型
++} from "@/types/prisma";
 +
-+## 再送・再preview・障害時の判断
++/**
++ * 除外前の生成候補と保存選択の最大件数。
++ */
++export const EVENT_PRACTICE_BATCH_MAX_COUNT = 31;
 +
-+初回送信後のフォームは、最初のpayloadをメモリに保持します。
-+同じ選択・requestId・previewFingerprint・対象月を、同じ本人・所属で再送するのが結果確認です。
-+Pageを再取得すると新しいrequestIdが発行され、別操作になります。
-+同じrequestIdでも異なる入力・実行者はCONFLICTで、現在の権限が失効していればreplayも拒否します。
++/**
++ * クラブ現地の曜日。日曜を0、土曜を6とする。
++ */
++export type EventPracticeBatchWeekday = 0 | 1 | 2 | 3 | 4 | 5 | 6; // クラブ現地の曜日型 / 値を限定するリテラル型
 +
-+| 状況・結果 | 行うこと |
-+| --- | --- |
-+| CREATED／ALREADY_COMPLETED | 保存済み。対象月の管理者一覧で確認する。同じ操作のreplayでは追加作成しない |
-+| READYで0件 | 元の開始月・クラブ・timezoneを確認する。保存は行えない |
-+| TOO_MANY | 除外前の前月候補が101件以上。チェック数を減らして回避せず、一括複製を中止する |
-+| 不正source・変換不能 | 理由を確認し、必要なら既存の編集機能で元予定を修正して再previewする |
-+| VALIDATION_FAILED／PREVIEW_CHANGED | 現在の送信は保存しない。元予定・timezone・既存一致状態等を再確認し、表示されたリンクで再previewして選び直す |
-+| CONFLICT | その操作IDは別の内容等で使用されている。先の操作の結果を確認したうえで、必要な別操作だけ再previewする |
-+| FORBIDDEN・ログイン／所属拒否 | 現在のログイン、ACTIVE所属、管理ロール、プランを確認する。IDを変えて認可を回避しない |
-+| CREATE_FAILED | 同じフォーム・操作のまま再送できる。選び直す場合は画面の再previewリンクで新しい操作にする |
-+| RESULT_UNKNOWN・通常の通信例外 | 同じタブ・選択・操作IDのまま「同じ選択・操作IDで再送して確認」を使う。結果が不明な間は新しい操作を始めない |
-+| 保存後の通常の再検証失敗 | successとneedsReload=trueを返し、「保存済みです（件数）。」を表示する。保存ボタンは出ない。管理者一覧を再読込して確認する |
-+| タブを閉じた／ページを再読込して最初のpayloadを失った | フォームのメモリは復元できない。新しい操作を送る前に、担当者が元のクラブ・操作ID・実行者・対象月等で完了記録と保存結果を確認する。不明なら保留する |
++/**
++ * 入力欄へ戻す未検証の文字列。初期状態の空欄も表現する。
++ */
++export type EventPracticeBatchFormValues = { // フォーム入力値型
++  targetMonth: string; // 文字列型
++  periodStart: string; // 文字列型
++  periodEnd: string; // 文字列型
++  weekdays: readonly string[]; // 文字列型
++  title: string; // 文字列型
++  startTime: string; // 文字列型
++  endTime: string; // 文字列型
++  location: string; // 文字列型
++  meetingTime: string; // 文字列型
++  meetingLocation: string; // 文字列型
++  targetRoles: readonly string[]; // 文字列型
++};
 +
-+結果不明のとき、フォームは再previewリンクを表示せず、同じ入力での確認を案内します。
-+エラーの種類に応じた再preview可否は
-+`EventMonthCopyForm.tsx / REPREVIEW_ERRORS / canRepreview`を根拠とします。
-+この判定は固定エラーメッセージに依存するため、将来文言を変える場合はActionとフォームを揃えて検証します。
-+結果照会専用の公開APIや、失ったフォームを復元する機能は追加していません。
++/**
++ * 構造検証・正規化した共通入力。曜日候補・UTC・認可は後続で再確認する。
++ */
++export type EventPracticeBatchCommonInput = { // 構造検証・正規化した共通入力型
++  targetMonth: string; // 文字列型
++  periodStart: string; // 文字列型
++  periodEnd: string; // 文字列型
++  weekdays: readonly EventPracticeBatchWeekday[]; // クラブ現地の曜日型
++  title: string; // 文字列型
++  startTime: string; // 文字列型
++  endTime: string; // 文字列型
++  location: string | null; // 文字列型 / 未設定を表すnull型
++  meetingTime: string | null; // 文字列型 / 未設定を表すnull型
++  meetingLocation: string | null; // 文字列型 / 未設定を表すnull型
++  targetRoles: readonly ClubMemberRole[]; // クラブ所属ロール型
++};
 +
-+`ClubEventBatchOperation`は成功した操作の完了記録です。
-+同一クラブ・requestIdに加え、operation・inputHash・実行者・対象月・件数・完了日時を照合します。
-+記録照会は権限のある担当者が必要なメタデータに限定して行い、
-+本文、個人情報、Cookie、token、生SQL例外、ハッシュ作成素材をログやチャットへ出しません。
-+生成イベントを編集・削除しても完了記録は残り、同じ入力のreplayで復元・再作成はしません。
-+Membership削除時は実行者参照だけSetNull、クラブ削除時はそのクラブの記録がcascade削除されます。
-+記録を削除して再送を通す運用はしません。
++/**
++ * 共通入力に選択日と操作識別子を加えた実行入力。
++ */
++export type EventPracticeBatchInput = EventPracticeBatchCommonInput & { // 保存入力型 / 構造検証・正規化した共通入力型
++  selectedDates: readonly string[]; // 文字列型
++  requestId: string; // 文字列型
++  previewFingerprint: string; // 文字列型
++};
 +
-+一意性の単位は `clubId + requestId` です。
-+別requestIdで既存一致候補を明示選択すれば、同じ内容を再作成できます。
-+別の管理者への引継ぎ・新しいpreviewを、結果不明の同一操作の代替にしないでください。
++/**
++ * preview入力と実行入力に対応する項目名。
++ */
++export type EventPracticeBatchField = // 入力項目名型
++  | keyof EventPracticeBatchFormValues // フォーム入力値型
++  | "selectedDates" // 値を限定するリテラル型
++  | "requestId" // 値を限定するリテラル型
++  | "previewFingerprint"; // 値を限定するリテラル型
 +
-+## ユーザー操作からDBまでの確認箇所
++/**
++ * 検証済み値と、安全な項目エラー・フォームエラーを区別する結果型。
++ */
++export type EventPracticeBatchValidation<T> = // 入力検証の結果型 / 検証成功時のデータ型
++  | {
++      success: true; // 値を限定するリテラル型
++      data: T; // 検証成功時のデータ型
++    }
++  | {
++      success: false; // 値を限定するリテラル型
++      fieldErrors: FieldErrors<EventPracticeBatchField>; // 項目別エラーの型 / 入力項目名型
++      formError: string | null; // 文字列型 / 未設定を表すnull型
++    };
 +
-+以下はリポジトリルートからのパスです。
++/**
++ * Clientへ返す生成予定のUTC ISO日時。終了は必須、集合は任意。
++ */
++export type EventPracticeBatchPreviewDateTimes = { // Clientへ返す生成予定のUTC ISO日時型
++  startAt: string; // 文字列型
++  endAt: string; // 文字列型
++  meetingAt: string | null; // 文字列型 / 未設定を表すnull型
++};
 +
-+| 段階 | ファイル・関数、入力と出力 | DB変更 |
-+| --- | --- | --- |
-+| 管理者入口 | `app/(club-app)/club/[clubSlug]/admin/events/page.tsx / AdminEventsMonthPage`。表示月から複製previewへのリンクを作る | 既存一覧の読取。複製はしない |
-+| 認可 | `app/(club-app)/club/club-app-authorization.ts / requireClubAppAdminAccess`。slugとAuth本人からクラブ・所属のcontextを得る | 本人・所属・プランの確認。権限を作成しない |
-+| preview | `app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/page.tsx / EventMonthCopyPage` → `src/application/club/event/get-event-month-copy.ts / getEventMonthCopyPreview`。contextと対象月から限定DTO・fingerprintを得て、新しいrequestIdとbound Actionを渡す | 読取のみ |
-+| 候補取得・変換 | `src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts / findEventMonthCopyPreviewData` → `domain/club/event/event-month-copy-date-times.ts / convertEventMonthCopyDateTimes`。最新クラブ・所属、前月開始の最大101行、コピー列一致を取得し、新旧日時・補正・除外を返す | 読取のみ |
-+| 選択と送信 | `app/(club-app)/club/[clubSlug]/admin/events/copy-previous-month/EventMonthCopyForm.tsx / EventMonthCopyForm` → 同ディレクトリの `actions.ts / copyPreviousMonthEventsAction`。対象月・選択元ID・requestId・previewFingerprintを再認可・構造検証・bound値照合する | ここまで複製なし。clubId・実行者・本文をclient入力から採用しない |
-+| 一括保存 | `src/application/club/event/copy-event-month.ts / copyPreviousMonthEvents` → `src/infrastructure/prisma/repositories/event-month-copy-mutation-repository.ts / createEventMonthCopyBatch`。contextのscopeと正規化入力を渡す。最新認可、完了記録の先行照合、新規だけ再previewとfingerprint照合を行い、固定outcomeと最小receiptを返す | Serializable transactionでClubEventのDRAFT群とClubEventBatchOperationを一体保存。途中失敗でrollback。replayは追加書込みなし |
-+| 完了表示 | Action → `app/(club-app)/club/revalidate-club-paths.ts / revalidateClubEventPaths` → 固定管理者一覧。`domain/club/event/event-toast.ts / getClubEventToastMessage`が固定文言を返す | 再検証・遷移はcommitの外。再保存しない |
++/**
++ * 後続の日時生成で候補を選択不可にする理由。
++ */
++export type EventPracticeBatchExclusionReason = // 後続の日時生成で候補を選択不可にする理由型
++  | "NONEXISTENT_LOCAL_TIME" // 値を限定するリテラル型
++  | "AMBIGUOUS_LOCAL_TIME" // 値を限定するリテラル型
++  | "INVALID_INTERVAL" // 値を限定するリテラル型
++  | "OUT_OF_RANGE" // 値を限定するリテラル型
++  | "INVALID_DATE_TIME"; // 値を限定するリテラル型
 +
-+本体の接続に後続粒度待ちはありません。実環境での受入結果は別に記録します。
-+P2034は初回の後に最大3回再試行し、上限ではRESULT_UNKNOWNです。
-+P2002後は別transactionで再認可し、完了記録の照合だけを行います。
-+該当処理の`existingOnly`は「公開済みイベントだけ」の意味ではありません。
-+`skipDuplicates: false`は重複を黙ってスキップする設定でもありません。
-+既存コメントのこれらの不整合は、コードを変更せず実装の制御に合わせて説明しています。
++/**
++ * 選択を禁止せず、previewで確認を促す警告。
++ */
++export type EventPracticeBatchWarning = "MEETING_AFTER_START"; // 選択を禁止せず、previewで確認を促す警告型 / 値を限定するリテラル型
 +
-+## コード試験・専用DB試験
++/**
++ * 1日1件の限定preview。既存イベントの本文・モデル・IDは含めない。
++ */
++export type EventPracticeBatchPreviewItem = { // 1日1件の限定preview型
++  date: string; // 文字列型
++  dates: EventPracticeBatchPreviewDateTimes | null; // Clientへ返す生成予定のUTC ISO日時型 / 未設定を表すnull型
++  exclusionReason: EventPracticeBatchExclusionReason | null; // 後続の日時生成で候補を選択不可にする理由型 / 未設定を表すnull型
++  warnings: readonly EventPracticeBatchWarning[]; // 選択を禁止せず、previewで確認を促す警告型
++  duplicate: boolean; // 真偽値型
++  initiallySelected: boolean; // 真偽値型
++};
 +
-+### DBへ接続しない試験
++/**
++ * 正規化入力、現在のtimezone、候補と件数を持つpreview成功データ。
++ */
++export type EventPracticeBatchPreviewReady = { // preview成功データ型
++  outcome: "READY"; // 値を限定するリテラル型
++  input: EventPracticeBatchCommonInput; // 構造検証・正規化した共通入力型
++  timezone: string; // 文字列型
++  fingerprint: string; // 文字列型
++  items: readonly EventPracticeBatchPreviewItem[]; // 1日1件の限定preview型
++  candidateCount: number; // 数値型
++  selectableCount: number; // 数値型
++};
 +
-+先に型・Lintを確認します。下記は既存の依存を使用します。
++/**
++ * 候補0件を含む成功と、超過・権限拒否・取得失敗を区別するpreview結果。
++ */
++export type EventPracticeBatchPreview = // preview結果型
++  | EventPracticeBatchPreviewReady // preview成功データ型
++  | {
++      outcome: "TOO_MANY" | "FORBIDDEN" | "PREVIEW_FAILED"; // 値を限定するリテラル型
++    };
 +
-+```sh
-+npm run typecheck
-+npm run lint
-+```
++/**
++ * 成功ledgerから返す対象月と件数だけの保存完了情報。
++ */
++export type EventPracticeBatchReceipt = { // 対象月・件数のreceipt型
++  targetMonth: string; // 文字列型
++  createdCount: number; // 数値型
++};
 +
-+F10の単体・mock試験と、ガードの単体試験を実行します。
++/**
++ * 保存せず拒否した場合と、保存結果を確認できない場合を判別するコード。
++ */
++export type EventPracticeBatchFailureOutcome = // 拒否・結果不明のコード型
++  | "VALIDATION_FAILED" // 値を限定するリテラル型
++  | "FORBIDDEN" // 値を限定するリテラル型
++  | "PREVIEW_CHANGED" // 値を限定するリテラル型
++  | "CONFLICT" // 値を限定するリテラル型
++  | "CREATE_FAILED" // 値を限定するリテラル型
++  | "RESULT_UNKNOWN"; // 値を限定するリテラル型
 +
-+```sh
-+RUN_EVENT_MONTH_COPY_TESTS=0 RUN_DB_INTEGRATION_TESTS=0 \
-+  npx vitest run tests/event-month-copy*.test.ts
-+```
++/**
++ * 一括保存の新規完了・replay完了と、安全な失敗結果の契約。
++ */
++export type EventPracticeBatchResult = // 一括保存結果型
++  | {
++      outcome: "CREATED" | "ALREADY_COMPLETED"; // 値を限定するリテラル型
++      receipt: EventPracticeBatchReceipt; // 対象月・件数のreceipt型
++    }
++  | {
++      outcome: EventPracticeBatchFailureOutcome; // 拒否・結果不明のコード型
++    };
 +
-+この実行では専用DBの20ケースがskipされます。DBの保証を得た結果として扱いません。
-+通常の `test:db` の列挙対象には、この専用試験を含めていません。
-+`verify:local`もF10専用script・flagを設定しません。flag未指定では、
-+内部の `npm test` でもF10のDBケースはskipです。
++/**
++ * 保存済みのまま一覧の再読込が必要な場合も表せる成功データ。
++ */
++export type EventPracticeBatchActionData = EventPracticeBatchReceipt & { // 保存後の成功データ型 / 対象月・件数のreceipt型
++  needsReload: boolean; // 真偽値型
++};
 +
-+| 実行対象 | 確認するもの | 保証範囲の限界 |
-+| --- | --- | --- |
-+| `tests/event-month-copy-form.test.ts`・`tests/event-month-copy-policy.test.ts` | 入力境界、コピー列、完全一致・候補間一致 | 実DB制約や認証通信を行わない |
-+| `tests/event-month-copy-date-times.test.ts` | 月末・閏年・終日・DST gap／fold・秒精度・期間逆転 | ブラウザーの実表示は別途確認 |
-+| `tests/event-month-copy-fingerprint.test.ts` | scope・元予定・timezone・一致状態の変更検出、正規化 | 実並列の保証ではない |
-+| `tests/event-month-copy-read-repository.test.ts`・`tests/event-month-copy-mutation-repository.test.ts` | 上限付きquery、再認可、replay、有限retry、保存境界 | DB呼出しをmock。実rollback・unique・FKは専用DB試験で確認 |
-+| `tests/event-month-copy-services.test.ts` | 最小DTO、初期選択、結果契約、機密情報の非返却 | Repositoryをmock |
-+| `tests/event-month-copy-actions.test.ts` | 共通認可、直接呼出し、入力改変、再検証・固定遷移 | 実Auth通信・HTTP Origin拒否の証明にはならない |
-+| `tests/event-month-copy-pages.test.ts`・`tests/event-month-copy-forms.test.ts`・`tests/event-month-copy-navigation.test.ts` | Page引数、bound値、表示、同一入力の再送、導線・toast | 静的描画・hook等のmock。実フォーカス・通信断・読み上げは手動 |
++/**
++ * preview Actionの入力・状態。新しい操作IDは成功後にサーバーが設定する。
++ */
++export type EventPracticeBatchPreviewActionState = Omit< // preview Actionの入力・状態型 / 指定したプロパティを除く型
++  ActionState< // 入力・エラー・成功データを持つAction状態型
++    EventPracticeBatchFormValues, // フォーム入力値型
++    EventPracticeBatchField, // 入力項目名型
++    EventPracticeBatchPreviewReady // preview成功データ型
++  >,
++  "status" | "data" // 値を限定するリテラル型
++> & (
++  | {
++      status: "idle"; // 値を限定するリテラル型
++      outcome?: never; // 値を許可しない型
++      data?: never; // 値を許可しない型
++    }
++  | {
++      status: "error"; // 値を限定するリテラル型
++      outcome: "VALIDATION_FAILED" | "TOO_MANY" | "FORBIDDEN" | "PREVIEW_FAILED"; // 値を限定するリテラル型
++      data?: never; // 値を許可しない型
++    }
++  | {
++      status: "success"; // 値を限定するリテラル型
++      outcome: "READY"; // 値を限定するリテラル型
++      data: EventPracticeBatchPreviewReady; // preview成功データ型
++    }
++);
 +
-+### 専用の使い捨てDBだけで行う試験
++/**
++ * 保存Actionの入力・状態。結果不明を保存済みや再preview可能な失敗と混同しない。
++ */
++export type EventPracticeBatchActionState = Omit< // 保存Actionの入力・状態型 / 指定したプロパティを除く型
++  ActionState< // 入力・エラー・成功データを持つAction状態型
++    EventPracticeBatchInput, // 保存入力型
++    EventPracticeBatchField, // 入力項目名型
++    EventPracticeBatchActionData // 保存後の成功データ型
++  >,
++  "status" | "data" // 値を限定するリテラル型
++> & (
++  | {
++      status: "idle"; // 値を限定するリテラル型
++      outcome?: never; // 値を許可しない型
++      data?: never; // 値を許可しない型
++    }
++  | {
++      status: "error"; // 値を限定するリテラル型
++      outcome: EventPracticeBatchFailureOutcome; // 拒否・結果不明のコード型
++      data?: never; // 値を許可しない型
++    }
++  | {
++      status: "success"; // 値を限定するリテラル型
++      outcome: "CREATED" | "ALREADY_COMPLETED"; // 値を限定するリテラル型
++      data: EventPracticeBatchActionData; // 保存後の成功データ型
++    }
++);
+diff --git a/tests/event-practice-batch-form.test.ts b/tests/event-practice-batch-form.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba3df7641dfdc849f5ba4d7f37b74473bdc935af
+--- /dev/null
++++ b/tests/event-practice-batch-form.test.ts
+@@ -0,0 +1,702 @@
++// tests/event-practice-batch-form.test.ts
++// DB・Auth・Nextへ接続せず、定期練習入力の信頼境界と限定結果型を検証する。
 +
-+対象は `tests/event-month-copy.flow.integration.test.ts` です。
-+ガードを通過後に専用PrismaPg clientを生成し、Service・Repositoryと実DBを接続します。
-+実Auth・Storage・LINE・メールは使いません。fixtureのAppUserはログイン用Authアカウントではありません。
++import {
++  expect,
++  expectTypeOf,
++  it,
++} from "vitest";
 +
-+接続条件は同ファイルの `enabled`・`localConfiguration` を正本とします。
++import {
++  isEventPracticeBatchTargetMonth, // 前月を必要としない単一の対象月を検証する関数
++  parseEventPracticeBatchFormData, // 保存用FormDataの構造と入力値を検証する関数
++  parseEventPracticeBatchPreviewFormData, // preview用FormDataから共通入力だけを検証する関数
++  validateEventPracticeBatchInput, // 共通入力・選択日・識別子を検証する関数
++  validateEventPracticeBatchPreviewInput, // 共通入力を検証・正規化する関数
++} from "@/domain/club/event/event-practice-batch-form";
++import {
++  EVENT_PRACTICE_BATCH_MAX_COUNT, // 候補と選択の最大件数31件
++  type EventPracticeBatchActionData, // 保存済みのreceiptと再読込指示の型
++  type EventPracticeBatchActionState, // 保存成功・結果不明等を判別するAction state型
++  type EventPracticeBatchCommonInput, // 構造検証・正規化した共通入力型
++  type EventPracticeBatchField, // 共通入力と実行入力の項目名型
++  type EventPracticeBatchInput, // 共通入力・選択日・操作識別子を持つ型
++  type EventPracticeBatchPreview, // preview成功と取得失敗等を分ける型
++  type EventPracticeBatchPreviewActionState, // preview入力と成功データを分けるAction state型
++  type EventPracticeBatchPreviewReady, // 共通入力と限定候補を持つpreview成功データ型
++  type EventPracticeBatchResult, // 作成済み・replay・拒否・結果不明を分ける型
++  type EventPracticeBatchValidation, // 検証成功と安全なエラーを区別する型
++} from "@/domain/club/event/event-practice-batch-types";
 +
-+- `RUN_EVENT_MONTH_COPY_TESTS=1`・`RUN_DB_INTEGRATION_TESTS=1`の両方が必要。
-+  専用scriptがこの2つを設定する。
-+- 別途 `EVENT_MONTH_COPY_DISPOSABLE=1` が必要。scriptで自動同意はしない。
-+- `NODE_ENV`・`VERCEL_ENV`がproductionではないこと。
-+- `DATABASE_URL`はpostgres／postgresql、hostはlocalhost／127.0.0.1、portは54322、DBはpostgres。
-+  ユーザー名・パスワードがあり、前後空白・query・fragmentを含まないこと。
-+- 値が空でない `PG*` 環境変数を拒否する。ドライバーの接続先上書きを持ち込まない。
-+- F10までのmigrationとClient生成が完了し、専用clientの接続roleに必要なDB権限があること。
-+  anon・authenticatedのData API権限を緩めて通す試験ではない。
++const REQUEST = "550e8400-e29b-41d4-a716-446655440000";
++const FINGERPRINT = "ab".repeat(32); // 文字列を繰り返すメソッド
++const PRIVATE = "PRIVATE_INPUT_SQL_TOKEN";
 +
-+既存のdotenv-cliを外側から使う場合の例です。担当者が接続先を確認してから実行します。
++/**
++ * DBやtimezoneを必要としない、独立した正常な共通入力を作る。
++ */
++function common(): EventPracticeBatchCommonInput { // 共通入力を作る関数 / 構造検証・正規化した共通入力型
++  return {
++    targetMonth: "2026-01",
++    periodStart: "2026-01-01",
++    periodEnd: "2026-01-31",
++    weekdays: [1, 3, 5],
++    title: "練習",
++    startTime: "18:00",
++    endTime: "20:00",
++    location: null,
++    meetingTime: null,
++    meetingLocation: null,
++    targetRoles: ["OWNER", "MEMBER"],
++  };
++}
 +
-+```sh
-+npx dotenv-cli -e .env.local -- env EVENT_MONTH_COPY_DISPOSABLE=1 \
-+  npm run test:event-month-copy:local
-+```
++/**
++ * 正常な選択日と操作IDを持つ保存入力を作る。
++ */
++function input(): EventPracticeBatchInput { // 保存入力を作る関数 / 保存入力型
++  return {
++    ...common(), // 共通入力を作る関数
++    selectedDates: ["2026-01-02"],
++    requestId: REQUEST,
++    previewFingerprint: FINGERPRINT,
++  };
++}
 +
-+期待結果はガード22件と実DB20ケースの **42件成功・失敗0・skip 0** です。
-+ガード違反や固定エラーは成功扱いせず、接続設定・migration・該当ケースを確認します。
-+SQL・接続エラーの原文を共有せず、ケース名と機密情報を除いた結果を担当者へ伝えます。
-+試験は登録済みfixtureのclubId・userIdに限定してcleanupします。
-+中断等で残存した場合も、登録されたfixture範囲を確認して担当者へ引き継ぎ、全件削除は行いません。
++/**
++ * 単一・反復項目を、実際のブラウザーと同じFormDataへ写す。
++ */
++function form(execute = true): FormData { // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数 / 送信フォームの型・コンストラクター
++  const data = execute ? input() : common(); // 保存入力を作る関数 / 共通入力を作る関数
++  const result = new FormData(); // 送信フォームの型・コンストラクター
++  for (const [field, value] of Object.entries(data)) { // キーと値の組を取得するメソッド
++    if (Array.isArray(value)) { // 配列かを調べる関数
++      for (const item of value) {
++        result.append(field, String(item)); // フォームへ値を追加するメソッド / 値を文字列へ変換する関数
++      }
++    } else if (value !== null) {
++      result.set(field, String(value)); // フォームの値を設定するメソッド / 値を文字列へ変換する関数
++    }
++  }
++  return result;
++}
 +
-+| 専用DBの確認 | 内容 |
-+| --- | --- |
-+| 件数・コピー値 | 100件一体保存／101件preview拒否。他club・前々月開始の除外、元予定不変、DRAFT・実行者・公開日時null・previewと日時一致 |
-+| 関連行 | 元のPDF添付metadata・既読・個人メモ・LINE履歴が生成行へコピーされない。実PDF・配送を使わない |
-+| 冪等性 | 同requestIdの逐次／実並列、異入力／異actorの衝突、元・生成予定の変更／削除後のreplay |
-+| rollbackと再試行 | 件数不一致・CHECK違反後の全体rollback。P2034をcommit前へ注入して有限retry・上限・同一入力での確認を検証 |
-+| 変更・最新権限 | preview後の元予定・timezone・既存一致変更、異requestIdの実並列。Membership失効・role・プラン変更で拒否 |
-+| DB制約と権限 | unique・同クラブFK・clubId不変・CHECK・Membership削除時のSetNull。RLS有効・policyなし・PUBLIC／anon／authenticated権限metadata |
++/**
++ * 固定エラー・未検証dataの非返却・機密情報の非含有を共通で検証する。
++ */
++function failure( // 安全な検証失敗を確認する関数
++  result: EventPracticeBatchValidation<unknown>, // 入力検証の結果型 / 未検証の値を表す型
++  field?: EventPracticeBatchField, // 入力項目名型
++): void { // 戻り値を持たない型
++  expect(result.success).toBe(false); // 値の一致を検証するメソッド / 期待値を検証する関数
++  if (!result.success) {
++    if (field) {
++      expect(result.fieldErrors[field]).toBeDefined(); // 値の存在を検証するメソッド / 期待値を検証する関数
++    }
++    expect(result).not.toHaveProperty("data"); // プロパティの存在を検証するメソッド / 期待値を検証する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を検証する関数 / 値をJSON文字列へ変換する関数
++  }
++}
 +
-+P2034と件数不一致は試験側の障害注入です。自然発生した競合の再現結果とは区別します。
-+実並列・CHECK違反・transaction rollback・権限metadataは、専用DB実行で確認する項目です。
-+100件の所要時間も実行環境と併せて記録し、本作業で性能測定済みとはしません。
++/**
++ * 配列やnullも1つの値として表形式テストへ渡す。
++ */
++function row(value: unknown): [unknown] { // 配列やnullも1つの値として表形式テストへ渡す関数 / 未検証の値を表す型
++  return [value];
++}
 +
-+## 実ブラウザー・HTTP受入確認表
++it.each(["0001-01", "0001-02", "2026-01", "9999-12"])( // 表形式の試験を登録する関数
++  "%sは前月の制約を持たないF11の対象月として受理する",
++  /**
++   * F10専用の最小月をF11入力へ持ち込まない。
++   */
++  (month) => { // 検証や試験に使うコールバック
++    expect(isEventPracticeBatchTargetMonth(month)).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数 / F11の対象月を厳密に検証する関数
++  },
++);
 +
-+使い捨てクラブ、既存の承認済み手順で用意したテスト用Authアカウント、対象月を使用します。
-+実DB試験のfixtureをAuthログインに流用しません。
-+本番アカウント・実PDF・外部配送は使わず、コードmockの成功をこの表へ転記しません。
-+各行は結果、実施日、担当、環境、機密情報を除いた証跡・未実施理由を記録します。
++it.each([ // 表形式の試験を登録する関数
++  undefined,
++  null,
++  [],
++  ["2026-01"],
++  202601,
++  "",
++  "0000-01",
++  "2026-00",
++  "2026-13",
++  "2026-1",
++  "10000-01",
++  " 2026-01",
++  "2026-01\n",
++].map(row))( // 各要素を変換するメソッド / 配列やnullも1つの値として表形式テストへ渡す関数
++  "不正な対象月%#はfallbackせず拒否する",
++  /**
++   * 型・桁数・末尾改行が安全な項目エラーとなることを確認する。
++   */
++  (targetMonth) => { // 検証や試験に使うコールバック
++    expect(isEventPracticeBatchTargetMonth(targetMonth)).toBe(false); // 値の一致を検証するメソッド / 期待値を検証する関数 / F11の対象月を厳密に検証する関数
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      targetMonth,
++    }), "targetMonth");
++  },
++);
 +
-+| ID | 操作・条件 | 期待結果 | 結果 |
-+| --- | --- | --- | --- |
-+| M01 | STANDARDのOWNER・COACH・OFFICERで一覧→preview→保存 | 各ロールが同クラブで実行できる。対象月・全ジャンルの候補とDRAFT作成を確認 | 未確認 |
-+| M02 | 未ログイン、MEMBER、失効所属、他クラブ、STARTER・PROでURLへ直接アクセス | ログイン遷移・認可拒否。別クラブの内容表示や保存を行わない | 未確認 |
-+| M03 | 月未指定、不正月、配列query、前月開始0件・100件・101件 | 不正月を現在月へfallbackしない。0件送信不可、100件可、101件は選択前に拒否 | 未確認 |
-+| M04 | 公開済み・下書き、前々月開始で前月にも継続する予定を用意 | 前月開始の両状態だけ候補。元予定は変更しない | 未確認 |
-+| M05 | Asia/Tokyoで1月31日→2月、閏年、UTCでは前日の日時 | クラブ現地日で月末補正。新旧日時と補正対象が正しい | 未確認 |
-+| M06 | 単日・複数日終日、終了・集合が対象月を跨ぐ予定 | 終日の排他的終了を保持し、終了・集合を対象月へ切り詰めない | 未確認 |
-+| M07 | DSTを跨ぐ通常日時、gap／foldとなる日時 | 通常日時の現地時刻・offset・秒精度を保持。gap／foldは選択不可 | 未確認 |
-+| M08 | DRAFT／PUBLISHEDの既存完全一致、候補同士の一致 | 既存一致は初期off・明示選択可。候補間一致は代表だけ初期on、複数選択は拒否 | 未確認 |
-+| M09 | 不正source、期間逆転、見出しにHTMLに見える文字列 | 不正候補は理由付きで選択不可。見出しは文字として表示され、スクリプト等を実行しない | 未確認 |
-+| M10 | 保存直前にテスト環境の元予定・timezone・既存一致を変更 | PREVIEW_CHANGEDで保存を止め、再previewして最新内容を確認できる | 未確認 |
-+| M11 | 保存を連打・Enter連続、同payloadを再送 | 処理中の操作を抑止し、同requestIdで1群・1記録。別requestIdは別操作と区別 | 未確認 |
-+| M12 | テスト環境で送信後に通信を遮断し復帰、応答喪失も確認 | 同じタブとpayloadで再送確認。結果不明で新操作を案内せず、保存済みなら追加しない | 未確認 |
-+| M13 | 保存後の再検証だけが失敗する条件を再現 | 保存済み表示と一覧再読込リンク。再実行ボタンを出さず、保存を再度呼ばない | 未確認 |
-+| M14 | 成功後の管理者月別一覧、フィルター、toastと下書き | 対象月・status=ALLへ戻り固定toast。作成件数・非コピー列・自動公開／通知なしを確認 | 未確認 |
-+| M15 | キーボードのみで選択・送信・再確認、読み上げ・狭い画面 | labelとcheckboxが対応し、補正・除外・エラー・pending・保存済みが認識できる。フォーカス位置と復帰を実機確認 | 未確認 |
-+| H01 | 正規画面の実際のNext Actionリクエストを、正当なセッションで直接再送 | UIを経由しなくても再認可・入力照合。同payloadのreplayで増えない | 未確認 |
-+| H02 | テスト用リクエストで他club元ID・未許可field・bound値・所属／権限失効を検証 | 有効な形式でも改変・越境・失効を拒否し、別クラブの情報や生例外を返さない | 未確認 |
-+| H03 | 実際のNext ActionリクエストでHostと一致しない外部Originを指定 | frameworkのOrigin検証で拒否され、保存が起きない。実環境のProxy経路でも確認 | 未確認 |
++it.each([ // 表形式の試験を登録する関数
++  ["0001-01", "0001-01-01", "0001-01-31"],
++  ["2000-02", "2000-02-29", "2000-02-29"],
++  ["2028-02", "2028-02-01", "2028-02-29"],
++  ["9999-12", "9999-12-31", "9999-12-31"],
++])(
++  "実在日の期間%s %s〜%sを受理する",
++  /**
++   * Gregorian閏年・単日・西暦端点をDateの年特例なしで検証する。
++   */
++  (targetMonth, periodStart, periodEnd) => { // 検証や試験に使うコールバック
++    expect(validateEventPracticeBatchPreviewInput({ // 期待値を検証する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      targetMonth,
++      periodStart,
++      periodEnd,
++    }).success).toBe(true); // 値の一致を検証するメソッド
++  },
++);
 +
-+M13の再現環境・既存の障害注入手段は、この調査では未確認です。
-+コードmockでの保証と分け、再現できなければ理由を付けて保留します。
-+HTTP確認は正規画面のリクエスト形式を利用し、Action ID・Cookie・payloadを公開資料へ保存しません。
-+H03は実際の拒否応答とDB非更新を確認し、特定のHTTPステータスだけで合格にしません。
-+`next.config.ts`の `allowedDevOrigins` はServer ActionのOrigin受入試験の代わりにはなりません。
-+Origin拒否や認可を通すために設定を緩める変更は、この粒度の対象外です。
++it.each([ // 表形式の試験を登録する関数
++  ["2026-02", "2026-02-29", "2026-02-29"],
++  ["1900-02", "1900-02-01", "1900-02-29"],
++  ["2026-04", "2026-04-01", "2026-04-31"],
++  ["2026-01", "2026-01-02", "2026-01-01"],
++  ["2026-01", "2025-12-31", "2026-01-31"],
++  ["2026-01", "2026-01-01", "2026-02-01"],
++  ["2026-01", "2026-01-00", "2026-01-31"],
++  ["2026-01", "2026-01-01", "2026-01-32"],
++  ["2026-01", "2026-1-01", "2026-01-31"],
++  ["2026-01", "2026-01-01\n", "2026-01-31"],
++])(
++  "不正日・逆転・対象月外の期間%#を拒否する",
++  /**
++   * 月跨ぎや32日間を、選択を減らす前に拒否する。
++   */
++  (targetMonth, periodStart, periodEnd) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      targetMonth,
++      periodStart,
++      periodEnd,
++    }));
++  },
++);
 +
-+## F10受入条件との対応と完了記録
++it("表記差を正規化し、元配列を変えず、検証済み値の再検証でも結果が変わらない", // 試験を登録する関数
++  /**
++   * 表記差を持つ入力を検証し、正規化の安定性と元配列の保持を確認する。
++   */
++  () => { // 検証や試験に使うコールバック
++    const source = {
++      ...input(), // 保存入力を作る関数
++      weekdays: [5, 1, 1],
++      title: " 練習 ",
++      location: " 体育館 ",
++      meetingTime: "",
++      meetingLocation: "  ",
++      targetRoles: ["MEMBER", "COACH", "MEMBER"],
++      selectedDates: ["2026-01-30", "2026-01-02"],
++      requestId: REQUEST.toUpperCase(), // 大文字へ変換するメソッド
++      previewFingerprint: FINGERPRINT.toUpperCase(), // 大文字へ変換するメソッド
++    };
++    const before = structuredClone(source); // 値を複製する関数
++    const result = validateEventPracticeBatchInput(source); // 保存入力を検証・正規化する関数
++    expect(result.success).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
++    if (result.success) {
++      expect(result.data).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数
++        ...input(), // 保存入力を作る関数
++        weekdays: [1, 5],
++        location: "体育館",
++        targetRoles: ["OWNER", "COACH", "MEMBER"],
++        selectedDates: ["2026-01-02", "2026-01-30"],
++      });
++      expect(validateEventPracticeBatchInput(result.data)).toEqual(result); // 内容の一致を検証するメソッド / 期待値を検証する関数 / 保存入力を検証・正規化する関数
++      expect(result.data.weekdays).not.toBe(source.weekdays); // 値の一致を検証するメソッド / 期待値を検証する関数
++      expect(result.data.selectedDates).not.toBe(source.selectedDates); // 値の一致を検証するメソッド / 期待値を検証する関数
++    }
++    expect(source).toEqual(before); // 内容の一致を検証するメソッド / 期待値を検証する関数
++  });
 +
-+| F10.mdの受入条件 | コード・mock | 専用DB | 手動 |
-+| --- | --- | --- | --- |
-+| 別クラブのイベントを複製できない | read／mutation Repository・Service・Action試験 | 他club候補除外・他club所属の拒否・同クラブFK | M02・H01・H02・H03 |
-+| 二重送信で同じイベント群が増えない | mutation Repository・Action・フォーム試験 | 逐次／並列replay、異入力衝突、変更／削除後replay | M11・M12 |
-+| timezone込みで月末補正が正しい | date-times・policy・Service・フォーム試験 | 保存日時とpreviewの一致 | M05・M06・M07 |
-+| 生成はDRAFTでPDF・LINE・既読情報なし | mutation Repository・Service・フォーム試験 | コピー列・公開日時null・関連行0・元予定不変 | M01・M04・M14 |
-+| 100件超を実行前に拒否 | 入力・read Repository・Service・Page試験 | 100件保存・101件拒否 | M03 |
++it.each([ // 表形式の試験を登録する関数
++  [[], false],
++  [[0, 1, 2, 3, 4, 5, 6], true],
++  [[0, 1, 2, 3, 4, 5, 6, 0], false],
++])(
++  "曜日の入力数%#を1〜7に制限する",
++  /**
++   * 7曜日を受理し、0個・8個は拒否する。
++   */
++  (weekdays, accepted) => { // 検証や試験に使うコールバック
++    expect(validateEventPracticeBatchPreviewInput({ // 期待値を検証する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      weekdays,
++    }).success).toBe(accepted); // 値の一致を検証するメソッド
++  },
++);
 +
-+| 記録する区分 | 文書作成時点の状態 | 担当者が残す証跡 |
-+| --- | --- | --- |
-+| 文書と実装・コマンドの一致 | 本粒度の静的確認対象 | 基準commit、確認したパス・script、patchのcheck結果 |
-+| 単体・mock・接続ガード | 本作業では未実行・過去結果未確認 | 実行commit、コマンド、成功／失敗／skip件数 |
-+| 実DBの20ケース | 本作業では未実行・過去結果未確認 | 専用使い捨て環境、42件の結果、所要時間、cleanup結果 |
-+| 実Auth・ブラウザー・HTTP | 本作業では未実施・過去結果未確認 | M01〜M15・H01〜H03の結果、担当・日付・環境・残課題 |
++it.each([[7], [-1], [1.5], [NaN], [Infinity], ["1"], [null], "1"].map(row))( // 表形式の試験を登録する関数 / 各要素を変換するメソッド / 配列やnullも1つの値として表形式テストへ渡す関数
++  "直接入力の不正な曜日%#を拒否する",
++  /**
++   * 数字文字列の解釈はFormDataだけで行い、検証済み共通入力は数値に限定する。
++   */
++  (weekdays) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      weekdays,
++    }), "weekdays");
++  },
++);
 +
-+結果は「成功」「失敗」「未実施」「保留」を区別します。
-+必要な受入が未実施なら、文書の追加完了とF10全体の受入完了を分けて報告します。
-+この粒度では試験コード、認証・認可、DB制約、キャッシュ、配送、他フェーズを追加変更しません。
++it.each(["", "18:00", "17:59", "00:00", "24:00", "20:60", "20:00\n", " 20:00"])( // 表形式の試験を登録する関数
++  "必須終了時刻%sが同日の開始より後でない場合を拒否する",
++  /**
++   * 翌日への自動送りや入力補正を行わないことを確認する。
++   */
++  (endTime) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      endTime,
++    }), "endTime");
++  },
++);
++
++it.each(["", "24:00", "18:60", "18:00\n", "9:00"])( // 表形式の試験を登録する関数
++  "不正な開始時刻%#を拒否する",
++  /**
++   * 時分の桁と範囲を検証する。
++   */
++  (startTime) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      startTime,
++    }), "startTime");
++  },
++);
++
++it.each(["", null, "17:30", "18:30"])( // 表形式の試験を登録する関数
++  "任意の当日集合%#は開始後も入力構造として許可する",
++  /**
++   * 警告表示・UTC・DSTの検証は後続で行い、構造検証で独自に禁止しない。
++   */
++  (meetingTime) => { // 検証や試験に使うコールバック
++    expect(validateEventPracticeBatchPreviewInput({ // 期待値を検証する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      meetingTime,
++    }).success).toBe(true); // 値の一致を検証するメソッド
++  },
++);
++
++it.each(["24:00", "18:60", " 17:30", "17:30\n"])( // 表形式の試験を登録する関数
++  "不正な集合時刻%#を拒否する",
++  /**
++   * 任意項目でも値があれば厳密な時刻形式を要求する。
++   */
++  (meetingTime) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      meetingTime,
++    }), "meetingTime");
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  ["title", "あ".repeat(120), true], // 文字列を繰り返すメソッド
++  ["title", "あ".repeat(121), false], // 文字列を繰り返すメソッド
++  ["title", "  ", false],
++  ["location", "あ".repeat(200), true], // 文字列を繰り返すメソッド
++  ["location", "あ".repeat(201), false], // 文字列を繰り返すメソッド
++  ["meetingLocation", "あ".repeat(200), true], // 文字列を繰り返すメソッド
++  ["meetingLocation", "あ".repeat(201), false], // 文字列を繰り返すメソッド
++])(
++  "%sの文字数境界%#を切り捨てず確認する",
++  /**
++   * 共通定数と既存の文字列長規約に合わせて入力境界を検証する。
++   */
++  (field, value, accepted) => { // 検証や試験に使うコールバック
++    expect(validateEventPracticeBatchPreviewInput({ // 期待値を検証する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      [field]: value,
++    }).success).toBe(accepted); // 値の一致を検証するメソッド
++  },
++);
++
++it("公開対象の選択なしでもOWNERを常時含める", // 試験を登録する関数
++  /**
++   * 任意ロールが空でもOWNERが補われることを確認する。
++   */
++  () => { // 検証や試験に使うコールバック
++    const value = common(); // 共通入力を作る関数
++    const result = validateEventPracticeBatchPreviewInput({ // 共通入力を検証・正規化する関数
++      ...value,
++      targetRoles: [],
++    });
++    expect(result.success && result.data.targetRoles).toEqual(["OWNER"]); // 内容の一致を検証するメソッド / 期待値を検証する関数
++  });
++
++it.each([["ADMIN"], ["member"], [PRIVATE], [null], "MEMBER", Array(5).fill("MEMBER")].map(row))( // 表形式の試験を登録する関数 / 各要素を変換するメソッド / 配列を指定値で埋めるメソッド / 配列を生成する関数 / 配列やnullも1つの値として表形式テストへ渡す関数
++  "不正role%#を正規化前に拒否する",
++  /**
++   * helperで不正roleを黙って消して受理しない。
++   */
++  (targetRoles) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      targetRoles,
++    }), "targetRoles");
++  },
++);
++
++it.each([0, 1, 31, 32])( // 表形式の試験を登録する関数
++  "%i件の選択を1〜31件に制限する",
++  /**
++   * 同月の全日を選べる一方、過大入力を拒否する。
++   */
++  (count) => { // 検証や試験に使うコールバック
++    const selectedDates = Array.from({ length: count }, // 配列を生成する関数
++      /**
++       * 境界検証に使う選択日文字列を作る。
++       */
++      (_, index) => `2026-01-${String(index + 1).padStart(2, "0")}`, // 検証や試験に使うコールバック / 文字列の先頭を補うメソッド / 値を文字列へ変換する関数
++    );
++    expect(validateEventPracticeBatchInput({ // 期待値を検証する関数 / 保存入力を検証・正規化する関数
++      ...input(), // 保存入力を作る関数
++      selectedDates,
++    }).success).toBe(count === 1 || count === 31); // 値の一致を検証するメソッド
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  ["2026-01-02", "2026-01-02"],
++  ["2026-02-01"],
++  ["2025-12-31"],
++  ["2026-01-00"],
++  ["2026-01-02\n"],
++  ["550e8400-e29b-41d4-a716-446655440000"],
++  [null],
++  "2026-01-02",
++].map(row))( // 各要素を変換するメソッド / 配列やnullも1つの値として表形式テストへ渡す関数
++  "不正・重複・期間外の選択%#を拒否する",
++  /**
++   * 元イベントUUIDではなく実在する選択日を要求する。
++   */
++  (selectedDates) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchInput({ // 安全な検証失敗を確認する関数 / 保存入力を検証・正規化する関数
++      ...input(), // 保存入力を作る関数
++      selectedDates,
++    }), "selectedDates");
++  },
++);
++
++it("期間内でも選択曜日に一致するかは、この構造検証だけで保証しない", // 試験を登録する関数
++  /**
++   * 期間内の曜日不一致は後続の候補照合へ委ねることを確認する。
++   */
++  () => { // 検証や試験に使うコールバック
++    expect(validateEventPracticeBatchInput({ // 期待値を検証する関数 / 保存入力を検証・正規化する関数
++      ...input(), // 保存入力を作る関数
++      weekdays: [1],
++      selectedDates: ["2026-01-02"],
++    }).success).toBe(true); // 値の一致を検証するメソッド
++  });
++
++it.each([ // 表形式の試験を登録する関数
++  ["requestId", "550e8400-e29b-11d4-a716-446655440000"],
++  ["requestId", REQUEST + "\n"],
++  ["requestId", PRIVATE],
++  ["previewFingerprint", "ab".repeat(31)], // 文字列を繰り返すメソッド
++  ["previewFingerprint", "ab".repeat(33)], // 文字列を繰り返すメソッド
++  ["previewFingerprint", "g".repeat(64)], // 文字列を繰り返すメソッド
++  ["previewFingerprint", FINGERPRINT + "\n"],
++])(
++  "実行識別子%sの不正値%#を拒否する",
++  /**
++   * UUID v4・64桁16進文字列の構造だけを検証する。
++   */
++  (field, value) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchInput({ // 安全な検証失敗を確認する関数 / 保存入力を検証・正規化する関数
++      ...input(), // 保存入力を作る関数
++      [field]: value,
++    }), field as EventPracticeBatchField); // 入力項目名型
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  "targetMonth",
++  "periodStart",
++  "periodEnd",
++  "title",
++  "startTime",
++  "endTime",
++  "location",
++  "meetingTime",
++  "meetingLocation",
++  "requestId",
++  "previewFingerprint",
++])(
++  "単一項目%sは同値の重複でも拒否する",
++  /**
++   * FormDataの先頭値・末尾値だけを使う解釈を防ぐ。
++   */
++  (field) => { // 検証や試験に使うコールバック
++    const data = form(); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    if (!data.has(field)) { // 要素や項目の有無を調べるメソッド
++      data.set(field, ""); // フォームの値を設定するメソッド
++    }
++    data.append(field, String(data.get(field))); // フォームへ値を追加するメソッド / 値を文字列へ変換する関数 / フォームの値を取得するメソッド
++    failure(parseEventPracticeBatchFormData(data)); // 安全な検証失敗を確認する関数 / 保存用FormDataを検証する関数
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  "targetMonth",
++  "periodStart",
++  "periodEnd",
++  "weekdays",
++  "title",
++  "startTime",
++  "endTime",
++  "selectedDates",
++  "requestId",
++  "previewFingerprint",
++])(
++  "必須項目%sの欠落を拒否する",
++  /**
++   * 保存に必要な共通入力と選択・識別子を検証する。
++   */
++  (field) => { // 検証や試験に使うコールバック
++    const data = form(); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.delete(field); // フォームの項目を削除するメソッド
++    failure(parseEventPracticeBatchFormData(data), field as EventPracticeBatchField); // 安全な検証失敗を確認する関数 / 保存用FormDataを検証する関数 / 入力項目名型
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  "targetMonth", "periodStart", "periodEnd", "weekdays", "title", "startTime", "endTime",
++  "location", "meetingTime", "meetingLocation", "targetRoles", "selectedDates", "requestId",
++  "previewFingerprint",
++])(
++  "%sへFileを混入できない",
++  /**
++   * ファイル名や内容を検証エラーへ返さない。
++   */
++  (field) => { // 検証や試験に使うコールバック
++    const data = form(); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.set(field, new File([PRIVATE], "private.txt")); // フォームの値を設定するメソッド / ファイル値のコンストラクター
++    failure(parseEventPracticeBatchFormData(data)); // 安全な検証失敗を確認する関数 / 保存用FormDataを検証する関数
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  "clubId", "membershipId", "userId", "genre", "status", "isAllDay", "content", "belongings",
++  "notes", "startAt", "endAt", "meetingAt", "meetingDate", "returnTo", "createdByMembershipId",
++  "updatedByMembershipId",
++  "firstPublishedAt",
++  "readRequiredAt",
++  "shouldNotifyLine",
++  "attachmentFiles",
++])(
++  "未許可field%sをobjectとFormDataの両方で拒否する",
++  /**
++   * 固定保存列・scope・外部処理の混入を許可しない。
++   */
++  (field) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchInput({ // 安全な検証失敗を確認する関数 / 保存入力を検証・正規化する関数
++      ...input(), // 保存入力を作る関数
++      [field]: PRIVATE,
++    }));
++    const data = form(); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.set(field, PRIVATE); // フォームの値を設定するメソッド
++    failure(parseEventPracticeBatchFormData(data)); // 安全な検証失敗を確認する関数 / 保存用FormDataを検証する関数
++  },
++);
++
++it("previewと保存のFormDataは各validatorと同じ正規化結果になる", // 試験を登録する関数
++  /**
++   * 共通入力と保存入力を各parserへ渡し、正規化結果を比較する。
++   */
++  () => { // 検証や試験に使うコールバック
++    expect(parseEventPracticeBatchPreviewFormData(form(false))).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数 / preview用FormDataを検証する関数 / 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++      success: true,
++      data: common(), // 共通入力を作る関数
++    });
++    expect(parseEventPracticeBatchFormData(form())).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数 / 保存用FormDataを検証する関数 / 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++      success: true,
++      data: input(), // 保存入力を作る関数
++    });
++  });
++
++it.each(["selectedDates", "requestId", "previewFingerprint"])( // 表形式の試験を登録する関数
++  "previewに保存専用の%sを混入できない",
++  /**
++   * previewの入力境界を実行入力から分離する。
++   */
++  (field) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput({ // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++      ...common(), // 共通入力を作る関数
++      [field]: PRIVATE,
++    }));
++    const data = form(false); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.set(field, PRIVATE); // フォームの値を設定するメソッド
++    failure(parseEventPracticeBatchPreviewFormData(data)); // 安全な検証失敗を確認する関数 / preview用FormDataを検証する関数
++  },
++);
++
++it.each(["1\n", " 1", "01", "1.0", "+1", "7", PRIVATE])( // 表形式の試験を登録する関数
++  "FormDataの曜日%#を数字へ勝手に補正しない",
++  /**
++   * Numberだけで変換せず単一桁の0〜6を要求する。
++   */
++  (weekday) => { // 検証や試験に使うコールバック
++    const data = form(false); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.set("weekdays", weekday); // フォームの値を設定するメソッド
++    failure(parseEventPracticeBatchPreviewFormData(data), "weekdays"); // 安全な検証失敗を確認する関数 / preview用FormDataを検証する関数
++  },
++);
++
++it.each([ // 表形式の試験を登録する関数
++  ["weekdays", 7, 8, "1"],
++  ["targetRoles", 4, 5, "MEMBER"],
++  ["selectedDates", 31, 32, "2026-01-01"],
++] as const)( // リテラル値を保持するconst型アサーション
++  "%sの反復項目が上限を超えたら即座に拒否する",
++  /**
++   * 反復選択の上限を配列の正規化より前にも守る。
++   */
++  (field, limit, count, value) => { // 検証や試験に使うコールバック
++    const data = form(); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.delete(field); // フォームの項目を削除するメソッド
++    for (let index = 0;index < count;index += 1) {
++      data.append(field, value); // フォームへ値を追加するメソッド
++    }
++    expect(count).toBe(limit + 1); // 値の一致を検証するメソッド / 期待値を検証する関数
++    failure(parseEventPracticeBatchFormData(data), field); // 安全な検証失敗を確認する関数 / 保存用FormDataを検証する関数
++  },
++);
++
++it("Nextの輸送項目を業務値にせず、任意項目は未設定へ揃える", // 試験を登録する関数
++  /**
++   * 輸送項目を除外し、空欄と任意ロール未指定の正規化を確認する。
++   */
++  () => { // 検証や試験に使うコールバック
++    const data = form(false); // 単一・反復項目を、実際のブラウザーと同じFormDataへ写す関数
++    data.set("$ACTION_ID_transport", PRIVATE); // フォームの値を設定するメソッド
++    data.set("location", "  "); // フォームの値を設定するメソッド
++    data.set("meetingTime", ""); // フォームの値を設定するメソッド
++    data.delete("targetRoles"); // フォームの項目を削除するメソッド
++    const result = parseEventPracticeBatchPreviewFormData(data); // preview用FormDataを検証する関数
++    expect(result.success).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
++    if (result.success) {
++      expect(result.data).toEqual({ // 内容の一致を検証するメソッド / 期待値を検証する関数
++        ...common(), // 共通入力を作る関数
++        targetRoles: ["OWNER"],
++      });
++      expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を検証する関数 / 値をJSON文字列へ変換する関数
++    }
++  });
++
++it.each([ // 表形式の試験を登録する関数
++  null,
++  undefined,
++  [],
++  PRIVATE,
++  new Date(0), // 日時値のコンストラクター
++  Object.create({ inherited: true }), // prototypeを指定してオブジェクトを作る関数
++].map(row))( // 各要素を変換するメソッド / 配列やnullも1つの値として表形式テストへ渡す関数
++  "非plain入力%#から安全なエラーを返す",
++  /**
++   * 辞書以外を通常の業務入力として扱わない。
++   */
++  (value) => { // 検証や試験に使うコールバック
++    failure(validateEventPracticeBatchPreviewInput(value)); // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++    failure(validateEventPracticeBatchInput(value)); // 安全な検証失敗を確認する関数 / 保存入力を検証・正規化する関数
++  },
++);
++
++it("null prototypeの値は受理し、accessor・例外・Symbolを安全に拒否する", // 試験を登録する関数
++  /**
++   * 通常辞書の受理と特殊オブジェクトからの安全な失敗を確認する。
++   */
++  () => { // 検証や試験に使うコールバック
++    expect( // 期待値を検証する関数
++      validateEventPracticeBatchPreviewInput( // 共通入力を検証・正規化する関数
++        Object.assign( // プロパティを写す関数
++          Object.create(null), // prototypeを指定してオブジェクトを作る関数
++          common(), // 共通入力を作る関数
++        ),
++      ).success,
++    ).toBe(true); // 値の一致を検証するメソッド
++    let getterCalled = false;
++    const accessor = Object.defineProperty({ ...common() }, "title", { // プロパティを定義する関数 / 共通入力を作る関数
++      enumerable: true,
++      /**
++       * 検証中に実行されてはいけないgetterを作る。
++       */
++      get() { // 実行時に例外を投げる試験用getter
++        getterCalled = true;
++        throw new Error(PRIVATE); // 例外を生成するコンストラクター
++      },
++    });
++    failure(validateEventPracticeBatchPreviewInput(accessor)); // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++    expect(getterCalled).toBe(false); // 期待値を検証する関数 / 値の一致を検証するメソッド
++    const throwing = new Proxy({}, { // 操作を置き換えるコンストラクター
++      /**
++       * prototype検査中の想定外例外を再現する。
++       */
++      getPrototypeOf() { // prototype検査で例外を投げる試験用メソッド
++        throw new Error(PRIVATE); // 例外を生成するコンストラクター
++      },
++    });
++    failure(validateEventPracticeBatchPreviewInput(throwing)); // 安全な検証失敗を確認する関数 / 共通入力を検証・正規化する関数
++    failure(validateEventPracticeBatchInput({ // 安全な検証失敗を確認する関数 / 保存入力を検証・正規化する関数
++      ...input(), // 保存入力を作る関数
++      [Symbol(PRIVATE)]: PRIVATE, // 固有のキーを生成する関数
++    }));
++    failure(parseEventPracticeBatchFormData({} as FormData)); // 安全な検証失敗を確認する関数 / 保存用FormDataを検証する関数 / 送信フォームの型・コンストラクター
++  });
++
++it("結果契約は0件preview・保存済み・結果不明・再読込を区別する", // 試験を登録する関数
++  /**
++   * 限定結果の値と、成功時だけ必須になるデータの型を確認する。
++   */
++  () => { // 検証や試験に使うコールバック
++    const preview: EventPracticeBatchPreview = { // preview結果型
++      outcome: "READY",
++      input: common(), // 共通入力を作る関数
++      timezone: "Asia/Tokyo",
++      fingerprint: FINGERPRINT,
++      items: [],
++      candidateCount: 0,
++      selectableCount: 0,
++    };
++    const unknown: EventPracticeBatchResult = { // 一括保存結果型
++      outcome: "RESULT_UNKNOWN",
++    };
++    const saved: EventPracticeBatchActionState = { // 保存Actionの入力・状態型
++      status: "success",
++      outcome: "ALREADY_COMPLETED",
++      values: input(), // 保存入力を作る関数
++      fieldErrors: {},
++      formError: null,
++      requestId: REQUEST,
++      data: {
++        targetMonth: "2026-01",
++        createdCount: 1,
++        needsReload: true,
++      },
++    };
++    expect(preview.items).toHaveLength(0); // 件数を検証するメソッド / 期待値を検証する関数
++    expect(unknown).not.toHaveProperty("receipt"); // プロパティの存在を検証するメソッド / 期待値を検証する関数
++    expect(saved.data.needsReload).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
++    expect(EVENT_PRACTICE_BATCH_MAX_COUNT).toBe(31); // 値の一致を検証するメソッド / 期待値を検証する関数
++    expectTypeOf<Extract<EventPracticeBatchActionState, { status: "success" }>["data"]>() // 型の期待値を検証する関数 / 条件に合う型を取り出す型 / 保存Actionの入力・状態型 / 値を限定するリテラル型
++      .toEqualTypeOf<EventPracticeBatchActionData>(); // 型の一致を検証するメソッド / 保存後の成功データ型
++    expectTypeOf<Extract<EventPracticeBatchPreviewActionState, { status: "success" }>["data"]>() // 型の期待値を検証する関数 / 条件に合う型を取り出す型 / preview Actionの入力・状態型 / 値を限定するリテラル型
++      .toEqualTypeOf<EventPracticeBatchPreviewReady>(); // 型の一致を検証するメソッド / preview成功データ型
++  });
