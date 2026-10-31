@@ -4,7 +4,7 @@
 "use server";
 
 import { redirect } from "next/navigation";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { createClient } from "@/src/infrastructure/supabase/server";
 
 type PasswordActionState = {
@@ -18,7 +18,7 @@ export async function updatePassword(
   _state: PasswordActionState,
   formData: FormData
 ): Promise<PasswordActionState> {
-  await requireAdmin();
+  const user = await requireWebsiteAdmin();
 
   const currentPassword = String(formData.get("currentPassword") ?? "");
   const newPassword = String(formData.get("newPassword") ?? "");
@@ -52,35 +52,38 @@ export async function updatePassword(
   }
 
   const supabase = await createClient();
+if (!user.email) {
+  console.error(
+    "HP管理者のSupabase Authユーザーにメールアドレスがありません。",
+    {
+      userId: user.id,
+    }
+  );
 
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
+  return {
+    error: PASSWORD_UPDATE_ERROR_MESSAGE,
+  };
+}
 
-  if (userError || !user?.email) {
-    console.error("パスワード変更前のユーザー取得に失敗しました。", {
-      message: userError?.message,
-      status: userError?.status,
-      name: userError?.name,
-    });
-
-    return {
-      error: PASSWORD_UPDATE_ERROR_MESSAGE,
-    };
-  }
 
   //現在のPWと入力した現在のPWを比較する
-  const { error: signInError } = await supabase.auth.signInWithPassword({
-    email: user.email,
-    password: currentPassword,
-  });
+const {
+  data: signInData,
+  error: signInError,
+} = await supabase.auth.signInWithPassword({
+  email: user.email,
+  password: currentPassword,
+});
 
-  if (signInError) {
-    return {
-      error: "現在のパスワードが正しくありません。",
-    };
-  }
+if (
+  signInError ||
+  !signInData.user ||
+  signInData.user.id !== user.id
+) {
+  return {
+    error: "現在のパスワードが正しくありません。",
+  };
+}
 
   //新しいPWへ上書きする
   const { error } = await supabase.auth.updateUser({

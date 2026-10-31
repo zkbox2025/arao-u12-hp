@@ -106,9 +106,6 @@ function applySessionApplicationAutoReplyTemplate({
 export async function sendSessionApplicationAutoReply(
   input: SessionApplicationAutoReplyInput
 ) {
-  if (!mailFrom) {
-    throw new Error("MAIL_FROM is not defined");
-  }
 
   const pageKey = "SESSION_APPLICATION" as const;
   const blockKey = "AUTO_REPLY_BODY" as const;
