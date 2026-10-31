@@ -60,6 +60,7 @@ export type EventPracticeBatchPreviewData =
 
 /**
  * 定期練習生成のプレビュー前の入力値を検証し、日時候補を生成し、プレビュー表示情報の生成結果を返す関数
+ * 重複チェックをすることでDBに追加予定のイベントが先に追加されてないかを確認する
  */
 export async function findEventPracticeBatchPreviewData( // 認可と上限付きpreview読取を行う関数
   input: EventPracticeBatchPreviewDataInput, // 認可scopeと定期練習共通入力の型

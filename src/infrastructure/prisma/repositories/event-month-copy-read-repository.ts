@@ -92,7 +92,7 @@ function monthStart( // クラブ現地月初のUTC値を作る関数
 
 /**
  * 前月のイベントを翌月に丸ごと複製するための、事前プレビューデータ作成（重複チェック付き）関数
- * 【修正】本人・クラブ・所属の識別子から最新権限を確認し、前月取得・日時変換・一致検索を行う。
+ * 重複チェックをすることでDBに追加予定のイベントが先に追加されてないかを確認する
  */
 export async function findEventMonthCopyPreviewData( // 【追加】認可・前月取得・日時変換・一致検索を行う関数
   input: EventMonthCopyPreviewDataInput, // 最新認可から得たクラブ・所属・Auth本人の識別子と、複製先年月。

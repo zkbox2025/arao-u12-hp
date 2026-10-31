@@ -189,7 +189,7 @@ function eventData(
 }
 
 /**
- * 前月のイベントを翌月に一括コピーして、その『完了記録』をDBに安全に保存する関数
+ * 前月のイベントを翌月に一括コピーして、その『完了記録』をDBに安全に保存する関数（作成イベントは下書きとしてDBに保存）
  * P2034だけ初回後最大3回再試行し、P2002後は別transactionで再認可して記録だけ照合する。
  */
 export async function createEventMonthCopyBatch( // 冪等な前月イベント複製の公開関数
@@ -238,7 +238,7 @@ export async function createEventMonthCopyBatch( // 冪等な前月イベント�
           if (existingOnly) {//既存の公開イベントのみを対象とする場合は、衝突とする
             return { outcome: "CONFLICT" };
           }
-          const preview = await findEventMonthCopyPreviewData({ //事前プレビューデータ作成（重複チェック付き）関数
+          const preview = await findEventMonthCopyPreviewData({ //【保存段階で再度実行する！データ更新されてないかの照合のため】事前プレビューデータ作成（重複チェック付き）関数
             ...actorScope,
             targetMonth: normalized.targetMonth,
           }, transaction);
@@ -250,13 +250,13 @@ export async function createEventMonthCopyBatch( // 冪等な前月イベント�
               outcome: preview.outcome === "TOO_MANY" ? "PREVIEW_CHANGED" : "CREATE_FAILED",
             };
           }
-          const fingerprint = buildEventMonthCopyFingerprint({ // プレビュー画面の状態を完璧に表すハッシュ値を1つ発行する関数
+          const fingerprint = buildEventMonthCopyFingerprint({ // 【保存段階で再度実行する！データ更新されてないかの照合のため】プレビュー画面の状態を完璧に表すハッシュ値を1つ発行する関数
             ...actorScope,
             targetMonth: preview.targetMonth,
             timezone: preview.timezone,
             candidates: preview.candidates,
           });
-          if (fingerprint !== normalized.previewFingerprint) {//プレビューを見ている間に誰もDB情報をいじってないかを確かめる
+          if (fingerprint !== normalized.previewFingerprint) {///プレビューを見ている間に他者が「複製しようとしている全く同じイベント」をDBに追加（入力値との重複に当てはまる）してないかを確かめる
             return { outcome: "PREVIEW_CHANGED" };
           }
           const byId = new Map( // 現在の前月候補をIDで引くMapを生成する
@@ -291,7 +291,7 @@ export async function createEventMonthCopyBatch( // 冪等な前月イベント�
           if (inserted.count !== data.length) {//保存件数が同じかどうか
             throw new BatchRollbackError(); //全件rollback（エラーなどで処理を始める前の綺麗な状態に戻す）を要求するときだけ使う
           }
-          await transaction.clubEventBatchOperation.create({ // 同一transaction内で下書きデータを完了とする
+          await transaction.clubEventBatchOperation.create({ // 同一transaction内で下書きデータをclubEventBatchOperationテーブルに新規作成完了とする
             data: {
               clubId: actorScope.clubId,
               requestId: normalized.requestId,

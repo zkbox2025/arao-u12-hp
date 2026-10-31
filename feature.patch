@@ -1,248 +1,21 @@
-diff --git a/src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository.ts b/src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository.ts
+diff --git a/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts b/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f20f5322589017471e8cd9e721050cb0668511f
+index 0000000000000000000000000000000000000000..18553e4743673bacf579a863e1b29aa75a703ac7
 --- /dev/null
-+++ b/src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository.ts
-@@ -0,0 +1,80 @@
-+// src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository.ts
-+// 同一クラブ内で、コピー対象12項目とロール集合が完全一致する代表IDだけを読む。
++++ b/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
+@@ -0,0 +1,349 @@
++// src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
++// 最新認可・完了記録の先行照合・再preview・下書き全件保存を同一transactionで行う。
 +
 +import "server-only";
 +
-+import type { Prisma } from "@prisma/client";
++import { Prisma } from "@prisma/client";
 +
 +import {
-+  CLUB_MEMBER_ROLE_LABELS, // 全クラブ所属ロールに対応する表示ラベル
++  isClubAdminRole, // OWNER・COACH・OFFICERか判定する関数
 +} from "@/domain/club/club-member-role";
 +import {
-+  pickEventMonthCopyEvent, // コピーするイベント1件から必要なコピー列だけを検証・抽出する関数
-+} from "@/domain/club/event/event-month-copy-policy";
-+import type {
-+  EventMonthCopyEvent, // コピーするイベント1件あたりの型
-+} from "@/domain/club/event/event-month-copy-types";
-+import type {
-+  ClubMemberRole, // Prisma由来のクラブ所属ロール型
-+} from "@/types/prisma";
-+
-+const ALL_ROLES = Object.keys(CLUB_MEMBER_ROLE_LABELS) as ClubMemberRole[]; // ロール名の取得関数 / 所属ロール配列型へのアサーション
-+
-+/**
-+ * コピー対象列と過不足のないロール集合を、同一クラブの検索条件へ変換する。
-+ */
-+function duplicateWhere( // 完全一致検索条件を組み立てる関数
-+  clubId: string, // 認可対象クラブIDの文字列型
-+  event: EventMonthCopyEvent, // コピー対象12項目を持つイベント型
-+): Prisma.ClubEventWhereInput { // Prismaのイベント検索条件型
-+  const { targetRoles, ...columns } = pickEventMonthCopyEvent(event); // コピー列を検証・抽出する関数
-+  const roles = [...new Set(targetRoles)]; // ロールの重複を除く集合の生成
-+  if (roles.length === 0) {
-+    return {
-+      clubId,
-+      ...columns,
-+      targetRoles: {
-+        isEmpty: true,
-+      },
-+    };
-+  }
-+  const excludedRoles = ALL_ROLES.filter( // 候補にないロールだけを残すメソッド
-+    /**
-+     * 候補のロール集合に含まれないロールか判定する。
-+     */
-+    (role) => !roles.includes(role), // ロールを判定するコールバック / 包含判定メソッド
-+  );
-+  return {
-+    clubId,
-+    ...columns,
-+    targetRoles: {
-+      hasEvery: roles,
-+    },
-+    NOT: {
-+      targetRoles: {
-+        hasSome: excludedRoles,
-+      },
-+    },
-+  };
-+}
-+
-+/**
-+ * 渡されたClientで完全一致する代表イベントのIDだけを取得する。公開状態は問わない。
-+ * 認可は呼出し元が確認し、DB・検証エラーは呼出し元へ伝播する。
-+ */
-+export async function findClubEventExactDuplicateId( // 既存一致IDを取得する関数
-+  clubId: string, // 認可対象クラブIDの文字列型
-+  event: EventMonthCopyEvent, // 比較するコピー対象イベント型
-+  database: Prisma.TransactionClient, // 呼出し元と同一の通常Clientまたはtransaction client型
-+): Promise<string | null> { // 代表IDの文字列または未一致を返す非同期型
-+  const duplicate = await database.clubEvent.findFirst({ // 一致行を最大1件だけ読むメソッド
-+    where: duplicateWhere(clubId, event), // コピー列とロール集合の完全一致条件を組み立てる関数
-+    select: {
-+      id: true,
-+    },
-+    orderBy: {
-+      id: "asc",
-+    },
-+  });
-+  return duplicate?.id ?? null;
-+}
-diff --git a/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts b/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts
-index c89bb3087b36fb61f797f59c993f843c568c6ec2..06f6538d76b6288f65600995f9e4e08f5056b89d 100644
---- a/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts
-+++ b/src/infrastructure/prisma/repositories/event-month-copy-read-repository.ts
-@@ -7,7 +7,6 @@ import { TZDate } from "@date-fns/tz";
- import type { Prisma } from "@prisma/client";
- 
- import {
--  CLUB_MEMBER_ROLE_LABELS, // Prisma由来の全クラブ所属ロールに対応する表示ラベル
-   isClubAdminRole, // 管理者(OWNER / COACH / OFFICER)かどうか判定する関数
- } from "@/domain/club/club-member-role";
- import {
-@@ -35,9 +34,9 @@ import type {
-   EventMonthCopyFingerprintCandidate, // 元データ・変換結果・既存一致ID（重複したID）をまとめたサーバー用候補型
-   EventMonthCopyFingerprintScope, // クラブ・所属・Auth本人の識別子をまとめた型
- } from "@/src/infrastructure/security/event-month-copy-fingerprint";
--import type {
--  ClubMemberRole, // Prisma由来のクラブ所属ロール型： "OWNER" | "COACH" | "OFFICER" | "MEMBER"
--} from "@/types/prisma";
-+import {
-+  findClubEventExactDuplicateId, // 【追加】クラブ内のコピー対象列・ロール集合が完全一致する代表IDを取得する関数
-+} from "./club-event-exact-duplicate-repository";
- 
- /**
-  * 最新認可から得たクラブ・所属・Auth本人の識別子と、複製先年月。
-@@ -62,7 +61,7 @@ export type EventMonthCopyPreviewData = // 上限付き読取の成功・失敗
-     };
- 
-   //コピーするイベント1件あたりの型を項目、値とするオブジェクトをCOPY_SELECTとする
--const COPY_SELECT = Object.fromEntries( 
-+const COPY_SELECT = Object.fromEntries( // 【追加】項目名と取得可否の組からselectを作る関数
-   EVENT_MONTH_COPY_FIELDS.map( // コピー項目名をselect値へ写すメソッド
-     /**
-      * コピー項目1つを、取得を許可するselectの組へ変換する。
-@@ -76,8 +75,6 @@ const SOURCE_SELECT = {
-   id: true,
-   updatedAt: true,
- } satisfies Prisma.ClubEventSelect; // コピー列・元ID・更新版だけのPrisma select型
--// 全ロール名を項目とする配列をALL_ROLESとする
--const ALL_ROLES = Object.keys(CLUB_MEMBER_ROLE_LABELS) as ClubMemberRole[]; 
- 
- /**
-  * クラブがある地域の現地時間で月の始まり（月初）が、世界標準時（UTC）では一体何時になるのか逆算して作り出す関数
-@@ -93,50 +90,11 @@ function monthStart( // クラブ現地月初のUTC値を作る関数
-   return new Date(local.getTime()); // UTC値を取得する
- }
- 
--/**
-- * 重複データを探し出すための、検索条件（Where条件）を自動で組み立てる関数
-- * 余分なロールを持つ行も排除し、公開状態や関連行は条件に含めない。
-- */
--function duplicateWhere( // 既存イベントの完全一致検索条件を組み立てる関数
--  clubId: string, // 認可対象クラブIDの文字列型
--  event: EventMonthCopyEvent, // コピーするイベント1件あたりの型。
--): Prisma.ClubEventWhereInput { // Prismaイベント検索条件の型
--  const { targetRoles, ...columns } = pickEventMonthCopyEvent(event); // コピー列だけを検証・抽出する関数
--  const roles = [...new Set(targetRoles)]; // ロールの重複を除く集合の生成
--  if (roles.length === 0) {
--    return {
--      clubId,
--      ...columns,
--      targetRoles: {
--        isEmpty: true,
--      },
--    };
--  }
--  const excludedRoles = ALL_ROLES.filter(
--    /**
--     * 候補のロール集合にないロールだけを残す。
--     */
--    (role) => !roles.includes(role), // 集合外か判定するコールバック / 配列の包含判定メソッド
--  );
--  return {
--    clubId,
--    ...columns,
--    targetRoles: {
--      hasEvery: roles,
--    },
--    NOT: {
--      targetRoles: {
--        hasSome: excludedRoles,//対象外ロールが一つも含まれないこと
--      },
--    },
--  };
--}
--
- /**
-  * 前月のイベントを翌月に丸ごと複製するための、事前プレビューデータ作成（重複チェック付き）関数
-- * 本人認証、先月の年月を作成、イベントデータを取得して、重複を検出してClient表示へ変換する前のプレビューデータ結果にまとめる
-+ * 【修正】本人・クラブ・所属の識別子から最新権限を確認し、前月取得・日時変換・一致検索を行う。
-  */
--export async function findEventMonthCopyPreviewData( 
-+export async function findEventMonthCopyPreviewData( // 【追加】認可・前月取得・日時変換・一致検索を行う関数
-   input: EventMonthCopyPreviewDataInput, // 最新認可から得たクラブ・所属・Auth本人の識別子と、複製先年月。
-   database: Prisma.TransactionClient = prisma, // 通常Clientまたは呼出し元transaction clientの型
- ): Promise<EventMonthCopyPreviewData> { //Client表示へ変換する前のプレビューデータ結果の型
-@@ -170,8 +128,8 @@ export async function findEventMonthCopyPreviewData(
-     }
-     const timezone = actor.club.timezone;
-     new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(0); // timezoneを検証する書式の生成 / 固定日時の書式化メソッド
--    const year = Number(input.targetMonth.slice(0, 4)); // 年を取り出すメソッド（"2026-11"の最初の４つを抜き出す）
--    const month = Number(input.targetMonth.slice(5, 7)); // 月を取り出すメソッド（"2026-11"の月の部分を抜き出す）
-+    const year = Number(input.targetMonth.slice(0, 4)); // 【追加】数値化する関数 / 年を取り出すメソッド（"2026-11"の最初の４つを抜き出す）
-+    const month = Number(input.targetMonth.slice(5, 7)); // 【追加】数値化する関数 / 月を取り出すメソッド（"2026-11"の月の部分を抜き出す）
-     const sourceYear = month === 1 ? year - 1 : year;
-     const sourceMonthNumber = month === 1 ? 12 : month - 1;
-     const sourceMonth =//元データの年月を"2026-09" という綺麗な「ハイフン区切りの文字列（テキスト）」に変換する
-@@ -196,7 +154,7 @@ export async function findEventMonthCopyPreviewData(
-       return { outcome: "TOO_MANY" };
-     }
-     const candidates: EventMonthCopyFingerprintCandidate[] = []; //元データと日時変換結果の組と、既存イベントとの一致状態を加えた、サーバー内のpreview候補。
--    const duplicateIds = new Map<string, string | null>(); // 重複検知用の箱を作成する
-+    const duplicateIds = new Map<string, string | null>(); // 重複検知用の箱を作成する / 【追加】Mapの生成 / キーの文字列型 / IDの文字列またはnull型
-     for (const row of rows) {
-       const source = {
-         ...pickEventMonthCopyEvent(row), // コピー列だけを検証・抽出する関数
-@@ -216,16 +174,11 @@ export async function findEventMonthCopyPreviewData(
-         if (cached !== undefined) {//重複がある場合は以下、
-           duplicateEventId = cached;
-         } else {//その他は以下、
--          const duplicate = await database.clubEvent.findFirst({ // 一致行を最大1件だけ取得する
--            where: duplicateWhere(input.clubId, converted), // 重複データを探し出すための、検索条件（Where条件）を自動で組み立てる関数
--            select: {
--              id: true,
--            },
--            orderBy: {
--              id: "asc",
--            },
--          });
--          duplicateEventId = duplicate?.id ?? null;
-+          duplicateEventId = await findClubEventExactDuplicateId( // 【修正】共通の完全一致検索へ委譲する関数
-+            input.clubId,
-+            converted,
-+            database,
-+          );
-           duplicateIds.set(key, duplicateEventId); //重複の検索結果をduplicateIdsに記録し、重複による2回目の登場でconst cached = duplicateIds.get(key);で検出されるようにする
-         }
-       }
-diff --git a/src/infrastructure/prisma/repositories/event-practice-batch-read-repository.ts b/src/infrastructure/prisma/repositories/event-practice-batch-read-repository.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..80d1ac762b1dd73719ab9c9b6a9515911b17fe49
---- /dev/null
-+++ b/src/infrastructure/prisma/repositories/event-practice-batch-read-repository.ts
-@@ -0,0 +1,135 @@
-+// src/infrastructure/prisma/repositories/event-practice-batch-read-repository.ts
-+// 最新認可とtimezoneを読み、最大31日の定期練習候補へ既存一致IDを付ける。
-+
-+import "server-only";
-+
-+import type { Prisma } from "@prisma/client";
-+
-+import {
-+  isClubAdminRole, // 管理者ロールか判定する関数
-+} from "@/domain/club/club-member-role";
-+import {
-+  generateEventPracticeBatchDateTimes, // 入力値とクラブtimezoneから最大31日の日時候補を生成する関数
-+} from "@/domain/club/event/event-practice-batch-date-times";
-+import {
-+  validateEventPracticeBatchPreviewInput, // previewの共通入力を検証・正規化する関数
++  validateEventPracticeBatchInput, // 定期練習の保存入力を検証・正規化する関数
 +} from "@/domain/club/event/event-practice-batch-form";
 +import {
 +  buildEventPracticeBatchEvent, // 共通入力とUTC日時から固定の比較・保存列を組み立てる関数
@@ -250,331 +23,346 @@ index 0000000000000000000000000000000000000000..80d1ac762b1dd73719ab9c9b6a951591
 +import {
 +  EVENT_PRACTICE_BATCH_MAX_COUNT, // 定期練習作成の最大件数31件
 +  type EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力型
++  type EventPracticeBatchInput, // 共通入力に選択日・操作ID・preview照合値を加えた保存入力型
++  type EventPracticeBatchResult, // 定期練習の保存結果の型
 +} from "@/domain/club/event/event-practice-batch-types";
 +import {
-+  hasClubFeature, // プランに応じて機能が有効か判定する関数
++  hasClubFeature, // 現在のプランで機能を利用できるか判定する関数
 +} from "@/domain/club/plan-features";
 +import {
 +  prisma, // サーバーDB接続用の共有Prisma Client
 +} from "@/src/infrastructure/prisma/client";
-+import type {
-+  EventPracticeBatchFingerprintCandidate, // 日時候補と既存一致IDを持つサーバー専用型
-+  EventPracticeBatchFingerprintScope, // クラブ・実行所属・Auth本人の識別情報型
++import {
++  buildEventPracticeBatchFingerprint, // 現在のpreview全体の照合値を計算する関数
++  buildEventPracticeBatchInputHash, // scopeと保存入力の照合値を計算する関数
++  type EventPracticeBatchFingerprintCandidate, // 日時候補と既存一致IDを持つサーバー専用型
++  type EventPracticeBatchFingerprintScope, // クラブ・実行所属・Auth本人の識別情報型
 +} from "@/src/infrastructure/security/event-practice-batch-fingerprint";
 +import {
-+  findClubEventExactDuplicateId, // クラブ内のコピー対象列・ロール集合が完全一致する代表IDを取得する関数
-+} from "./club-event-exact-duplicate-repository";
++  findEventPracticeBatchPreviewData, // 最新認可で候補日時と既存一致IDを取得する関数
++} from "./event-practice-batch-read-repository";
 +
-+/**
-+ * 認可済みscopeと、previewで生成する定期練習の共通入力をまとめた型。
-+ */
-+export type EventPracticeBatchPreviewDataInput = EventPracticeBatchFingerprintScope & { // 認可scopeと入力を結合する型
-+  input: EventPracticeBatchCommonInput; // 正規化対象の定期練習共通入力型
++const OPERATION = "CREATE_PRACTICE_BATCH";
++const MAX_TRANSACTION_RETRIES = 3; // 初回の後に許可する最大再試行回数
++const TRANSACTION_OPTIONS = {
++  isolationLevel: Prisma.TransactionIsolationLevel.Serializable, // Serializable分離レベルの列挙値
++  maxWait: 5000,
++  timeout: 30000,
 +};
 +
 +/**
-+ * Client向けDTOへ変換する前の、最新timezone・生成候補・既存一致情報の取得結果。
++ * 作成件数の不一致時にtransaction全体のrollbackを要求する専用例外。
 + */
-+export type EventPracticeBatchPreviewData = // サーバー専用の成功・拒否・失敗結果型
-+  | {
-+      outcome: "READY"; // 読取成功を表すリテラル型
-+      input: EventPracticeBatchCommonInput; // 検証・正規化済み共通入力型
-+      timezone: string; // 現在のクラブtimezoneの文字列型
-+      candidates: readonly EventPracticeBatchFingerprintCandidate[]; // 除外理由・警告・一致IDを持つ候補配列型
-+      candidateCount: number; // 除外前の候補件数の数値型
-+      selectableCount: number; // 日時を生成できる候補件数の数値型
-+    }
-+  | {
-+      outcome: "FORBIDDEN" | "TOO_MANY" | "PREVIEW_FAILED"; // 認可拒否・件数超過・取得失敗の型
-+    };
++class BatchRollbackError extends Error {} // rollback要求の例外型 / 組込みError型
 +
 +/**
-+ * 最新のACTIVE管理者・プラン・timezoneを確認し、候補日ごとの既存一致IDだけを読む。
-+ * 本文や関連行を取得せず、渡されたtransaction内でも同じ処理を行う。書込みは行わない。
++ * DB更新前・再送照合前に、DBから現在の所属・本人・クラブ情報を取得し、管理者ロール・利用可能プランを検証する。
 + */
-+export async function findEventPracticeBatchPreviewData( // 認可と上限付きpreview読取を行う関数
-+  input: EventPracticeBatchPreviewDataInput, // 認可scopeと定期練習共通入力の型
-+  database: Prisma.TransactionClient = prisma, // 通常Clientまたは呼出し元transaction client型
-+): Promise<EventPracticeBatchPreviewData> { // サーバー専用の取得結果を返す非同期型
-+  try {
-+    const validated = validateEventPracticeBatchPreviewInput(input.input); // 共通入力を検証・正規化する関数
-+    if (!validated.success) {
-+      return { outcome: "PREVIEW_FAILED" };
-+    }
-+    const actor = await database.clubMembership.findFirst({ // 最新の本人所属とクラブ設定を読むメソッド
-+      where: {
-+        id: input.membershipId,
-+        clubId: input.clubId,
-+        userId: input.userId,
-+        status: "ACTIVE",
-+      },
-+      select: {
-+        role: true,
-+        club: {
-+          select: {
-+            timezone: true,
-+            planType: true,
-+          },
++async function isCurrentActor( // 現在の管理者権限をDBで再確認する関数
++  transaction: Prisma.TransactionClient, // 保存または照合に使用するtransaction client型
++  scope: EventPracticeBatchFingerprintScope, //最新認可から得たクラブ・所属・Auth本人の識別子
++): Promise<boolean> { // 認可結果を返す非同期の真偽値型
++  const actor = await transaction.clubMembership.findFirst({ // 操作者のアクティブな最新所属を1件取得するメソッド
++    where: {
++      id: scope.membershipId,
++      clubId: scope.clubId,
++      userId: scope.userId,
++      status: "ACTIVE",
++    },
++    select: {
++      id: true,
++      clubId: true,
++      userId: true,
++      status: true,
++      role: true,
++      club: {
++        select: {
++          id: true,
++          planType: true,
 +        },
 +      },
-+    });
-+    if (
-+      !actor ||
-+      !isClubAdminRole(actor.role) || // 現在のロールが管理者か判定する関数
-+      !hasClubFeature(actor.club.planType, "CLUB_APP") // 現在のプランでアプリを使えるか判定する関数
-+    ) {
-+      return { outcome: "FORBIDDEN" };
-+    }
-+    const timezone = actor.club.timezone;
-+    const generated = generateEventPracticeBatchDateTimes(validated.data, timezone); // 最新timezoneで日時候補を生成する関数
-+    if (generated.outcome !== "READY") {
-+      return {
-+        outcome: generated.outcome === "TOO_MANY" ? "TOO_MANY" : "PREVIEW_FAILED",
-+      };
-+    }
-+    if (generated.items.length > EVENT_PRACTICE_BATCH_MAX_COUNT) {
-+      return { outcome: "TOO_MANY" };
-+    }
-+    const candidates: EventPracticeBatchFingerprintCandidate[] = []; // サーバー内の日時・一致候補配列型
-+    for (const item of generated.items) {
-+      let duplicateEventId: string | null = null; // 一致IDの文字列または未一致を表すnull型
-+      if (item.dates !== null) {
-+        const event = buildEventPracticeBatchEvent(validated.data, item.dates); // 共通入力とUTC日時から比較列を作る関数
-+        duplicateEventId = await findClubEventExactDuplicateId( // 同じClientで既存一致IDだけを取得する関数
-+          input.clubId,
-+          event,
-+          database,
-+        );
-+      }
-+      candidates.push({ // 除外候補も理由・警告を保って記録するメソッド
-+        ...item,
-+        duplicateEventId,
-+      });
-+    }
-+    return {
-+      outcome: "READY",
-+      input: validated.data,
-+      timezone,
-+      candidates,
-+      candidateCount: generated.candidateCount,
-+      selectableCount: generated.selectableCount,
-+    };
-+  } catch {
-+    return { outcome: "PREVIEW_FAILED" };
-+  }
++    },
++  });
++  return (
++    actor !== null &&
++    actor.id === scope.membershipId &&
++    actor.clubId === scope.clubId &&
++    actor.userId === scope.userId &&
++    actor.status === "ACTIVE" &&
++    actor.club.id === scope.clubId &&
++    isClubAdminRole(actor.role) && // 現在のロールが管理者か判定する関数
++    hasClubFeature(actor.club.planType, "CLUB_APP") // 現在のプランでアプリを利用できるか判定する関数
++  );
 +}
-diff --git a/tests/club-event-exact-duplicate-repository.test.ts b/tests/club-event-exact-duplicate-repository.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..51e4430db722058ae1c839fef10298a0b111b26c
---- /dev/null
-+++ b/tests/club-event-exact-duplicate-repository.test.ts
-@@ -0,0 +1,197 @@
-+// tests/club-event-exact-duplicate-repository.test.ts
-+// 実DBを使わず、完全一致の列・ロール集合・クラブ境界と限定selectを検証する。
-+
-+import {
-+  beforeEach,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+import type { Prisma } from "@prisma/client";
-+
-+import {
-+  EVENT_MONTH_COPY_FIELDS, // コピー対象12項目のリスト
-+} from "@/domain/club/event/event-month-copy-policy";
-+import type {
-+  EventMonthCopyEvent, // コピーするイベント1件あたりの型
-+} from "@/domain/club/event/event-month-copy-types";
-+import {
-+  findClubEventExactDuplicateId, // 同一クラブの完全一致する代表イベントIDを取得する関数
-+} from "@/src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository";
-+
-+const CLUB = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-+const OTHER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-+const match = vi.fn(); // 読取モックを生成する関数
-+const database = {
-+  clubEvent: {
-+    findFirst: match, // 読取モック関数の参照
-+  },
-+} as unknown as Prisma.TransactionClient; // 未知の値の型 / 通常Clientまたはtransaction client型
 +
 +/**
-+ * null・空文字・秒とミリ秒を含む、比較対象12項目の値を生成する。
++ * 同じクラブ・操作IDの完了記録を先行照合し、同じ実行者・入力・操作種別だけを再送成功にする。
 + */
-+function event(): EventMonthCopyEvent { // 比較用イベントを生成する関数 / コピー対象12項目のイベント型
++async function existingResult( // 完了済み操作を先行照合する関数
++  transaction: Prisma.TransactionClient, // 再認可済みのtransaction client型
++  scope: EventPracticeBatchFingerprintScope, // 最新認可から得たクラブ・所属・Auth本人の識別子。
++  input: EventPracticeBatchInput, // 検証・正規化済みの定期練習一括作成の入力型
++  inputHash: string, // サーバー計算した入力SHA-256の文字列型
++): Promise<EventPracticeBatchResult | null> { // 定期練習の保存結果型
++  const existing = await transaction.clubEventBatchOperation.findUnique({ // DBの定期練習一括作成記録テーブルから1件のデータを取得する
++    where: {
++      clubId_requestId: {
++        clubId: scope.clubId,
++        requestId: input.requestId,
++      },
++    },
++    select: {
++      clubId: true,
++      requestId: true,
++      executedByMembershipId: true,
++      operation: true,
++      inputHash: true,
++      targetMonth: true,
++      createdCount: true,
++      completedAt: true,
++    },
++  });
++  if (existing === null) {// 未保存の場合だけ新規保存処理へ進む
++    return null;
++  }
++  if (
++    existing.clubId !== scope.clubId ||
++    existing.requestId !== input.requestId ||
++    existing.executedByMembershipId !== scope.membershipId ||
++    existing.operation !== OPERATION ||//定期練習一括作成ではない
++    existing.inputHash !== inputHash ||
++    existing.targetMonth !== input.targetMonth ||
++    !Number.isInteger(existing.createdCount) || // 保存済み件数が整数か検証するメソッド
++    existing.createdCount < 1 ||
++    existing.createdCount > EVENT_PRACTICE_BATCH_MAX_COUNT ||
++    existing.createdCount !== input.selectedDates.length ||
++    !(existing.completedAt instanceof Date) || // 保存済み完了日時のDate型判定
++    !Number.isFinite(existing.completedAt.getTime()) // 完了日時の有限値検証・UTC値取得メソッド
++  ) {
++    return { outcome: "CONFLICT" };//衝突
++  }
 +  return {
-+    title: "練習",
-+    content: "",
-+    genre: "PRACTICE",
-+    targetRoles: ["MEMBER", "OWNER", "MEMBER"],
-+    startAt: new Date("2026-01-01T09:00:00.123Z"), // 日時のコンストラクター
-+    endAt: new Date("2026-01-01T11:00:00.123Z"), // 日時のコンストラクター
-+    isAllDay: false,
-+    location: null,
-+    meetingAt: null,
-+    meetingLocation: " ",
-+    belongings: "水筒",
-+    notes: null,
++    outcome: "ALREADY_COMPLETED",//すでに同じDB処理が完了している
++    receipt: {
++      targetMonth: existing.targetMonth,
++      createdCount: existing.createdCount,
++    },
 +  };
 +}
 +
-+beforeEach( // 各試験の初期化を登録する関数
-+  /**
-+   * 読取履歴を初期化し、既定では未一致を返す。
-+   */
-+  () => { // 試験処理を実行するコールバック
-+    match.mockReset().mockResolvedValue(null); // モックの成功結果を設定するメソッド / モックの実装と履歴を初期化するメソッド
-+  },
-+);
-+
-+it("12項目と過不足のないロール集合で検索し、最小IDだけを取得する", // 試験を登録する関数
-+  /**
-+   * 全比較列を保持し、公開状態・本文取得・関連行を検索へ混ぜないことを確認する。
-+   */
-+  async () => { // 試験処理を実行するコールバック
-+    match.mockResolvedValue({ id: OTHER }); // モックの成功結果を設定するメソッド
-+    expect(await findClubEventExactDuplicateId(CLUB, event(), database)).toBe(OTHER); // 値の一致を検証するメソッド / 期待値を生成する関数 / 同一クラブの完全一致IDを読む関数 / 比較用イベントを生成する関数
-+    const { targetRoles: omittedRoles, ...columns } = event(); // 比較用イベントを生成する関数
-+    expect(omittedRoles).toHaveLength(3); // 件数を検証するメソッド / 期待値を生成する関数
-+    expect(match).toHaveBeenCalledExactlyOnceWith({ // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
-+      where: {
-+        clubId: CLUB,
-+        ...columns,
-+        targetRoles: {
-+          hasEvery: ["MEMBER", "OWNER"],
-+        },
-+        NOT: {
-+          targetRoles: {
-+            hasSome: ["COACH", "OFFICER"],
-+          },
-+        },
-+      },
-+      select: {
-+        id: true,
-+      },
-+      orderBy: {
-+        id: "asc",
-+      },
-+    });
-+    const query = match.mock.calls[0][0];
-+    for (const field of EVENT_MONTH_COPY_FIELDS) {
-+      expect(query.where).toHaveProperty(field); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
++/**
++ * 現在の候補に含まれる生成可能な選択日だけを、固定列の下書き作成データへ変換する。
++ * 既存イベントとの一致は明示選択を許可し、関連行や通知の作成は含めない。
++ */
++function eventData( // 選択日を固定列の一括作成データへ変換する関数
++  scope: EventPracticeBatchFingerprintScope, // 認可済みクラブ・実行所属・Auth本人の識別情報型
++  input: EventPracticeBatchCommonInput, // 正規化済みの定期練習共通入力型
++  selectedDates: readonly string[], // 検証済み選択日の文字列配列型
++  candidates: readonly EventPracticeBatchFingerprintCandidate[], // 再取得した全候補の配列型
++): Prisma.ClubEventCreateManyInput[] | null { // 作成列配列または選択不正を表すnull型
++  const byDate = new Map( // 現在の候補を現地日付で引くMapを作るコンストラクター
++    candidates.map( // 日付と候補の組へ変換するメソッド
++      /**
++       * 現在の候補日とサーバー生成値を対応付ける。
++       */
++      (candidate) => [candidate.date, candidate] as const, // 日付と候補を返すコールバック / 読取専用タプル型
++    ),
++  );
++  const data: Prisma.ClubEventCreateManyInput[] = []; // 固定保存列の配列型
++  for (const date of selectedDates) {
++    const candidate = byDate.get(date); // 選択日が現在の候補に含まれるか調べるメソッド
++    if (
++      !candidate ||
++      candidate.dates === null ||
++      candidate.exclusionReason !== null
++    ) {
++      return null;
 +    }
-+    expect(query.where).not.toHaveProperty("status"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
-+    expect(query).not.toHaveProperty("include"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
-+  },
-+);
++    const event = buildEventPracticeBatchEvent(input, candidate.dates); // 共通入力とUTC日時から保存対象列を作る関数
++    data.push({ // 関連行を含まない下書き作成列を追加するメソッド
++      clubId: scope.clubId,
++      title: event.title,
++      content: null,
++      genre: "PRACTICE",
++      targetRoles: [...event.targetRoles],
++      startAt: event.startAt,
++      endAt: event.endAt,
++      isAllDay: false,
++      location: event.location,
++      meetingAt: event.meetingAt,
++      meetingLocation: event.meetingLocation,
++      belongings: null,
++      notes: null,
++      status: "DRAFT",
++      firstPublishedAt: null,
++      readRequiredAt: null,
++      createdByMembershipId: scope.membershipId,
++      updatedByMembershipId: scope.membershipId,
++    });
++  }
++  return data;
++}
 +
-+it.each([ // 条件別の試験を登録する関数
-+  [[]],
-+  [["OWNER"]],
-+  [["OWNER", "MEMBER"]],
-+  [["MEMBER", "OWNER", "MEMBER"]],
-+  [["OWNER", "COACH", "OFFICER", "MEMBER"]],
-+] as const)("ロール集合%jは順序・重複を無視し、余分・不足を許さない", // 読取専用リテラル型
-+  /**
-+   * 生成されたhasEvery・hasSome・isEmptyを評価し、集合の完全一致を検証する。
-+   */
-+  async (roles) => { // 引数を受け取って試験・判定を行うコールバック
-+    const value = event(); // 比較用イベントを生成する関数
-+    value.targetRoles = [...roles];
-+    await findClubEventExactDuplicateId(CLUB, value, database); // 同一クラブの完全一致IDを読む関数
-+    const where = match.mock.calls[0][0].where;
-+    const allRoles = ["OWNER", "COACH", "OFFICER", "MEMBER"];
-+    for (let bits = 0; bits < 16; bits += 1) {
-+      const stored = allRoles.filter( // 条件に合う要素を抽出するメソッド
++/**
++ * 定期練習の下書き群と完了記録を同一transactionで保存し、同一操作の再送を照合する。
++ * P2034は初回後最大3回だけ再試行し、P2002後は再認可と記録照合だけを行う。
++ */
++export async function createEventPracticeBatch( // 冪等な定期練習一括作成の公開関数
++  scope: EventPracticeBatchFingerprintScope, // 認可済みクラブ・実行所属・Auth本人の識別情報型
++  input: EventPracticeBatchInput, // 正規化対象の定期練習保存入力型
++): Promise<EventPracticeBatchResult> { // 固定の保存結果を返す非同期型
++  const validation = validateEventPracticeBatchInput(input); // 保存入力を検証・正規化する関数
++  if (!validation.success) {
++    return { outcome: "VALIDATION_FAILED" };
++  }
++  const normalized = validation.data;
++  const {
++    selectedDates,
++    requestId,
++    previewFingerprint,
++    ...commonInput
++  } = normalized;
++  let actorScope: EventPracticeBatchFingerprintScope; // 検証済みの認可scope型
++  let inputHash: string; // 入力照合値の文字列型
++  try {
++    actorScope = {
++      clubId: scope.clubId.toLowerCase(), // クラブIDを小文字へ揃えるメソッド
++      membershipId: scope.membershipId.toLowerCase(), // 所属IDを小文字へ揃えるメソッド
++      userId: scope.userId.toLowerCase(), // Auth本人IDを小文字へ揃えるメソッド
++    };
++    inputHash = buildEventPracticeBatchInputHash(actorScope, normalized); // UUIDを含むscopeと保存入力を検証し照合値を作る関数
++  } catch {
++    return { outcome: "FORBIDDEN" };
++  }
++  let retries = 0;
++  let existingOnly = false; // P2002後だけ、追加保存せず完了記録を照合する
++  while (true) {
++    let attemptedWrite = false;
++    try {
++      return await prisma.$transaction( // Event群と完了記録を同一transactionで扱うメソッド
 +        /**
-+         * ビットに対応するロールだけを残し、保存済みの集合を作る。
++         * 最新権限と完了記録を先に確認し、新規操作だけ再previewと一括保存を行う。
 +         */
-+        (_, index) => (bits & (1 << index)) !== 0, // 対応するビットから保存ロールを選ぶコールバック
++        async (transaction): Promise<EventPracticeBatchResult> => { // transaction処理のコールバック / 保存結果を返す非同期型
++          if (!await isCurrentActor(transaction, actorScope)) { // 最新所属・本人・クラブ・管理権限・プランを検証する関数
++            return { outcome: "FORBIDDEN" };
++          }
++          const existing = await existingResult( // 完了記録を先行照合する関数
++            transaction,
++            actorScope,
++            normalized,
++            inputHash,
++          );
++          if (existing !== null) {
++            return existing;
++          }
++          if (existingOnly) {
++            return { outcome: "CONFLICT" };
++          }
++          const preview = await findEventPracticeBatchPreviewData({ // 同一transactionで候補を再生成・照合する関数
++            ...actorScope,
++            input: commonInput,
++          }, transaction);
++          if (preview.outcome !== "READY") {
++            if (preview.outcome === "FORBIDDEN") {
++              return { outcome: "FORBIDDEN" };
++            }
++            return {
++              outcome: preview.outcome === "TOO_MANY" ? "PREVIEW_CHANGED" : "CREATE_FAILED",
++            };
++          }
++          const fingerprint = buildEventPracticeBatchFingerprint({ // 現在のtimezone・全候補・一致状態を照合値へ変換する関数
++            ...actorScope,
++            input: commonInput,
++            timezone: preview.timezone,
++            candidates: preview.candidates,
++          });
++          if (fingerprint !== previewFingerprint) {
++            return { outcome: "PREVIEW_CHANGED" };
++          }
++          const data = eventData( // 現在の選択日だけを固定保存列へ変換する関数
++            actorScope,
++            commonInput,
++            selectedDates,
++            preview.candidates,
++          );
++          if (
++            data === null ||
++            data.length === 0 ||
++            data.length > EVENT_PRACTICE_BATCH_MAX_COUNT
++          ) {
++            return { outcome: "VALIDATION_FAILED" };
++          }
++          attemptedWrite = true;
++          const inserted = await transaction.clubEvent.createMany({ // 選択した下書き群を一括保存するメソッド
++            data,
++            skipDuplicates: false,
++          });
++          if (inserted.count !== data.length) {
++            throw new BatchRollbackError(); // 件数不一致で全件rollbackを要求する例外の生成
++          }
++          await transaction.clubEventBatchOperation.create({ // 同一transaction内で成功記録だけを保存するメソッド
++            data: {
++              clubId: actorScope.clubId,
++              requestId,
++              operation: OPERATION,
++              targetMonth: normalized.targetMonth,
++              inputHash,
++              executedByMembershipId: actorScope.membershipId,
++              createdCount: inserted.count,
++              completedAt: new Date(), // 完了日時を生成するコンストラクター
++            },
++            select: {
++              id: true,
++            },
++          });
++          return {
++            outcome: "CREATED",
++            receipt: {
++              targetMonth: normalized.targetMonth,
++              createdCount: inserted.count,
++            },
++          };
++        },
++        TRANSACTION_OPTIONS,
 +      );
-+      const expected = new Set<string>(roles); // 重複を除く集合のコンストラクター / 文字列型
-+      let actual: boolean; // 検索条件の評価結果を保持する真偽値型
-+      if (where.targetRoles.isEmpty === true) {
-+        actual = stored.length === 0;
-+      } else {
-+        const hasAll = where.targetRoles.hasEvery.every( // 必須ロールがすべてあるか検証するメソッド
-+          /**
-+           * 必須ロールが保存集合へ含まれるか判定する。
-+           */
-+          (role: string) => stored.includes(role), // 包含判定のコールバック / 文字列型 / 配列の包含判定
-+        );
-+        const hasExtra = where.NOT.targetRoles.hasSome.some( // 余分なロールの有無を検証するメソッド
-+          /**
-+           * 候補にないロールが保存集合へ含まれるか判定する。
-+           */
-+          (role: string) => stored.includes(role), // 包含判定のコールバック / 文字列型 / 配列の包含判定
-+        );
-+        actual = hasAll && !hasExtra;
++    } catch (error) {
++      if (error instanceof BatchRollbackError) { // 全件rollback要求の専用例外型の判定
++        return { outcome: "CREATE_FAILED" };
 +      }
-+      const sameRoles = stored.every( // 保存集合の全要素を検証するメソッド
-+        /**
-+         * 保存ロールが期待する集合に含まれるか判定する。
-+         */
-+        (role) => expected.has(role), // 集合包含を判定するコールバック / 集合の包含判定メソッド
-+      );
-+      expect(actual).toBe( // 期待値を生成する関数 / 条件評価の一致を検証するメソッド
-+        stored.length === expected.size &&
-+        sameRoles,
-+      );
++      if (error instanceof Prisma.PrismaClientKnownRequestError) { // Prisma既知エラー型の判定
++        if (error.code === "P2034") {
++          if (retries < MAX_TRANSACTION_RETRIES) {
++            retries += 1;
++            continue;
++          }
++          return { outcome: "RESULT_UNKNOWN" };
++        }
++        if (
++          error.code === "P2002" &&
++          attemptedWrite &&
++          !existingOnly
++        ) {
++          existingOnly = true;
++          continue;
++        }
++      }
++      return {
++        outcome: attemptedWrite || existingOnly ? "RESULT_UNKNOWN" : "CREATE_FAILED",
++      };
 +    }
-+  },
-+);
-+
-+it.each(["DRAFT", "PUBLISHED"])("既存側が%sでも公開状態を検索条件にしない", // 条件別の試験を登録する関数
-+  /**
-+   * 既存行の状態に関係なく、IDを持つ一致結果をそのまま返す。
-+   */
-+  async (status) => { // 引数を受け取って試験・判定を行うコールバック
-+    match.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      id: OTHER,
-+      status,
-+    });
-+    expect(await findClubEventExactDuplicateId(CLUB, event(), database)).toBe(OTHER); // 値の一致を検証するメソッド / 期待値を生成する関数 / 同一クラブの完全一致IDを読む関数 / 比較用イベントを生成する関数
-+    expect(match.mock.calls[0][0].where).not.toHaveProperty("status"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
-+  },
-+);
-+
-+it("他クラブを検索せず、null・空文字・空白・ミリ秒を保持する", // 試験を登録する関数
-+  /**
-+   * クラブIDを必須条件にし、比較値へフォーム用の正規化を加えない。
-+   */
-+  async () => { // 試験処理を実行するコールバック
-+    expect(await findClubEventExactDuplicateId(OTHER, event(), database)).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数 / 同一クラブの完全一致IDを読む関数 / 比較用イベントを生成する関数
-+    expect(match.mock.calls[0][0].where).toMatchObject({ // 一部の構造を検証するメソッド / 期待値を生成する関数
-+      clubId: OTHER,
-+      content: "",
-+      location: null,
-+      meetingLocation: " ",
-+      startAt: new Date("2026-01-01T09:00:00.123Z"), // 日時のコンストラクター
-+    });
-+  },
-+);
-+
-+it("検証エラーでは検索せず、DBエラーは呼出し元へ伝播する", // 試験を登録する関数
-+  /**
-+   * 不正比較値を未一致として扱わず、DB失敗も安全に処理する責務を呼出し元へ残す。
-+   */
-+  async () => { // 試験処理を実行するコールバック
-+    const value = event(); // 比較用イベントを生成する関数
-+    value.startAt = new Date(NaN); // 日時のコンストラクター
-+    await expect(findClubEventExactDuplicateId(CLUB, value, database)).rejects.toThrow(); // 例外を検証するメソッド / 期待値を生成する関数 / 同一クラブの完全一致IDを読む関数
-+    expect(match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    const error = new Error("private-database-error"); // 例外のコンストラクター
-+    match.mockRejectedValue(error); // モックの失敗を設定するメソッド
-+    await expect(findClubEventExactDuplicateId(CLUB, event(), database)).rejects.toBe(error); // 値の一致を検証するメソッド / 期待値を生成する関数 / 同一クラブの完全一致IDを読む関数 / 比較用イベントを生成する関数
-+  },
-+);
-diff --git a/tests/event-practice-batch-read-repository.test.ts b/tests/event-practice-batch-read-repository.test.ts
++  }
++}
+diff --git a/tests/event-practice-batch-mutation-repository.test.ts b/tests/event-practice-batch-mutation-repository.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..c40474db6339530c021dee381831b9091613b9c3
+index 0000000000000000000000000000000000000000..90cb3b63d9385441738ba2ddd52bb338a56c0090
 --- /dev/null
-+++ b/tests/event-practice-batch-read-repository.test.ts
-@@ -0,0 +1,404 @@
-+// tests/event-practice-batch-read-repository.test.ts
-+// 実DB・Auth・dotenvなしで、最新認可・timezone・候補上限・限定読取を検証する。
++++ b/tests/event-practice-batch-mutation-repository.test.ts
+@@ -0,0 +1,889 @@
++// tests/event-practice-batch-mutation-repository.test.ts
++// 実DBなしで、完了記録先行照合・明示列保存・rollback・有限再試行の契約を検証する。
 +
++import { Prisma } from "@prisma/client";
 +import {
 +  afterEach,
 +  beforeEach,
@@ -582,114 +370,265 @@ index 0000000000000000000000000000000000000000..c40474db6339530c021dee381831b909
 +  it,
 +  vi,
 +} from "vitest";
-+import type { Prisma } from "@prisma/client";
 +
-+import * as dateTimes from "@/domain/club/event/event-practice-batch-date-times"; // 定期練習候補の日時生成モジュール
++import {
++  generateEventPracticeBatchDateTimes, // 共通入力とtimezoneから最大31日の日時候補を生成する関数
++} from "@/domain/club/event/event-practice-batch-date-times";
 +import type {
-+  EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力型
++  EventPracticeBatchInput, // 定期練習保存入力型
++  EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
 +} from "@/domain/club/event/event-practice-batch-types";
 +import {
-+  findEventPracticeBatchPreviewData, // 最新認可で候補日時と既存一致IDを取得する関数
-+  type EventPracticeBatchPreviewDataInput, // 認可scopeと定期練習共通入力の型
++  createEventPracticeBatch, // 再送照合・preview再検証・一体保存を行う関数
++} from "@/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository";
++import type {
++  EventPracticeBatchPreviewData, // 上限付き読取の結果型
 +} from "@/src/infrastructure/prisma/repositories/event-practice-batch-read-repository";
++import {
++  buildEventPracticeBatchFingerprint, // preview全体の照合値を計算する関数
++  buildEventPracticeBatchInputHash, // scopeと選択内容の照合値を計算する関数
++  type EventPracticeBatchFingerprintScope, // 認証済みクラブ・実行者の識別子型
++} from "@/src/infrastructure/security/event-practice-batch-fingerprint";
++import type {
++  ClubMemberRole, // 所属ロール型
++  ClubMembershipStatus, // 所属状態型
++  PlanType, // クラブプラン型
++} from "@/types/prisma";
 +
-+const mocks = vi.hoisted( // import前にモックを生成する関数
++const mocks = vi.hoisted( // import前にDB境界のモックを作るメソッド
 +  /**
-+   * 実Clientより先に、読取専用の所属・既存一致モックを生成する。
++   * transaction内の操作を区別し、実Clientのdotenv読込を防ぐdelegateを作る。
 +   */
-+  () => ({ // 読取モックや試験候補を生成するコールバック
-+    actor: vi.fn(), // 読取モックを生成する関数
-+    match: vi.fn(), // 読取モックを生成する関数
++  () => ({ // DBとpreviewのモックを返すコールバック
++    transaction: vi.fn(), // transaction関数のモック生成メソッド
++    actor: vi.fn(), // 所属読取のモック生成メソッド
++    ledger: vi.fn(), // 操作記録読取のモック生成メソッド
++    createLedger: vi.fn(), // 操作記録作成のモック生成メソッド
++    insert: vi.fn(), // Event群作成のモック生成メソッド
++    preview: vi.fn(), // preview再取得のモック生成メソッド
 +  }),
 +);
-+vi.mock("@/src/infrastructure/prisma/client", // 実Clientの読込みを置き換える関数
++vi.mock("@/src/infrastructure/prisma/client", // 実DB境界を置き換えるメソッド
 +  /**
-+   * dotenvや実DB接続を評価せず、全件取得・書込みを持たないClientへ差し替える。
++   * transaction外の読取・書込を提供しないClientを返す。
 +   */
-+  () => ({ // 読取モックや試験候補を生成するコールバック
++  () => ({ // 共有Clientの代替を返すコールバック
 +    prisma: {
-+      clubMembership: {
-+        findFirst: mocks.actor, // 最新所属を読むモック関数の参照
-+      },
-+      clubEvent: {
-+        findFirst: mocks.match, // 既存一致を読むモック関数の参照
-+      },
++      $transaction: mocks.transaction, // transactionモックの関数参照
 +    },
 +  }),
 +);
++vi.mock("@/src/infrastructure/prisma/repositories/event-practice-batch-read-repository", // 既に別試験で検証済みの読取境界を置き換えるメソッド
++  /**
++   * transaction引数と再取得の順序を観測する読取関数を返す。
++   */
++  () => ({ // previewモックを返すコールバック
++    findEventPracticeBatchPreviewData: mocks.preview, // preview再取得モックの関数参照
++  }),
++);
 +
-+const CLUB = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-+const MEMBER = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-+const USER = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-+const OTHER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-+const PRIVATE = "PRIVATE_BODY_SQL_TOKEN_CAUSE";
++const SCOPE: EventPracticeBatchFingerprintScope = { // 呼出し元で認証済みのscope型
++  clubId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
++  membershipId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
++  userId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
++};
++const OTHER = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
++const REQUEST = "11111111-1111-4111-8111-111111111111";
++const PRIVATE = "fixture-private-body raw-token database-secret";
 +
 +/**
-+ * UTCのACTIVE管理者と利用可能プランを持つ、現在の所属情報を生成する。
++ * 保存済み実行者の最小fixture。
 + */
-+function membership() { // 最新所属のfixtureを生成する関数
-+  return {
-+    id: MEMBER,
-+    clubId: CLUB,
-+    userId: USER,
-+    status: "ACTIVE",
-+    role: "OWNER",
-+    club: {
-+      timezone: "UTC",
-+      planType: "STANDARD",
-+    },
++type Actor = { // 現在の所属を表す試験用型
++  id: string; // 所属IDの文字列型
++  clubId: string; // クラブIDの文字列型
++  userId: string; // Auth本人IDの文字列型
++  status: ClubMembershipStatus; // 所属状態型
++  role: ClubMemberRole; // 所属ロール型
++  club: { // 現在のクラブ設定の構造型
++    id: string; // クラブIDの文字列型
++    planType: PlanType; // プラン型
 +  };
-+}
-+let actor: ReturnType<typeof membership> | null; // 関数の返却値を取得する型 / 関数の型を参照するtypeof型
++};
 +
 +/**
-+ * 31日すべてが候補になる独立した共通入力を生成する。
++ * DBに保存される完了記録の照合列を持つfixture。
 + */
-+function common(): EventPracticeBatchCommonInput { // 定期練習の共通入力を生成する関数 / 正規化した定期練習共通入力型
++type Ledger = { // 保存済み完了記録の試験用型
++  clubId: string; // クラブIDの文字列型
++  requestId: string; // 操作IDの文字列型
++  executedByMembershipId: string | null; // 実行者IDまたは参照解除の型
++  operation: string; // 操作種別の文字列型
++  inputHash: string; // 入力ハッシュの文字列型
++  targetMonth: string; // 対象月の文字列型
++  createdCount: number; // 作成件数の数値型
++  completedAt: Date; // 完了日時の型
++};
++
++/**
++ * 成功したpreviewのサーバー材料だけを取り出す試験用型。
++ */
++type Ready = Extract<EventPracticeBatchPreviewData, { outcome: "READY" }>; // 読取結果から成功材料を選ぶ型
++let actor: Actor | null; // 現在の所属または不存在を表す型
++let preview: EventPracticeBatchPreviewData; // 再取得されるpreview結果の型
++let ledger: Ledger | null; // 保存済み完了記録または未保存の型
++let inserted: Prisma.ClubEventCreateManyInput[]; // transaction内のEvent作成列の配列型
++let order: string[]; // 認可・照合・保存の実行順を記録する配列型
++let afterRollback: (() => void) | undefined; // 他の処理のcommitを模すコールバック型
++let loseCommitReply: boolean; // commit後の応答喪失を模す真偽値型
++const transaction = {
++  clubMembership: {
++    findFirst: mocks.actor, // transaction内の所属読取関数の参照
++  },
++  clubEventBatchOperation: {
++    findUnique: mocks.ledger, // transaction内の記録読取関数の参照
++    create: mocks.createLedger, // transaction内の記録作成関数の参照
++  },
++  clubEvent: {
++    createMany: mocks.insert, // transaction内のEvent群作成関数の参照
++  },
++} as unknown as Prisma.TransactionClient; // 試験用delegateをtransaction client型へ変換する型アサーション
++
++/**
++ * 1月の毎日を対象にした独立した共通入力を生成する。
++ */
++function common(): EventPracticeBatchCommonInput { // 共通入力fixtureを作る関数 / 定期練習共通入力型
 +  return {
 +    targetMonth: "2026-01",
 +    periodStart: "2026-01-01",
 +    periodEnd: "2026-01-31",
 +    weekdays: [0, 1, 2, 3, 4, 5, 6],
-+    title: " 練習 ",
++    title: "練習",
 +    startTime: "18:00",
 +    endTime: "20:00",
-+    location: null,
-+    meetingTime: null,
-+    meetingLocation: null,
++    location: "体育館",
++    meetingTime: "17:30",
++    meetingLocation: "入口",
 +    targetRoles: ["OWNER", "MEMBER"],
 +  };
 +}
 +
 +/**
-+ * 最新認可scopeと、試験ごとの共通入力をまとめる。
++ * 実際の純粋生成関数を利用し、同じscopeで照合できるpreview材料を作る。
 + */
-+function input( // 認可scopeと試験入力を組み立てる関数
-+  changes: Partial<EventPracticeBatchCommonInput> = {}, // 共通入力の一部を上書きする型
-+): EventPracticeBatchPreviewDataInput { // 認可scopeと定期練習共通入力の型
++function ready( // 正常なpreview材料を作る関数
++  values: EventPracticeBatchCommonInput = common(), // 定期練習共通入力型 / 共通入力fixture生成関数
++  timezone = "UTC",
++): Ready { // 正常preview材料の型
++  const generated = generateEventPracticeBatchDateTimes(values, timezone); // 共通入力とtimezoneから日時候補を生成する関数
++  if (generated.outcome !== "READY") {
++    throw new Error("fixture-generation"); // 例外のコンストラクター
++  }
 +  return {
-+    clubId: CLUB,
-+    membershipId: MEMBER,
-+    userId: USER,
-+    input: {
-+      ...common(), // 定期練習の共通入力を生成する関数
-+      ...changes,
-+    },
++    outcome: "READY",
++    input: values,
++    timezone,
++    candidates: generated.items.map( // 項目ごとに値を写すメソッド
++      /**
++       * 日時生成結果へ、既存一致なしの初期状態を付ける。
++       */
++      (item) => ({ // 引数を受け取って試験・判定を行うコールバック
++        ...item,
++        duplicateEventId: null,
++      }),
++    ),
++    candidateCount: generated.candidateCount,
++    selectableCount: generated.selectableCount,
 +  };
 +}
 +
-+beforeEach( // 各試験の初期化を登録する関数
++/**
++ * 表示時の共通入力とfingerprintを保持する保存入力を作る。
++ */
++function input( // 保存入力fixtureを作る関数
++  changes: Partial<EventPracticeBatchInput> = {}, // 保存入力の一部だけを上書きする型
++): EventPracticeBatchInput { // 正規化対象の定期練習保存入力型
++  if (preview.outcome !== "READY") {
++    throw new Error("fixture-preview"); // 例外のコンストラクター
++  }
++  return {
++    ...preview.input,
++    requestId: REQUEST,
++    selectedDates: [preview.candidates[0].date],
++    previewFingerprint: buildEventPracticeBatchFingerprint({ // 全preview候補の照合値を計算する関数
++      ...SCOPE,
++      input: preview.input,
++      timezone: preview.timezone,
++      candidates: preview.candidates,
++    }),
++    ...changes,
++  };
++}
++
++/**
++ * 同一操作・別操作・破損した履歴の試験に使う完了記録を作る。
++ */
++function record( // 保存済み完了記録fixtureを生成する関数
++  request: EventPracticeBatchInput, // 照合対象の入力型
++  changes: Partial<Ledger> = {}, // 記録の部分変更型
++): Ledger { // 完了記録fixture型
++  return {
++    clubId: SCOPE.clubId,
++    requestId: request.requestId,
++    executedByMembershipId: SCOPE.membershipId,
++    operation: "CREATE_PRACTICE_BATCH",
++    inputHash: buildEventPracticeBatchInputHash(SCOPE, request), // 入力照合値を計算する関数
++    targetMonth: request.targetMonth,
++    createdCount: request.selectedDates.length,
++    completedAt: new Date("2026-02-01T00:00:00Z"), // 保存済み完了Dateの生成
++    ...changes,
++  };
++}
++
++/**
++ * 秘密を含み得るPrisma既知エラーを再現し、返却やログへの原文混入を検出する。
++ */
++function databaseError(code: string) { // Prisma既知エラーfixtureを作る関数 / コードの文字列型
++  return new Prisma.PrismaClientKnownRequestError(PRIVATE, { // 既知エラーのコンストラクター
++    code,
++    clientVersion: "test",
++  });
++}
++
++/**
++ * consoleの出力だけを抑え、spyによる呼出しの検出を可能にする。
++ */
++function silence() { // 試験中のログ出力を抑える関数
++  return undefined;
++}
++
++beforeEach( // 試験前の処理を登録する関数
 +  /**
-+   * 現在の所属をquery条件で照合する読取と、一致なしの既定値を設定する。
++   * 実DBを使わないtransactionのsnapshot・rollbackと、限定した読取・作成delegateを設定する。
 +   */
-+  () => { // 試験処理を実行するコールバック
-+    vi.resetAllMocks(); // モックの実装と履歴を初期化する関数
-+    actor = membership(); // 最新所属のfixtureを生成する関数
-+    mocks.actor.mockImplementation( // モックの処理を設定するメソッド
++  () => { // fixtureとDBモックを初期化するコールバック
++    vi.resetAllMocks(); // モック履歴・実装を初期化するメソッド
++    vi.spyOn(console, "error").mockImplementation(silence); // console監視・置換メソッド / 空処理関数の参照
++    vi.spyOn(console, "warn").mockImplementation(silence); // console監視・置換メソッド / 空処理関数の参照
++    vi.spyOn(console, "log").mockImplementation(silence); // console監視・置換メソッド / 空処理関数の参照
++    actor = {
++      id: SCOPE.membershipId,
++      clubId: SCOPE.clubId,
++      userId: SCOPE.userId,
++      status: "ACTIVE",
++      role: "OWNER",
++      club: {
++        id: SCOPE.clubId,
++        planType: "STANDARD",
++      },
++    };
++    preview = ready(); // 初期previewを作る関数
++    ledger = null;
++    inserted = [];
++    order = [];
++    afterRollback = undefined;
++    loseCommitReply = false;
++    mocks.actor.mockImplementation( // 所属読取モックの実装設定メソッド
 +      /**
-+       * 別クラブ・別本人・失効所属のqueryは一致させない。
++       * 現在の保存済み所属を、queryの本人・クラブ・ACTIVE条件で照合する。
 +       */
-+      async ({ where }: Prisma.ClubMembershipFindFirstArgs) => { // 引数を受け取って試験・判定を行うコールバック / 所属検索のPrisma引数型
++      async ({ where }: Prisma.ClubMembershipFindFirstArgs) => { // 所属読取コールバック / Prisma引数型
++        order.push("AUTH"); // 呼出し順を記録するメソッド
 +        if (
 +          actor === null ||
 +          actor.id !== where?.id ||
@@ -702,277 +641,610 @@ index 0000000000000000000000000000000000000000..c40474db6339530c021dee381831b909
 +        return actor;
 +      },
 +    );
-+    mocks.match.mockResolvedValue(null); // モックの成功結果を設定するメソッド
-+    for (const method of ["error", "warn", "log"] as const) { // 読取専用リテラル型
-+      vi.spyOn(console, method).mockImplementation( // モックの処理を設定するメソッド / 関数呼出しを監視する関数
-+        /**
-+         * 試験中の実ログ出力を抑止し、呼出し履歴だけを残す。
-+         */
-+        () => undefined, // 実ログ出力を抑止するコールバック
-+      );
-+    }
++    mocks.ledger.mockImplementation( // 記録読取モックの実装設定メソッド
++      /**
++       * 保存済み完了記録を返す。queryのclubId・requestIdは各試験で別途検証する。
++       */
++      async () => { // 記録読取の非同期コールバック
++        order.push("LEDGER_READ"); // 呼出し順を記録するメソッド
++        return ledger;
++      },
++    );
++    mocks.preview.mockImplementation( // preview再取得モックの実装設定メソッド
++      /**
++       * 実行時点のpreview材料を返す。
++       */
++      async () => { // preview再取得の非同期コールバック
++        order.push("PREVIEW"); // 呼出し順を記録するメソッド
++        return preview;
++      },
++    );
++    mocks.insert.mockImplementation( // Event群作成モックの実装設定メソッド
++      /**
++       * 明示されたEvent行だけを保存し、挿入件数を返す。
++       */
++      async ({ data }: { data: Prisma.ClubEventCreateManyInput[] }) => { // Event作成コールバック / 作成列配列の型
++        order.push("EVENTS_INSERT"); // 呼出し順を記録するメソッド
++        inserted.push(...structuredClone(data)); // Dateも保持する複製関数 / 行を追加するメソッド
++        return { count: data.length };
++      },
++    );
++    mocks.createLedger.mockImplementation( // 記録作成モックの実装設定メソッド
++      /**
++       * Event群と同じtransaction内の完了記録を保存する。
++       */
++      async ({ data }: { data: Ledger }) => { // 記録作成コールバック / 完了記録型
++        order.push("LEDGER_INSERT"); // 呼出し順を記録するメソッド
++        ledger = structuredClone(data); // Dateも保持して記録を複製する関数
++        return { id: OTHER };
++      },
++    );
++    mocks.transaction.mockImplementation( // transaction境界モックの実装設定メソッド
++      /**
++       * callback例外では両storeを復元し、commit後の応答喪失では保存値を保持する。
++       * 実DBの分離レベル・実並列・FKの検証を代替するものではない。
++       */
++      async (callback: (tx: Prisma.TransactionClient) => Promise<unknown>) => { // transactionコールバック / Clientと非同期返却の型
++        const beforeRows = structuredClone(inserted); // Event群のsnapshotを作る関数
++        const beforeLedger = structuredClone(ledger); // 完了記録のsnapshotを作る関数
++        let result: unknown; // callbackの返却値を保持する型
++        try {
++          result = await callback(transaction); // 指定transactionで処理を実行する関数
++        } catch (error) {
++          inserted = beforeRows;
++          ledger = beforeLedger;
++          order.push("ROLLBACK"); // rollbackを記録するメソッド
++          const concurrentCommit = afterRollback;
++          afterRollback = undefined;
++          concurrentCommit?.(); // 別transactionのcommitを模す試験用関数
++          throw error;
++        }
++        order.push("COMMIT"); // commitを記録するメソッド
++        if (loseCommitReply) {
++          loseCommitReply = false;
++          throw new Error(PRIVATE); // 保存後の応答喪失を模す例外の生成
++        }
++        return result;
++      },
++    );
 +  },
 +);
-+afterEach( // 各試験後の検証を登録する関数
++afterEach( // 試験後の処理を登録する関数
 +  /**
-+   * 機密ログが出ていないことを確認し、spyを復元する。
++   * 原文や本文をログへ出していないことを確認し、consoleの監視を解除する。
 +   */
-+  () => { // 試験処理を実行するコールバック
-+    expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    expect(console.warn).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    expect(console.log).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    vi.restoreAllMocks(); // spyを復元する関数
++  () => { // ログ検証と監視解除を行うコールバック
++    expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / console関数参照 / 未呼出し検証メソッド
++    expect(console.warn).not.toHaveBeenCalled(); // 期待値生成関数 / console関数参照 / 未呼出し検証メソッド
++    expect(console.log).not.toHaveBeenCalled(); // 期待値生成関数 / console関数参照 / 未呼出し検証メソッド
++    vi.restoreAllMocks(); // 監視を解除するメソッド
 +  },
 +);
 +
-+it("最新所属とtimezoneだけを読み、31候補を最大31回の一致検索で返す", // 試験を登録する関数
++it("最新認可・完了記録・再preview・一括保存を順に行い固定列を保存する", // 試験を登録する関数
 +  /**
-+   * 全件取得・本文取得・書込みがなく、正規化入力とサーバー専用一致IDを返す。
++   * 生成値と同じtransactionを使い、関連行や公開・通知を作らないことを確認する。
 +   */
-+  async () => { // 試験処理を実行するコールバック
-+    mocks.match.mockResolvedValue({ id: OTHER }); // モックの成功結果を設定するメソッド
-+    const result = await findEventPracticeBatchPreviewData(input()); // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(result.outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    if (result.outcome !== "READY") {
-+      throw new Error("fixture-not-ready"); // 例外のコンストラクター
-+    }
-+    expect(result.input.title).toBe("練習"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.candidateCount).toBe(31); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.selectableCount).toBe(31); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.candidates).toHaveLength(31); // 件数を検証するメソッド / 期待値を生成する関数
-+    expect(result.candidates[0].duplicateEventId).toBe(OTHER); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.candidates[0]).not.toHaveProperty("initiallySelected"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
-+    expect(mocks.actor).toHaveBeenCalledExactlyOnceWith({ // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
-+      where: {
-+        id: MEMBER,
-+        clubId: CLUB,
-+        userId: USER,
-+        status: "ACTIVE",
-+      },
-+      select: {
-+        role: true,
-+        club: {
-+          select: {
-+            timezone: true,
-+            planType: true,
-+          },
-+        },
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++      outcome: "CREATED",
++      receipt: {
++        targetMonth: "2026-01",
++        createdCount: 1,
 +      },
 +    });
-+    expect(mocks.match).toHaveBeenCalledTimes(31); // 呼出し回数を検証するメソッド / 期待値を生成する関数
-+    for (const [query] of mocks.match.mock.calls) {
-+      expect(query.select).toEqual({ id: true }); // 構造の一致を検証するメソッド / 期待値を生成する関数
-+      expect(query.where.clubId).toBe(CLUB); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(query.where).not.toHaveProperty("status"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
-+      expect(query.where.content).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
-+      expect(query.where.belongings).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
-+      expect(query.where.notes).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
-+      expect(query.where.genre).toBe("PRACTICE"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(query.where.isAllDay).toBe(false); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(query).not.toHaveProperty("include"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
-+    }
++    expect(order).toEqual([ // 構造の一致を検証するメソッド / 期待値を生成する関数
++      "AUTH", "LEDGER_READ", "PREVIEW", "EVENTS_INSERT", "LEDGER_INSERT", "COMMIT",
++    ]);
++    expect(mocks.transaction.mock.calls[0][1]).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数
++      isolationLevel: "Serializable",
++      maxWait: 5000,
++      timeout: 30000,
++    });
++    expect(mocks.actor.mock.calls[0][0].where).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数
++      id: SCOPE.membershipId,
++      clubId: SCOPE.clubId,
++      userId: SCOPE.userId,
++      status: "ACTIVE",
++    });
++    expect(mocks.ledger.mock.calls[0][0].where).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数
++      clubId_requestId: {
++        clubId: SCOPE.clubId,
++        requestId: REQUEST,
++      },
++    });
++    expect(mocks.preview).toHaveBeenCalledExactlyOnceWith({ // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
++      ...SCOPE,
++      input: common(), // 定期練習の共通入力を生成する関数
++    }, transaction);
++    expect(inserted).toEqual([{ // 構造の一致を検証するメソッド / 期待値を生成する関数
++      clubId: SCOPE.clubId,
++      title: "練習",
++      content: null,
++      genre: "PRACTICE",
++      targetRoles: ["OWNER", "MEMBER"],
++      startAt: new Date("2026-01-01T18:00:00Z"), // 日時のコンストラクター
++      endAt: new Date("2026-01-01T20:00:00Z"), // 日時のコンストラクター
++      isAllDay: false,
++      location: "体育館",
++      meetingAt: new Date("2026-01-01T17:30:00Z"), // 日時のコンストラクター
++      meetingLocation: "入口",
++      belongings: null,
++      notes: null,
++      status: "DRAFT",
++      firstPublishedAt: null,
++      readRequiredAt: null,
++      createdByMembershipId: SCOPE.membershipId,
++      updatedByMembershipId: SCOPE.membershipId,
++    }]);
++    expect(mocks.insert.mock.calls[0][0].skipDuplicates).toBe(false); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(ledger).toEqual(record(request, { completedAt: expect.any(Date) })); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 完了記録fixtureを生成する関数 / 指定型の値と一致する期待値を作る関数
++    expect(mocks.createLedger.mock.calls[0][0].select).toEqual({ id: true }); // 構造の一致を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["id", "clubId", "userId", "status"] as const)("最新所属の%sが違えば取得しない", // 条件別の試験を登録する関数 / 読取専用リテラル型
++it("31件を1回のcreateManyと完了記録へ保存する", // 試験を登録する関数
 +  /**
-+   * 同じ形式の識別子でも別scopeや失効所属は認可しない。
++   * 画面で選択した全件が保存され、実件数が完了記録と一致することを確認する。
 +   */
-+  async (field) => { // 引数を受け取って試験・判定を行うコールバック
-+    actor![field] = OTHER;
-+    expect(await findEventPracticeBatchPreviewData(input())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input({ // 認可scopeと試験入力を組み立てる関数
++      selectedDates: Array.from({ length: 31 }, // 指定件数の候補配列を生成する関数
++        /**
++         * 対象月内の全日付を生成する。
++         */
++        (_, index) => `2026-01-${String(index + 1).padStart(2, "0")}`, // 引数を受け取って試験・判定を行うコールバック / 文字列の桁を揃えるメソッド / 文字列へ変換する関数
++      ),
++    });
++    expect((await createEventPracticeBatch(SCOPE, request)).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(inserted).toHaveLength(31); // 件数を検証するメソッド / 期待値を生成する関数
++    expect(ledger).toHaveProperty("createdCount", 31); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["OWNER", "COACH", "OFFICER"])("現在の管理者%sは利用できる", // 条件別の試験を登録する関数
++it.each([0, 32])("選択%s件はtransaction開始前に拒否する", // 条件別の試験を登録する関数
 +  /**
-+   * OWNER以外の管理ロールも最新権限で許可する。
++   * 上限・下限を正規化前の入力検証で拒否する。
 +   */
-+  async (role) => { // 引数を受け取って試験・判定を行うコールバック
-+    actor!.role = role;
-+    expect((await findEventPracticeBatchPreviewData(input())).outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+  },
-+);
-+
-+it.each(["MEMBER", "missing", "STARTER", "PRO"])("現在の権限・プラン%sを拒否する", // 条件別の試験を登録する関数
-+  /**
-+   * 最新DBが管理権限やアプリ利用権を認めなければ、一致検索へ進まない。
-+   */
-+  async (reason) => { // 引数を受け取って試験・判定を行うコールバック
-+    if (reason === "missing") {
-+      actor = null;
-+    } else if (reason === "MEMBER") {
-+      actor!.role = reason;
-+    } else {
-+      actor!.club.planType = reason;
-+    }
-+    expect(await findEventPracticeBatchPreviewData(input())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+  },
-+);
-+
-+it("同じ入力でも現在DBのtimezoneでUTC日時を再生成する", // 試験を登録する関数
-+  /**
-+   * UTCと東京で検索日時が変わり、前回の設定を再利用しない。
-+   */
-+  async () => { // 試験処理を実行するコールバック
-+    await findEventPracticeBatchPreviewData(input()); // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(mocks.match.mock.calls[0][0].where.startAt).toEqual(new Date("2026-01-01T18:00:00Z")); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 日時のコンストラクター
-+    actor!.club.timezone = "Asia/Tokyo";
-+    mocks.match.mockClear(); // モックの呼出し履歴を初期化するメソッド
-+    const result = await findEventPracticeBatchPreviewData(input()); // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(result.outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(mocks.match.mock.calls[0][0].where.startAt).toEqual(new Date("2026-01-01T09:00:00Z")); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 日時のコンストラクター
-+    expect(result).toHaveProperty("timezone", "Asia/Tokyo"); // 項目の有無と値を検証するメソッド / 期待値を生成する関数
++  async (count) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input({ selectedDates: Array(count).fill("2026-01-01") }); // 認可scopeと試験入力を組み立てる関数 / 配列を指定値で埋めるメソッド / 指定件数の配列を作る関数
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
 +it.each([ // 条件別の試験を登録する関数
-+  ["2026-03", "2026-03-08", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-11", "2026-11-01", "AMBIGUOUS_LOCAL_TIME"],
-+])("%sのDST除外理由を保持し、一致検索しない",
++  ["2026-01-01", "2026-01-01"],
++  ["2025-12-31"],
++  ["2026-02-01"],
++  ["invalid"],
++])("不正・重複・期間外の選択%jを拒否する",
 +  /**
-+   * 生成できない時刻を未一致の正常候補へ変換しない。
++   * 保存入力の構造不正をDBへ持ち込まない。
 +   */
-+  async (month, date, reason) => { // 引数を受け取って試験・判定を行うコールバック
-+    actor!.club.timezone = "America/New_York";
-+    const result = await findEventPracticeBatchPreviewData(input({ // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+      targetMonth: month,
-+      periodStart: date,
-+      periodEnd: date,
-+      startTime: month === "2026-03" ? "02:30" : "01:30",
++  async (...selectedDates) => { // 引数を受け取って試験・判定を行うコールバック
++    expect(await createEventPracticeBatch(SCOPE, input({ selectedDates }))) // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++      .toEqual({ outcome: "VALIDATION_FAILED" });
++    expect(mocks.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["id", "clubId", "userId", "status", "role", "plan"])("最新所属の%sが不適切なら保存しない", // 条件別の試験を登録する関数
++  /**
++   * 本人・クラブ・ACTIVE・管理権限・現在プランを再確認してから記録を読む。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    if (field === "plan") {
++      actor!.club.planType = "STARTER";
++    } else if (field === "role") {
++      actor!.role = "MEMBER";
++    } else if (field === "status") {
++      actor!.status = "WITHDRAWN";
++    } else {
++      actor![field as "id" | "clubId" | "userId"] = OTHER;
++    }
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.ledger).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["COACH", "OFFICER"] as const)("最新管理者%sも保存できる", // 条件別の試験を登録する関数 / 読取専用リテラル型
++  /**
++   * OWNERだけへの過剰な権限制限を防ぐ。
++   */
++  async (role) => { // 引数を受け取って試験・判定を行うコールバック
++    actor!.role = role;
++    expect((await createEventPracticeBatch(SCOPE, input())).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++  },
++);
++
++it.each(["edited", "deleted", "timezone", "duplicate"])("保存後に%sが変わっても同じ操作は記録だけで成功する", // 条件別の試験を登録する関数
++  /**
++   * 完了済み操作の再送で現在previewや作成行を照合し直し、追加保存しない。
++   */
++  async (change) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    expect((await createEventPracticeBatch(SCOPE, request)).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    if (change === "deleted") {
++      inserted = [];
++    }
++    if (change === "edited") {
++      inserted[0].title = "編集済み";
++    }
++    if (change === "timezone") {
++      preview = ready(common(), "Asia/Tokyo"); // 現在のtimezoneを変更したpreview材料を作る関数 / 共通入力生成関数
++    } else if (change === "duplicate") {
++      if (preview.outcome !== "READY") {
++        throw new Error("fixture-preview"); // fixture不正の例外を生成するコンストラクター
++      }
++      preview.candidates[0].duplicateEventId = OTHER;
++    } else {
++      preview = { outcome: "PREVIEW_FAILED" };
++    }
++    mocks.preview.mockClear(); // モックの呼出し履歴を初期化するメソッド
++    expect((await createEventPracticeBatch(SCOPE, request)).outcome).toBe("ALREADY_COMPLETED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each([ // 条件別の試験を登録する関数
++  { operation: "COPY_PREVIOUS_MONTH" },
++  { executedByMembershipId: OTHER },
++  { inputHash: "0".repeat(64) }, // 指定回数だけ文字列を反復するメソッド
++  { targetMonth: "2026-02" },
++  { clubId: OTHER },
++  { requestId: OTHER },
++  { createdCount: 0 },
++  { createdCount: 32 },
++  { createdCount: 2 },
++  { completedAt: new Date(NaN) }, // 日時のコンストラクター
++])("別操作・別実行者・改変記録%jではCONFLICTを返す",
++  /**
++   * F10との同じ操作ID衝突や不正な完了記録を再送成功として扱わない。
++   */
++  async (changes) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    ledger = record(request, changes); // 完了記録fixtureを生成する関数
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: "CONFLICT" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["title", "selection", "fingerprint"])("同じ操作IDで%sを変えた入力は衝突する", // 条件別の試験を登録する関数
++  /**
++   * requestIdだけが一致しても、元の入力hashと異なる操作を許可しない。
++   */
++  async (change) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    ledger = record(request); // 完了記録fixtureを生成する関数
++    if (change === "title") {
++      request.title = "別内容";
++    }
++    if (change === "selection") {
++      request.selectedDates = ["2026-01-02"];
++    }
++    if (change === "fingerprint") {
++      request.previewFingerprint = "0".repeat(64); // 指定回数だけ文字列を反復するメソッド
++    }
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: "CONFLICT" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["timezone", "duplicate", "removed", "dates"])("保存前の%s変更はPREVIEW_CHANGEDにする", // 条件別の試験を登録する関数
++  /**
++   * 表示時fingerprintを最新の全候補と照合し、変化があれば保存を止める。
++   */
++  async (change) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    if (preview.outcome !== "READY") {
++      throw new Error("fixture-preview"); // 例外のコンストラクター
++    }
++    if (change === "timezone") {
++      preview = ready(common(), "Asia/Tokyo"); // 正常なpreview材料を生成する関数 / 定期練習の共通入力を生成する関数
++    }
++    if (change === "duplicate") {
++      preview.candidates[0].duplicateEventId = OTHER;
++    }
++    if (change === "removed") {
++      preview.candidates = preview.candidates.slice(1); // 先頭を除いた候補配列を取り出すメソッド
++    }
++    if (change === "dates") {
++      const dates = preview.candidates[0].dates;
++      if (dates === null) {
++        throw new Error("fixture-dates"); // 例外のコンストラクター
++      }
++      dates.startAt = new Date(dates.startAt.getTime() + 1000); // 日時のコンストラクター / UTCミリ秒値を得るメソッド
++    }
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: "PREVIEW_CHANGED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("期間内でも曜日候補にない日と、生成不能な除外日は保存しない", // 試験を登録する関数
++  /**
++   * 形式・期間が正しくても、現在の候補に含まれる生成可能日だけを許可する。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    preview = ready({ ...common(), weekdays: [4] }); // 正常なpreview材料を生成する関数 / 定期練習の共通入力を生成する関数
++    expect(await createEventPracticeBatch(SCOPE, input({ selectedDates: ["2026-01-02"] }))) // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++      .toEqual({ outcome: "VALIDATION_FAILED" });
++    preview = ready({ // 正常なpreview材料を生成する関数
++      ...common(), // 定期練習の共通入力を生成する関数
++      targetMonth: "2026-03",
++      periodStart: "2026-03-08",
++      periodEnd: "2026-03-08",
++      startTime: "02:30",
 +      endTime: "04:00",
-+    }));
-+    expect(result).toMatchObject({ // 一部の構造を検証するメソッド / 期待値を生成する関数
-+      outcome: "READY",
-+      candidateCount: 1,
-+      selectableCount: 0,
-+      candidates: [{
-+        date,
-+        dates: null,
-+        exclusionReason: reason,
-+        duplicateEventId: null,
-+      }],
-+    });
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    }, "America/New_York");
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it("開始後の集合警告を保持し、対象曜日がない場合もREADYを返す", // 試験を登録する関数
++it("既存完全一致の明示選択を許可する", // 試験を登録する関数
 +  /**
-+   * 警告を除外扱いにせず、0候補も正常なpreview材料にする。
++   * 未選択の初期表示ルールを保存拒否条件として混入させない。
 +   */
-+  async () => { // 試験処理を実行するコールバック
-+    const result = await findEventPracticeBatchPreviewData(input({ // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+      periodEnd: "2026-01-01",
-+      meetingTime: "19:00",
-+    }));
-+    expect(result).toMatchObject({ // 一部の構造を検証するメソッド / 期待値を生成する関数
-+      outcome: "READY",
-+      selectableCount: 1,
-+      candidates: [{ warnings: ["MEETING_AFTER_START"] }],
-+    });
-+    mocks.match.mockClear(); // モックの呼出し履歴を初期化するメソッド
-+    expect(await findEventPracticeBatchPreviewData(input({ // 一部の構造を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+      periodEnd: "2026-01-01",
-+      weekdays: [0],
-+    }))).toMatchObject({
-+      outcome: "READY",
-+      candidateCount: 0,
-+      selectableCount: 0,
-+      candidates: [],
-+    });
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    if (preview.outcome !== "READY") {
++      throw new Error("fixture-preview"); // 例外のコンストラクター
++    }
++    preview.candidates[0].duplicateEventId = OTHER;
++    expect((await createEventPracticeBatch(SCOPE, input())).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
 +  },
 +);
 +
-+it("不正入力はDB読取前に、不正timezoneは一致検索前に拒否する", // 試験を登録する関数
++it("件数不一致はEvent群と記録を全件rollbackする", // 試験を登録する関数
 +  /**
-+   * 通常の取得失敗を固定結果にし、元の値を返さない。
++   * 行を仮保存した後でも専用例外によってtransactionを中断する。
 +   */
-+  async () => { // 試験処理を実行するコールバック
-+    expect(await findEventPracticeBatchPreviewData(input({ targetMonth: PRIVATE }))) // 構造の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+      .toEqual({ outcome: "PREVIEW_FAILED" });
-+    expect(mocks.actor).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    actor!.club.timezone = PRIVATE;
-+    expect(await findEventPracticeBatchPreviewData(input())).toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.insert.mockImplementationOnce( // 次の呼出しだけを差し替えるメソッド
++      /**
++       * Event行を仮保存して、不一致の件数を返す。
++       */
++      async ({ data }: { data: Prisma.ClubEventCreateManyInput[] }) => { // 引数を受け取って試験・判定を行うコールバック / イベント一括作成列のPrisma型
++        inserted.push(...structuredClone(data)); // 候補を配列へ追加するメソッド / Dateも保持して値を複製する関数
++        return { count: 0 };
++      },
++    );
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "CREATE_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(inserted).toEqual([]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(ledger).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
++    expect(order).toContain("ROLLBACK"); // 値の包含を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["actor", "match"] as const)("%sの障害を原文・本文・ログなしの固定結果にする", // 条件別の試験を登録する関数 / 読取専用リテラル型
++it.each(["insert", "createLedger"] as const)("%sの途中失敗を成功扱いせず全件rollbackする", // 条件別の試験を登録する関数 / 読取専用リテラル型
 +  /**
-+   * 途中まで一致検索しても、失敗したpreview材料を部分成功として返さない。
++   * 書込依頼後の不明な障害は結果不明を返し、mock上で部分行を残さない。
 +   */
 +  async (phase) => { // 引数を受け取って試験・判定を行うコールバック
 +    mocks[phase].mockRejectedValue(new Error(PRIVATE)); // モックの失敗を設定するメソッド / 例外のコンストラクター
-+    const result = await findEventPracticeBatchPreviewData(input()); // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(result).toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(inserted).toEqual([]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(ledger).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("P2034は初回後最大3回で打ち切る", // 試験を登録する関数
++  /**
++   * 毎回再認可・再previewし、有限回数で同じ操作の再確認へ戻す。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.insert.mockRejectedValue(databaseError("P2034")); // モックの失敗を設定するメソッド / Prisma既知エラーfixtureを生成する関数
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.transaction).toHaveBeenCalledTimes(4); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.actor).toHaveBeenCalledTimes(4); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(inserted).toEqual([]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(ledger).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("P2034の一度だけの衝突は再試行し、一度分だけ保存する", // 試験を登録する関数
++  /**
++   * 最初のtransactionのrollback後に、同じ入力で保存できることを確認する。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.insert.mockRejectedValueOnce(databaseError("P2034")); // 次の呼出しだけを失敗させるメソッド / Prisma既知エラーfixtureを生成する関数
++    expect((await createEventPracticeBatch(SCOPE, input())).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.actor).toHaveBeenCalledTimes(2); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(inserted).toHaveLength(1); // 件数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("P2034の再試行時にも最新権限を確認する", // 試験を登録する関数
++  /**
++   * 最初の試行後に失効した所属で保存を続行しない。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.insert.mockRejectedValueOnce(databaseError("P2034")); // 次の呼出しだけを失敗させるメソッド / Prisma既知エラーfixtureを生成する関数
++    afterRollback =
++      /**
++       * 別処理による所属失効を再試行前に反映する。
++       */
++      () => { // 引数を受け取って試験・判定を行うコールバック
++        actor!.status = "WITHDRAWN";
++      };
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["same", "different", "missing", "revoked"])("P2002後の%sでは再認可と記録照合だけを行う", // 条件別の試験を登録する関数
++  /**
++   * 自分の書込をrollbackし、競合した別処理の完了記録だけで結果を判断する。
++   */
++  async (kind) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    mocks.createLedger.mockRejectedValueOnce(databaseError("P2002")); // 次の呼出しだけを失敗させるメソッド / Prisma既知エラーfixtureを生成する関数
++    afterRollback =
++      /**
++       * rollback後に他のtransactionの完了記録や権限失効を反映する。
++       */
++      () => { // 引数を受け取って試験・判定を行うコールバック
++        if (kind === "same") {
++          ledger = record(request); // 完了記録fixtureを生成する関数
++        }
++        if (kind === "different") {
++          ledger = record(request, { operation: "COPY_PREVIOUS_MONTH" }); // 完了記録fixtureを生成する関数
++        }
++        if (kind === "revoked") {
++          actor!.status = "WITHDRAWN";
++        }
++      };
++    const result = await createEventPracticeBatch(SCOPE, request); // 定期練習を冪等に一括保存する関数
++    const expected = kind === "same"
++      ? "ALREADY_COMPLETED"
++      : kind === "revoked" ? "FORBIDDEN" : "CONFLICT";
++    expect(result.outcome).toBe(expected); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(mocks.actor).toHaveBeenCalledTimes(2); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.preview).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(inserted).toEqual([]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("commit後の応答喪失でも、同じ操作の再送は追加作成しない", // 試験を登録する関数
++  /**
++   * 保存済みのEventと記録を保持したまま、次回はledgerだけで成功を確認する。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    loseCommitReply = true;
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(inserted).toHaveLength(1); // 件数を検証するメソッド / 期待値を生成する関数
++    expect((await createEventPracticeBatch(SCOPE, request)).outcome).toBe("ALREADY_COMPLETED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(inserted).toHaveLength(1); // 件数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["actor", "ledger", "preview"] as const)("%sの書込前障害は固定失敗で返す", // 条件別の試験を登録する関数 / 読取専用リテラル型
++  /**
++   * 生例外・本文・秘密を返却せず、自動で追加保存もしない。
++   */
++  async (phase) => { // 引数を受け取って試験・判定を行うコールバック
++    mocks[phase].mockRejectedValue(new Error(PRIVATE)); // モックの失敗を設定するメソッド / 例外のコンストラクター
++    const result = await createEventPracticeBatch(SCOPE, input()); // 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(result).toEqual({ outcome: "CREATE_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数
 +    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it("指定transaction clientで認可から一致検索まで行い、通常Clientへ戻らない", // 試験を登録する関数
++it.each(["clubId", "membershipId", "userId"] as const)("不正なscopeの%sをDBへ渡さない", // 条件別の試験を登録する関数 / 読取専用リテラル型
 +  /**
-+   * 後続の保存transactionから同じ読取処理を利用できることを確認する。
++   * 直接呼出しでもUUID不正と秘密を含むscopeを照合hashの検証で拒否する。
 +   */
-+  async () => { // 試験処理を実行するコールバック
-+    const transactionActor = vi.fn().mockResolvedValue(membership()); // モックの成功結果を設定するメソッド / 読取モックを生成する関数 / 最新所属のfixtureを生成する関数
-+    const transactionMatch = vi.fn().mockResolvedValue({ id: OTHER }); // モックの成功結果を設定するメソッド / 読取モックを生成する関数
-+    const transaction = {
-+      clubMembership: {
-+        findFirst: transactionActor, // 読取モック関数の参照
-+      },
-+      clubEvent: {
-+        findFirst: transactionMatch, // 読取モック関数の参照
-+      },
-+    } as unknown as Prisma.TransactionClient; // 未知の値の型 / 通常Clientまたはtransaction client型
-+    const result = await findEventPracticeBatchPreviewData(input(), transaction); // 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(result.outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(transactionActor).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
-+    expect(transactionMatch).toHaveBeenCalledTimes(31); // 呼出し回数を検証するメソッド / 期待値を生成する関数
-+    expect(mocks.actor).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    expect(await createEventPracticeBatch({ ...SCOPE, [field]: PRIVATE }, input())) // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++      .toEqual({ outcome: "FORBIDDEN" });
++    expect(mocks.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it("除外前の32候補を一致検索前に拒否する", // 試験を登録する関数
++it.each(["missing", "relation"])("最新所属の%sが不正な場合も記録を返さない", // 条件別の試験を登録する関数
 +  /**
-+   * 純粋生成側が上限を破った場合も、Repositoryの検索回数を31以内に制限する。
++   * 保存済み記録があっても、所属なしや別クラブrelationの認可を通さない。
 +   */
-+  async () => { // 試験処理を実行するコールバック
-+    vi.spyOn(dateTimes, "generateEventPracticeBatchDateTimes").mockReturnValue({ // モックの返却値を設定するメソッド / 関数呼出しを監視する関数
-+      outcome: "READY",
-+      items: Array.from({ length: 32 }, // 指定件数の候補配列を生成する関数
-+        /**
-+         * 生成不能候補も上限の対象になることを確認する。
-+         */
-+        () => ({ // 読取モックや試験候補を生成するコールバック
-+          date: "2026-01-01",
-+          dates: null,
-+          exclusionReason: "INVALID_DATE_TIME" as const, // 読取専用リテラル型
-+          warnings: [],
-+        }),
-+      ),
-+      candidateCount: 32,
-+      selectableCount: 0,
-+    });
-+    expect(await findEventPracticeBatchPreviewData(input())).toEqual({ outcome: "TOO_MANY" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  async (reason) => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    ledger = record(request); // 完了記録fixtureを生成する関数
++    if (reason === "missing") {
++      actor = null;
++    }
++    if (reason === "relation") {
++      actor!.club.id = OTHER;
++    }
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.ledger).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["TOO_MANY", "GENERATION_FAILED", "INVALID_INPUT", "INVALID_TIMEZONE"] as const)( // 条件別の試験を登録する関数 / 読取専用リテラル型
-+  "日時生成の%sを安全な読取結果へ変換する",
++it("UUIDと照合値の大小文字・選択順を正規化し、同一操作として再送できる", // 試験を登録する関数
 +  /**
-+   * 件数超過と通常失敗を区別し、失敗した生成結果で検索しない。
++   * 元の入力配列を変更せず、同じscopeと選択集合を同じ入力hashで照合する。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    const request = input({ selectedDates: ["2026-01-02", "2026-01-01"] }); // 認可scopeと試験入力を組み立てる関数
++    expect((await createEventPracticeBatch(SCOPE, request)).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(request.selectedDates).toEqual(["2026-01-02", "2026-01-01"]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    const upperScope = {
++      clubId: SCOPE.clubId.toUpperCase(), // 文字列を大文字へ変換するメソッド
++      membershipId: SCOPE.membershipId.toUpperCase(), // 文字列を大文字へ変換するメソッド
++      userId: SCOPE.userId.toUpperCase(), // 文字列を大文字へ変換するメソッド
++    };
++    const replay = {
++      ...request,
++      previewFingerprint: request.previewFingerprint.toUpperCase(), // 文字列を大文字へ変換するメソッド
++      selectedDates: ["2026-01-01", "2026-01-02"],
++    };
++    expect((await createEventPracticeBatch(upperScope, replay)).outcome).toBe("ALREADY_COMPLETED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["FORBIDDEN", "TOO_MANY", "PREVIEW_FAILED"] as const)("再previewの%sで保存しない", // 条件別の試験を登録する関数 / 読取専用リテラル型
++  /**
++   * 認可拒否・候補増加・取得失敗を区別して、固定の保存結果へ変換する。
 +   */
 +  async (outcome) => { // 引数を受け取って試験・判定を行うコールバック
-+    vi.spyOn(dateTimes, "generateEventPracticeBatchDateTimes").mockReturnValue({ outcome }); // モックの返却値を設定するメソッド / 関数呼出しを監視する関数
-+    expect(await findEventPracticeBatchPreviewData(input())).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数 / 最新認可で定期練習preview材料を読む関数 / 認可scopeと試験入力を組み立てる関数
-+      outcome: outcome === "TOO_MANY" ? "TOO_MANY" : "PREVIEW_FAILED",
-+    });
-+    expect(mocks.match).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    const request = input(); // 認可scopeと試験入力を組み立てる関数
++    preview = { outcome };
++    const expected = outcome === "FORBIDDEN" ? "FORBIDDEN"
++      : outcome === "TOO_MANY" ? "PREVIEW_CHANGED" : "CREATE_FAILED";
++    expect(await createEventPracticeBatch(SCOPE, request)).toEqual({ outcome: expected }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("書込前のP2002で照合専用transactionへ切り替えない", // 試験を登録する関数
++  /**
++   * 無関係な読取エラーを保存済み記録の競合と混同しない。
++   */
++  async () => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.ledger.mockRejectedValueOnce(databaseError("P2002")); // 次の呼出しだけを失敗させるメソッド / Prisma既知エラーfixtureを生成する関数
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "CREATE_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.transaction).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["P2002", "ordinary"])("P2002後の照合が%sで失敗しても追加保存しない", // 条件別の試験を登録する関数
++  /**
++   * 照合専用モードの障害は結果不明にし、自動で書込みへ戻らない。
++   */
++  async (kind) => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.createLedger.mockRejectedValueOnce(databaseError("P2002")); // 次の呼出しだけを失敗させるメソッド / Prisma既知エラーfixtureを生成する関数
++    afterRollback =
++      /**
++       * rollback後の記録読取だけを失敗させる。
++       */
++      () => { // 引数を受け取って試験・判定を行うコールバック
++        mocks.ledger.mockRejectedValueOnce(kind === "P2002" ? databaseError("P2002") : new Error(PRIVATE)); // 次の呼出しだけを失敗させるメソッド / Prisma既知エラーfixtureを生成する関数 / 例外のコンストラクター
++      };
++    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(mocks.transaction).toHaveBeenCalledTimes(2); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.insert).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(inserted).toEqual([]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["clubId", "status", "genre", "content", "returnTo"])("未許可項目%sの混入を保存しない", // 条件別の試験を登録する関数
++  /**
++   * scopeや固定保存列・任意遷移先をClient入力から取り込まない。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const result = await createEventPracticeBatch(SCOPE, { ...input(), [field]: PRIVATE }); // 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
++    expect(result).toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    expect(mocks.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
