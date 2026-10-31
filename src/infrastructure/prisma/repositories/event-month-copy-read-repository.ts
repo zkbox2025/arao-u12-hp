@@ -7,7 +7,6 @@ import { TZDate } from "@date-fns/tz";
 import type { Prisma } from "@prisma/client";
 
 import {
-  CLUB_MEMBER_ROLE_LABELS, // Prisma由来の全クラブ所属ロールに対応する表示ラベル
   isClubAdminRole, // 管理者(OWNER / COACH / OFFICER)かどうか判定する関数
 } from "@/domain/club/club-member-role";
 import {
@@ -35,9 +34,9 @@ import type {
   EventMonthCopyFingerprintCandidate, // 元データ・変換結果・既存一致ID（重複したID）をまとめたサーバー用候補型
   EventMonthCopyFingerprintScope, // クラブ・所属・Auth本人の識別子をまとめた型
 } from "@/src/infrastructure/security/event-month-copy-fingerprint";
-import type {
-  ClubMemberRole, // Prisma由来のクラブ所属ロール型： "OWNER" | "COACH" | "OFFICER" | "MEMBER"
-} from "@/types/prisma";
+import {
+  findClubEventExactDuplicateId, // 【追加】クラブ内のコピー対象列・ロール集合が完全一致する代表IDを取得する関数
+} from "./club-event-exact-duplicate-repository";
 
 /**
  * 最新認可から得たクラブ・所属・Auth本人の識別子と、複製先年月。
@@ -62,7 +61,7 @@ export type EventMonthCopyPreviewData = // 上限付き読取の成功・失敗�
     };
 
   //コピーするイベント1件あたりの型を項目、値とするオブジェクトをCOPY_SELECTとする
-const COPY_SELECT = Object.fromEntries( 
+const COPY_SELECT = Object.fromEntries( // 【追加】項目名と取得可否の組からselectを作る関数
   EVENT_MONTH_COPY_FIELDS.map( // コピー項目名をselect値へ写すメソッド
     /**
      * コピー項目1つを、取得を許可するselectの組へ変換する。
@@ -76,8 +75,6 @@ const SOURCE_SELECT = {
   id: true,
   updatedAt: true,
 } satisfies Prisma.ClubEventSelect; // コピー列・元ID・更新版だけのPrisma select型
-// 全ロール名を項目とする配列をALL_ROLESとする
-const ALL_ROLES = Object.keys(CLUB_MEMBER_ROLE_LABELS) as ClubMemberRole[]; 
 
 /**
  * クラブがある地域の現地時間で月の始まり（月初）が、世界標準時（UTC）では一体何時になるのか逆算して作り出す関数
@@ -94,49 +91,10 @@ function monthStart( // クラブ現地月初のUTC値を作る関数
 }
 
 /**
- * 重複データを探し出すための、検索条件（Where条件）を自動で組み立てる関数
- * 余分なロールを持つ行も排除し、公開状態や関連行は条件に含めない。
- */
-function duplicateWhere( // 既存イベントの完全一致検索条件を組み立てる関数
-  clubId: string, // 認可対象クラブIDの文字列型
-  event: EventMonthCopyEvent, // コピーするイベント1件あたりの型。
-): Prisma.ClubEventWhereInput { // Prismaイベント検索条件の型
-  const { targetRoles, ...columns } = pickEventMonthCopyEvent(event); // コピー列だけを検証・抽出する関数
-  const roles = [...new Set(targetRoles)]; // ロールの重複を除く集合の生成
-  if (roles.length === 0) {
-    return {
-      clubId,
-      ...columns,
-      targetRoles: {
-        isEmpty: true,
-      },
-    };
-  }
-  const excludedRoles = ALL_ROLES.filter(
-    /**
-     * 候補のロール集合にないロールだけを残す。
-     */
-    (role) => !roles.includes(role), // 集合外か判定するコールバック / 配列の包含判定メソッド
-  );
-  return {
-    clubId,
-    ...columns,
-    targetRoles: {
-      hasEvery: roles,
-    },
-    NOT: {
-      targetRoles: {
-        hasSome: excludedRoles,//対象外ロールが一つも含まれないこと
-      },
-    },
-  };
-}
-
-/**
  * 前月のイベントを翌月に丸ごと複製するための、事前プレビューデータ作成（重複チェック付き）関数
- * 本人認証、先月の年月を作成、イベントデータを取得して、重複を検出してClient表示へ変換する前のプレビューデータ結果にまとめる
+ * 【修正】本人・クラブ・所属の識別子から最新権限を確認し、前月取得・日時変換・一致検索を行う。
  */
-export async function findEventMonthCopyPreviewData( 
+export async function findEventMonthCopyPreviewData( // 【追加】認可・前月取得・日時変換・一致検索を行う関数
   input: EventMonthCopyPreviewDataInput, // 最新認可から得たクラブ・所属・Auth本人の識別子と、複製先年月。
   database: Prisma.TransactionClient = prisma, // 通常Clientまたは呼出し元transaction clientの型
 ): Promise<EventMonthCopyPreviewData> { //Client表示へ変換する前のプレビューデータ結果の型
@@ -170,8 +128,8 @@ export async function findEventMonthCopyPreviewData(
     }
     const timezone = actor.club.timezone;
     new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(0); // timezoneを検証する書式の生成 / 固定日時の書式化メソッド
-    const year = Number(input.targetMonth.slice(0, 4)); // 年を取り出すメソッド（"2026-11"の最初の４つを抜き出す）
-    const month = Number(input.targetMonth.slice(5, 7)); // 月を取り出すメソッド（"2026-11"の月の部分を抜き出す）
+    const year = Number(input.targetMonth.slice(0, 4)); // 【追加】数値化する関数 / 年を取り出すメソッド（"2026-11"の最初の４つを抜き出す）
+    const month = Number(input.targetMonth.slice(5, 7)); // 【追加】数値化する関数 / 月を取り出すメソッド（"2026-11"の月の部分を抜き出す）
     const sourceYear = month === 1 ? year - 1 : year;
     const sourceMonthNumber = month === 1 ? 12 : month - 1;
     const sourceMonth =//元データの年月を"2026-09" という綺麗な「ハイフン区切りの文字列（テキスト）」に変換する
@@ -196,7 +154,7 @@ export async function findEventMonthCopyPreviewData(
       return { outcome: "TOO_MANY" };
     }
     const candidates: EventMonthCopyFingerprintCandidate[] = []; //元データと日時変換結果の組と、既存イベントとの一致状態を加えた、サーバー内のpreview候補。
-    const duplicateIds = new Map<string, string | null>(); // 重複検知用の箱を作成する
+    const duplicateIds = new Map<string, string | null>(); // 重複検知用の箱を作成する / 【追加】Mapの生成 / キーの文字列型 / IDの文字列またはnull型
     for (const row of rows) {
       const source = {
         ...pickEventMonthCopyEvent(row), // コピー列だけを検証・抽出する関数
@@ -216,16 +174,11 @@ export async function findEventMonthCopyPreviewData(
         if (cached !== undefined) {//重複がある場合は以下、
           duplicateEventId = cached;
         } else {//その他は以下、
-          const duplicate = await database.clubEvent.findFirst({ // 一致行を最大1件だけ取得する
-            where: duplicateWhere(input.clubId, converted), // 重複データを探し出すための、検索条件（Where条件）を自動で組み立てる関数
-            select: {
-              id: true,
-            },
-            orderBy: {
-              id: "asc",
-            },
-          });
-          duplicateEventId = duplicate?.id ?? null;
+          duplicateEventId = await findClubEventExactDuplicateId( // 【修正】共通の完全一致検索へ委譲する関数
+            input.clubId,
+            converted,
+            database,
+          );
           duplicateIds.set(key, duplicateEventId); //重複の検索結果をduplicateIdsに記録し、重複による2回目の登場でconst cached = duplicateIds.get(key);で検出されるようにする
         }
       }
