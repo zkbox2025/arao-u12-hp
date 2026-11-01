@@ -1,263 +1,400 @@
-diff --git a/src/application/club/event/create-event-practice-batch.ts b/src/application/club/event/create-event-practice-batch.ts
+diff --git a/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/actions.ts b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/actions.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..81a17fb58cd1a780ff257a6853786bc48dafd5a9
+index 0000000000000000000000000000000000000000..deda192279951269df37a92f600d257bc483b966
 --- /dev/null
-+++ b/src/application/club/event/create-event-practice-batch.ts
-@@ -0,0 +1,89 @@
-+// src/application/club/event/create-event-practice-batch.ts
-+// 定期練習保存入力と認可scopeを再検証し、Repositoryの結果を最小の保存結果へ限定する。
++++ b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/actions.ts
+@@ -0,0 +1,383 @@
++// app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/actions.ts
++// 定期練習のpreviewと保存を、最新認可・入力照合・保存後処理へ接続する。
++"use server";
 +
-+import "server-only";
++import {
++  redirect,
++  unstable_rethrow,
++} from "next/navigation";
 +
-+import { z } from "zod";
-+
++import {
++  requireClubAppAdminAccess, // ログイン・ACTIVE所属・管理者ロール・アプリ利用プランを確認する関数
++} from "@/app/(club-app)/club/club-app-authorization";
 +import type {
 +  ClubAccessContext, // Auth本人とACTIVE所属から作られる認可contextの型
 +} from "@/app/(club-app)/club/club-membership-authorization";
 +import {
-+  validateEventPracticeBatchInput, // 定期練習の保存入力を検証・正規化する関数
++  revalidateClubEventPaths, // イベント更新後の一覧パスを再検証する関数
++} from "@/app/(club-app)/club/revalidate-club-paths";
++import {
++  isEventPracticeBatchTargetMonth, // 対象月の厳密な構造を検証する関数
++  parseEventPracticeBatchFormData, // 保存用FormDataを検証・正規化する関数
++  parseEventPracticeBatchPreviewFormData, // preview用FormDataを検証・正規化する関数
++  validateEventPracticeBatchPreviewInput, // 共通入力を検証・正規化する関数
 +} from "@/domain/club/event/event-practice-batch-form";
 +import {
 +  EVENT_PRACTICE_BATCH_MAX_COUNT, // 定期練習作成の最大件数31件
-+  type EventPracticeBatchResult, // 定期練習の保存結果の型
++  type EventPracticeBatchActionState, // 保存結果・入力・エラーを持つAction state型
++  type EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力型
++  type EventPracticeBatchFailureOutcome, // 保存の拒否・結果不明コード型
++  type EventPracticeBatchField, // 定期練習の入力項目名型
++  type EventPracticeBatchFormValues, // previewフォームの表示入力型
++  type EventPracticeBatchInput, // 共通入力と選択日・操作ID・照合値を持つ保存入力型
++  type EventPracticeBatchPreviewActionState, // previewの入力・結果・エラーを持つAction state型
 +} from "@/domain/club/event/event-practice-batch-types";
++import type {
++  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
++} from "@/domain/shared/action-state";
 +import {
-+  createEventPracticeBatch as persistEventPracticeBatch, // 最新認可・完了記録照合・再preview・下書き一括保存を行うRepository関数
-+} from "@/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository";
++  createRequestId, // 新しいUUID v4形式の操作IDを発行する関数
++  isRequestId, // UUID v4形式の操作IDか検証する関数
++} from "@/domain/shared/request-id";
++import {
++  createEventPracticeBatch, // 保存入力と認可scopeを再検証し、保存Repositoryへ1回だけ委譲するService
++} from "@/src/application/club/event/create-event-practice-batch";
++import {
++  getEventPracticeBatchPreview, // 最新preview材料を限定DTOと照合値へ変換するService
++} from "@/src/application/club/event/get-event-practice-batch";
 +
-+const scopeSchema = z.object({ // contextの識別子を検証するスキーマ生成関数
-+  clubId: z.uuid(), // クラブUUIDの検証スキーマ生成関数
-+  membershipId: z.uuid(), // 所属UUIDの検証スキーマ生成関数
-+  userId: z.uuid(), // Auth本人UUIDの検証スキーマ生成関数
-+});
++const INVALID_FORM = "フォームが不正です。previewを作成し直してください。";
++const FORBIDDEN = "このクラブで定期練習を作成する権限を確認できません。";
++const PREVIEW_FAILED = "previewを作成できませんでした。入力を確認して再度お試しください。";
++const UNKNOWN_RESULT =
++  "保存結果を確認できません。同じ選択・操作IDのまま再送して確認してください。";
 +
 +/**
-+ * 認証済みcontextと保存入力を検証して、Repositoryへ1回だけ委譲し、最小の保存結果を返す。
-+ * previewの先読みやService内での再試行を行わず、保存依頼後の例外は結果不明として扱う。
++ * preview Actionが返す固定の失敗コード型。
 + */
-+export async function createEventPracticeBatch( // 定期練習一括作成のApplication Service
-+  context: ClubAccessContext, // Auth本人とACTIVE所属から作られる認可context型
-+  input: unknown, // 未検証の定期練習保存入力型
-+): Promise<EventPracticeBatchResult> { // 固定の保存結果を返す非同期型
-+  let requested = false;
-+  try {
-+    const validation = validateEventPracticeBatchInput(input); // 保存入力を再検証・正規化する関数
-+    if (!validation.success) {
-+      return { outcome: "VALIDATION_FAILED" };
-+    }
-+    const parsed = scopeSchema.safeParse({ // context由来の識別子を検証するメソッド
-+      clubId: context?.club?.id,
-+      membershipId: context?.membership?.id,
-+      userId: context?.userId,
-+    });
-+    if (!parsed.success) {
-+      return { outcome: "FORBIDDEN" };
-+    }
-+    const scope = {
-+      clubId: parsed.data.clubId.toLowerCase(), // クラブUUIDを小文字へ揃えるメソッド
-+      membershipId: parsed.data.membershipId.toLowerCase(), // 所属UUIDを小文字へ揃えるメソッド
-+      userId: parsed.data.userId.toLowerCase(), // Auth本人UUIDを小文字へ揃えるメソッド
-+    };
-+    requested = true;
-+    const result = await persistEventPracticeBatch(scope, validation.data); // 保存Repositoryへ1回だけ委譲する関数
-+    switch (result.outcome) {
-+      case "CREATED":
-+      case "ALREADY_COMPLETED":
-+        if (
-+          result.receipt.targetMonth !== validation.data.targetMonth ||
-+          !Number.isInteger(result.receipt.createdCount) || // 作成件数が整数か検証するメソッド
-+          result.receipt.createdCount < 1 ||
-+          result.receipt.createdCount > EVENT_PRACTICE_BATCH_MAX_COUNT ||
-+          result.receipt.createdCount !== validation.data.selectedDates.length
-+        ) {
-+          return { outcome: "RESULT_UNKNOWN" };
-+        }
-+        return {
-+          outcome: result.outcome,
-+          receipt: {
-+            targetMonth: result.receipt.targetMonth,
-+            createdCount: result.receipt.createdCount,
-+          },
-+        };
-+      case "VALIDATION_FAILED":
-+      case "FORBIDDEN":
-+      case "PREVIEW_CHANGED":
-+      case "CONFLICT":
-+      case "CREATE_FAILED":
-+      case "RESULT_UNKNOWN":
-+        return { outcome: result.outcome };
-+      default:
-+        return { outcome: "RESULT_UNKNOWN" };
-+    }
-+  } catch {
-+    return { outcome: requested ? "RESULT_UNKNOWN" : "CREATE_FAILED" };
-+  }
-+}
-diff --git a/src/application/club/event/get-event-practice-batch.ts b/src/application/club/event/get-event-practice-batch.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..343f7bf5e4e38face26a9b8ee21ac89d7d30f624
---- /dev/null
-+++ b/src/application/club/event/get-event-practice-batch.ts
-@@ -0,0 +1,151 @@
-+// src/application/club/event/get-event-practice-batch.ts
-+// 認可contextと共通入力を検証し、定期練習previewを内部IDのない限定DTOへ変換する。
-+
-+import "server-only";
-+
-+import { z } from "zod";
-+
-+import type {
-+  ClubAccessContext, // Auth本人とACTIVE所属から作られる認可contextの型
-+} from "@/app/(club-app)/club/club-membership-authorization";
-+import type {
-+  EventPracticeBatchUtcDateTimes, // 終了必須の練習イベントが持つUTC日時型
-+} from "@/domain/club/event/event-practice-batch-date-times";
-+import {
-+  validateEventPracticeBatchPreviewInput, // previewの共通入力を検証・正規化する関数
-+} from "@/domain/club/event/event-practice-batch-form";
-+import {
-+  EVENT_PRACTICE_BATCH_MAX_COUNT, // 定期練習作成の最大件数31件
-+  type EventPracticeBatchPreview, // 定期練習previewの成功・拒否・失敗結果型
-+  type EventPracticeBatchPreviewDateTimes, // Clientへ返すUTC ISO日時の型
-+  type EventPracticeBatchPreviewItem, // 1日あたりの限定preview項目型
-+} from "@/domain/club/event/event-practice-batch-types";
-+import {
-+  findEventPracticeBatchPreviewData, // 最新認可で日時候補と既存一致IDを取得する関数
-+} from "@/src/infrastructure/prisma/repositories/event-practice-batch-read-repository";
-+import {
-+  buildEventPracticeBatchFingerprint, // 共通入力・現在のtimezone・全候補の照合値を計算する関数
-+} from "@/src/infrastructure/security/event-practice-batch-fingerprint";
-+
-+const scopeSchema = z.object({ // contextの識別子を検証するスキーマ生成関数
-+  clubId: z.uuid(), // クラブUUIDの検証スキーマ生成関数
-+  membershipId: z.uuid(), // 所属UUIDの検証スキーマ生成関数
-+  userId: z.uuid(), // Auth本人UUIDの検証スキーマ生成関数
-+});
++type PreviewFailure = // previewの安全な失敗コード型
++  | "VALIDATION_FAILED" // 入力不正
++  | "TOO_MANY" // 件数超過
++  | "FORBIDDEN" // 認可拒否
++  | "PREVIEW_FAILED"; // preview取得失敗
 +
 +/**
-+ * 生成されたUTC日時を、Dateや余分なプロパティを含まないISO文字列の組へ変換する。
++ * 未検証値を返却しないための、共通入力の安全な初期値を作る。
 + */
-+function dateTimesDto( // Client向け日時DTOを作る関数
-+  values: EventPracticeBatchUtcDateTimes, // 終了必須の開始・終了・任意集合のUTC日時型
-+): EventPracticeBatchPreviewDateTimes { // Client向けUTC ISO日時型
++function emptyInput(targetMonth: string): EventPracticeBatchCommonInput { // 安全な共通入力の初期値を作る関数 / 文字列型 / 正規化した定期練習共通入力型
 +  return {
-+    startAt: values.startAt.toISOString(), // 開始DateをISO文字列へ変換するメソッド
-+    endAt: values.endAt.toISOString(), // 終了DateをISO文字列へ変換するメソッド
-+    meetingAt: values.meetingAt?.toISOString() ?? null, // 任意の集合DateをISO文字列へ変換するメソッド
++    targetMonth,
++    periodStart: "",
++    periodEnd: "",
++    weekdays: [],
++    title: "",
++    startTime: "",
++    endTime: "",
++    location: null,
++    meetingTime: null,
++    meetingLocation: null,
++    targetRoles: ["OWNER"],
 +  };
 +}
 +
 +/**
-+ * 認証済みcontextと共通入力を検証し、最新のpreview材料を限定DTOと照合値へ変換する。
-+ * 認証通信・キャッシュ更新・保存は行わず、現在の権限とtimezoneの取得はRepositoryへ委譲する。
++ * 検証済み共通入力だけを、フォーム表示用の文字列・配列へ変換する。
 + */
-+export async function getEventPracticeBatchPreview( // 定期練習preview取得のApplication Service
-+  context: ClubAccessContext, // Auth本人とACTIVE所属から作られる認可context型
-+  input: unknown, // 未検証のpreview共通入力型
-+): Promise<EventPracticeBatchPreview> { // 限定preview結果を返す非同期型
++function formValues(values: EventPracticeBatchCommonInput): EventPracticeBatchFormValues { // 共通入力をフォーム表示値へ変換する関数 / 正規化した定期練習共通入力型 / フォーム表示用の入力型
++  return {
++    targetMonth: values.targetMonth,
++    periodStart: values.periodStart,
++    periodEnd: values.periodEnd,
++    weekdays: values.weekdays.map(String), // 項目ごとに値を写すメソッド
++    title: values.title,
++    startTime: values.startTime,
++    endTime: values.endTime,
++    location: values.location ?? "",
++    meetingTime: values.meetingTime ?? "",
++    meetingLocation: values.meetingLocation ?? "",
++    targetRoles: [...values.targetRoles],
++  };
++}
++
++/**
++ * 検証済みslugの構造を確認し、改行や任意URLを拒否する。
++ */
++function validSlug(value: unknown): value is string { // slugの構造を検証する関数 / 未知の値の型 / 文字列型
++  return (
++    typeof value === "string" &&
++    value.trim() === value && // 文字列の前後空白を除くメソッド
++    /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) // 正規表現との一致を検証するメソッド
++  );
++}
++
++/**
++ * 64桁の照合値だけを小文字へ揃え、その他は空文字で拒否する。
++ */
++function fingerprintValue(value: unknown): string { // 照合値を検証・正規化する関数 / 未知の値の型 / 文字列型
++  return (
++    typeof value === "string" &&
++    value.length === 64 &&
++    /^[0-9a-f]{64}$/i.test(value) // 正規表現との一致を検証するメソッド
++  ) ? value.toLowerCase() : ""; // 文字列を小文字へ揃えるメソッド
++}
++
++/**
++ * 操作IDの文字数とUUID v4形式を確認し、小文字へ揃える。
++ */
++function requestIdValue(value: unknown): string { // 操作IDを検証・正規化する関数 / 未知の値の型 / 文字列型
++  return (
++    typeof value === "string" &&
++    value.length === 36 &&
++    isRequestId(value) // 操作IDのUUID v4形式を検証する関数
++  ) ? value.toLowerCase() : ""; // 文字列を小文字へ揃えるメソッド
++}
++
++/**
++ * 最新の共通認可を実行し、返されたクラブもbound slugと一致することを確認する。
++ * Nextの制御例外を含む失敗はAction側へ伝播する。
++ */
++async function currentAccess(clubSlug: string): Promise<ClubAccessContext> { // 最新の共通認可とslug一致を確認する関数 / 文字列型 / Promise型 / Auth本人とACTIVE所属から作られる認可context型
++  const access = await requireClubAppAdminAccess(clubSlug); // ログイン・ACTIVE所属・管理権限・プランを確認する関数
++  if (access.club.slug !== clubSlug) {
++    throw new Error(FORBIDDEN); // 例外のコンストラクター
++  }
++  return access;
++}
++
++/**
++ * 前回stateを引き継がず、安全なpreview失敗stateを構築する。
++ */
++function previewError( // 固定のpreview失敗stateを作る関数
++  values: EventPracticeBatchFormValues, // フォーム表示用の入力型
++  outcome: PreviewFailure, // preview失敗コード型
++  formError: string | null, // 文字列型
++  fieldErrors: FieldErrors<EventPracticeBatchField> = {}, // 項目別エラーを保持する型 / 定期練習の入力項目名型
++): EventPracticeBatchPreviewActionState { // previewの入力・結果・エラーを持つstate型
++  return {
++    status: "error",
++    outcome,
++    values,
++    fieldErrors,
++    formError,
++    requestId: "",
++  };
++}
++
++/**
++ * 検証済み保存入力と固定コードから、同じ操作を確認できる失敗stateを構築する。
++ */
++function saveError( // 固定の保存失敗stateを作る関数
++  values: EventPracticeBatchInput, // 定期練習保存入力型
++  outcome: EventPracticeBatchFailureOutcome, // 保存の拒否・結果不明コード型
++  formError: string | null, // 文字列型
++  fieldErrors: FieldErrors<EventPracticeBatchField> = {}, // 項目別エラーを保持する型 / 定期練習の入力項目名型
++): EventPracticeBatchActionState { // 保存の入力・結果・エラーを持つstate型
++  return {
++    status: "error",
++    outcome,
++    values,
++    fieldErrors,
++    formError,
++    requestId: values.requestId,
++  };
++}
++
++/**
++ * slug・対象月と認可を確認し、共通入力だけでpreviewを作る。
++ * 成功したpreviewに対してだけ新しい操作IDを発行する。保存・再検証・遷移は行わない。
++ */
++export async function previewEventPracticeBatchAction( // 認可と入力照合を行うpreview Action
++  clubSlug: string, // 文字列型
++  expectedTargetMonth: string, // 文字列型
++  _previousState: EventPracticeBatchPreviewActionState, // previewの入力・結果・エラーを持つstate型
++  formData: FormData, // 送信フォーム型
++): Promise<EventPracticeBatchPreviewActionState> { // Promise型 / previewの入力・結果・エラーを持つstate型
++  let values = formValues(emptyInput( // 共通入力をフォーム表示値へ変換する関数 / 安全な共通入力の初期値を作る関数
++    isEventPracticeBatchTargetMonth(expectedTargetMonth) ? expectedTargetMonth : "", // 対象月の構造を検証する関数
++  ));
++  if (
++    !validSlug(clubSlug) || // slugの構造を検証する関数
++    !isEventPracticeBatchTargetMonth(expectedTargetMonth) // 対象月の構造を検証する関数
++  ) {
++    return previewError(values, "VALIDATION_FAILED", INVALID_FORM); // 固定のpreview失敗stateを作る関数
++  }
++  let access: ClubAccessContext; // Auth本人とACTIVE所属から作られる認可context型
 +  try {
-+    const validation = validateEventPracticeBatchPreviewInput(input); // 共通入力を検証・正規化する関数
-+    if (!validation.success) {
-+      return { outcome: "PREVIEW_FAILED" };
-+    }
-+    const parsed = scopeSchema.safeParse({ // context由来の識別子を検証するメソッド
-+      clubId: context?.club?.id,
-+      membershipId: context?.membership?.id,
-+      userId: context?.userId,
-+    });
++    access = await currentAccess(clubSlug); // 最新の共通認可とslug一致を確認する関数
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外を再送出する関数
++    return previewError(values, "FORBIDDEN", FORBIDDEN); // 固定のpreview失敗stateを作る関数
++  }
++  try {
++    const parsed = parseEventPracticeBatchPreviewFormData(formData); // preview用FormDataを検証・正規化する関数
 +    if (!parsed.success) {
-+      return { outcome: "FORBIDDEN" };
++      return previewError(values, "VALIDATION_FAILED", parsed.formError, parsed.fieldErrors); // 固定のpreview失敗stateを作る関数
 +    }
-+    const scope = {
-+      clubId: parsed.data.clubId.toLowerCase(), // クラブUUIDを小文字へ揃えるメソッド
-+      membershipId: parsed.data.membershipId.toLowerCase(), // 所属UUIDを小文字へ揃えるメソッド
-+      userId: parsed.data.userId.toLowerCase(), // Auth本人UUIDを小文字へ揃えるメソッド
-+    };
-+    const result = await findEventPracticeBatchPreviewData({ // 最新の認可とtimezoneでpreview材料を取得する関数
-+      ...scope,
-+      input: validation.data,
-+    });
-+    switch (result.outcome) {
-+      case "FORBIDDEN":
-+      case "TOO_MANY":
-+      case "PREVIEW_FAILED":
-+        return { outcome: result.outcome };
-+      case "READY":
-+        break;
-+      default:
-+        return { outcome: "PREVIEW_FAILED" };
++    if (parsed.data.targetMonth !== expectedTargetMonth) {
++      return previewError(values, "VALIDATION_FAILED", INVALID_FORM); // 固定のpreview失敗stateを作る関数
 +    }
-+    if (!Array.isArray(result.candidates)) { // 候補が配列か検証する関数
-+      return { outcome: "PREVIEW_FAILED" };
-+    }
-+    if (result.candidates.length > EVENT_PRACTICE_BATCH_MAX_COUNT) {
-+      return { outcome: "TOO_MANY" };
-+    }
-+    const returnedInput = validateEventPracticeBatchPreviewInput(result.input); // Repositoryの共通入力を再検証する関数
-+    if (
-+      !returnedInput.success ||
-+      JSON.stringify(returnedInput.data) !== JSON.stringify(validation.data) || // 正規化済み共通入力の一致を比較するJSON変換関数
-+      !Number.isInteger(result.candidateCount) || // 候補件数が整数か検証するメソッド
-+      result.candidateCount !== result.candidates.length ||
-+      !Number.isInteger(result.selectableCount) || // 選択可能件数が整数か検証するメソッド
-+      result.selectableCount < 0 ||
-+      result.selectableCount > result.candidateCount
-+    ) {
-+      return { outcome: "PREVIEW_FAILED" };
-+    }
-+    const fingerprint = buildEventPracticeBatchFingerprint({ // 全候補の構造・日時・理由・警告・一致IDを検証し照合値を作る関数
-+      ...scope,
-+      input: validation.data,
-+      timezone: result.timezone,
-+      candidates: result.candidates,
-+    });
-+    const items: EventPracticeBatchPreviewItem[] = []; // 内部IDを含まない限定preview項目の配列型
-+    let selectableCount = 0;
-+    for (const candidate of result.candidates) {
-+      const selectable =
-+        candidate.dates !== null &&
-+        candidate.exclusionReason === null;
-+      if (selectable) {
-+        selectableCount += 1;
++    values = formValues(parsed.data); // 共通入力をフォーム表示値へ変換する関数
++    const result = await getEventPracticeBatchPreview(access, parsed.data); // 限定preview DTOを取得するService
++    switch (result?.outcome) {
++      case "READY": {
++        const returned = validateEventPracticeBatchPreviewInput(result.input); // previewの共通入力を検証・正規化する関数
++        if (
++          !returned.success ||
++          JSON.stringify(returned.data) !== JSON.stringify(parsed.data) || // 共通入力を比較するJSON変換関数
++          !fingerprintValue(result.fingerprint) // 照合値を検証・正規化する関数
++        ) {
++          return previewError(values, "PREVIEW_FAILED", PREVIEW_FAILED); // 固定のpreview失敗stateを作る関数
++        }
++        const requestId = requestIdValue(createRequestId()); // 操作IDを検証・正規化する関数 / サーバーで新しい操作IDを発行する関数
++        if (!requestId) {
++          return previewError(values, "PREVIEW_FAILED", PREVIEW_FAILED); // 固定のpreview失敗stateを作る関数
++        }
++        return {
++          status: "success",
++          outcome: "READY",
++          values,
++          fieldErrors: {},
++          formError: null,
++          requestId,
++          data: result,
++        };
 +      }
-+      const duplicate = candidate.duplicateEventId !== null;
-+      items.push({ // 許可された項目だけをDTOへ追加するメソッド
-+        date: candidate.date,
-+        dates: candidate.dates === null
-+          ? null
-+          : dateTimesDto(candidate.dates), // 生成日時をISO文字列DTOへ変換する関数
-+        exclusionReason: candidate.exclusionReason,
-+        warnings: [...candidate.warnings],
-+        duplicate,
-+        initiallySelected:
-+          selectable &&
-+          !duplicate,
-+      });
++      case "FORBIDDEN":
++        return previewError(values, "FORBIDDEN", FORBIDDEN); // 固定のpreview失敗stateを作る関数
++      case "TOO_MANY":
++        return previewError(values, "TOO_MANY", "作成候補は31件以内にしてください。"); // 固定のpreview失敗stateを作る関数
++      case "PREVIEW_FAILED":
++      default:
++        return previewError(values, "PREVIEW_FAILED", PREVIEW_FAILED); // 固定のpreview失敗stateを作る関数
 +    }
-+    if (selectableCount !== result.selectableCount) {
-+      return { outcome: "PREVIEW_FAILED" };
-+    }
-+    return {
-+      outcome: "READY",
-+      input: validation.data,
-+      timezone: result.timezone,
-+      fingerprint,
-+      items,
-+      candidateCount: items.length,
-+      selectableCount,
-+    };
-+  } catch {
-+    return { outcome: "PREVIEW_FAILED" };
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外を再送出する関数
++    return previewError(values, "PREVIEW_FAILED", PREVIEW_FAILED); // 固定のpreview失敗stateを作る関数
 +  }
 +}
-diff --git a/tests/event-practice-batch-services.test.ts b/tests/event-practice-batch-services.test.ts
++
++/**
++ * preview成功時の共通入力・操作ID・照合値をbindし、送信値と最新認可を照合して保存する。
++ * 前回stateは信用せず、保存成功・replay成功後だけ一覧を再検証し、固定の管理者一覧へ遷移する。
++ */
++export async function createEventPracticeBatchAction( // 認可と入力照合・保存後処理を行うAction
++  clubSlug: string, // 文字列型
++  expectedInput: EventPracticeBatchCommonInput, // 正規化した定期練習共通入力型
++  expectedRequestId: string, // 文字列型
++  expectedFingerprint: string, // 文字列型
++  _previousState: EventPracticeBatchActionState, // 保存の入力・結果・エラーを持つstate型
++  formData: FormData, // 送信フォーム型
++): Promise<EventPracticeBatchActionState> { // Promise型 / 保存の入力・結果・エラーを持つstate型
++  const bound = validateEventPracticeBatchPreviewInput(expectedInput); // previewの共通入力を検証・正規化する関数
++  let values: EventPracticeBatchInput = { // 定期練習保存入力型
++    ...(bound.success ? bound.data : emptyInput("")), // 安全な共通入力の初期値を作る関数
++    selectedDates: [],
++    requestId: requestIdValue(expectedRequestId), // 操作IDを検証・正規化する関数
++    previewFingerprint: fingerprintValue(expectedFingerprint), // 照合値を検証・正規化する関数
++  };
++  if (
++    !validSlug(clubSlug) || // slugの構造を検証する関数
++    !bound.success ||
++    !values.requestId ||
++    !values.previewFingerprint
++  ) {
++    return saveError(values, "VALIDATION_FAILED", INVALID_FORM); // 固定の保存失敗stateを作る関数
++  }
++  let access: ClubAccessContext; // Auth本人とACTIVE所属から作られる認可context型
++  try {
++    access = await currentAccess(clubSlug); // 最新の共通認可とslug一致を確認する関数
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外を再送出する関数
++    return saveError(values, "FORBIDDEN", FORBIDDEN); // 固定の保存失敗stateを作る関数
++  }
++  let parsed: ReturnType<typeof parseEventPracticeBatchFormData>; // 関数の返却値を取得する型 / 関数の型を参照するtypeof型
++  try {
++    parsed = parseEventPracticeBatchFormData(formData); // 保存用FormDataを検証・正規化する関数
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外を再送出する関数
++    return saveError(values, "VALIDATION_FAILED", INVALID_FORM); // 固定の保存失敗stateを作る関数
++  }
++  if (!parsed.success) {
++    return saveError(values, "VALIDATION_FAILED", parsed.formError, parsed.fieldErrors); // 固定の保存失敗stateを作る関数
++  }
++  const {
++    selectedDates,
++    requestId,
++    previewFingerprint,
++    ...commonInput
++  } = parsed.data;
++  if (
++    requestId !== values.requestId ||
++    previewFingerprint !== values.previewFingerprint ||
++    JSON.stringify(commonInput) !== JSON.stringify(bound.data) // 共通入力を比較するJSON変換関数
++  ) {
++    return saveError(values, "VALIDATION_FAILED", INVALID_FORM); // 固定の保存失敗stateを作る関数
++  }
++  values = {
++    ...commonInput,
++    selectedDates,
++    requestId,
++    previewFingerprint,
++  };
++  let result: Awaited<ReturnType<typeof createEventPracticeBatch>>; // 非同期処理の返却値を取り出す型 / 関数の返却値を取得する型 / 関数の型を参照するtypeof型
++  try {
++    result = await createEventPracticeBatch(access, values); // 保存を1回だけRepositoryへ委譲するService
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外を再送出する関数
++    return saveError(values, "RESULT_UNKNOWN", UNKNOWN_RESULT); // 固定の保存失敗stateを作る関数
++  }
++  switch (result?.outcome) {
++    case "CREATED":
++    case "ALREADY_COMPLETED":
++      break;
++    case "VALIDATION_FAILED":
++      return saveError(values, result.outcome, "選択した日を作成できません。previewを作成し直してください。"); // 固定の保存失敗stateを作る関数
++    case "FORBIDDEN":
++      return saveError(values, result.outcome, FORBIDDEN); // 固定の保存失敗stateを作る関数
++    case "PREVIEW_CHANGED":
++      return saveError(values, result.outcome, "候補が変更されました。previewを作成し直してください。"); // 固定の保存失敗stateを作る関数
++    case "CONFLICT":
++      return saveError(values, result.outcome, "この操作IDは別の内容で使用されています。previewを作成し直してください。"); // 固定の保存失敗stateを作る関数
++    case "CREATE_FAILED":
++      return saveError(values, result.outcome, "作成できませんでした。同じ操作のまま再度お試しください。"); // 固定の保存失敗stateを作る関数
++    case "RESULT_UNKNOWN":
++    default:
++      return saveError(values, "RESULT_UNKNOWN", UNKNOWN_RESULT); // 固定の保存失敗stateを作る関数
++  }
++  if (
++    result.receipt?.targetMonth !== values.targetMonth ||
++    !Number.isInteger(result.receipt?.createdCount) || // 整数か検証するメソッド
++    result.receipt.createdCount < 1 ||
++    result.receipt.createdCount > EVENT_PRACTICE_BATCH_MAX_COUNT ||
++    result.receipt.createdCount !== values.selectedDates.length
++  ) {
++    return saveError(values, "RESULT_UNKNOWN", UNKNOWN_RESULT); // 固定の保存失敗stateを作る関数
++  }
++  try {
++    revalidateClubEventPaths(access.club.slug); // イベント4一覧を再検証する関数
++  } catch (error) {
++    unstable_rethrow(error); // Next制御例外を再送出する関数
++    return {
++      status: "success",
++      outcome: result.outcome,
++      values,
++      fieldErrors: {},
++      formError: null,
++      requestId: values.requestId,
++      data: {
++        targetMonth: result.receipt.targetMonth,
++        createdCount: result.receipt.createdCount,
++        needsReload: true,
++      },
++    };
++  }
++  const query = new URLSearchParams({ // 固定queryを生成するコンストラクター
++    month: values.targetMonth,
++    status: "ALL",
++    toast: "event-practice-batch-created",
++    toastId: values.requestId,
++  });
++  redirect( // Nextの遷移制御例外で固定URLへ遷移する関数
++    `/club/${encodeURIComponent(access.club.slug)}/admin/events?${query.toString()}`, // slugをURL用に符号化する関数 / queryをURL文字列へ変換するメソッド
++  );
++}
+diff --git a/tests/event-practice-batch-actions.test.ts b/tests/event-practice-batch-actions.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..739563d7bfff5e42f9b7dec80131a649e059107a
+index 0000000000000000000000000000000000000000..418e109c586d8385481726233da42506727c9ba3
 --- /dev/null
-+++ b/tests/event-practice-batch-services.test.ts
-@@ -0,0 +1,804 @@
-+// tests/event-practice-batch-services.test.ts
-+// 実DB・Auth・Next・配送なしで、Serviceの正規化・限定DTO・安全な保存結果を検証する。
++++ b/tests/event-practice-batch-actions.test.ts
+@@ -0,0 +1,1024 @@
++// tests/event-practice-batch-actions.test.ts
++// 実DB・Auth通信なしで、実際の共通認可とActionの入力境界・保存後処理を検証する。
 +
 +import {
 +  afterEach,
@@ -266,797 +403,1017 @@ index 0000000000000000000000000000000000000000..739563d7bfff5e42f9b7dec80131a649
 +  it,
 +  vi,
 +} from "vitest";
++import {
++  notFound,
++  redirect,
++  unstable_rethrow,
++} from "next/navigation";
 +
-+import type {
-+  ClubAccessContext, // Auth本人とACTIVE所属から作られる認可contextの型
-+} from "@/app/(club-app)/club/club-membership-authorization";
 +import {
-+  generateEventPracticeBatchDateTimes, // 共通入力とtimezoneから最大31日の日時候補を生成する関数
-+} from "@/domain/club/event/event-practice-batch-date-times";
-+import {
-+  validateEventPracticeBatchPreviewInput, // previewの共通入力を検証・正規化する関数
-+} from "@/domain/club/event/event-practice-batch-form";
++  previewEventPracticeBatchAction, // previewと操作ID発行を接続するAction
++  createEventPracticeBatchAction, // 保存と一覧更新を接続するAction
++} from "@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/actions";
 +import type {
-+  EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
-+  EventPracticeBatchInput, // 共通入力と選択日・操作ID・照合値を持つ保存入力型
++  EventPracticeBatchActionState, // 保存の入力・エラー・成功結果を持つAction state型
++  EventPracticeBatchPreviewActionState, // previewの入力・エラー・成功結果を持つAction state型
++  EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力型
 +} from "@/domain/club/event/event-practice-batch-types";
-+import {
-+  createEventPracticeBatch, // 保存を1回だけRepositoryへ委譲し結果を限定するService
-+} from "@/src/application/club/event/create-event-practice-batch";
-+import {
-+  getEventPracticeBatchPreview, // 内部候補を限定preview DTOへ変換するService
-+} from "@/src/application/club/event/get-event-practice-batch";
-+import type {
-+  EventPracticeBatchPreviewData, // サーバー内のpreview材料の取得結果型
-+} from "@/src/infrastructure/prisma/repositories/event-practice-batch-read-repository";
-+import {
-+  buildEventPracticeBatchFingerprint, // preview全体の照合値を計算する関数
-+} from "@/src/infrastructure/security/event-practice-batch-fingerprint";
 +
-+const mocks = vi.hoisted( // import前にモックを生成する関数
++const mocks = vi.hoisted( // importより先にmockを作る関数
 +  /**
-+   * Repositoryの委譲回数と、禁止依存への到達を記録する。
++   * 認可が使うAuth・DBと、Actionが使うService・再検証だけを置き換える。
 +   */
-+  () => ({ // 読取・保存のモックを公開するコールバック
-+    read: vi.fn(), // 読取モックを生成する関数
-+    save: vi.fn(), // 読取モックを生成する関数
-+    external: vi.fn(), // 読取モックを生成する関数
++  () => ({ // mock群を生成するコールバック
++    user: vi.fn(), // Auth本人取得のmockを作る関数
++    membership: vi.fn(), // ACTIVE所属取得のmockを作る関数
++    save: vi.fn(), // 保存Serviceのmockを作る関数
++    preview: vi.fn(), // preview Serviceのmockを作る関数
++    issue: vi.fn(), // 操作ID発行のmockを作る関数
++    paths: vi.fn(), // 一覧再検証のmockを作る関数
++    cache: vi.fn(), // 個別パスの再検証を記録するmockを作る関数
 +  }),
 +);
-+vi.mock("@/src/infrastructure/prisma/repositories/event-practice-batch-read-repository", // 実Clientの読込みを置き換える関数
++vi.mock("@/src/infrastructure/supabase/server", // Auth通信の境界を置き換える関数
 +  /**
-+   * 読取Repositoryだけをmockへ置き換え、実DBを評価しない。
++   * Auth本人取得を通信せずに返すSDKを公開する。
 +   */
-+  () => ({ // 読取・保存のモックを公開するコールバック
-+    findEventPracticeBatchPreviewData: mocks.read, // 読取Repositoryのモック関数の参照
++  () => ({ // SDK生成関数を公開するコールバック
++    createClient: // 本人取得のmockだけを持つSDK生成関数
++      /**
++       * 本人取得のmockだけを持つSDKを生成する。
++       */
++      async () => ({ // SDK生成を代替する非同期コールバック
++        auth: {
++          getUser: mocks.user, // Auth本人取得のmock関数を参照
++        },
++      }),
 +  }),
 +);
-+vi.mock("@/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository", // 実Clientの読込みを置き換える関数
++vi.mock("@/src/infrastructure/prisma/client", // DB通信の境界を置き換える関数
 +  /**
-+   * 保存Repositoryだけをmockへ置き換え、実保存を行わない。
++   * 共通認可の所属検索だけをmockへ置き換える。
 +   */
-+  () => ({ // 読取・保存のモックを公開するコールバック
-+    createEventPracticeBatch: mocks.save, // 保存Repositoryのモック関数の参照
++  () => ({ // DBクライアントを公開するコールバック
++    prisma: {
++      clubMembership: {
++        findFirst: mocks.membership, // ACTIVE所属取得のmock関数を参照
++      },
++    },
 +  }),
 +);
-+vi.mock("@/src/infrastructure/prisma/client", // 実Clientの読込みを置き換える関数
++vi.mock("@/src/application/club/event/create-event-practice-batch", // 複製Serviceを置き換える関数
 +  /**
-+   * Repositoryを経由しない実DB依存の追加を拒否する。
++   * Actionからの保存依頼を記録し、実保存を行わない。
 +   */
-+  () => { // 試験・依存検出の処理を実行するコールバック
-+    mocks.external(); // 禁止依存への到達を記録するモック関数
-+    throw new Error("DB dependency forbidden"); // 例外のコンストラクター
-+  },
++  () => ({ // 保存Serviceを公開するコールバック
++    createEventPracticeBatch: mocks.save, // 保存Serviceのmock関数を参照
++  }),
 +);
-+vi.mock("@/src/infrastructure/supabase/server", // 実Clientの読込みを置き換える関数
++vi.mock("@/app/(club-app)/club/revalidate-club-paths", // 再検証を置き換える関数
 +  /**
-+   * ServiceでのAuth SDK通信を拒否する。
++   * 一覧更新の回数と失敗を制御する。
 +   */
-+  () => { // 試験・依存検出の処理を実行するコールバック
-+    mocks.external(); // 禁止依存への到達を記録するモック関数
-+    throw new Error("Auth dependency forbidden"); // 例外のコンストラクター
-+  },
++  () => ({ // 一覧再検証関数を公開するコールバック
++    revalidateClubEventPaths: mocks.paths, // 再検証のmock関数を参照
++  }),
 +);
-+vi.mock("next/navigation", // 実Clientの読込みを置き換える関数
++vi.mock("next/navigation", // Nextの実際の制御例外を保ったまま呼出しを記録する関数
 +  /**
-+   * ServiceでのNext遷移依存を拒否する。
++   * 実装済みNextのredirect・unstable_rethrowを利用して制御例外の扱いを確認する。
 +   */
-+  () => { // 試験・依存検出の処理を実行するコールバック
-+    mocks.external(); // 禁止依存への到達を記録するモック関数
-+    throw new Error("Next dependency forbidden"); // 例外のコンストラクター
-+  },
-+);
-+vi.mock("next/cache", // 実Clientの読込みを置き換える関数
-+  /**
-+   * Serviceでのキャッシュ再検証依存を拒否する。
-+   */
-+  () => { // 試験・依存検出の処理を実行するコールバック
-+    mocks.external(); // 禁止依存への到達を記録するモック関数
-+    throw new Error("Cache dependency forbidden"); // 例外のコンストラクター
++  async (importOriginal) => { // 実モジュールを読み込む非同期コールバック
++    const actual = await importOriginal<typeof import("next/navigation")>(); // 実モジュール取得関数 / 導入済みNextのモジュール型
++    return {
++      ...actual,
++      redirect: vi.fn(actual.redirect), // 実際の遷移関数を包むmock生成関数
++      unstable_rethrow: vi.fn(actual.unstable_rethrow), // 実際の制御例外再送出関数を包むmock生成関数
++    };
 +  },
 +);
 +
-+const SCOPE = {
-+  clubId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-+  membershipId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-+  userId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-+};
-+const EXISTING = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
++vi.mock("@/src/application/club/event/get-event-practice-batch", // 実Clientの読込みを置き換える関数
++  /**
++   * preview Serviceの返却値を制御し、実DBを使わない。
++   */
++  () => ({ // 試験用のmock群・限定データを返すコールバック
++    getEventPracticeBatchPreview: mocks.preview, // preview Serviceのmock関数の参照
++  }),
++);
++vi.mock("@/domain/shared/request-id", // 実Clientの読込みを置き換える関数
++  /**
++   * UUIDの検証は実装を使い、発行だけ記録可能なmockへ差し替える。
++   */
++  async (importOriginal) => { // 引数を受け取って試験・判定を行うコールバック
++    const actual = await importOriginal<typeof import("@/domain/shared/request-id")>(); // 実モジュールを読み込む関数 / 操作IDモジュールの型
++    return {
++      ...actual,
++      createRequestId: mocks.issue, // 操作ID発行のmock関数の参照
++    };
++  },
++);
++
++const SLUG = "club-a";
++const MONTH = "2026-01";
 +const REQUEST = "11111111-1111-4111-8111-111111111111";
-+const SECRET = "PRIVATE_BODY_SQL_TOKEN_CAUSE";
++const SECOND = "22222222-2222-4222-8222-222222222222";
++const FINGERPRINT = "ab".repeat(32); // 文字列を指定回数だけ反復するメソッド
++const PRIVATE = "PRIVATE_BODY_SQL_TOKEN_CAUSE";
++const USER = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 +
 +/**
-+ * UUIDの大小文字を含み、古いtimezoneを持つ認証済みcontextを生成する。
++ * 現在のDBから認可に使うクラブと所属を生成する。
 + */
-+function context(): ClubAccessContext { // 認証済みcontextのfixtureを生成する関数 / Auth本人とACTIVE所属から作られる認可context型
++function actor() { // 認可に使う所属fixtureを生成する関数
 +  return {
-+    userId: SCOPE.userId.toUpperCase(), // 文字列を大文字へ変換するメソッド
++    id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
++    userId: USER,
++    status: "ACTIVE",
++    role: "OWNER",
 +    club: {
-+      id: SCOPE.clubId.toUpperCase(), // 文字列を大文字へ変換するメソッド
++      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
++      slug: SLUG,
 +      name: "クラブ",
-+      slug: "club-a",
 +      timezone: "Asia/Tokyo",
 +      planType: "STANDARD",
 +    },
-+    membership: {
-+      id: SCOPE.membershipId.toUpperCase(), // 文字列を大文字へ変換するメソッド
-+      role: "OWNER",
-+    },
 +  };
 +}
++let stored: ReturnType<typeof actor> | null; // 関数の返却値を取得する型 / 関数の型を参照するtypeof型
 +
 +/**
-+ * trimとロールの正規化を必要とする、1月全体の共通入力を生成する。
++ * 実際の共通認可が所属検索へ渡す、本人・状態・slugの検索条件型。
++ */
++type MembershipQuery = { // 共通認可の所属検索条件型
++  where: {
++    userId: string; // 文字列型
++    status: string; // 文字列型
++    club: {
++      is: {
++        slug: string; // 文字列型
++      };
++    };
++  };
++};
++
++/**
++ * previewでbindする、正規化済みの共通入力を生成する。
 + */
 +function common(): EventPracticeBatchCommonInput { // 定期練習の共通入力を生成する関数 / 正規化した定期練習共通入力型
 +  return {
-+    targetMonth: "2026-01",
++    targetMonth: MONTH,
 +    periodStart: "2026-01-01",
 +    periodEnd: "2026-01-31",
 +    weekdays: [0, 1, 2, 3, 4, 5, 6],
-+    title: " 練習 ",
++    title: "練習",
 +    startTime: "18:00",
 +    endTime: "20:00",
-+    location: " 体育館 ",
++    location: null,
 +    meetingTime: null,
-+    meetingLocation: " ",
-+    targetRoles: ["MEMBER", "OWNER"],
++    meetingLocation: null,
++    targetRoles: ["OWNER", "MEMBER"],
 +  };
 +}
 +
 +/**
-+ * 読取成功結果だけを取り出したfixture型。
++ * Serviceが返す限定preview DTOのfixtureを生成する。
 + */
-+type Ready = Extract<EventPracticeBatchPreviewData, { outcome: "READY" }>; // 成功結果だけを取り出す型 / サーバー内preview材料の取得結果型
-+
-+/**
-+ * 実際の入力検証・日時生成を使い、Repositoryの正常な返却値を設定する。
-+ */
-+function ready( // 正常なpreview材料を生成する関数
-+  values: EventPracticeBatchCommonInput = common(), // 正規化した定期練習共通入力型 / 定期練習の共通入力を生成する関数
-+  timezone = "UTC",
-+): Ready { // Ready型
-+  const validated = validateEventPracticeBatchPreviewInput(values); // previewの共通入力を検証・正規化する関数
-+  if (!validated.success) {
-+    throw new Error("fixture-input"); // 例外のコンストラクター
-+  }
-+  const generated = generateEventPracticeBatchDateTimes(validated.data, timezone); // 共通入力とtimezoneから日時候補を生成する関数
-+  if (generated.outcome !== "READY") {
-+    throw new Error("fixture-generation"); // 例外のコンストラクター
-+  }
-+  const result: Ready = { // Ready型
-+    outcome: "READY",
-+    input: validated.data,
-+    timezone,
-+    candidates: generated.items.map( // 項目ごとに値を写すメソッド
-+      /**
-+       * 日時候補へ既存一致なしの初期値を加える。
-+       */
-+      (item) => ({ // 引数を受け取って試験・判定を行うコールバック
-+        ...item,
-+        duplicateEventId: null,
-+      }),
-+    ),
-+    candidateCount: generated.candidateCount,
-+    selectableCount: generated.selectableCount,
-+  };
-+  mocks.read.mockResolvedValue(result); // モックの成功結果を設定するメソッド
-+  return result;
-+}
-+
-+/**
-+ * 共通入力に単一選択と形式が正しい操作ID・照合値を加える。
-+ */
-+function execution(): EventPracticeBatchInput { // 保存入力のfixtureを生成する関数 / 定期練習保存入力型
++function ready() { // 正常なpreview材料を生成する関数
 +  return {
-+    ...common(), // 定期練習の共通入力を生成する関数
-+    selectedDates: ["2026-01-01"],
-+    requestId: REQUEST,
-+    previewFingerprint: "ab".repeat(32), // 文字列を指定回数だけ反復するメソッド
++    outcome: "READY" as const, // 読取専用リテラル型
++    input: common(), // 定期練習の共通入力を生成する関数
++    timezone: "Asia/Tokyo",
++    fingerprint: FINGERPRINT,
++    candidateCount: 1,
++    selectableCount: 1,
++    items: [{
++      date: "2026-01-01",
++      dates: {
++        startAt: "2026-01-01T09:00:00.000Z",
++        endAt: "2026-01-01T11:00:00.000Z",
++        meetingAt: null,
++      },
++      exclusionReason: null,
++      warnings: [],
++      duplicate: false,
++      initiallySelected: true,
++    }],
 +  };
++}
++
++/**
++ * previewフォームの初期stateを生成する。Actionはこの値を判定材料に使わない。
++ */
++function previewState(): EventPracticeBatchPreviewActionState { // preview初期stateを生成する関数 / previewの入力・結果・エラーを持つstate型
++  return {
++    status: "idle",
++    values: {
++      ...common(), // 定期練習の共通入力を生成する関数
++      weekdays: ["0", "1", "2", "3", "4", "5", "6"],
++      location: "",
++      meetingTime: "",
++      meetingLocation: "",
++    },
++    fieldErrors: {},
++    formError: null,
++    requestId: "",
++  };
++}
++
++/**
++ * 保存フォームの初期stateを生成する。
++ */
++function saveState(): EventPracticeBatchActionState { // 保存初期stateを生成する関数 / 保存の入力・結果・エラーを持つstate型
++  return {
++    status: "idle",
++    values: {
++      ...common(), // 定期練習の共通入力を生成する関数
++      selectedDates: [],
++      requestId: REQUEST,
++      previewFingerprint: FINGERPRINT,
++    },
++    fieldErrors: {},
++    formError: null,
++    requestId: REQUEST,
++  };
++}
++
++/**
++ * 共通入力だけのFormDataを生成し、保存段階だけ保存専用項目を付ける。
++ */
++function form(execute = false): FormData { // FormDataを生成する関数 / 送信フォーム型
++  const values = common(); // 定期練習の共通入力を生成する関数
++  const data = new FormData(); // 送信フォームのコンストラクター
++  data.set("targetMonth", values.targetMonth); // フォームの単一項目を設定するメソッド
++  data.set("periodStart", values.periodStart); // フォームの単一項目を設定するメソッド
++  data.set("periodEnd", values.periodEnd); // フォームの単一項目を設定するメソッド
++  data.set("title", values.title); // フォームの単一項目を設定するメソッド
++  data.set("startTime", values.startTime); // フォームの単一項目を設定するメソッド
++  data.set("endTime", values.endTime); // フォームの単一項目を設定するメソッド
++  data.set("location", ""); // フォームの単一項目を設定するメソッド
++  data.set("meetingTime", ""); // フォームの単一項目を設定するメソッド
++  data.set("meetingLocation", ""); // フォームの単一項目を設定するメソッド
++  for (const weekday of values.weekdays) {
++    data.append("weekdays", String(weekday)); // フォームの反復項目を追加するメソッド / 文字列へ変換する関数
++  }
++  for (const role of values.targetRoles) {
++    data.append("targetRoles", role); // フォームの反復項目を追加するメソッド
++  }
++  if (execute) {
++    data.append("selectedDates", "2026-01-01"); // フォームの反復項目を追加するメソッド
++    data.set("requestId", REQUEST); // フォームの単一項目を設定するメソッド
++    data.set("previewFingerprint", FINGERPRINT); // フォームの単一項目を設定するメソッド
++  }
++  return data;
++}
++
++/**
++ * preview Actionを初期state付きで直接呼ぶ。
++ */
++function preview(data = form(), previous = previewState()) { // preview Actionを直接呼ぶ試験用関数 / FormDataを生成する関数 / preview初期stateを生成する関数
++  return previewEventPracticeBatchAction(SLUG, MONTH, previous, data); // 認可と入力照合を行うpreview Action
++}
++
++/**
++ * preview成功時のbind値を付け、保存Actionを直接呼ぶ。
++ */
++function save(data = form(true), previous = saveState()) { // 保存Actionを直接呼ぶ試験用関数 / FormDataを生成する関数 / 保存初期stateを生成する関数
++  return createEventPracticeBatchAction(SLUG, common(), REQUEST, FINGERPRINT, previous, data); // 認可と入力照合・保存後処理を行うAction / 定期練習の共通入力を生成する関数
++}
++
++/**
++ * 認可・入力境界をpreviewと保存の両方で試験するため、対象Actionを選ぶ。
++ */
++function invoke(stage: "preview" | "save", data = form(stage === "save")) { // 対象Actionを選んで直接呼ぶ試験用関数 / FormDataを生成する関数
++  return stage === "preview" ? preview(data) : save(data); // preview Actionを直接呼ぶ試験用関数 / 保存Actionを直接呼ぶ試験用関数
++}
++
++/**
++ * インストール済みNextが作る本物のnotFound制御例外を取得する。
++ */
++function controlError(): unknown { // 本物のNext制御例外を取得する試験用関数 / 未知の値の型
++  try {
++    notFound(); // Nextの404制御例外を投げる関数
++  } catch (error) {
++    return error;
++  }
 +}
 +
 +beforeEach( // 各試験の初期化を登録する関数
 +  /**
-+   * 委譲先の結果とログ監視を初期化し、正常なpreviewと保存結果を用意する。
++   * 実Auth・DB通信をせず、本人とACTIVE所属の一致を評価するmockを設定する。
 +   */
-+  () => { // 試験・依存検出の処理を実行するコールバック
-+    vi.resetAllMocks(); // モックの実装と履歴を初期化する関数
-+    ready(); // 正常なpreview材料を生成する関数
++  () => { // Actionの境界と副作用を検証するコールバック
++    vi.clearAllMocks(); // mock呼出し履歴だけを初期化する関数
++    for (const mock of Object.values(mocks)) { // mock群の値を列挙する関数
++      mock.mockReset(); // モックの実装と履歴を初期化するメソッド
++    }
++    stored = actor(); // 認可に使う所属fixtureを生成する関数
++    mocks.user.mockResolvedValue({ // モックの成功結果を設定するメソッド
++      data: { user: { id: USER } },
++      error: null,
++    });
++    mocks.membership.mockImplementation( // モックの処理を設定するメソッド
++      /**
++       * 現在の本人・ACTIVE状態・URLのslugに一致する所属だけを返す。
++       */
++      async ({ where }: MembershipQuery) => { // 引数を受け取って試験・判定を行うコールバック / 共通認可の所属検索条件型
++        if (
++          !stored ||
++          stored.userId !== where.userId ||
++          stored.status !== where.status ||
++          stored.club.slug !== where.club.is.slug
++        ) {
++          return null;
++        }
++        return stored;
++      },
++    );
++    mocks.preview.mockResolvedValue(ready()); // モックの成功結果を設定するメソッド / 正常なpreview材料を生成する関数
 +    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
 +      outcome: "CREATED",
 +      receipt: {
-+        targetMonth: "2026-01",
++        targetMonth: MONTH,
 +        createdCount: 1,
 +      },
 +    });
++    mocks.issue.mockReturnValue(REQUEST); // モックの返却値を設定するメソッド
 +    for (const method of ["error", "warn", "log"] as const) { // 読取専用リテラル型
 +      vi.spyOn(console, method).mockImplementation( // モックの処理を設定するメソッド / 関数呼出しを監視する関数
 +        /**
-+         * 実ログ出力を抑止し、呼出し履歴だけを残す。
++         * 実ログ出力を抑止する。
 +         */
-+        () => undefined, // 実ログ出力を抑止するコールバック
++        () => undefined, // 実ログ書込みを抑止するコールバック
 +      );
 +    }
 +  },
 +);
 +afterEach( // 各試験後の検証を登録する関数
 +  /**
-+   * 禁止依存・機密ログ・保存の複数委譲がないことを確認し、spyを復元する。
++   * 本文や秘密をログへ出していないことを確認し、spyを復元する。
 +   */
-+  () => { // 試験・依存検出の処理を実行するコールバック
-+    expect(mocks.external).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  () => { // Actionの境界と副作用を検証するコールバック
 +    expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +    expect(console.warn).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +    expect(console.log).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    expect(mocks.save.mock.calls.length).toBeLessThanOrEqual(1); // 保存の委譲回数の上限を検証するメソッド / 期待値を生成する関数
 +    vi.restoreAllMocks(); // spyを復元する関数
 +  },
 +);
 +
-+it.each([0, 31])("previewの%s候補を限定DTOとscope付きfingerprintで返す", // 条件別の試験を登録する関数
++it("previewは共通認可とServiceを呼び、成功後だけ新しい操作IDを発行する", // 試験を登録する関数
 +  /**
-+   * 空候補も成功にし、contextの古いtimezoneよりRepositoryの現在値を使う。
++   * 輸送用項目を除き、保存・再検証・遷移をpreviewで行わない。
 +   */
-+  async (count) => { // 引数を受け取って試験・判定を行うコールバック
-+    const values = count === 0
-+      ? {
-+          ...common(), // 定期練習の共通入力を生成する関数
-+          periodEnd: "2026-01-01",
-+          weekdays: [0] as const, // 読取専用リテラル型
-+        }
-+      : common(); // 定期練習の共通入力を生成する関数
-+    const internal = ready(values); // 正常なpreview材料を生成する関数
-+    const result = await getEventPracticeBatchPreview(context(), values); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+    expect(result.outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    if (result.outcome !== "READY") {
-+      throw new Error("fixture-preview"); // 例外のコンストラクター
-+    }
-+    expect(result.candidateCount).toBe(count); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.selectableCount).toBe(count); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.items).toHaveLength(count); // 件数を検証するメソッド / 期待値を生成する関数
-+    expect(result.timezone).toBe("UTC"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.input).toEqual(internal.input); // 構造の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.fingerprint).toBe(buildEventPracticeBatchFingerprint({ // 値の一致を検証するメソッド / 期待値を生成する関数 / preview全体の照合値を計算する関数
-+      ...SCOPE,
-+      input: internal.input,
-+      timezone: internal.timezone,
-+      candidates: internal.candidates,
-+    }));
-+    expect(mocks.read).toHaveBeenCalledExactlyOnceWith({ // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
-+      ...SCOPE,
-+      input: internal.input,
-+    });
-+    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+  },
-+);
-+
-+it("32候補はDTO化やfingerprint生成の前に拒否する", // 試験を登録する関数
-+  /**
-+   * 除外前の件数上限をServiceでも維持する。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const internal = ready(); // 正常なpreview材料を生成する関数
-+    mocks.read.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      ...internal,
-+      candidates: [...internal.candidates, internal.candidates[0]],
-+      candidateCount: 32,
-+    });
-+    expect(await getEventPracticeBatchPreview(context(), common())).toEqual({ outcome: "TOO_MANY" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
-+  },
-+);
-+
-+it("DTOは許可項目だけを返し、既存ID・本文・関連行・hash素材を含めない", // 試験を登録する関数
-+  /**
-+   * Repositoryが余分な情報を持っていても、明示的なDTOの組立てで除外する。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const internal = ready(); // 正常なpreview材料を生成する関数
-+    const first = internal.candidates[0];
-+    mocks.read.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      ...internal,
-+      rawError: SECRET,
-+      hashMaterial: SECRET,
-+      candidates: [{
-+        ...first,
-+        duplicateEventId: EXISTING,
-+        existingEvent: {
-+          content: SECRET,
-+          attachments: [SECRET],
-+        },
-+        dates: {
-+          ...first.dates,
-+          secret: SECRET,
-+        },
-+      }, ...internal.candidates.slice(1)], // 指定範囲の候補配列を取り出すメソッド
-+    });
-+    const result = await getEventPracticeBatchPreview(context(), common()); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
-+    if (result.outcome !== "READY") {
-+      throw new Error("fixture-preview"); // 例外のコンストラクター
-+    }
-+    expect(Object.keys(result).sort()).toEqual([ // 構造の一致を検証するメソッド / 期待値を生成する関数 / 項目名を並べ替えるメソッド / 項目名を列挙する関数
-+      "candidateCount", "fingerprint", "input", "items", "outcome", "selectableCount", "timezone",
-+    ]);
-+    expect(result.items[0]).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数
-+      date: "2026-01-01",
-+      dates: {
-+        startAt: "2026-01-01T18:00:00.000Z",
-+        endAt: "2026-01-01T20:00:00.000Z",
-+        meetingAt: null,
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const data = form(); // FormDataを生成する関数
++    data.set("$ACTION_ID_transport", "ignored"); // フォームの単一項目を設定するメソッド
++    const result = await preview(data); // preview Actionを直接呼ぶ試験用関数
++    expect(result.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.requestId).toBe(REQUEST); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.data).toEqual(ready()); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 正常なpreview材料を生成する関数
++    expect(mocks.preview).toHaveBeenCalledExactlyOnceWith({ // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
++      userId: USER,
++      club: actor().club, // 認可に使う所属fixtureを生成する関数
++      membership: {
++        id: actor().id, // 認可に使う所属fixtureを生成する関数
++        role: "OWNER",
 +      },
-+      exclusionReason: null,
-+      warnings: [],
-+      duplicate: true,
-+      initiallySelected: false,
-+    });
-+    expect(JSON.stringify(result)).not.toContain(SECRET); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
-+    expect(JSON.stringify(result)).not.toContain(EXISTING); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
-+    expect(result.items[1].initiallySelected).toBe(true); // 値の一致を検証するメソッド / 期待値を生成する関数
++    }, common()); // 定期練習の共通入力を生成する関数
++    expect(mocks.issue).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.preview.mock.invocationCallOrder[0]).toBeLessThan(mocks.issue.mock.invocationCallOrder[0]); // 処理順の前後を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.paths).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(redirect).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each([ // 条件別の試験を登録する関数
-+  ["2026-03", "2026-03-08", "02:30", "NONEXISTENT_LOCAL_TIME"],
-+  ["2026-11", "2026-11-01", "01:30", "AMBIGUOUS_LOCAL_TIME"],
-+])("%sの除外理由を保持し、初期選択をoffにする",
++it("再previewでは前回stateを信用せず、新しい操作IDを発行する", // 試験を登録する関数
 +  /**
-+   * 日時の生成不能を取得失敗や通常の未一致と混同しない。
++   * 偽装した成功stateや操作ID・エラーを次のpreviewへ引き継がない。
 +   */
-+  async (month, date, start, reason) => { // 引数を受け取って試験・判定を行うコールバック
-+    const values = {
-+      ...common(), // 定期練習の共通入力を生成する関数
-+      targetMonth: month,
-+      periodStart: date,
-+      periodEnd: date,
-+      startTime: start,
-+      endTime: "04:00",
-+    };
-+    ready(values, "America/New_York"); // 正常なpreview材料を生成する関数
-+    const result = await getEventPracticeBatchPreview(context(), values); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+    expect(result).toMatchObject({ // 一部の構造を検証するメソッド / 期待値を生成する関数
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const previous = {
++      ...previewState(), // preview初期stateを生成する関数
++      status: "success",
 +      outcome: "READY",
-+      candidateCount: 1,
-+      selectableCount: 0,
-+      items: [{
-+        date,
-+        dates: null,
-+        exclusionReason: reason,
-+        duplicate: false,
-+        initiallySelected: false,
-+      }],
-+    });
++      requestId: PRIVATE,
++      formError: PRIVATE,
++      data: ready(), // 正常なpreview材料を生成する関数
++    } as EventPracticeBatchPreviewActionState; // previewの入力・結果・エラーを持つstate型
++    mocks.issue.mockReturnValueOnce(SECOND); // 次回の返却値だけを設定するメソッド
++    const result = await preview(form(), previous); // preview Actionを直接呼ぶ試験用関数 / FormDataを生成する関数
++    expect(result.requestId).toBe(SECOND); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.formError).toBeNull(); // 未一致のnullを検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
 +  },
 +);
 +
-+it("開始後集合の警告をコピーし、通常候補の初期選択を維持する", // 試験を登録する関数
++it.each(["FORBIDDEN", "TOO_MANY", "PREVIEW_FAILED", "UNKNOWN"])("preview結果%sではIDを発行しない", // 条件別の試験を登録する関数
 +  /**
-+   * 警告配列や入力配列をRepositoryと共有せず、警告だけで候補を除外しない。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const values = {
-+      ...common(), // 定期練習の共通入力を生成する関数
-+      meetingTime: "19:00",
-+    }; // 定期練習の共通入力を生成する関数
-+    const internal = ready(values); // 正常なpreview材料を生成する関数
-+    const result = await getEventPracticeBatchPreview(context(), values); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+    if (result.outcome !== "READY") {
-+      throw new Error("fixture-preview"); // 例外のコンストラクター
-+    }
-+    expect(result.items[0].warnings).toEqual(["MEETING_AFTER_START"]); // 構造の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.items[0].warnings).not.toBe(internal.candidates[0].warnings); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.input.targetRoles).not.toBe(values.targetRoles); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.input.weekdays).not.toBe(values.weekdays); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(result.items[0].initiallySelected).toBe(true); // 値の一致を検証するメソッド / 期待値を生成する関数
-+  },
-+);
-+
-+it.each(["FORBIDDEN", "TOO_MANY", "PREVIEW_FAILED"] as const)("previewの%sは詳細を付けず返す", // 条件別の試験を登録する関数 / 読取専用リテラル型
-+  /**
-+   * 安全な失敗コードだけを伝え、Repositoryの内部情報を引き継がない。
++   * 失敗と未知の結果を固定stateへ変換し、内部詳細を返さない。
 +   */
 +  async (outcome) => { // 引数を受け取って試験・判定を行うコールバック
-+    mocks.read.mockResolvedValue({ // モックの成功結果を設定するメソッド
++    mocks.preview.mockResolvedValue({ // モックの成功結果を設定するメソッド
 +      outcome,
-+      detail: SECRET,
++      detail: PRIVATE,
 +    });
-+    expect(await getEventPracticeBatchPreview(context(), common())).toEqual({ outcome }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
++    const result = await preview(); // preview Actionを直接呼ぶ試験用関数
++    expect(result.status).toBe("error"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.requestId).toBe(""); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.data).toBeUndefined(); // データがないことを検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each([null, undefined, { // 条件別の試験を登録する関数
-+  outcome: "UNKNOWN",
-+  detail: SECRET,
-+}])("未知のpreview結果%jを固定失敗にする", // 条件別の試験を登録する関数
++it("保存は認可contextと照合済み入力を渡し、固定toast付き管理者一覧へ遷移する", // 試験を登録する関数
 +  /**
-+   * 予期しない結果形式をClientへ流さない。
++   * UUID・fingerprintの表記差を正規化し、成功後に1回だけ一覧を再検証する。
 +   */
-+  async (value) => { // 引数を受け取って試験・判定を行うコールバック
-+    mocks.read.mockResolvedValue(value); // モックの成功結果を設定するメソッド
-+    expect(await getEventPracticeBatchPreview(context(), common())).toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const data = form(true); // FormDataを生成する関数
++    data.set("previewFingerprint", FINGERPRINT.toUpperCase()); // フォームの単一項目を設定するメソッド / 文字列を大文字へ変換するメソッド
++    data.set("title", " 練習 "); // フォームの単一項目を設定するメソッド
++    await expect(save(data)).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.save).toHaveBeenCalledExactlyOnceWith({ // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
++      userId: USER,
++      club: actor().club, // 認可に使う所属fixtureを生成する関数
++      membership: {
++        id: actor().id, // 認可に使う所属fixtureを生成する関数
++        role: "OWNER",
++      },
++    }, {
++      ...common(), // 定期練習の共通入力を生成する関数
++      selectedDates: ["2026-01-01"],
++      requestId: REQUEST,
++      previewFingerprint: FINGERPRINT,
++    });
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.paths).toHaveBeenCalledExactlyOnceWith(SLUG); // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
++    expect(redirect).toHaveBeenCalledExactlyOnceWith( // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
++      `/club/${SLUG}/admin/events?month=${MONTH}&status=ALL&toast=event-practice-batch-created&toastId=${REQUEST}`,
++    );
 +  },
 +);
 +
-+it.each([ // 条件別の試験を登録する関数
-+  { candidateCount: -1 },
-+  { candidateCount: 30 },
-+  { candidateCount: 1.5 },
-+  { candidateCount: NaN },
-+  { selectableCount: -1 },
-+  { selectableCount: 32 },
-+  { selectableCount: 1.5 },
-+  { selectableCount: NaN },
-+  { selectableCount: 30 },
-+])("不正なpreview件数%jを拒否する",
++it.each(["preview", "save"] as const)("%sでも未ログインならログインへ遷移する", // 条件別の試験を登録する関数 / 読取専用リテラル型
 +  /**
-+   * メタデータと実候補の件数不一致や非整数を成功扱いしない。
++   * 画面を経由しない呼出しでもAuth本人確認を省略しない。
 +   */
-+  async (changes) => { // 引数を受け取って試験・判定を行うコールバック
-+    const internal = ready(); // 正常なpreview材料を生成する関数
-+    mocks.read.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      ...internal,
-+      ...changes,
-+    }); // モックの成功結果を設定するメソッド
-+    expect(await getEventPracticeBatchPreview(context(), common())).toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
++  async (stage) => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.user.mockResolvedValue({ // モックの成功結果を設定するメソッド
++      data: { user: null },
++      error: null,
++    });
++    await expect(invoke(stage)).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 対象Actionを選んで直接呼ぶ試験用関数
++    expect(redirect).toHaveBeenCalledWith("/club-login"); // 呼出し引数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["timezone", "duplicateDate", "warning", "reason", "dates", "input", "array"])( // 条件別の試験を登録する関数
-+  "不正なpreview材料%sを固定失敗にする",
++it.each(["MEMBER", "WITHDRAWN", "other-club", "missing", "STARTER", "PRO"])("権限拒否%sでは両ActionともServiceを呼ばない", // 条件別の試験を登録する関数
 +  /**
-+   * 不正な内部材料があれば、既存fingerprint検証とDTO境界で拒否する。
++   * 実際の共通認可で管理権限・ACTIVE・他クラブ・利用プランを確認する。
 +   */
-+  async (kind) => { // 引数を受け取って試験・判定を行うコールバック
-+    const internal = ready(); // 正常なpreview材料を生成する関数
-+    const first = internal.candidates[0];
-+    let changes: object = {}; // 不正なRepository返却値を上書きするオブジェクト型
-+    switch (kind) {
-+      case "timezone":
-+        changes = { timezone: SECRET };
-+        break;
-+      case "duplicateDate":
-+        changes = {
-+          candidates: [first, first],
-+          candidateCount: 2,
-+          selectableCount: 2,
-+        };
-+        break;
-+      case "warning":
-+        changes = {
-+          candidates: [{
-+            ...first,
-+            warnings: [SECRET],
-+          }],
-+          candidateCount: 1,
-+          selectableCount: 1,
-+        };
-+        break;
-+      case "reason":
-+        changes = {
-+          candidates: [{
-+            ...first,
-+            dates: null,
-+            exclusionReason: SECRET,
-+          }],
-+          candidateCount: 1,
-+          selectableCount: 0,
-+        };
-+        break;
-+      case "dates":
-+        changes = {
-+          candidates: [{
-+            ...first,
-+            dates: {
-+              ...first.dates,
-+              startAt: new Date(NaN), // 日時のコンストラクター
-+            },
-+          }],
-+          candidateCount: 1,
-+          selectableCount: 1,
-+        };
-+        break;
-+      case "input":
-+        changes = {
-+          input: {
-+            ...internal.input,
-+            title: "別内容",
-+          },
-+        };
-+        break;
-+      case "array":
-+        changes = { candidates: SECRET };
-+        break;
++  async (reason) => { // 引数を受け取って試験・判定を行うコールバック
++    if (reason === "MEMBER") {
++      stored!.role = reason;
 +    }
-+    mocks.read.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      ...internal,
-+      ...changes,
-+    }); // モックの成功結果を設定するメソッド
-+    const result = await getEventPracticeBatchPreview(context(), common()); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
-+    expect(result).toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数
-+    expect(JSON.stringify(result)).not.toContain(SECRET); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    if (reason === "WITHDRAWN") {
++      stored!.status = reason;
++    }
++    if (reason === "other-club") {
++      stored!.club.slug = "other-club";
++    }
++    if (reason === "missing") {
++      stored = null;
++    }
++    if (reason === "STARTER" || reason === "PRO") {
++      stored!.club.planType = reason;
++    }
++    if (reason === "STARTER" || reason === "PRO") {
++      expect((await preview()).outcome).toBe("FORBIDDEN"); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++      expect((await save()).outcome).toBe("FORBIDDEN"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    } else {
++      await expect(preview()).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404"); // 例外を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++      await expect(save()).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    }
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.paths).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["clubId", "membershipId", "userId"])("contextの%sが不正なら読取・保存へ渡さない", // 条件別の試験を登録する関数
++it.each(["COACH", "OFFICER"])("管理者%sは両Actionを利用できる", // 条件別の試験を登録する関数
 +  /**
-+   * contextの代用品や不正UUIDを正規化だけで受け入れない。
++   * OWNER以外の管理者を不必要に拒否しない。
++   */
++  async (role) => { // 引数を受け取って試験・判定を行うコールバック
++    stored!.role = role;
++    expect((await preview()).status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++    await expect(save()).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++  },
++);
++
++it.each(["targetMonth", "periodStart", "periodEnd", "title", "startTime", "endTime", "location", "meetingTime", "meetingLocation"])( // 条件別の試験を登録する関数
++  "単一項目%sの重複を両Actionで拒否する",
++  /**
++   * 同じ値でも複数指定を認めず、先頭だけを採用しない。
 +   */
 +  async (field) => { // 引数を受け取って試験・判定を行うコールバック
-+    const value = context(); // 認証済みcontextのfixtureを生成する関数
-+    if (field === "clubId") {
-+      value.club.id = SECRET;
++    for (const stage of ["preview", "save"] as const) { // 読取専用リテラル型
++      const data = form(stage === "save"); // FormDataを生成する関数
++      data.append(field, data.get(field) as string); // フォームの反復項目を追加するメソッド / フォームの単一項目を取得するメソッド / 文字列型
++      expect((await invoke(stage, data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 対象Actionを選んで直接呼ぶ試験用関数
 +    }
-+    if (field === "membershipId") {
-+      value.membership.id = SECRET;
-+    }
-+    if (field === "userId") {
-+      value.userId = SECRET;
-+    }
-+    expect(await getEventPracticeBatchPreview(value, common())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 限定preview DTOを取得するService / 定期練習の共通入力を生成する関数
-+    expect(await createEventPracticeBatch(value, execution())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 保存入力のfixtureを生成する関数
-+    expect(mocks.read).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["targetMonth", "periodStart", "startTime", "weekdays", "title"])( // 条件別の試験を登録する関数
-+  "共通入力%sの不正をRepositoryの前で拒否する",
++it.each(["requestId", "previewFingerprint"])("保存専用の単一項目%sの重複も拒否する", // 条件別の試験を登録する関数
 +  /**
-+   * 未検証値のfallbackや切捨てをせず、previewと保存をそれぞれの固定結果で返す。
++   * 同じ操作情報を複数送っても受け入れない。
 +   */
-+  async (field) => { // 入力項目の不正を確認する非同期コールバック
-+    const invalid = field === "title" ? "" : SECRET;
-+    expect(await getEventPracticeBatchPreview(context(), { // 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+      ...common(), // 定期練習の共通入力を生成する関数
-+      [field]: invalid,
-+    })) // 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
-+      .toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド
-+    expect(await createEventPracticeBatch(context(), { // 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数
-+      ...execution(), // 保存入力のfixtureを生成する関数
-+      [field]: invalid,
-+    })) // 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+      .toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const data = form(true); // FormDataを生成する関数
++    data.append(field, data.get(field) as string); // フォームの反復項目を追加するメソッド / フォームの単一項目を取得するメソッド / 文字列型
++    expect((await save(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
 +    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it("previewと保存へ同じ正規化共通入力を渡す", // 試験を登録する関数
++it.each(["clubId", "actorMembershipId", "returnTo", "status", "genre", "content", "startAt"])( // 条件別の試験を登録する関数
++  "未許可項目%sを両Actionで拒否する",
 +  /**
-+   * 入力配列を変更せず、scope・選択順・照合値を正規化して保存を1回だけ依頼する。
++   * scope・固定保存列・本文・UTC値・任意遷移先をClientから受け取らない。
 +   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const values = common(); // 定期練習の共通入力を生成する関数
-+    const result = await getEventPracticeBatchPreview(context(), values); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+    if (result.outcome !== "READY") {
-+      throw new Error("fixture-preview"); // 例外のコンストラクター
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    for (const stage of ["preview", "save"] as const) { // 読取専用リテラル型
++      const data = form(stage === "save"); // FormDataを生成する関数
++      data.set(field, PRIVATE); // フォームの単一項目を設定するメソッド
++      const result = await invoke(stage, data); // 対象Actionを選んで直接呼ぶ試験用関数
++      expect(result.outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数
++      expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
 +    }
-+    const request = {
-+      ...values,
-+      selectedDates: ["2026-01-02", "2026-01-01"],
-+      requestId: REQUEST,
-+      previewFingerprint: result.fingerprint.toUpperCase(), // 文字列を大文字へ変換するメソッド
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["title", "weekdays", "targetRoles"])("Fileを共通項目%sに混入できない", // 条件別の試験を登録する関数
++  /**
++   * テキストと反復項目のどちらもFile値を拒否する。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    for (const stage of ["preview", "save"] as const) { // 読取専用リテラル型
++      const data = form(stage === "save"); // FormDataを生成する関数
++      data.set(field, new File([PRIVATE], "private.txt")); // フォームの単一項目を設定するメソッド / 試験用Fileのコンストラクター
++      expect((await invoke(stage, data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 対象Actionを選んで直接呼ぶ試験用関数
++    }
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["requestId", "previewFingerprint", "selectedDates"])("保存専用項目%sのFileも拒否する", // 条件別の試験を登録する関数
++  /**
++   * 選択日と操作情報を文字列以外では受け取らない。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const data = form(true); // FormDataを生成する関数
++    data.set(field, new File([PRIVATE], "private.txt")); // フォームの単一項目を設定するメソッド / 試験用Fileのコンストラクター
++    expect((await save(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["requestId", "previewFingerprint", "selectedDates"])("previewは保存専用項目%sを受け取らない", // 条件別の試験を登録する関数
++  /**
++   * 共通入力と保存入力のフォーム契約を混同しない。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const data = form(); // FormDataを生成する関数
++    data.set(field, REQUEST); // フォームの単一項目を設定するメソッド
++    expect((await preview(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["title", "location", "meetingTime", "meetingLocation", "weekdays", "targetRoles", "targetMonth", "periodStart", "periodEnd", "startTime", "endTime"])( // 条件別の試験を登録する関数
++  "preview時の共通入力%sの改変を保存前に拒否する",
++  /**
++   * 形式が有効でもbindしたpreviewの入力と異なれば、Serviceへ渡さない。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const data = form(true); // FormDataを生成する関数
++    const changes: Record<string, string> = { // キーと値の対応を持つ型 / 文字列型
++      title: "別の練習",
++      location: "別会場",
++      meetingTime: "17:00",
++      meetingLocation: "別集合場所",
++      weekdays: "4",
++      targetRoles: "OWNER",
++      targetMonth: "2026-02",
++      periodStart: "2026-01-02",
++      periodEnd: "2026-01-30",
++      startTime: "17:00",
++      endTime: "21:00",
 +    };
-+    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      outcome: "CREATED",
-+      receipt: {
-+        targetMonth: "2026-01",
-+        createdCount: 2,
-+      },
-+    });
-+    expect((await createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数
-+    expect(mocks.save).toHaveBeenCalledExactlyOnceWith(SCOPE, { // 1回の呼出しと引数を検証するメソッド / 期待値を生成する関数
-+      ...result.input,
-+      selectedDates: ["2026-01-01", "2026-01-02"],
-+      requestId: REQUEST,
-+      previewFingerprint: result.fingerprint,
-+    });
-+    expect(mocks.read.mock.calls[0][0].input).toEqual(result.input); // 構造の一致を検証するメソッド / 期待値を生成する関数
-+    expect(request.selectedDates).toEqual(["2026-01-02", "2026-01-01"]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    data.set(field, changes[field]); // フォームの単一項目を設定するメソッド
++    expect((await save(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each(["CREATED", "ALREADY_COMPLETED"] as const)("%sは最小receiptだけ返し、previewを先読みしない", // 条件別の試験を登録する関数 / 読取専用リテラル型
++it.each(["requestId", "previewFingerprint"])("bindした操作情報%sの改変を拒否する", // 条件別の試験を登録する関数
 +  /**
-+   * Repositoryの完了記録先行照合を妨げず、成功の内部詳細を除外する。
++   * 別の操作IDやpreviewへのすり替えを拒否する。
 +   */
-+  async (outcome) => { // 引数を受け取って試験・判定を行うコールバック
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const data = form(true); // FormDataを生成する関数
++    data.set(field, field === "requestId" ? SECOND : "cd".repeat(32)); // フォームの単一項目を設定するメソッド / 文字列を指定回数だけ反復するメソッド
++    expect((await save(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each([0, 32])("保存の選択%s件をServiceの前で拒否する", // 条件別の試験を登録する関数
++  /**
++   * 件数制限をActionの入力境界でも適用する。
++   */
++  async (count) => { // 引数を受け取って試験・判定を行うコールバック
++    const data = form(true); // FormDataを生成する関数
++    data.delete("selectedDates"); // フォーム項目を削除するメソッド
++    for (let index = 0; index < count; index += 1) {
++      data.append("selectedDates", "2026-01-01"); // フォームの反復項目を追加するメソッド
++    }
++    expect((await save(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("偽装された前回成功stateを信用せず、送信した選択をServiceへ渡す", // 試験を登録する関数
++  /**
++   * 前stateの成功・操作ID・入力・データを保存済み判定や入力へ利用しない。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const previous: EventPracticeBatchActionState = { // 保存の入力・結果・エラーを持つstate型
++      ...saveState(), // 保存初期stateを生成する関数
++      status: "success",
++      outcome: "CREATED",
++      requestId: PRIVATE,
++      formError: PRIVATE,
++      data: {
++        targetMonth: "2026-02",
++        createdCount: 99,
++        needsReload: false,
++      },
++    };
++    previous.values.selectedDates = ["2026-01-02"];
 +    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      outcome,
-+      receipt: {
-+        targetMonth: "2026-01",
-+        createdCount: 1,
-+        body: SECRET,
-+      },
-+      rawError: SECRET,
++      outcome: "RESULT_UNKNOWN",
++      detail: PRIVATE,
 +    });
-+    expect(await createEventPracticeBatch(context(), execution())).toEqual({ // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+      outcome,
-+      receipt: {
-+        targetMonth: "2026-01",
-+        createdCount: 1,
-+      },
-+    });
-+    expect(mocks.read).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    const result = await save(form(true), previous); // 保存Actionを直接呼ぶ試験用関数 / FormDataを生成する関数
++    expect(result.outcome).toBe("RESULT_UNKNOWN"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.requestId).toBe(REQUEST); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.values.selectedDates).toEqual(["2026-01-01"]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.data).toBeUndefined(); // データがないことを検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
 +    expect(mocks.save).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it("31件保存のreceiptを受け入れる", // 試験を登録する関数
++it.each(["VALIDATION_FAILED", "FORBIDDEN", "PREVIEW_CHANGED", "CONFLICT", "CREATE_FAILED", "RESULT_UNKNOWN", "UNKNOWN"])( // 条件別の試験を登録する関数
++  "保存結果%sでは再検証も遷移も行わない",
 +  /**
-+   * 実行入力と同じ上限件数の結果を、誤って不正扱いしない。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const request = execution(); // 保存入力のfixtureを生成する関数
-+    request.selectedDates = Array.from({ length: 31 }, // 指定件数の候補配列を生成する関数
-+      /**
-+       * 対象月の全日付を作る。
-+       */
-+      (_, index) => `2026-01-${String(index + 1).padStart(2, "0")}`, // 引数を受け取って試験・判定を行うコールバック / 文字列の桁を揃えるメソッド / 文字列へ変換する関数
-+    );
-+    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      outcome: "CREATED",
-+      receipt: {
-+        targetMonth: "2026-01",
-+        createdCount: 31,
-+      },
-+    });
-+    expect((await createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数
-+  },
-+);
-+
-+it.each([ // 条件別の試験を登録する関数
-+  "VALIDATION_FAILED", "FORBIDDEN", "PREVIEW_CHANGED", "CONFLICT", "CREATE_FAILED", "RESULT_UNKNOWN",
-+] as const)("保存結果%sを区別し、内部詳細を除去する", // 読取専用リテラル型
-+  /**
-+   * エラーコードをメッセージ比較せず保持し、生Errorや内部素材を引き継がない。
++   * 固定コードで失敗原因を区別し、同じ入力と操作IDを維持する。
 +   */
 +  async (outcome) => { // 引数を受け取って試験・判定を行うコールバック
 +    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
 +      outcome,
-+      detail: SECRET,
-+      error: new Error(SECRET), // 例外のコンストラクター
++      detail: PRIVATE,
 +    });
-+    expect(await createEventPracticeBatch(context(), execution())).toEqual({ outcome }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
++    const result = await save(); // 保存Actionを直接呼ぶ試験用関数
++    expect(result.status).toBe("error"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.outcome).toBe(outcome === "UNKNOWN" ? "RESULT_UNKNOWN" : outcome); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.requestId).toBe(REQUEST); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    expect(mocks.paths).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(redirect).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each([0, 32, 1.5, NaN, 2, "1"])("不正なreceipt件数%jをRESULT_UNKNOWNにする", // 条件別の試験を登録する関数
++it.each(["CREATED", "ALREADY_COMPLETED"])("%s後の通常の再検証失敗を保存済みsuccessにする", // 条件別の試験を登録する関数
 +  /**
-+   * 非整数・上限外・選択件数不一致を、保存成功と誤認しない。
++   * 再検証エラーで保存を再実行せず、最小receiptとneedsReloadを返す。
++   */
++  async (outcome) => { // 引数を受け取って試験・判定を行うコールバック
++    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
++      outcome,
++      receipt: { targetMonth: MONTH, createdCount: 1, secret: PRIVATE },
++    });
++    mocks.paths.mockImplementation( // モックの処理を設定するメソッド
++      /**
++       * 保存完了後の通常の再検証障害を再現する。
++       */
++      () => { // Actionの境界と副作用を検証するコールバック
++        throw new Error(PRIVATE); // 例外のコンストラクター
++      },
++    );
++    const result = await save(); // 保存Actionを直接呼ぶ試験用関数
++    expect(result).toMatchObject({ // 一部の構造を検証するメソッド / 期待値を生成する関数
++      status: "success",
++      outcome,
++      requestId: REQUEST,
++      data: {
++        targetMonth: MONTH,
++        createdCount: 1,
++        needsReload: true,
++      },
++    });
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    expect(mocks.save).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(redirect).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("同じIDの手動再送はServiceへ再照合を依頼し、replay成功でも固定遷移する", // 試験を登録する関数
++  /**
++   * 結果不明の再送で新IDを作らず、Repositoryの完了記録による確認を利用する。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    mocks.save.mockResolvedValueOnce({ outcome: "RESULT_UNKNOWN" }); // 次回の成功結果だけを設定するメソッド
++    const unknown = await save(); // 保存Actionを直接呼ぶ試験用関数
++    mocks.save.mockResolvedValueOnce({ // 次回の成功結果だけを設定するメソッド
++      outcome: "ALREADY_COMPLETED",
++      receipt: { targetMonth: MONTH, createdCount: 1 },
++    });
++    await expect(save(form(true), unknown)).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数 / FormDataを生成する関数
++    expect(mocks.save).toHaveBeenCalledTimes(2); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save.mock.calls[0][1]).toEqual(mocks.save.mock.calls[1][1]); // 構造の一致を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.paths).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["preview", "save", "paths"])("%sで発生したNext制御例外は再送出する", // 条件別の試験を登録する関数
++  /**
++   * 本物のnotFound例外を固定エラーや保存済みstateへ変えない。
++   */
++  async (stage) => { // 引数を受け取って試験・判定を行うコールバック
++    const error = controlError(); // 本物のNext制御例外を取得する試験用関数
++    if (stage === "preview") {
++      mocks.preview.mockRejectedValue(error); // モックの失敗を設定するメソッド
++    }
++    if (stage === "save") {
++      mocks.save.mockRejectedValue(error); // モックの失敗を設定するメソッド
++    }
++    if (stage === "paths") mocks.paths.mockImplementation( // モックの処理を設定するメソッド
++      /**
++       * キャッシュ処理から制御例外を伝播させる。
++       */
++      () => { // Actionの境界と副作用を検証するコールバック
++        throw error;
++      },
++    );
++    await expect(stage === "preview" ? preview() : save()).rejects.toBe(error); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(unstable_rethrow).toHaveBeenCalledWith(error); // 呼出し引数を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["preview", "save", "auth"])("%sの通常例外は原文を出さず固定結果にする", // 条件別の試験を登録する関数
++  /**
++   * 生Errorやcauseを返さず、保存依頼後だけ結果不明に区別する。
++   */
++  async (stage) => { // 引数を受け取って試験・判定を行うコールバック
++    const error = new Error(PRIVATE, { cause: { token: PRIVATE } }); // 例外のコンストラクター
++    if (stage === "preview") {
++      mocks.preview.mockRejectedValue(error); // モックの失敗を設定するメソッド
++    }
++    if (stage === "save") {
++      mocks.save.mockRejectedValue(error); // モックの失敗を設定するメソッド
++    }
++    if (stage === "auth") {
++      mocks.membership.mockRejectedValue(error); // モックの失敗を設定するメソッド
++    }
++    const result = await (stage === "preview" ? preview() : save()); // preview Actionを直接呼ぶ試験用関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(result.outcome).toBe(stage === "preview" ? "PREVIEW_FAILED" : stage === "auth" ? "FORBIDDEN" : "RESULT_UNKNOWN"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++    expect(mocks.paths).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["https://external.invalid", "club-a\n", "", "../club-a"])("不正なbound slug %jを両Actionで拒否する",
++  /**
++   * 任意URL・パストラバーサル・改行を遷移先へ混入させない。
++   */
++  async (slug) => { // 引数を受け取って試験・判定を行うコールバック
++    expect((await previewEventPracticeBatchAction(slug, MONTH, previewState(), form())).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 認可と入力照合を行うpreview Action / preview初期stateを生成する関数 / FormDataを生成する関数
++    expect((await createEventPracticeBatchAction(slug, common(), REQUEST, FINGERPRINT, saveState(), form(true))).outcome) // 期待値を生成する関数 / 認可と入力照合・保存後処理を行うAction / 定期練習の共通入力を生成する関数 / 保存初期stateを生成する関数 / FormDataを生成する関数
++      .toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド
++    expect(mocks.user).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["2026-13", "2026-1", "2026-01\n", "0000-01"])("不正なbound対象月%jを拒否する", // 条件別の試験を登録する関数
++  /**
++   * preview対象月と保存用共通入力の両方を構造検証する。
++   */
++  async (month) => { // 引数を受け取って試験・判定を行うコールバック
++    expect((await previewEventPracticeBatchAction(SLUG, month, previewState(), form())).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 認可と入力照合を行うpreview Action / preview初期stateを生成する関数 / FormDataを生成する関数
++    expect((await createEventPracticeBatchAction(SLUG, { // 期待値を生成する関数 / 認可と入力照合・保存後処理を行うAction
++      ...common(), // 定期練習の共通入力を生成する関数
++      targetMonth: month,
++    }, REQUEST, FINGERPRINT, saveState(), form(true))).outcome) // 保存初期stateを生成する関数 / FormDataを生成する関数
++      .toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++vi.mock("next/cache", // 実Clientの読込みを置き換える関数
++  /**
++   * 実際の共通パス生成を試す時も、Nextのキャッシュ操作自体は実行しない。
++   */
++  () => ({ // 試験用のmock群・限定データを返すコールバック
++    revalidatePath: mocks.cache, // 個別パス再検証のmock関数の参照
++  }),
++);
++
++it("成功後に実際の共通関数がイベント4一覧を再検証する", // 試験を登録する関数
++  /**
++   * 共通関数の正しい接続を確認し、他クラブや余分な詳細ページへ無効化を広げない。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const actual = await vi.importActual<typeof import("@/app/(club-app)/club/revalidate-club-paths")>( // 実モジュールを読み込む関数
++      "@/app/(club-app)/club/revalidate-club-paths",
++    );
++    mocks.paths.mockImplementation(actual.revalidateClubEventPaths); // モックの処理を設定するメソッド
++    await expect(save()).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.cache.mock.calls).toEqual([ // 構造の一致を検証するメソッド / 期待値を生成する関数
++      [`/club/${SLUG}/events`],
++      [`/club/${SLUG}/events/list`],
++      [`/club/${SLUG}/admin/events`],
++      [`/club/${SLUG}/admin/events/list`],
++    ]);
++  },
++);
++
++it.each(["requestId", "fingerprint", "common"])("不正なbind情報%sをAuth前に拒否する", // 条件別の試験を登録する関数
++  /**
++   * bindされた値自体も構造検証し、正しい値と仮定しない。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const result = await createEventPracticeBatchAction( // 認可と入力照合・保存後処理を行うAction
++      SLUG,
++      field === "common" ? {
++        ...common(), // 定期練習の共通入力を生成する関数
++        periodEnd: "invalid",
++      } : common(), // 定期練習の共通入力を生成する関数
++      field === "requestId" ? `${REQUEST}\n` : REQUEST,
++      field === "fingerprint" ? PRIVATE : FINGERPRINT,
++      saveState(), // 保存初期stateを生成する関数
++      form(true), // FormDataを生成する関数
++    );
++    expect(result.outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(mocks.user).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++  },
++);
++
++it("FormDataの対象月は形式が正しくてもbindされた月と異なればpreviewしない", // 試験を登録する関数
++  /**
++   * 別の月の有効な期間へ書き換えても、対象月の一致確認を省略しない。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const data = form(); // FormDataを生成する関数
++    data.set("targetMonth", "2026-02"); // フォームの単一項目を設定するメソッド
++    data.set("periodStart", "2026-02-01"); // フォームの単一項目を設定するメソッド
++    data.set("periodEnd", "2026-02-28"); // フォームの単一項目を設定するメソッド
++    expect((await preview(data)).outcome).toBe("VALIDATION_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("共通認可が別slugを返す異常時も両Actionで拒否する", // 試験を登録する関数
++  /**
++   * 認可層の不整合があっても、別クラブcontextをServiceへ渡さない。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const other = actor(); // 認可に使う所属fixtureを生成する関数
++    other.club.slug = "other-club";
++    mocks.membership.mockResolvedValue(other); // モックの成功結果を設定するメソッド
++    expect((await preview()).outcome).toBe("FORBIDDEN"); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++    expect((await save()).outcome).toBe("FORBIDDEN"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.preview).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each(["input", "fingerprint", "missing"])("preview成功の不正な材料%sでIDを発行しない", // 条件別の試験を登録する関数
++  /**
++   * 成功コードだけを信用せず、共通入力の一致と照合値の構造を確認する。
++   */
++  async (field) => { // 引数を受け取って試験・判定を行うコールバック
++    const value = ready(); // 正常なpreview材料を生成する関数
++    if (field === "input") {
++      value.input.title = "別の入力";
++    }
++    if (field === "fingerprint") {
++      value.fingerprint = PRIVATE;
++    }
++    mocks.preview.mockResolvedValue(field === "missing" ? null : value); // モックの成功結果を設定するメソッド
++    expect((await preview()).outcome).toBe("PREVIEW_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / preview Actionを直接呼ぶ試験用関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it("操作ID発行時の例外も固定preview失敗にする", // 試験を登録する関数
++  /**
++   * preview成功後の発行失敗で、中途半端な成功stateや秘密を返さない。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    mocks.issue.mockImplementation( // モックの処理を設定するメソッド
++      /**
++       * UUID発行の通常障害を再現する。
++       */
++      () => { // Actionの境界と副作用を検証するコールバック
++        throw new Error(PRIVATE); // 例外のコンストラクター
++      },
++    );
++    const result = await preview(); // preview Actionを直接呼ぶ試験用関数
++    expect(result.outcome).toBe("PREVIEW_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.requestId).toBe(""); // 値の一致を検証するメソッド / 期待値を生成する関数
++    expect(result.data).toBeUndefined(); // データがないことを検証するメソッド / 期待値を生成する関数
++    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
++  },
++);
++
++it("保存済みsuccessを再送してもstateだけで保存済みと判定しない", // 試験を登録する関数
++  /**
++   * 再検証障害後の手動再送は、同じ操作IDを使ってServiceへ再確認する。
++   */
++  async () => { // Actionの境界と副作用を検証するコールバック
++    mocks.paths.mockImplementationOnce( // 次の呼出しだけを差し替えるメソッド
++      /**
++       * 最初の再検証だけを通常エラーにする。
++       */
++      () => { // Actionの境界と副作用を検証するコールバック
++        throw new Error(PRIVATE); // 例外のコンストラクター
++      },
++    );
++    const saved = await save(); // 保存Actionを直接呼ぶ試験用関数
++    expect(saved.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数
++    mocks.save.mockResolvedValueOnce({ // 次回の成功結果だけを設定するメソッド
++      outcome: "ALREADY_COMPLETED",
++      receipt: { targetMonth: MONTH, createdCount: 1 },
++    });
++    await expect(save(form(true), saved)).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数 / FormDataを生成する関数
++    expect(mocks.save).toHaveBeenCalledTimes(2); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.issue).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++  },
++);
++
++it.each([0, 32, 1.5, NaN, 2])("破損した保存件数%jを再検証・遷移へ進めない", // 条件別の試験を登録する関数
++  /**
++   * Service契約と異なるreceiptでも、追加保存せず結果不明として返す。
 +   */
 +  async (createdCount) => { // 引数を受け取って試験・判定を行うコールバック
 +    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
 +      outcome: "CREATED",
-+      receipt: {
-+        targetMonth: "2026-01",
-+        createdCount,
-+      },
++      receipt: { targetMonth: MONTH, createdCount },
 +    });
-+    expect(await createEventPracticeBatch(context(), execution())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
++    expect((await save()).outcome).toBe("RESULT_UNKNOWN"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.paths).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    expect(redirect).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
 +  },
 +);
 +
-+it.each([null, undefined, { // 条件別の試験を登録する関数
-+  outcome: "UNKNOWN",
-+  detail: SECRET,
-+}, { outcome: "CREATED" }])( // 条件別の試験を登録する関数
-+  "不明・破損した保存結果%jをRESULT_UNKNOWNにする",
++it("31件の選択を正規化して1回だけ保存へ渡せる", // 試験を登録する関数
 +  /**
-+   * 保存依頼後の不正応答で新しい操作や再保存を行わない。
++   * 上限内の選択をActionで不要に拒否しない。
 +   */
-+  async (result) => { // 引数を受け取って試験・判定を行うコールバック
-+    mocks.save.mockResolvedValue(result); // モックの成功結果を設定するメソッド
-+    expect(await createEventPracticeBatch(context(), execution())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+  },
-+);
-+
-+it("異なる対象月のreceiptを成功として返さない", // 試験を登録する関数
-+  /**
-+   * 別の操作結果が混ざった場合は、同じ操作の結果確認が必要な状態にする。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
-+      outcome: "ALREADY_COMPLETED",
-+      receipt: {
-+        targetMonth: "2026-02",
-+        createdCount: 1,
-+      },
-+    });
-+    expect(await createEventPracticeBatch(context(), execution())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+  },
-+);
-+
-+it.each(["selectedDates", "requestId", "previewFingerprint"])("保存専用入力%sの不正をDBへ渡さない", // 条件別の試験を登録する関数
-+  /**
-+   * Serviceを直接呼んでも、保存入力の構造検証を省略しない。
-+   */
-+  async (field) => { // 引数を受け取って試験・判定を行うコールバック
-+    expect(await createEventPracticeBatch(context(), { // 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数
-+      ...execution(), // 保存入力のfixtureを生成する関数
-+      [field]: SECRET,
-+    })) // 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+      .toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド
-+    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+  },
-+);
-+
-+it.each(["clubId", "status", "content", "returnTo"])("未許可項目%sを入力に混入できない", // 条件別の試験を登録する関数
-+  /**
-+   * Client指定のscope・本文・固定状態・任意遷移先をService入力から排除する。
-+   */
-+  async (field) => { // 引数を受け取って試験・判定を行うコールバック
-+    expect(await getEventPracticeBatchPreview(context(), { // 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+      ...common(), // 定期練習の共通入力を生成する関数
-+      [field]: SECRET,
-+    })) // 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
-+      .toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド
-+    expect(await createEventPracticeBatch(context(), { // 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数
-+      ...execution(), // 保存入力のfixtureを生成する関数
-+      [field]: SECRET,
-+    })) // 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+      .toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド
-+    expect(mocks.read).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-+  },
-+);
-+
-+it("原文とcauseを持つ想定外例外も返却やログへ出さない", // 試験を登録する関数
-+  /**
-+   * previewは固定失敗、保存依頼後は結果不明へ限定する。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const error = new Error(SECRET, { cause: { token: SECRET } }); // 例外のコンストラクター
-+    mocks.read.mockRejectedValue(error); // モックの失敗を設定するメソッド
-+    mocks.save.mockRejectedValue(error); // モックの失敗を設定するメソッド
-+    expect(await getEventPracticeBatchPreview(context(), common())).toEqual({ outcome: "PREVIEW_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数 / 定期練習の共通入力を生成する関数
-+    expect(await createEventPracticeBatch(context(), execution())).toEqual({ outcome: "RESULT_UNKNOWN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数 / 保存入力のfixtureを生成する関数
-+  },
-+);
-+
-+it("F11の最小対象月0001-01もpreviewと保存へ渡せる", // 試験を登録する関数
-+  /**
-+   * 前月を使うF10の下限を、定期練習のServiceへ混入させない。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const values = {
-+      ...common(), // 定期練習の共通入力を生成する関数
-+      targetMonth: "0001-01",
-+      periodStart: "0001-01-01",
-+      periodEnd: "0001-01-01",
-+    };
-+    ready(values); // 正常なpreview材料を生成する関数
-+    const result = await getEventPracticeBatchPreview(context(), values); // 限定preview DTOを取得するService / 認証済みcontextのfixtureを生成する関数
-+    expect(result.outcome).toBe("READY"); // 値の一致を検証するメソッド / 期待値を生成する関数
++  async () => { // Actionの境界と副作用を検証するコールバック
++    const data = form(true); // FormDataを生成する関数
++    data.delete("selectedDates"); // フォーム項目を削除するメソッド
++    for (let day = 31; day >= 1; day -= 1) {
++      data.append("selectedDates", `2026-01-${String(day).padStart(2, "0")}`); // フォームの反復項目を追加するメソッド / 文字列の桁を揃えるメソッド / 文字列へ変換する関数
++    }
 +    mocks.save.mockResolvedValue({ // モックの成功結果を設定するメソッド
 +      outcome: "CREATED",
-+      receipt: {
-+        targetMonth: "0001-01",
-+        createdCount: 1,
-+      },
++      receipt: { targetMonth: MONTH, createdCount: 31 },
 +    });
-+    expect((await createEventPracticeBatch(context(), { // 値の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 認証済みcontextのfixtureを生成する関数
-+      ...execution(), // 保存入力のfixtureを生成する関数
-+      ...values,
-+      selectedDates: ["0001-01-01"],
-+    })).outcome).toBe("CREATED"); // 値の一致を検証するメソッド
-+  },
-+);
-+
-+it("保存委譲前の想定外例外はCREATE_FAILEDに限定する", // 試験を登録する関数
-+  /**
-+   * contextの読取自体が失敗した場合も、原文を返さず保存を依頼しない。
-+   */
-+  async () => { // 試験・依存検出の処理を実行するコールバック
-+    const value = context(); // 認証済みcontextのfixtureを生成する関数
-+    Object.defineProperty(value, "userId", { // 試験用の読取失敗プロパティを設定する関数
-+      /**
-+       * context読取時の想定外例外を再現する。
-+       */
-+      get() { // context読取時に試験用例外を投げるgetter
-+        throw new Error(SECRET); // 例外のコンストラクター
-+      },
-+    });
-+    expect(await createEventPracticeBatch(value, execution())).toEqual({ outcome: "CREATE_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 保存を1回だけRepositoryへ委譲するService / 保存入力のfixtureを生成する関数
-+    expect(mocks.save).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++    await expect(save(data)).rejects.toThrow("NEXT_REDIRECT"); // 例外を検証するメソッド / 期待値を生成する関数 / 保存Actionを直接呼ぶ試験用関数
++    expect(mocks.save).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save.mock.calls[0][1].selectedDates).toHaveLength(31); // 件数を検証するメソッド / 期待値を生成する関数
++    expect(mocks.save.mock.calls[0][1].selectedDates[0]).toBe("2026-01-01"); // 値の一致を検証するメソッド / 期待値を生成する関数
 +  },
 +);

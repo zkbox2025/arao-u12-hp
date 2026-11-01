@@ -27,8 +27,7 @@ const scopeSchema = z.object({
 });
 
 /**
- * 認証済みcontextと保存入力を検証して、Repositoryへ1回だけ委譲し、最小の保存結果を返す。
- * previewの先読みやService内での再試行を行わず、保存依頼後の例外は結果不明として扱う。
+ * 定期練習保存の入力値と認可contextを再検証し、定期練習を一括作成して、その『完了記録』をDBに安全に保存する関数（作成イベントは下書きとしてDBに保存）
  */
 export async function createEventPracticeBatch( // 定期練習一括作成のApplication Service
   context: ClubAccessContext, // Auth本人とACTIVE所属から作られる認可context型
