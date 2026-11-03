@@ -39,6 +39,11 @@ describe( // 【追加】関連するtoast試験をまとめる関数
         "event-month-copied",
         "前月の予定を下書きとして複製しました。",
       ],
+      // 【追加】定期練習の保存Actionが送る固定成功コードを扱う。
+      [
+        "event-practice-batch-created",
+        "定期練習の予定を下書きとして作成しました。",
+      ],
     ])(
       "%sを固定メッセージへ変換する",
       /**
@@ -52,7 +57,7 @@ describe( // 【追加】関連するtoast試験をまとめる関数
           getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
             value,
           ),
-        ).toBe(expected);
+        ).toBe(expected); // 【追加】対応する固定文言を比較するメソッド
       },
     );
 
@@ -65,7 +70,7 @@ describe( // 【追加】関連するtoast試験をまとめる関数
         getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
           "unknown",
         ),
-      ).toBeNull();
+      ).toBeNull(); // 【追加】不正または未指定のコードが非表示になることを検証するメソッド
     });
 
     it("複数指定はnull",  // 【追加】toastの変換試験を登録する関数
@@ -77,7 +82,7 @@ describe( // 【追加】関連するtoast試験をまとめる関数
         getClubEventToastMessage([ // 【追加】既知のコードだけを固定メッセージへ変換する関数
           "event-created",
         ]),
-      ).toBeNull();
+      ).toBeNull(); // 【追加】不正または未指定のコードが非表示になることを検証するメソッド
     });
 
     it("未指定はnull",  // 【追加】toastの変換試験を登録する関数
@@ -89,7 +94,7 @@ describe( // 【追加】関連するtoast試験をまとめる関数
         getClubEventToastMessage( // 【追加】既知のコードだけを固定メッセージへ変換する関数
           undefined,
         ),
-      ).toBeNull();
+      ).toBeNull(); // 【追加】不正または未指定のコードが非表示になることを検証するメソッド
     });
   },
 );
@@ -105,5 +110,23 @@ it.each([ // 【追加】不正な複製toastのパラメーター試験を登�
    */
   (value) => { // 【追加】不正コードを検証するコールバック
     expect(getClubEventToastMessage(value)).toBeNull(); // 【追加】期待値生成関数 / 固定文言変換関数 / 非表示を比較するメソッド
+  },
+);
+
+// 【追加】F11も完全一致する単一の成功コードだけを表示する。
+it.each([ // 【追加】定期練習toastの不正入力を列挙する試験登録関数
+  "events-practice-batch-created",
+  "event-practice-batch-created?createdCount=999",
+  "event-practice-batch-created<script>",
+  " event-practice-batch-created",
+  "event-practice-batch-created\n",
+  ["event-practice-batch-created"],
+  ["event-practice-batch-created", "event-practice-batch-created"],
+])("定期練習の成功コード以外の%jは表示しない", // 【追加】不正toastの試験を登録する関数
+  /**
+   * 【追加】類似コード・自由文言付き・空白付き・配列を成功文言へ変換しない。
+   */
+  (value) => { // 【追加】不正な成功コードを検証するコールバック
+    expect(getClubEventToastMessage(value)).toBeNull(); // 【追加】期待値生成関数 / 固定文言変換関数 / 非表示検証メソッド
   },
 );
