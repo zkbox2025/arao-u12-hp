@@ -122,8 +122,7 @@ function monthBounds(targetMonth: string) { // 月の日付境界を求める関
 }
 
 /**
- * 定期練習生成の共通入力を表示するComponent
- * onChangeは任意roleの「すべて選択」を含む変更を親へ知らせる。
+ * 定期練習生成のフォームコンポーネント
  */
 export function EventPracticeBatchInputFields({ // 定期練習の共通入力を表示するComponent
   idPrefix,

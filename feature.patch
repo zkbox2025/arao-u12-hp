@@ -1,698 +1,1942 @@
-diff --git a/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchInputFields.tsx b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchInputFields.tsx
+diff --git a/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm.tsx b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm.tsx
 new file mode 100644
-index 0000000..2492e2c
+index 0000000..8fd52a4
 --- /dev/null
-+++ b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchInputFields.tsx
-@@ -0,0 +1,297 @@
-+// app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchInputFields.tsx
-+// 定期練習の共通入力だけを表示し、preview・保存の状態管理は親フォームへ委ねる。
++++ b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm.tsx
+@@ -0,0 +1,635 @@
++// app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm.tsx
++// 共通入力からpreviewし、初回保存の内容を固定して同じ操作だけを再送する。
 +"use client";
 +
 +import {
-+  ContentTargetRoleFieldset, // 公開対象のチェックボックスを表示するComponent
-+} from "@/app/(club-app)/club/admin/_components/ContentTargetRoleFieldset";
++  startTransition,
++  useActionState,
++  useId,
++  useRef,
++  useState,
++  type FormEvent,
++} from "react";
++import { unstable_rethrow } from "next/navigation";
++
 +import {
 +  FieldErrorList, // 入力項目のエラー配列を表示するComponent
 +} from "@/app/(club-app)/club/admin/_components/FieldErrorList";
 +import {
-+  EVENT_LOCATION_MAX_LENGTH, // 開催場所の最大文字数
-+  EVENT_TITLE_MAX_LENGTH, // タイトルの最大文字数
-+} from "@/domain/club/event/event-form";
++  FormErrorAlert, // フォーム全体のエラーをalertで表示するComponent
++} from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
++import {
++  EVENT_PRACTICE_BATCH_MAX_COUNT, // 定期練習作成の最大件数31件
++  type EventPracticeBatchActionState, // 定期練習保存の入力・結果・エラーを持つstate型
++  type EventPracticeBatchCommonInput, // 検証・正規化した定期練習の共通入力型
++  type EventPracticeBatchExclusionReason, // 候補日の選択不可理由の型
++  type EventPracticeBatchFormValues, // 定期練習のフォーム入力値の型
++  type EventPracticeBatchInput, // 共通入力・選択日・操作ID・照合値の保存入力型
++  type EventPracticeBatchPreviewActionState, // preview準備の入力・結果・エラーを持つstate型
++  type EventPracticeBatchPreviewReady, // preview成功時の限定データ型
++} from "@/domain/club/event/event-practice-batch-types";
++import {
++  EventPracticeBatchInputFields, // 定期練習の共通入力欄を表示するComponent
++} from "./EventPracticeBatchInputFields";
++
++/**
++ * Pageがクラブ・対象月を固定したpreview Actionの関数型。
++ */
++type PreviewAction = ( // preview Actionの型
++  previous: EventPracticeBatchPreviewActionState, // 前回のpreview state型
++  data: FormData, // 共通入力のフォーム型
++) => Promise<EventPracticeBatchPreviewActionState>; // preview stateを返す非同期型
++
++/**
++ * Pageがクラブを固定し、Clientがpreview入力・操作ID・照合値を渡す保存Action型。
++ */
++type CreateAction = ( // 保存Actionの型
++  input: EventPracticeBatchCommonInput, // previewで正規化された共通入力型
++  requestId: string, // 操作IDの文字列型
++  fingerprint: string, // preview照合値の文字列型
++  previous: EventPracticeBatchActionState, // 前回の保存state型
++  data: FormData, // 保存入力のフォーム型
++) => Promise<EventPracticeBatchActionState>; // 保存stateを返す非同期型
++
++/**
++ * Pageから渡す初期入力・Action・固定の管理一覧リンク。
++ */
++type Props = { // 共通入力フォームのprops型
++  initialValues: EventPracticeBatchFormValues; // 初期の共通入力型
++  timezone: string; // 表示用クラブtimezoneの文字列型
++  previewAction: PreviewAction; // preview Actionの関数型
++  createAction: CreateAction; // 保存Actionの関数型
++  cancelHref: string; // 同クラブ・対象月の管理一覧URL型
++};
++
++/**
++ * preview結果と、その入力が送信された時点の変更番号。
++ */
++type PreviewRun = { // preview結果の適用範囲を表す型
++  revision: number; // 入力の変更番号の数値型
++  state: EventPracticeBatchPreviewActionState; // preview Actionのstate型
++};
++
++/**
++ * 1つのpreviewに対応する選択・保存フォームのprops。
++ */
++type SelectionProps = { // 選択・保存フォームのprops型
++  ready: EventPracticeBatchPreviewReady; // previewの限定成功データ型
++  requestId: string; // サーバー発行の操作IDの文字列型
++  createAction: CreateAction; // 保存Actionの関数型
++  cancelHref: string; // 管理一覧URLの文字列型
++  isCurrent: () => boolean; // 入力変更直後も古いpreviewからの保存を拒否する関数型
++  onAttempt: () => void; // 共通入力を固定する関数型
++  onRestart: () => void; // 確定した失敗後にpreviewを破棄する関数型
++};
++
++const EXCLUSION_LABELS: Record<EventPracticeBatchExclusionReason, string> = { // 除外理由型と説明の辞書型
++  NONEXISTENT_LOCAL_TIME: "存在しない現地時刻のため作成できません。",
++  AMBIGUOUS_LOCAL_TIME: "曖昧な現地時刻のため作成できません。",
++  INVALID_INTERVAL: "開始・終了の順序が不正です。",
++  OUT_OF_RANGE: "日時の有効範囲外です。",
++  INVALID_DATE_TIME: "日時を変換できません。",
++};
++
++/**
++ * 正規化した保存入力の業務項目だけを、新しいFormDataへ毎回写す。
++ * disabledの表示欄や、再送時のDOMから保存内容を作り直さない。
++ */
++function submission(input: EventPracticeBatchInput): FormData { // 保存フォーム生成関数 / 保存入力型 / フォーム型
++  const data = new FormData(); // 保存用フォームのコンストラクター
++  for (const name of [
++    "targetMonth",
++    "periodStart",
++    "periodEnd",
++    "title",
++    "startTime",
++    "endTime",
++    "location",
++    "meetingTime",
++    "meetingLocation",
++    "requestId",
++    "previewFingerprint",
++  ] as const) { // 単一入力の項目名を限定する読取専用型
++    data.append(name, input[name] ?? ""); // 単一値を追加するメソッド
++  }
++  for (const day of input.weekdays) {
++    data.append("weekdays", String(day)); // 曜日を追加するメソッド / 曜日番号を文字列化する関数
++  }
++  for (const role of input.targetRoles) {
++    data.append("targetRoles", role); // 公開対象を追加するメソッド
++  }
++  for (const date of input.selectedDates) {
++    data.append("selectedDates", date); // 選択日を追加するメソッド
++  }
++  return data;
++}
++
++/**
++ * 選択日が重複せず、上限内かつ生成可能な候補だけであることを確認する。
++ */
++function validDates( // 選択日の安全な送信条件を確認する関数
++  ready: EventPracticeBatchPreviewReady, // 限定preview成功データ型
++  selected: readonly string[], // 選択日の読取専用文字列配列型
++): boolean { // 真偽値型
++  return (
++    ready.candidateCount <= EVENT_PRACTICE_BATCH_MAX_COUNT &&
++    ready.items.length <= EVENT_PRACTICE_BATCH_MAX_COUNT &&
++    new Set(selected).size === selected.length && // 選択日の重複を検査する集合コンストラクター
++    selected.length > 0 &&
++    selected.length <= EVENT_PRACTICE_BATCH_MAX_COUNT &&
++    selected.every( // 全選択日が選択可能な候補に含まれるか調べるメソッド
++      /**
++       * 除外日や候補外の日付を送信しない。
++       */
++      (date) => ready.items.some( // 日付を確認するコールバック / 候補を探すメソッド
++        /**
++         * 現在のpreview内で生成可能な日付か調べる。
++         */
++        (item) => ( // 候補判定のコールバック
++          item.date === date &&
++          item.dates !== null &&
++          item.exclusionReason === null
++        ),
++      ),
++    )
++  );
++}
++
++/**
++ * 1つのpreviewを表示し、保存を始めたら選択と入力を固定する。
++ * 結果不明は同一操作だけ再送でき、既知の失敗はoutcomeで再preview可否を判断する。
++ */
++function SelectionForm({ // 選択・保存を扱うComponent
++  ready,
++  requestId,
++  createAction,
++  cancelHref,
++  isCurrent,
++  onAttempt,
++  onRestart,
++}: SelectionProps) { // 選択・保存フォームのprops型
++  const id = useId(); // フォーム内の関連付けIDを作るhook
++  const [selected, setSelected] = useState<readonly string[]>( // 選択日を保持するhook / 文字列の読取専用配列型
++    ready.items.filter( // 選択可能な初期選択だけを抽出するメソッド
++      /**
++       * Serviceの初期選択と生成可能性を合わせて確認する。
++       */
++      (item) => ( // 初期選択判定のコールバック
++        item.initiallySelected &&
++        item.dates !== null &&
++        item.exclusionReason === null
++      ),
++    ).map( // 日付だけを取り出すメソッド
++      /**
++       * 候補の識別子として現地日付を使う。
++       */
++      (item) => item.date, // 日付抽出のコールバック
++    ),
++  );
++  const selectedRef = useRef(selected); // 選択変更を再描画前にも参照するhook
++  const retryAllowed = useRef(true); // 最新の保存結果で再送可否を同期的に判断するhook
++  const restartAllowed = useRef(true); // 保存中・結果不明・保存済みの作り直しを止めるhook
++  const [attempted, setAttempted] = useState(false); // 初回送信済みの表示を保持するhook
++  const attemptedRef = useRef(false); // 再描画前から選択変更を止めるhook
++  const inFlight = useRef(false); // 同期的に二重送信を止めるhook
++  const snapshot = useRef<EventPracticeBatchInput | null>(null); // 初回の保存入力を保持するhook / 保存入力または未設定の型
++  const initial: EventPracticeBatchActionState = { // 初期の保存state型
++    status: "idle",
++    values: {
++      ...ready.input,
++      selectedDates: [...selected],
++      requestId,
++      previewFingerprint: ready.fingerprint,
++    },
++    fieldErrors: {},
++    formError: null,
++    requestId,
++  };
++  const [state, dispatch, pending] = useActionState( // 保存結果と送信中状態を持つhook
++    /**
++     * 初回に保持した入力から毎回フォームを作り、同じ操作の保存だけを依頼する。
++     */
++    async ( // 保存reducerの非同期コールバック
++      previous: EventPracticeBatchActionState, // 前回の保存state型
++    ): Promise<EventPracticeBatchActionState> => { // 保存stateを返す非同期型
++      const input = snapshot.current;
++      if (input === null) {
++        inFlight.current = false;
++        return previous;
++      }
++      try {
++        const result = await createAction( // サーバーの保存Actionを呼ぶ関数
++          ready.input,
++          requestId,
++          ready.fingerprint,
++          previous,
++          submission(input), // 固定入力から新しいフォームを作る関数
++        );
++        retryAllowed.current = (
++          result.status === "error" &&
++          (result.outcome === "RESULT_UNKNOWN" || result.outcome === "CREATE_FAILED")
++        );
++        restartAllowed.current = (
++          result.status === "error" &&
++          result.outcome !== "RESULT_UNKNOWN"
++        );
++        return result;
++      } catch (error) {
++        unstable_rethrow(error); // Nextの遷移・アクセス制御例外を再送出する関数
++        retryAllowed.current = true;
++        return {
++          status: "error",
++          outcome: "RESULT_UNKNOWN",
++          values: input,
++          fieldErrors: {},
++          formError: "通信結果を確認できません。同じ選択・操作IDで結果を確認してください。",
++          requestId,
++        };
++      } finally {
++        inFlight.current = false;
++      }
++    },
++    initial,
++  );
++  const saved = state.status === "success";
++  const canRestart = (
++    state.status === "error" &&
++    state.outcome !== "RESULT_UNKNOWN"
++  );
++  const canRetry = !attempted || (
++    state.status === "error" &&
++    (state.outcome === "RESULT_UNKNOWN" || state.outcome === "CREATE_FAILED")
++  );
++  const validSelection = validDates(ready, selected); // 保存可能な選択か確認する関数
++  const formatter = new Intl.DateTimeFormat("ja-JP", { // クラブ現地日時の表示器を作るコンストラクター
++    timeZone: ready.timezone,
++    year: "numeric",
++    month: "2-digit",
++    day: "2-digit",
++    hour: "2-digit",
++    minute: "2-digit",
++    hourCycle: "h23",
++    timeZoneName: "longOffset",
++  });
++  /**
++   * 保存内容を同期的に固定し、ReactのActionをtransition内で1回だけ送信する。
++   */
++  function beginSave(event: FormEvent<HTMLFormElement>) { // 保存送信の処理関数 / フォームイベント型
++    event.preventDefault(); // 通常のフォーム送信を止めるメソッド
++    if (
++      inFlight.current ||
++      pending ||
++      saved ||
++      !validDates(ready, selectedRef.current) || // 最新の選択日で保存条件を確認する関数
++      !retryAllowed.current ||
++      !isCurrent() // 最新入力に対応するpreviewかを同期的に確認する関数
++    ) {
++      return;
++    }
++    if (snapshot.current === null) {
++      snapshot.current = {
++        ...ready.input,
++        weekdays: [...ready.input.weekdays],
++        targetRoles: [...ready.input.targetRoles],
++        selectedDates: [...selectedRef.current].sort(), // 初回選択を日付昇順へ並べるメソッド
++        requestId,
++        previewFingerprint: ready.fingerprint,
++      };
++    }
++    inFlight.current = true;
++    retryAllowed.current = false;
++    restartAllowed.current = false;
++    attemptedRef.current = true;
++    setAttempted(true); // 選択固定を描画へ反映するstate更新関数
++    onAttempt(); // 親の共通入力を固定する関数
++    startTransition( // Action送信をReactのtransition内で開始する関数
++      /**
++       * 固定入力の保存をAction queueへ渡す。
++       */
++      () => dispatch(), // 送信コールバック / 固定入力を使うAction送信関数
++    );
++  }
++  /**
++   * 再描画前に残ったボタンからも、結果不明・保存中・保存済みの作り直しを拒否する。
++   */
++  function restartPreview() { // 安全な場合だけ新しいpreviewへ戻す関数
++    if (
++      !inFlight.current &&
++      restartAllowed.current
++    ) {
++      onRestart(); // 親のpreviewを破棄する関数
++    }
++  }
++  return (
++    <form
++      method="post"
++      onSubmit={beginSave /* 保存を1回ずつ送信する関数 */}
++      aria-busy={pending}
++      className="space-y-5"
++    >
++      <p>候補件数: {ready.candidateCount} / 選択可能: {ready.selectableCount}</p>
++      <p aria-live="polite">選択件数: {selected.length}</p>
++      <p>表示timezone: {ready.timezone}</p>
++      <p>選択した予定をDRAFT（下書き）で作成します。公開・LINE通知・PDF追加は行いません。</p>
++      {/* フォーム全体のエラーを表示するComponent */}
++      <FormErrorAlert message={state.formError} />
++      {/* 保存時の項目エラーを表示するComponent */}
++      {Object.entries(state.fieldErrors).map( // 項目エラーを列挙するメソッド / エラー欄へ変換するメソッド
++        /**
++         * 項目名ごとに安定したエラーIDを付ける。
++         */
++        ([field, errors]) => ( // エラー表示のコールバック
++          <FieldErrorList
++            key={field}
++            id={`${id}-${field}-error`}
++            errors={errors}
++          />
++        ),
++      )}
++      {ready.items.length === 0 ? <p role="status">指定条件に一致する候補日はありません。</p> : null}
++      {ready.items.length > 0 && ready.selectableCount === 0 ? (
++        <p role="status">すべての候補が除外されているため作成できません。</p>
++      ) : null}
++      {ready.items.length > EVENT_PRACTICE_BATCH_MAX_COUNT ? (
++        <p role="alert">候補が31件を超えているため作成できません。</p>
++      ) : null}
++      <fieldset
++        disabled={pending || attempted || saved}
++        className="space-y-3"
++      >
++        <legend className="font-bold">作成する日を選択</legend>
++        {ready.items.map( // すべての候補日を表示するメソッド
++          /**
++           * 現地日時・既存一致・除外理由・集合警告を候補ごとに表示する。
++           */
++          (item) => { // 候補を表示するコールバック
++            const itemId = `${id}-${item.date}`;
++            return (
++              <div
++                key={item.date}
++                className="space-y-2 rounded-lg border p-4"
++              >
++                <input
++                  id={itemId}
++                  type="checkbox"
++                  checked={selected.includes(item.date) /* 選択日の有無を調べるメソッド */}
++                  disabled={item.dates === null || item.exclusionReason !== null}
++                  aria-invalid={Boolean(state.fieldErrors.selectedDates?.length) /* エラー有無を真偽値にする関数 */}
++                  aria-describedby={`${itemId}-details${state.fieldErrors.selectedDates?.length ? ` ${id}-selectedDates-error` : ""}`}
++                  onChange={
++                    /**
++                     * 初回送信前だけ、生成可能な候補の選択を更新する。
++                     */
++                    (event) => { // 候補checkboxの変更コールバック
++                      if (
++                        attemptedRef.current ||
++                        item.dates === null ||
++                        item.exclusionReason !== null
++                      ) {
++                        return;
++                      }
++                      const checked = event.currentTarget.checked;
++                      const current = selectedRef.current;
++                      const next = checked
++                        ? current.includes(item.date) // 既選択か調べるメソッド
++                          ? current
++                          : [...current, item.date]
++                        : current.filter( // 選択解除した日を除くメソッド
++                          /**
++                           * 解除対象以外の日付を残す。
++                           */
++                          (date) => date !== item.date, // 選択解除のコールバック
++                        );
++                      selectedRef.current = next;
++                      setSelected(next); // 最新の選択日を描画へ反映するstate更新関数
++                    }
++                  }
++                />
++                <label
++                  htmlFor={itemId}
++                  className="ml-2 font-bold"
++                >{item.date}：{ready.input.title}</label>
++                <div
++                  id={`${itemId}-details`}
++                  className="space-y-1 text-sm"
++                >
++                  {item.dates ? (
++                    <>
++                      <p>開始: {formatter.format(new Date(item.dates.startAt)) /* 現地日時の表示メソッド / UTC日時のコンストラクター */}</p>
++                      <p>終了: {formatter.format(new Date(item.dates.endAt)) /* 現地日時の表示メソッド / UTC日時のコンストラクター */}</p>
++                      <p>集合: {item.dates.meetingAt === null ? "未設定" : formatter.format(new Date(item.dates.meetingAt)) /* 表示メソッド / UTC日時のコンストラクター */}</p>
++                    </>
++                  ) : null}
++                  {item.duplicate ? <p>既存イベントと完全一致しています。確認したうえで明示選択できます。</p> : null}
++                  {item.exclusionReason ? <p>{EXCLUSION_LABELS[item.exclusionReason]}</p> : null}
++                  {item.warnings.includes("MEETING_AFTER_START") /* 集合警告の有無を調べるメソッド */ ? (
++                    <p>集合時刻が開始時刻より後です。</p>
++                  ) : null}
++                </div>
++              </div>
++            );
++          },
++        )}
++      </fieldset>
++      {saved ? (
++        <div
++          role="status"
++          className="space-y-2"
++        >
++          <p>{state.data.createdCount}件を下書きで作成済みです。再保存しないでください。</p>
++          {state.data.needsReload ? <p>一覧の更新を確認できませんでした。管理一覧を再読込してください。</p> : null}
++          <a href={cancelHref}>対象月の管理一覧を開く</a>
++        </div>
++      ) : (
++        <button
++          type="submit"
++          disabled={pending || !validSelection || !canRetry}
++          className="rounded-lg bg-blue-700 px-4 py-3 text-white disabled:opacity-50"
++        >
++          {pending ? "保存結果を確認中…" : attempted ? "同じ選択・操作IDで再確認する" : "選択した予定を下書き作成"}
++        </button>
++      )}
++      {state.status === "error" && state.outcome === "RESULT_UNKNOWN" ? (
++        <p role="alert">結果が不明です。新しい操作を作らず、同じ選択・操作IDで再確認してください。</p>
++      ) : null}
++      {!attempted || canRestart ? (
++        <button
++          type="button"
++          disabled={pending}
++          onClick={restartPreview /* 保存状態を確認してpreviewを破棄する関数 */}
++        >
++          入力を変更してpreviewを作成し直す
++        </button>
++      ) : null}
++      {!attempted ? <a href={cancelHref}>月別管理ページへ戻る</a> : null}
++    </form>
++  );
++}
++
++/**
++ * 共通入力とpreviewを接続する。入力変更番号で遅延応答を無効化する。
++ * onSubmitで既定送信を止めてActionを呼ぶため、Reactの自動resetで入力を失わない。
++ */
++export function EventPracticeBatchForm({ // 定期練習の共通入力・previewフォームComponent
++  initialValues,
++  timezone,
++  previewAction,
++  createAction,
++  cancelHref,
++}: Props) { // フォームprops型
++  const id = useId(); // 入力欄の関連付けIDを作るhook
++  const [revision, setRevision] = useState(0); // 入力変更番号を描画へ反映するhook
++  const revisionRef = useRef(0); // 入力変更番号を同期的に保持するhook
++  const submittedRevision = useRef(0); // 送信時点の変更番号を保持するhook
++  const previewInFlight = useRef(false); // previewの連打を同期的に止めるhook
++  const lockedRef = useRef(false); // 保存開始後の入力変更を同期的に止めるhook
++  const [locked, setLocked] = useState(false); // 共通入力の操作可否を保持するhook
++  const initial: PreviewRun = { // 入力変更番号付きpreview state型
++    revision: -1,
++    state: {
++      status: "idle",
++      values: initialValues,
++      fieldErrors: {},
++      formError: null,
++      requestId: "",
++    },
++  };
++  const [run, dispatch, pending] = useActionState( // preview結果と送信中状態を保持するhook
++    /**
++     * 送信時の変更番号を応答と一緒に保持し、古い入力の結果を区別する。
++     */
++    async ( // preview reducerの非同期コールバック
++      previous: PreviewRun, // 前回の変更番号付きpreview結果型
++      data: FormData, // 共通入力のフォーム型
++    ): Promise<PreviewRun> => { // 変更番号付きpreview結果を返す非同期型
++      const version = submittedRevision.current;
++      try {
++        return {
++          revision: version,
++          state: await previewAction(previous.state, data), // 再認可とpreviewを行うサーバーAction
++        };
++      } catch (error) {
++        unstable_rethrow(error); // Nextの遷移・アクセス制御例外を再送出する関数
++        return {
++          revision: version,
++          state: {
++            status: "error",
++            outcome: "PREVIEW_FAILED",
++            values: initialValues,
++            fieldErrors: {},
++            formError: "previewを取得できませんでした。入力を保ったまま再度お試しください。",
++            requestId: "",
++          },
++        };
++      } finally {
++        previewInFlight.current = false;
++      }
++    },
++    initial,
++  );
++  const current = run.revision === revision;
++  const ready = current && run.state.status === "success" ? run.state : null;
++  /**
++   * 入力変更と再previewの開始時に、前の候補を同期的に無効化する。
++   */
++  function invalidate() { // previewを無効化する関数
++    if (lockedRef.current) {
++      return;
++    }
++    revisionRef.current += 1;
++    setRevision(revisionRef.current); // 新しい入力変更番号を表示するstate更新関数
++  }
++  /**
++   * フォーム値を送信時点で取得し、二重送信を防いでpreviewを作成する。
++   */
++  function beginPreview(event: FormEvent<HTMLFormElement>) { // preview送信関数 / フォームイベント型
++    event.preventDefault(); // 通常送信とURLへの入力混入を止めるメソッド
++    if (
++      previewInFlight.current ||
++      lockedRef.current ||
++      pending
++    ) {
++      return;
++    }
++    const data = new FormData(event.currentTarget); // 現在の共通入力を取得するフォームコンストラクター
++    invalidate(); // 再previewを始める時点で古い候補を無効化する関数
++    submittedRevision.current = revisionRef.current;
++    previewInFlight.current = true;
++    startTransition( // Action queueの送信をtransition内で開始する関数
++      /**
++       * 送信時点の共通入力をpreview Actionへ渡す。
++       */
++      () => dispatch(data), // preview送信のコールバック / Action送信関数
++    );
++  }
++  /**
++   * 再描画前の入力変更と再preview開始も含めて、保存対象の有効性を確認する。
++   */
++  function isCurrent() { // 最新のpreviewか確認する関数
++    return (
++      revisionRef.current === run.revision &&
++      !previewInFlight.current
++    );
++  }
++  /**
++   * 初回保存から共通入力を固定する。
++   */
++  function lock() { // 共通入力を固定する関数
++    lockedRef.current = true;
++    setLocked(true); // 操作不可を表示へ反映するstate更新関数
++  }
++  /**
++   * 保存前または確定した失敗後に限り、新しいpreviewを作成できる状態へ戻す。
++   */
++  function restart() { // 新しいpreviewの準備へ戻す関数
++    lockedRef.current = false;
++    setLocked(false); // 共通入力を操作可能にするstate更新関数
++    invalidate(); // 古いpreview・選択・操作IDを破棄する関数
++  }
++  return (
++    <div className="space-y-6">
++      <p>表示timezone: {timezone}。共通入力を確認してからpreviewを作成してください。</p>
++      <form
++        method="post"
++        onSubmit={beginPreview /* previewを送信する関数 */}
++        aria-busy={pending}
++        className="space-y-5"
++      >
++        {/* 定期練習の共通入力欄を表示するComponent */}
++        <EventPracticeBatchInputFields
++          idPrefix={id}
++          values={initialValues}
++          fieldErrors={current ? run.state.fieldErrors : {}}
++          disabled={locked}
++          onChange={invalidate /* 共通入力の変更でpreviewを無効化する関数 */}
++        />
++        {/* preview全体の固定エラーを表示するComponent */}
++        <FormErrorAlert message={current ? run.state.formError : null} />
++        <button
++          type="submit"
++          disabled={pending || locked}
++          className="rounded-lg bg-blue-700 px-4 py-3 text-white disabled:opacity-50"
++        >
++          {pending ? "previewを作成中…" : "作成予定をpreviewする"}
++        </button>
++      </form>
++      {!current && run.state.status !== "idle" ? (
++        <p role="status">入力が変更されました。現在の入力でpreviewを作成してください。</p>
++      ) : null}
++      {ready ? (
++        /* 選択・保存・同じ操作の再確認を扱うComponent */
++        <SelectionForm
++          key={ready.requestId}
++          ready={ready.data}
++          requestId={ready.requestId}
++          createAction={createAction /* クラブを固定したサーバー保存Action */}
++          cancelHref={cancelHref}
++          isCurrent={isCurrent /* 再描画前もpreviewの有効性を確認する関数 */}
++          onAttempt={lock /* 初回保存から共通入力を固定する関数 */}
++          onRestart={restart /* 新しいpreviewの準備へ戻す関数 */}
++        />
++      ) : null}
++      {!locked ? <a href={cancelHref}>月別管理ページへ戻る</a> : null}
++    </div>
++  );
++}
+diff --git a/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/page.tsx b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/page.tsx
+new file mode 100644
+index 0000000..12cf8d2
+--- /dev/null
++++ b/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/page.tsx
+@@ -0,0 +1,112 @@
++// app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/page.tsx
++// 認可と対象月を確認して、定期練習の共通入力・previewフォームを表示する。
++import { notFound } from "next/navigation";
++
++import {
++  requireClubAppAdminAccess, // 本人・ACTIVE所属・管理ロール・アプリ利用プランを確認する関数
++} from "@/app/(club-app)/club/club-app-authorization";
 +import {
 +  isEventPracticeBatchTargetMonth, // 定期練習生成の対象月を検証する関数
 +} from "@/domain/club/event/event-practice-batch-form";
 +import type {
-+  EventPracticeBatchField, // 定期練習作成の入力項目名の型
 +  EventPracticeBatchFormValues, // 定期練習のフォーム入力値の型
 +} from "@/domain/club/event/event-practice-batch-types";
-+import type {
-+  FieldErrors, // 入力項目ごとのエラーメッセージを保持する型
-+} from "@/domain/shared/action-state";
++import {
++  createEventPracticeBatchAction, // 再認可・入力照合・一括保存・保存後処理を行うAction
++  previewEventPracticeBatchAction, // 再認可して共通入力からpreviewを作成するAction
++} from "./actions";
++import {
++  EventPracticeBatchForm, // 共通入力・preview・選択・同一入力の再送を接続するComponent
++} from "./EventPracticeBatchForm";
 +
 +/**
-+ * 共通入力値・項目エラー・操作可否と、親への変更通知を受け取るprops。
-+ * 親が初期の期間を月全体に設定し、再表示時には送信値を渡す。
++ * リクエストごとに本人・所属・プランを確認するページ設定。
 + */
-+type EventPracticeBatchInputFieldsProps = { // 共通入力欄のprops型
-+  idPrefix: string; // 入力欄のIDを区別する文字列型
-+  values: EventPracticeBatchFormValues; // 初期表示またはエラー後の入力値の型
-+  fieldErrors: FieldErrors<EventPracticeBatchField>; // 定期練習の項目別エラー型
-+  disabled: boolean; // 操作を止める真偽値型
-+  onChange?: () => void; // 親フォームへ入力変更を知らせる関数型
++export const dynamic = "force-dynamic";
++
++/**
++ * クラブslugと対象月の非同期route引数。
++ */
++type Props = { // ページの引数型
++  params: Promise<{ // 非同期route引数型
++    clubSlug: string; // クラブslugの文字列型
++  }>;
++  searchParams: Promise<{ // 非同期query引数型
++    month?: string | string[]; // 単一月または重複queryの型
++  }>;
 +};
 +
 +/**
-+ * 単一値を受け取る共通入力欄の表示設定。
++ * 検証済みの対象月全体を期間とする、安全な初期入力を作る。
 + */
-+type InputFieldProps = { // 単一入力欄のprops型
-+  id: string; // 入力要素の識別子の文字列型
-+  name: Exclude< // 反復項目と固定対象月を除く組込み型
-+    keyof EventPracticeBatchFormValues, // 共通入力値から項目名を取り出す型
-+    "weekdays" | "targetRoles" | "targetMonth"
-+  >;
-+  label: string; // 入力欄の見出しの文字列型
-+  type: "text" | "date" | "time"; // 入力形式のリテラル型
-+  value: string; // 表示する入力値の文字列型
-+  required?: boolean; // 必須入力を示す真偽値型
-+  min?: string; // 日付の下限の文字列型
-+  max?: string; // 日付の上限の文字列型
-+  maxLength?: number; // 文字数上限の数値型
-+  errors?: readonly string[]; // 項目エラーの読取専用配列型
-+  onChange?: () => void; // 親へ入力変更を知らせる関数型
-+};
-+
-+const WEEKDAY_LABELS = ["日", "月", "火", "水", "木", "金", "土"] as const; // 曜日表示の読取専用リテラル型
-+
-+/**
-+ * 単一入力値をlabel・必須属性・項目エラーと関連付けて表示する。
-+ */
-+function InputField({ // 単一値の入力欄を表示する関数
-+  id,
-+  name,
-+  label,
-+  type,
-+  value,
-+  required,
-+  min,
-+  max,
-+  maxLength,
-+  errors,
-+  onChange,
-+}: InputFieldProps) { // 単一入力欄のprops型
-+  const errorId = `${id}-error`;
-+  return (
-+    <div>
-+      <label htmlFor={id} className="block text-sm font-bold text-neutral-900">
-+        {label}
-+      </label>
-+      <input
-+        key={`${name}-${value}`}
-+        id={id}
-+        name={name}
-+        type={type}
-+        defaultValue={value}
-+        required={required}
-+        min={min}
-+        max={max}
-+        maxLength={maxLength}
-+        step={type === "time" ? 60 : undefined}
-+        aria-invalid={Boolean(errors?.length) /* エラー有無を真偽値へ変換する関数 */}
-+        aria-describedby={errors?.length ? errorId : undefined}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+        className="mt-2 w-full rounded-lg border border-neutral-300 px-4 py-3 disabled:opacity-60"
-+      />
-+      {/* 項目エラー配列を表示するComponent */}
-+      <FieldErrorList id={errorId} errors={errors} />
-+    </div>
-+  );
-+}
-+
-+/**
-+ * 厳密な対象月から日付入力の月初・月末を求める。不正月を現在月へ置き換えない。
-+ */
-+function monthBounds(targetMonth: string) { // 月の日付境界を求める関数 / 対象月の文字列型
-+  if (!isEventPracticeBatchTargetMonth(targetMonth)) { // 対象月を検証する関数
-+    return undefined;
-+  }
-+  const date = new Date(0); // UTC日付境界の計算に使う日時コンストラクター
-+  date.setUTCFullYear( // 年1〜99もそのまま扱って対象月末を設定するメソッド
-+    Number(targetMonth.slice(0, 4)), // 年を数値へ変換する関数 / 年部分を取り出すメソッド
-+    Number(targetMonth.slice(5, 7)), // 月を数値へ変換する関数 / 月部分を取り出すメソッド
++function initialValues(targetMonth: string): EventPracticeBatchFormValues { // 初期値生成関数 / 月の文字列型 / フォーム入力型
++  const date = new Date(0); // 月末計算用のUTC日時コンストラクター
++  date.setUTCFullYear( // 年1〜99もそのまま扱って月末を設定するメソッド
++    Number(targetMonth.slice(0, 4)), // 年を数値化する関数 / 年部分を取り出すメソッド
++    Number(targetMonth.slice(5, 7)), // 月を数値化する関数 / 月部分を取り出すメソッド
 +    0,
 +  );
-+  const lastDay = String(date.getUTCDate()).padStart(2, "0"); // 文字列化関数 / UTC日取得メソッド / 桁揃えメソッド
++  const day = String(date.getUTCDate()).padStart(2, "0"); // 文字列化関数 / UTC日取得メソッド / 桁揃えメソッド
 +  return {
-+    min: `${targetMonth}-01`,
-+    max: `${targetMonth}-${lastDay}`,
++    targetMonth,
++    periodStart: `${targetMonth}-01`,
++    periodEnd: `${targetMonth}-${day}`,
++    weekdays: [],
++    title: "",
++    startTime: "",
++    endTime: "",
++    location: "",
++    meetingTime: "",
++    meetingLocation: "",
++    targetRoles: ["OWNER"],
 +  };
 +}
 +
 +/**
-+ * 期間・曜日・共通内容を表示する。値の検証・preview・保存・DB操作は行わない。
-+ * onChangeは任意roleの「すべて選択」を含む変更を親へ知らせる。
++ * Promise propsを解決して再認可し、厳密な対象月と限定したActionをフォームへ渡す。
++ * 共通入力や操作IDをURLへ載せず、このPageではpreview取得・DB更新を行わない。
 + */
-+export function EventPracticeBatchInputFields({ // 定期練習の共通入力を表示するComponent
-+  idPrefix,
-+  values,
-+  fieldErrors,
-+  disabled,
-+  onChange,
-+}: EventPracticeBatchInputFieldsProps) { // 共通入力欄のprops型
-+  const bounds = monthBounds(values.targetMonth); // 対象月の日付境界を求める関数
-+  const weekdayErrorId = `${idPrefix}-weekdays-error`;
-+  const weekdayHelpId = `${idPrefix}-weekdays-help`;
-+  const monthErrorId = `${idPrefix}-targetMonth-error`;
++export default async function EventPracticeBatchPage({ // 定期練習作成ページの関数
++  params,
++  searchParams,
++}: Props) { // ページ引数型
++  const [route, query] = await Promise.all([params, searchParams]); // 非同期引数を並行して解決するメソッド
++  const access = await requireClubAppAdminAccess(route.clubSlug); // 本人とクラブの管理権限を確認する関数
++  if (access.club.slug !== route.clubSlug) {
++    notFound(); // 異なるクラブの認可contextを拒否するNext制御関数
++  }
++  const base = `/club/${encodeURIComponent(access.club.slug)}/admin/events`; // slugをパス用に符号化する関数
++  if (!isEventPracticeBatchTargetMonth(query.month)) { // 単一の対象月を厳密に検証する関数
++    return (
++      <section className="space-y-4">
++        <h1 className="text-2xl font-bold">定期練習の一括作成</h1>
++        <p role="alert">対象月をYYYY-MM形式で指定してください。</p>
++        <a href={`${base}?status=ALL`}>月別管理ページへ戻る</a>
++      </section>
++    );
++  }
++  const month = query.month;
++  const previewAction = previewEventPracticeBatchAction.bind( // クラブと対象月を固定するActionのbindメソッド
++    null,
++    access.club.slug,
++    month,
++  );
++  const createAction = createEventPracticeBatchAction.bind( // 保存Actionのクラブを固定するbindメソッド
++    null,
++    access.club.slug,
++  );
 +  return (
-+    <fieldset disabled={disabled} className="space-y-6 disabled:opacity-60">
-+      <legend className="text-lg font-bold">定期練習の共通設定</legend>
-+      <div>
-+        <p
-+          tabIndex={fieldErrors.targetMonth?.length ? -1 : undefined}
-+          aria-describedby={fieldErrors.targetMonth?.length ? monthErrorId : undefined}
-+        >
-+          対象月：{values.targetMonth}
-+        </p>
-+        <input type="hidden" name="targetMonth" value={values.targetMonth} />
-+        {/* 対象月の入力エラーを表示するComponent */}
-+        <FieldErrorList id={monthErrorId} errors={fieldErrors.targetMonth} />
-+      </div>
-+      <p className="text-sm text-neutral-600">
-+        日付・曜日・時刻はクラブの現地時間で指定します。
-+        期間は対象月内、終了時刻は同日の開始時刻より後にしてください。
-+      </p>
-+      {/* 期間開始日を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-periodStart`}
-+        name="periodStart"
-+        label="期間開始日（必須）"
-+        type="date"
-+        value={values.periodStart}
-+        required
-+        min={bounds?.min}
-+        max={bounds?.max}
-+        errors={fieldErrors.periodStart}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
++    <section className="space-y-6">
++      <h1 className="text-2xl font-bold">定期練習の一括作成</h1>
++      {/* 共通入力・preview・保存を接続するClient Component */}
++      <EventPracticeBatchForm
++        key={`${access.club.slug}-${month}`}
++        initialValues={initialValues(month) /* 対象月全体の初期値を作る関数 */}
++        timezone={access.club.timezone}
++        previewAction={previewAction /* クラブと月を固定したpreview Action */}
++        createAction={createAction /* クラブを固定した保存Action */}
++        cancelHref={`${base}?month=${month}&status=ALL`}
 +      />
-+      {/* 期間終了日を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-periodEnd`}
-+        name="periodEnd"
-+        label="期間終了日（必須）"
-+        type="date"
-+        value={values.periodEnd}
-+        required
-+        min={bounds?.min}
-+        max={bounds?.max}
-+        errors={fieldErrors.periodEnd}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      <fieldset
-+        tabIndex={fieldErrors.weekdays?.length ? -1 : undefined}
-+        aria-invalid={Boolean(fieldErrors.weekdays?.length) /* エラー有無を真偽値へ変換する関数 */}
-+        aria-describedby={`${weekdayHelpId}${fieldErrors.weekdays?.length ? ` ${weekdayErrorId}` : ""}`}
-+      >
-+        <legend className="text-sm font-bold">対象曜日（必須・複数選択可）</legend>
-+        <p id={weekdayHelpId} className="mt-1 text-sm text-neutral-600">
-+          曜日を1つ以上選択してください。期間の開始日・終了日も含みます。
-+        </p>
-+        <div className="mt-2 flex flex-wrap gap-4">
-+          {WEEKDAY_LABELS.map( // 曜日ごとのチェックボックスを生成するメソッド
-+            /**
-+             * 曜日の番号・名前をlabelとcheckboxへ対応付ける。
-+             */
-+            (label, index) => { // 曜日入力を作るコールバック
-+              const value = String(index); // 日曜0〜土曜6を文字列化する関数
-+              const id = `${idPrefix}-weekday-${value}`;
-+              return (
-+                <label key={value} htmlFor={id} className="flex items-center gap-2">
-+                  <input
-+                    key={`${value}-${values.weekdays.includes(value)}` /* 曜日の初期選択を調べるメソッド */}
-+                    id={id}
-+                    type="checkbox"
-+                    name="weekdays"
-+                    value={value}
-+                    defaultChecked={values.weekdays.includes(value) /* 曜日の初期選択を調べるメソッド */}
-+                    onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+                  />
-+                  {label}曜日
-+                </label>
-+              );
-+            },
-+          )}
-+        </div>
-+        {/* 曜日の入力エラーを表示するComponent */}
-+        <FieldErrorList id={weekdayErrorId} errors={fieldErrors.weekdays} />
-+      </fieldset>
-+      {/* タイトルを表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-title`}
-+        name="title"
-+        label="タイトル（必須）"
-+        type="text"
-+        value={values.title}
-+        required
-+        maxLength={EVENT_TITLE_MAX_LENGTH}
-+        errors={fieldErrors.title}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      {/* 開始時刻を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-startTime`}
-+        name="startTime"
-+        label="開始時刻（必須）"
-+        type="time"
-+        value={values.startTime}
-+        required
-+        errors={fieldErrors.startTime}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      {/* 終了時刻を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-endTime`}
-+        name="endTime"
-+        label="終了時刻（必須・同日）"
-+        type="time"
-+        value={values.endTime}
-+        required
-+        errors={fieldErrors.endTime}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      {/* 開催場所を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-location`}
-+        name="location"
-+        label="開催場所（任意）"
-+        type="text"
-+        value={values.location}
-+        maxLength={EVENT_LOCATION_MAX_LENGTH}
-+        errors={fieldErrors.location}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      {/* 集合時刻を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-meetingTime`}
-+        name="meetingTime"
-+        label="集合時刻（任意・同日）"
-+        type="time"
-+        value={values.meetingTime}
-+        errors={fieldErrors.meetingTime}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      {/* 集合場所を表示する単一入力Component */}
-+      <InputField
-+        id={`${idPrefix}-meetingLocation`}
-+        name="meetingLocation"
-+        label="集合場所（任意）"
-+        type="text"
-+        value={values.meetingLocation}
-+        maxLength={EVENT_LOCATION_MAX_LENGTH}
-+        errors={fieldErrors.meetingLocation}
-+        onChange={onChange /* 親へ入力変更を通知する関数の参照 */}
-+      />
-+      {/* 公開対象の選択状態とエラーを表示する既存Component */}
-+      <ContentTargetRoleFieldset
-+        key={values.targetRoles.join(",") /* 初期ロールを連結し再表示用のキーにするメソッド */}
-+        idPrefix={idPrefix}
-+        initialRoles={values.targetRoles}
-+        errors={fieldErrors.targetRoles}
-+        disabled={disabled}
-+        onChange={onChange /* すべて選択を含む公開対象変更を通知する関数の参照 */}
-+      />
-+    </fieldset>
++    </section>
 +  );
 +}
-diff --git a/tests/event-practice-batch-input-fields.test.ts b/tests/event-practice-batch-input-fields.test.ts
+diff --git a/tests/event-practice-batch-forms.test.ts b/tests/event-practice-batch-forms.test.ts
 new file mode 100644
-index 0000000..6bcf646
+index 0000000..b3997b5
 --- /dev/null
-+++ b/tests/event-practice-batch-input-fields.test.ts
-@@ -0,0 +1,389 @@
-+// tests/event-practice-batch-input-fields.test.ts
-+// 実Componentを静的描画し、共通入力のHTML契約を確認する。実ブラウザー操作は対象外。
++++ b/tests/event-practice-batch-forms.test.ts
+@@ -0,0 +1,897 @@
++// tests/event-practice-batch-forms.test.ts
++// hookとAction queueだけを置換するnode試験。実ブラウザーのDOM・通信断は手動確認へ残す。
 +import {
-+  Children,
++  cloneElement,
 +  createElement,
 +  isValidElement,
 +  type ReactElement,
 +  type ReactNode,
 +} from "react";
 +import { renderToStaticMarkup } from "react-dom/server";
-+import { expect, it, vi } from "vitest";
++import { notFound } from "next/navigation";
++import { afterEach, beforeEach, expect, it, vi } from "vitest";
 +
 +import {
-+  EventPracticeBatchInputFields, // 定期練習の共通入力を表示するComponent
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchInputFields";
-+import {
-+  EVENT_LOCATION_MAX_LENGTH, // 開催場所の最大文字数
-+  EVENT_TITLE_MAX_LENGTH, // タイトルの最大文字数
-+} from "@/domain/club/event/event-form";
++  EventPracticeBatchForm, // 共通入力・preview・選択・同一入力再送を接続するComponent
++} from "@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm";
 +import type {
-+  EventPracticeBatchFormValues, // 定期練習のフォーム入力値の型
++  EventPracticeBatchActionState, // 保存結果を持つAction state型
++  EventPracticeBatchPreviewActionState, // preview結果を持つAction state型
++  EventPracticeBatchPreviewItem, // 1日分のpreview候補型
 +} from "@/domain/club/event/event-practice-batch-types";
 +
++const mocks = vi.hoisted( // hookをimport前に用意する関数
++  /**
++   * Reactの要素生成は実装のまま、hookとtransitionだけを制御する。
++   */
++  () => ({ // mock生成のコールバック
++    state: vi.fn(), // state hookのmock生成関数
++    ref: vi.fn(), // ref hookのmock生成関数
++    action: vi.fn(), // Action hookのmock生成関数
++    id: vi.fn(), // ID hookのmock生成関数
++    transition: vi.fn(), // transitionのmock生成関数
++  }),
++);
++vi.mock("react", // Reactのhookを置換する関数
++  /**
++   * 要素生成・HTML描画を保ってhookだけを試験領域へ接続する。
++   */
++  async (original) => ({ // モジュール置換の非同期コールバック
++    ...await original<typeof import("react")>(), // 実Reactを取得する関数 / Reactモジュール型
++    useState: mocks.state, // state hookのmock関数参照
++    useRef: mocks.ref, // ref hookのmock関数参照
++    useActionState: mocks.action, // Action hookのmock関数参照
++    useId: mocks.id, // ID hookのmock関数参照
++    startTransition: mocks.transition, // transitionのmock関数参照
++  }),
++);
++
 +/**
-+ * 実Componentから取り出した入力欄のprops。
++ * 実フォームのprops型。
 + */
-+type Props = Parameters<typeof EventPracticeBatchInputFields>[0]; // 引数型取得の組込み型 / 共通入力Componentの型
++type Props = Parameters<typeof EventPracticeBatchForm>[0]; // Component引数の取得型
 +/**
-+ * 要素のpropsを検証するための限定したReact要素型。
++ * JSXのpropsを検査するためのReact要素型。
 + */
 +type Element = ReactElement<Record<string, unknown>>; // React要素型 / 不明値の辞書型
++/**
++ * Componentごとに独立したhook保存領域。
++ */
++type Context = { // hook保存領域の型
++  cells: unknown[]; // 保存値の不明型配列
++  cursor: number; // hook呼出し位置の数値型
++};
++/**
++ * Action hookが保持するstateと現在のreducer。
++ */
++type ActionCell = { // Action queueの試験用構造型
++  state: unknown; // Action結果の不明型
++  pending: boolean; // 処理中の真偽値型
++  reducer: (state: unknown, data?: FormData) => Promise<unknown>; // reducerの関数型 / フォーム型 / 非同期戻り値型
++};
++/**
++ * 同期submit handlerに渡す最小イベント型。
++ */
++type Submit = (event: { // submit handlerの関数型
++  preventDefault: () => void; // 通常送信を止める関数型
++  currentTarget: FormData; // Node試験でDOMフォームの代わりに使う型
++}) => void; // 戻り値を使わない型
++
++const NativeFormData = globalThis.FormData; // 本物のフォームコンストラクターを保持する参照
++const REQUEST = "11111111-1111-4111-8111-111111111111";
++const NEXT_REQUEST = "22222222-2222-4222-8222-222222222222";
++const PRIVATE = "SQL_TOKEN_PRIVATE_CAUSE";
++let contexts: Map<string, Context>; // Component別保存領域の辞書型
++let active: Context; // 現在評価するComponentのhook領域型
++let tasks: Promise<void>[]; // 試験が待機するAction処理の配列型
++let value: Props; // 現在のフォームprops型
 +
 +/**
-+ * 月全体を期間とする親フォームの初期入力を用意する。
++ * 正常な候補日を生成する。
 + */
-+function values(): EventPracticeBatchFormValues { // 初期入力生成関数 / 共通入力値の型
++function item(date = "2026-11-01"): EventPracticeBatchPreviewItem { // 候補生成関数 / 候補表示型
 +  return {
-+    targetMonth: "2026-11",
-+    periodStart: "2026-11-01",
-+    periodEnd: "2026-11-30",
-+    weekdays: ["0", "6"],
-+    title: "定期練習",
-+    startTime: "09:00",
-+    endTime: "12:00",
-+    location: "グラウンド",
-+    meetingTime: "08:30",
-+    meetingLocation: "入口",
-+    targetRoles: ["OWNER", "MEMBER"],
-+  };
-+}
-+
-+/**
-+ * 上書き可能なpropsを用意する。
-+ */
-+function props(overrides: Partial<Props> = {}): Props { // props生成関数 / 部分指定型 / Component props型
-+  return {
-+    idPrefix: "practice",
-+    values: values(), // 初期入力を生成する関数
-+    fieldErrors: {},
-+    disabled: false,
-+    ...overrides,
-+  };
-+}
-+
-+/**
-+ * hookを置換せずに実Componentと既存の公開対象部品を静的描画する。
-+ */
-+function render(overrides: Partial<Props> = {}): string { // 静的描画関数 / 部分指定型 / 文字列型
-+  return renderToStaticMarkup( // React要素をHTMLへ描画する関数
-+    createElement(EventPracticeBatchInputFields, props(overrides)), // 要素生成関数 / 共通入力Component / props生成関数
-+  );
-+}
-+
-+/**
-+ * 指定したnameのinput開始タグをHTMLから取り出す。
-+ */
-+function inputs(html: string, name: string): string[] { // 入力タグ取得関数 / 文字列型 / 配列型
-+  return [...html.matchAll(/<input\b[^>]*>/g)] // 入力タグを列挙するメソッド
-+    .map( // 一致した開始タグを取り出すメソッド
-+      /**
-+       * 正規表現で一致したタグの全文を返す。
-+       */
-+      (match) => match[0], // タグ抽出のコールバック
-+    )
-+    .filter( // 指定項目のタグに限定するメソッド
-+      /**
-+       * 固定された業務項目名の完全一致を調べる。
-+       */
-+      (tag) => tag.includes(`name="${name}"`), // 項目名を照合するコールバック / 部分文字列検査メソッド
-+    );
-+}
-+
-+/**
-+ * hookを持つ子Componentを実行せず、表示ツリーに渡したpropsを集める。
-+ */
-+function elements(node: ReactNode): Element[] { // ツリー収集関数 / React子要素型 / 限定React要素の配列型
-+  const result: Element[] = []; // 収集するReact要素の配列型
-+  Children.forEach( // Reactの子要素を反復する関数
-+    node,
-+    /**
-+     * JSX要素と、そのchildrenだけを再帰的に収集する。
-+     */
-+    (child) => { // 子要素を集めるコールバック
-+      if (!isValidElement<Record<string, unknown>>(child)) { // React要素を判定する関数 / propsの辞書型
-+        return;
-+      }
-+      result.push(child); // 要素を追加するメソッド
-+      result.push(...elements(child.props.children as ReactNode)); // 追加メソッド / 子要素収集関数 / React子要素型へのアサーション
++    date,
++    dates: {
++      startAt: `${date}T00:00:00.000Z`,
++      endAt: `${date}T03:00:00.000Z`,
++      meetingAt: null,
 +    },
-+  );
-+  return result;
++    exclusionReason: null,
++    warnings: [],
++    duplicate: false,
++    initiallySelected: true,
++  };
 +}
 +
-+it("月全体の初期期間と、必須・任意・文字数上限を表示する", // テストを登録する関数
-+  /**
-+   * 親が渡した月全体と既存Domain定数に一致する入力制約を確認する。
-+   */
-+  () => { // 初期表示を検証するコールバック
-+    const html = render(); // 共通入力を静的描画する関数
-+    for (const name of ["periodStart", "periodEnd"]) {
-+      const tag = inputs(html, name)[0]; // 項目の入力タグを取得する関数
-+      expect(tag).toContain('type="date"'); // 期待値生成関数 / 文字列包含の検証メソッド
-+      expect(tag).toContain('min="2026-11-01"'); // 期待値生成関数 / 下限の検証メソッド
-+      expect(tag).toContain('max="2026-11-30"'); // 期待値生成関数 / 上限の検証メソッド
-+      expect(tag).toContain('required=""'); // 期待値生成関数 / 必須の検証メソッド
-+    }
-+    expect(inputs(html, "periodStart")[0]).toContain('value="2026-11-01"'); // 期待値生成関数 / タグ取得関数 / 月初の検証メソッド
-+    expect(inputs(html, "periodEnd")[0]).toContain('value="2026-11-30"'); // 期待値生成関数 / タグ取得関数 / 月末の検証メソッド
-+    expect(inputs(html, "title")[0]).toContain(`maxLength="${EVENT_TITLE_MAX_LENGTH}"`); // 期待値生成関数 / タグ取得関数 / 文字数制約の検証メソッド
-+    for (const name of ["title", "startTime", "endTime"]) {
-+      expect(inputs(html, name)[0]).toContain('required=""'); // 期待値生成関数 / タグ取得関数 / 必須の検証メソッド
-+    }
-+    for (const name of ["location", "meetingLocation"]) {
-+      expect(inputs(html, name)[0]).toContain(`maxLength="${EVENT_LOCATION_MAX_LENGTH}"`); // 期待値生成関数 / タグ取得関数 / 上限の検証メソッド
-+    }
-+    for (const name of ["location", "meetingLocation", "meetingTime"]) {
-+      expect(inputs(html, name)[0]).not.toContain('required=""'); // 期待値生成関数 / タグ取得関数 / 任意入力の検証メソッド
-+    }
-+    expect(html).toContain("終了時刻は同日の開始時刻より後"); // 期待値生成関数 / 同日終了説明の検証メソッド
-+  },
-+);
-+
-+it.each([ // 月末境界のパラメーター試験を登録する関数
-+  ["2028-02", "29"],
-+  ["1900-02", "28"],
-+  ["2000-02", "29"],
-+  ["0001-01", "31"],
-+  ["9999-12", "31"],
-+])("%sの月末を%s日として制約する", // パラメーター試験を登録する関数
-+  /**
-+   * 閏年・世紀・年1と9999でもUTCの月末がずれないことを確認する。
-+   */
-+  (targetMonth, day) => { // 月末制約を検証するコールバック
-+    const html = render({ // 静的描画関数
-+      values: {
-+        ...values(), // 初期値生成関数
-+        targetMonth,
++/**
++ * 正規化済み共通入力と候補を持つpreview成功state。
++ */
++function ready(items = [item()], requestId = REQUEST): EventPracticeBatchPreviewActionState { // preview成功生成関数 / 候補生成関数 / preview state型
++  return {
++    status: "success",
++    outcome: "READY",
++    values: value.initialValues,
++    fieldErrors: {},
++    formError: null,
++    requestId,
++    data: {
++      outcome: "READY",
++      input: {
++        targetMonth: "2026-11",
++        periodStart: "2026-11-01",
++        periodEnd: "2026-11-30",
++        weekdays: [0, 6],
++        title: "定期練習",
++        startTime: "09:00",
++        endTime: "12:00",
++        location: null,
++        meetingTime: null,
++        meetingLocation: null,
++        targetRoles: ["OWNER", "MEMBER"],
 +      },
-+    });
-+    expect(inputs(html, "periodEnd")[0]).toContain(`max="${targetMonth}-${day}"`); // 期待値生成関数 / タグ取得関数 / 月末制約の検証メソッド
-+  },
-+);
-+
-+it("不正な対象月を現在月へ置き換えず、エラー表示とともに保持する", // テストを登録する関数
-+  /**
-+   * 不正月から不正なmin・maxを組み立てたり、意図せず別月を選んだりしない。
-+   */
-+  () => { // 不正月の表示を検証するコールバック
-+    const html = render({ // 静的描画する関数
-+      values: {
-+        ...values(), // 初期値生成関数
-+        targetMonth: "2026-13",
-+      },
-+      fieldErrors: { targetMonth: ["対象月を確認してください。"] },
-+    });
-+    expect(inputs(html, "targetMonth")[0]).toContain('value="2026-13"'); // 期待値生成関数 / タグ取得関数 / 入力保持の検証メソッド
-+    expect(inputs(html, "periodStart")[0]).not.toMatch(/\b(?:min|max)=/); // 期待値生成関数 / タグ取得関数 / 境界未設定の検証メソッド
-+    expect(html).toContain('aria-describedby="practice-targetMonth-error"'); // 期待値生成関数 / エラー関連付けの検証メソッド
-+    expect(html).toContain("対象月を確認してください。"); // 期待値生成関数 / エラー内容の検証メソッド
-+  },
-+);
-+
-+it("再表示用の値・空欄・複数曜日・公開対象を保持する", // テストを登録する関数
-+  /**
-+   * 初期値への巻き戻しや、必須欄の空欄を初期値で補う動作がないことを確認する。
-+   */
-+  () => { // 再表示値を検証するコールバック
-+    const data = values(); // 初期入力を生成する関数
-+    data.periodStart = "2026-11-03";
-+    data.periodEnd = "2026-11-25";
-+    data.title = "変更後の練習";
-+    data.startTime = "10:15";
-+    data.endTime = "11:45";
-+    data.meetingTime = "";
-+    data.meetingLocation = "";
-+    data.location = "変更後の場所";
-+    data.weekdays = ["2", "4"];
-+    data.targetRoles = ["OWNER", "COACH", "OFFICER"];
-+    const html = render({ values: data }); // 静的描画する関数
-+    for (const name of [ // 単一入力項目を反復する
-+      "periodStart",
-+      "periodEnd",
-+      "title",
-+      "startTime",
-+      "endTime",
-+      "meetingTime",
-+      "meetingLocation",
-+      "location",
-+    ] as const) { // 入力項目名を限定する読取専用リテラル型
-+      expect(inputs(html, name)[0]).toContain(`value="${data[name]}"`); // 期待値生成関数 / タグ取得関数 / 入力保持の検証メソッド
-+    }
-+    const selected = inputs(html, "weekdays").filter( // 曜日タグ取得関数 / 選択済みタグを絞るメソッド
-+      /**
-+       * 選択済みの曜日だけを抽出する。
-+       */
-+      (tag) => tag.includes('checked=""'), // 選択抽出のコールバック / 文字列包含を調べるメソッド
-+    );
-+    expect(selected).toHaveLength(2); // 期待値生成関数 / 選択数の検証メソッド
-+    expect(selected[0]).toContain('value="2"'); // 期待値生成関数 / 火曜選択の検証メソッド
-+    expect(selected[1]).toContain('value="4"'); // 期待値生成関数 / 木曜選択の検証メソッド
-+    for (const role of ["COACH", "OFFICER"]) {
-+      const tag = inputs(html, "targetRoles").find( // タグ取得関数 / 指定roleのタグを探すメソッド
++      timezone: "Asia/Tokyo",
++      fingerprint: "ab".repeat(32), // 64桁の照合値を作るメソッド
++      items,
++      candidateCount: items.length,
++      selectableCount: items.filter( // 生成可能な候補を数えるメソッド
 +        /**
-+         * 属性順序に依存せず指定roleを探す。
++         * 日時があり除外されていない候補を数える。
 +         */
-+        (input) => input.includes(`value="${role}"`), // role照合のコールバック / 包含検査メソッド
-+      );
-+      expect(tag).toContain('checked=""'); // 期待値生成関数 / 選択状態の検証メソッド
-+    }
-+    const empty = render({ // 静的描画関数
-+      values: {
-+        ...data,
-+        title: "",
-+        periodStart: "",
-+        endTime: "",
-+      },
-+    });
-+    for (const name of ["title", "periodStart", "endTime"]) {
-+      expect(inputs(empty, name)[0]).toContain('value=""'); // 期待値生成関数 / タグ取得関数 / 空欄保持の検証メソッド
-+    }
-+  },
-+);
++        (candidate) => candidate.dates !== null && candidate.exclusionReason === null, // 候補判定のコールバック
++      ).length,
++    },
++  };
++}
 +
-+it("曜日fieldsetと全入力のlabel・エラーIDを関連付ける", // テストを登録する関数
-+  /**
-+   * 単一欄・反復曜日・既存role欄のエラーを対応する入力グループへ結び付ける。
-+   */
-+  () => { // アクセシビリティ属性を検証するコールバック
-+    const fieldErrors: Props["fieldErrors"] = {}; // 共通入力propsから取り出した項目エラー型
-+    for (const name of [ // 入力項目名を反復する
-+      "periodStart",
-+      "periodEnd",
-+      "title",
-+      "startTime",
-+      "endTime",
-+      "location",
-+      "meetingTime",
-+      "meetingLocation",
-+      "weekdays",
-+      "targetRoles",
-+    ] as const) { // 項目名を限定する読取専用リテラル型
-+      fieldErrors[name] = [`${name}のエラー`];
-+    }
-+    const html = render({ fieldErrors }); // 静的描画する関数
-+    for (const name of [
-+      "periodStart",
-+      "periodEnd",
-+      "title",
-+      "startTime",
-+      "endTime",
-+      "location",
-+      "meetingTime",
-+      "meetingLocation",
-+    ]) {
-+      const tag = inputs(html, name)[0]; // 項目の入力タグを取得する関数
-+      expect(tag).toContain(`id="practice-${name}"`); // 期待値生成関数 / IDの検証メソッド
-+      expect(tag).toContain('aria-invalid="true"'); // 期待値生成関数 / 不正属性の検証メソッド
-+      expect(tag).toContain(`aria-describedby="practice-${name}-error"`); // 期待値生成関数 / エラーIDの検証メソッド
-+      expect(html).toContain(`for="practice-${name}"`); // 期待値生成関数 / labelの検証メソッド
-+      expect(html).toContain(`id="practice-${name}-error" role="alert"`); // 期待値生成関数 / エラー一覧の検証メソッド
-+    }
-+    expect(html).toContain("対象曜日（必須・複数選択可）"); // 期待値生成関数 / legendの検証メソッド
-+    expect(html).toContain('aria-describedby="practice-weekdays-help practice-weekdays-error"'); // 期待値生成関数 / 曜日エラーの関連付け検証メソッド
-+    expect(html).toContain('aria-describedby="practice-target-roles-error"'); // 期待値生成関数 / 公開対象エラーの検証メソッド
-+    const weekdays = inputs(html, "weekdays"); // 曜日入力を取得する関数
-+    expect(weekdays).toHaveLength(7); // 期待値生成関数 / 曜日数の検証メソッド
-+    for (let index = 0; index < 7; index += 1) {
-+      expect(weekdays[index]).toContain(`value="${index}"`); // 期待値生成関数 / 曜日値の検証メソッド
-+      expect(html).toContain(`for="practice-weekday-${index}"`); // 期待値生成関数 / 曜日labelの検証メソッド
-+      expect(weekdays[index]).not.toContain('required=""'); // 期待値生成関数 / 全曜日必須ではないことの検証メソッド
-+    }
-+  },
-+);
++/**
++ * 新規入力・Action mockを持つpropsを用意する。
++ */
++function props(): Props { // props生成関数 / 実props型
++  return {
++    initialValues: {
++      targetMonth: "2026-11",
++      periodStart: "2026-11-01",
++      periodEnd: "2026-11-30",
++      weekdays: ["0", "6"],
++      title: "定期練習",
++      startTime: "09:00",
++      endTime: "12:00",
++      location: "",
++      meetingTime: "",
++      meetingLocation: "",
++      targetRoles: ["OWNER", "MEMBER"],
++    },
++    timezone: "Asia/Tokyo",
++    cancelHref: "/club/club-a/admin/events?month=2026-11&status=ALL",
++    previewAction: vi.fn(), // preview Actionのmock生成関数
++    createAction: vi.fn(), // 保存Actionのmock生成関数
++  };
++}
 +
-+it("OWNERは常時対象で、保存・公開・通知などの項目を持ち込まない", // テストを登録する関数
-+  /**
-+   * 任意roleが空でもOWNERを送信し、この粒度の入力範囲だけを表示する。
-+   */
-+  () => { // 公開対象と範囲を検証するコールバック
-+    const html = render({ // 静的描画関数
-+      values: {
-+        ...values(), // 初期値生成関数
-+        targetRoles: [],
-+      },
-+    });
-+    expect(inputs(html, "targetRoles")[0]).toContain('type="hidden"'); // 期待値生成関数 / タグ取得関数 / hidden属性の検証メソッド
-+    expect(inputs(html, "targetRoles")[0]).toContain('value="OWNER"'); // 期待値生成関数 / タグ取得関数 / OWNER送信の検証メソッド
-+    expect(html).toContain("代表者は常に公開対象へ含まれます。"); // 期待値生成関数 / OWNER説明の検証メソッド
-+    expect(html).not.toContain("<form"); // 期待値生成関数 / 親フォーム未実装の検証メソッド
-+    for (const name of [
-+      "status",
-+      "genre",
-+      "clubId",
-+      "selectedDates",
-+      "requestId",
-+      "previewFingerprint",
-+      "lineTargets",
-+      "attachments",
-+    ]) {
-+      expect(inputs(html, name)).toHaveLength(0); // 期待値生成関数 / タグ取得関数 / 対象外項目不存在の検証メソッド
-+    }
-+  },
-+);
-+
-+it("disabled時はfieldset全体と公開対象の操作を止める", // テストを登録する関数
-+  /**
-+   * 親が送信中や保存済みの入力変更を止められるHTML契約を確認する。
-+   */
-+  () => { // 操作無効を検証するコールバック
-+    const html = render({ disabled: true }); // 静的描画する関数
-+    expect(html).toMatch(/^<fieldset disabled=""/); // 期待値生成関数 / 全体無効属性の検証メソッド
-+    expect(html).toMatch(/<button[^>]*disabled=""/); // 期待値生成関数 / 全選択無効の検証メソッド
-+    for (const tag of inputs(html, "targetRoles")) { // 公開対象入力タグを取得する関数
-+      if (tag.includes('type="checkbox"')) { // checkboxか調べるメソッド
-+        expect(tag).toContain('disabled=""'); // 期待値生成関数 / checkbox無効の検証メソッド
++/**
++ * 通信なしで、共通フォームの送信値を作る。
++ */
++function commonData(): FormData { // 共通入力生成関数 / フォーム型
++  const data = new NativeFormData(); // 実フォームを作るコンストラクター
++  for (const [name, field] of Object.entries(value.initialValues)) { // 共通入力を列挙するメソッド
++    if (typeof field === "string") {
++      data.append(name, field); // 単一値を追加するメソッド
++    } else {
++      for (const entry of field) {
++        data.append(name, entry); // 反復値を追加するメソッド
 +      }
 +    }
-+    expect(render()).not.toMatch(/^<fieldset disabled/); // 期待値生成関数 / 静的描画関数 / 通常操作可の検証メソッド
++  }
++  return data;
++}
++
++/**
++ * Function Componentをhook領域ごとに評価し、静的描画できる要素へ展開する。
++ */
++function expand(tree: ReactNode, path: string): ReactNode { // ツリー展開関数 / React子要素型 / パスの文字列型
++  if (Array.isArray(tree)) { // 配列を判定するメソッド
++    return tree.map( // 配列の要素を展開するメソッド
++      /**
++       * 同じ位置の子要素に同じ保存領域を割り当てる。
++       */
++      (child, index) => expand(child, `${path}-${index}`), // 展開のコールバック / ツリー展開関数
++    );
++  }
++  if (!isValidElement<Record<string, unknown>>(tree)) return tree; // React要素の判定関数 / propsの辞書型
++  const keyedPath = `${path}-${String(tree.key ?? "")}`; // keyを文字列化する関数
++  if (typeof tree.type === "function") {
++    const context = contexts.get(keyedPath) ?? { // 保存領域を取得するメソッド
++      cells: [],
++      cursor: 0,
++    }; // 保存領域取得メソッド
++    contexts.set(keyedPath, context); // 保存領域設定メソッド
++    active = context;
++    active.cursor = 0;
++    const component = tree.type as (props: Record<string, unknown>) => ReactNode; // Function Component型へのアサーション
++    return expand(component(tree.props), `${keyedPath}-render`); // 展開関数 / Component呼出し関数
++  }
++  return cloneElement(tree, {}, expand(tree.props.children as ReactNode, `${keyedPath}-children`)); // 要素複製関数 / 展開関数 / React子要素型へのアサーション
++}
++
++/**
++ * 親と子のhookを保って再描画する。
++ */
++function view(): ReactNode { // 再描画関数 / React子要素型
++  return expand(createElement(EventPracticeBatchForm, value), "root"); // ツリー展開関数 / 要素生成関数 / 共通フォームComponent
++}
++
++/**
++ * 展開済みのツリーから、指定したタグを検索する。
++ */
++function nodes(tree: ReactNode, tag: string): Element[] { // 要素検索関数 / React子要素型 / タグの文字列型 / 要素配列型
++  if (Array.isArray(tree)) { // 配列か判定するメソッド
++    return tree.flatMap( // 検索結果を平坦化するメソッド
++      /**
++       * 各子要素を再帰検索する。
++       */
++      (child) => nodes(child, tag), // 再帰検索のコールバック / 要素検索関数
++    );
++  }
++  if (!isValidElement<Record<string, unknown>>(tree)) return []; // React要素の判定関数 / propsの辞書型
++  const own = tree.type === tag ? [tree] : [];
++  return [...own, ...nodes(tree.props.children as ReactNode, tag)]; // 再帰検索関数 / React子要素型へのアサーション
++}
++
++/**
++ * 現在のpreviewまたは保存フォームを同期送信する。
++ */
++function begin(tree: ReactNode, index = 0, data = commonData()) { // 同期送信の関数 / React子要素型 / 共通入力生成関数
++  const preventDefault = vi.fn(); // 通常送信停止を記録するmock生成関数
++  const handler = nodes(tree, "form")[index].props.onSubmit as Submit; // 要素検索関数 / 同期submit型へのアサーション
++  handler({ // 同期submit handlerを呼ぶ関数
++    preventDefault,
++    currentTarget: data,
++  }); // 同期submit handlerを呼ぶ関数
++  expect(preventDefault).toHaveBeenCalledOnce(); // 期待値生成関数 / 通常送信停止の検証メソッド
++}
++
++/**
++ * 保存候補のcheckboxを変更する。
++ */
++function check(tree: ReactNode, index: number, checked: boolean) { // checkbox変更関数 / React子要素型 / 数値型 / 真偽値型
++  const boxes = nodes(nodes(tree, "form")[1], "input"); // 要素検索関数
++  const handler = boxes[index].props.onChange as (event: { // 変更handler型へのアサーション
++    currentTarget: { checked: boolean }; // checkedだけを持つ試験用イベント型
++  }) => void; // 戻り値を使わない型
++  handler({ currentTarget: { checked } }); // checkboxの変更関数
++}
++
++/**
++ * 共通入力の変更通知を発生させる。
++ */
++function change(tree: ReactNode) { // 共通入力変更関数 / React子要素型
++  const input = nodes(tree, "input").find( // 要素検索関数 / タイトル欄を探すメソッド
++    /**
++     * 共通入力のタイトル欄を特定する。
++     */
++    (node) => node.props.name === "title", // タイトル判定のコールバック
++  );
++  (input!.props.onChange as () => void)(); // 親への変更通知関数型のアサーションと呼出し
++}
++
++/**
++ * 再previewの準備へ戻るボタンを押す。
++ */
++function restart(tree: ReactNode) { // preview破棄関数 / React子要素型
++  const button = nodes(tree, "button").find( // 要素検索関数 / 再previewボタンを探すメソッド
++    /**
++     * 固定の表示文言で再preview操作を特定する。
++     */
++    (node) => node.props.children === "入力を変更してpreviewを作成し直す", // ボタン判定のコールバック
++  );
++  (button!.props.onClick as () => void)(); // preview破棄の関数型へのアサーションと呼出し
++}
++
++/**
++ * queueへ渡したAction処理を1回だけ待つ。
++ */
++async function finish() { // Action完了待機の関数
++  expect(tasks.length).toBeGreaterThan(0); // 期待値生成関数 / queue存在の検証メソッド
++  await tasks.shift(); // 最初のAction処理を取り出すメソッド
++}
++
++/**
++ * 正常なpreviewを完了して選択フォームを返す。
++ */
++async function preview() { // preview完了の試験用関数
++  begin(view()); // 同期送信関数 / フォーム再描画関数
++  await finish(); // Action処理の完了を待つ関数
++  return view(); // フォーム再描画関数
++}
++
++/**
++ * 保存時に返す失敗stateを、渡された固定入力から用意する。
++ */
++function failure(outcome: Exclude<EventPracticeBatchActionState["outcome"], undefined | "CREATED" | "ALREADY_COMPLETED">) { // 失敗state生成関数 / 保存stateの失敗コードだけを取り出す型
++  vi.mocked(value.createAction).mockImplementation( // 保存結果を設定するメソッド / mock型へ変換する関数
++    /**
++     * 実保存をせず、入力と失敗コードだけを返す。
++     */
++    async (input, requestId, fingerprint, _previous, data) => ({ // 保存拒否結果の非同期コールバック
++      status: "error",
++      outcome,
++      values: {
++        ...input,
++        selectedDates: data.getAll("selectedDates") as string[], // 選択日取得メソッド / 文字列配列型へのアサーション
++        requestId,
++        previewFingerprint: fingerprint,
++      },
++      requestId,
++      fieldErrors: {},
++      formError: "固定エラー",
++    }),
++  );
++}
++
++beforeEach( // 各試験の準備を登録する関数
++  /**
++   * 独立したhook領域と、通信しないAction queueを用意する。
++   */
++  () => { // 初期化のコールバック
++    vi.clearAllMocks(); // mock履歴を初期化する関数
++    contexts = new Map(); // Component別のhook領域を作るコンストラクター
++    tasks = [];
++    value = props(); // フォームprops生成関数
++    vi.mocked(value.previewAction).mockResolvedValue(ready()); // mock型取得関数 / preview結果設定メソッド / 成功state生成関数
++    failure("CREATE_FAILED"); // 既定の保存失敗を設定する関数
++    mocks.state.mockImplementation( // state hookの代替を設定するメソッド
++      /**
++       * hookごとに値を保持し、関数形式の更新にも対応する。
++       */
++      (initial: unknown) => { // state hookのコールバック / 初期値の不明型
++        const context = active;
++        const index = context.cursor++;
++        if (!(index in context.cells)) {
++          context.cells[index] = typeof initial === "function" ? initial() : initial; // lazy初期値を評価する関数
++        }
++        return [context.cells[index],
++          /**
++           * 再描画に使う現在値を置き換える。
++           */
++          (next: unknown) => { // state更新コールバック / 更新値の不明型
++            context.cells[index] = typeof next === "function" ? next(context.cells[index]) : next; // 関数形式のstate更新を呼ぶ関数
++          },
++        ];
++      },
++    );
++    mocks.ref.mockImplementation( // ref hookの代替を設定するメソッド
++      /**
++       * 同じComponentでは同じcurrentの箱を返す。
++       */
++      (initial: unknown) => { // ref hookのコールバック / 初期値の不明型
++        const index = active.cursor++;
++        if (!(index in active.cells)) active.cells[index] = { current: initial };
++        return active.cells[index];
++      },
++    );
++    mocks.id.mockImplementation( // ID hookの代替を設定するメソッド
++      /**
++       * 再描画後も安定したIDを返す。
++       */
++      () => { // ID生成コールバック
++        const index = active.cursor++;
++        if (!(index in active.cells)) active.cells[index] = `practice-${contexts.size}-${index}`;
++        return active.cells[index];
++      },
++    );
++    mocks.action.mockImplementation( // Action hookの代替を設定するメソッド
++      /**
++       * Action結果とpendingをComponentごとの領域に保持する。
++       */
++      (reducer: ActionCell["reducer"], initial: unknown) => { // Action hookのコールバック / reducer型 / 初期stateの不明型
++        const index = active.cursor++;
++        if (!(index in active.cells)) active.cells[index] = {
++          state: initial,
++          pending: false,
++          reducer,
++        };
++        const cell = active.cells[index] as ActionCell; // Action保存領域型へのアサーション
++        cell.reducer = reducer;
++        return [cell.state,
++          /**
++           * React schedulerの代わりに、試験が待てるPromiseを記録する。
++           */
++          (data?: FormData) => { // Action送信のコールバック / 任意のフォーム型
++            cell.pending = true;
++            const task = cell.reducer(cell.state, data).then( // reducer呼出し関数 / 結果処理のメソッド
++              /**
++               * 完了したAction結果を次の描画へ渡す。
++               */
++              (state) => { // state反映のコールバック
++                cell.state = state;
++              },
++            ).finally( // pendingを解除するメソッド
++              /**
++               * 例外も含めて処理中の状態を解除する。
++               */
++              () => { // pending解除のコールバック
++                cell.pending = false;
++              },
++            );
++            tasks.push(task); // 待機対象のPromiseを記録するメソッド
++          },
++          cell.pending,
++        ];
++      },
++    );
++    mocks.transition.mockImplementation( // transitionの代替を設定するメソッド
++      /**
++       * 送信コールバックを同期的に開始する。
++       */
++      (callback: () => void) => callback(), // transition開始のコールバック / 関数型 / 送信コールバック呼出し関数
++    );
++    vi.stubGlobal("FormData", // Node試験のDOMフォーム取得だけを代替する関数
++      /**
++       * 引数がある場合、試験用フォームから実FormDataへ値を写す。
++       */
++      function FormDataForTest(source?: FormData) { // フォーム生成を代替する関数 / 任意フォーム型
++        const data = new NativeFormData(); // 実フォームのコンストラクター
++        if (source) {
++          for (const [name, field] of source.entries()) data.append(name, field); // 項目取得メソッド / 値追加メソッド
++        }
++        return data;
++      },
++    );
++  },
++);
++afterEach( // 試験後の処理を登録する関数
++  /**
++   * FormDataのグローバル置換を解除する。
++   */
++  () => { // 復元のコールバック
++    vi.unstubAllGlobals(); // グローバル置換を戻す関数
 +  },
 +);
 +
-+it("文字列をHTMLとして実行せず、入力値とエラーをエスケープする", // テストを登録する関数
++it("初期表示では共通入力だけを表示し、本文をURLへ載せない", // テスト登録関数
 +  /**
-+   * タイトル・場所・対象月・エラー経由のHTML注入を防ぐ表示を確認する。
++   * preview・保存を自動実行せず、通常送信はPOSTとして扱う。
 +   */
-+  () => { // HTMLエスケープを検証するコールバック
-+    const attack = '<img src=x onerror="alert(1)">';
-+    const html = render({ // 静的描画する関数
-+      idPrefix: 'practice" data-attack="yes',
-+      values: { // 初期値を上書きする
-+        ...values(), // 初期値を生成する関数
-+        targetMonth: attack,
-+        title: attack,
-+        location: attack,
-+        meetingLocation: attack,
++  () => { // 初期表示の検証コールバック
++    const tree = view(); // フォームを再描画する関数
++    expect(nodes(tree, "form")).toHaveLength(1); // 期待値生成関数 / 要素検索関数 / フォーム数検証メソッド
++    expect(nodes(tree, "form")[0].props.method).toBe("post"); // 期待値生成関数 / 要素検索関数 / 送信方式比較メソッド
++    expect(value.previewAction).not.toHaveBeenCalled(); // 期待値生成関数 / 自動preview非実行の検証メソッド
++    expect(value.createAction).not.toHaveBeenCalled(); // 期待値生成関数 / 自動保存非実行の検証メソッド
++  },
++);
++
++it("共通入力をpreviewし、全候補・日時・重複・除外・警告を安全に表示する", // テスト登録関数
++  /**
++   * 限定DTOのテキストを表示し、XSS風のタイトルをHTMLとして扱わない。
++   */
++  async () => { // preview表示の検証コールバック
++    const duplicate = {
++      ...item("2026-11-07"), // 候補生成関数
++      duplicate: true,
++      initiallySelected: false,
++    };
++    const excluded: EventPracticeBatchPreviewItem = { // 選択不可候補の型
++      ...item("2026-11-08"), // 候補を生成する関数
++      dates: null,
++      exclusionReason: "AMBIGUOUS_LOCAL_TIME",
++      initiallySelected: false,
++    };
++    const result = ready([item(), duplicate, excluded]); // preview成功state生成関数 / 候補生成関数
++    if (result.status !== "success") throw new Error("fixture"); // 試験データ不整合の例外生成
++    result.data.input.title = '<img src=x onerror="alert(1)">';
++    result.data.items[0].warnings = ["MEETING_AFTER_START"];
++    vi.mocked(value.previewAction).mockResolvedValue(result); // mock型取得関数 / preview結果設定メソッド
++    const tree = await preview(); // previewを完了する関数
++    const html = renderToStaticMarkup(tree); // 実HTML描画の関数
++    for (const text of ["候補件数: 3", "選択可能: 2", "Asia/Tokyo", "GMT+09:00", "2026-11-07", "完全一致", "曖昧な現地時刻", "集合時刻が開始時刻より後", "DRAFT", "PDF"]) {
++      expect(html).toContain(text); // 期待値生成関数 / 表示文言検証メソッド
++    }
++    expect(html).not.toContain("<img"); // 期待値生成関数 / HTML注入防止の検証メソッド
++    expect(html).toContain("&lt;img"); // 期待値生成関数 / エスケープ検証メソッド
++    const boxes = nodes(nodes(tree, "form")[1], "input"); // 候補checkboxを検索する関数
++    expect(boxes[1].props.checked).toBe(false); // 期待値生成関数 / 既存一致の初期未選択検証メソッド
++    expect(boxes[2].props.disabled).toBe(true); // 期待値生成関数 / 除外日の操作不可検証メソッド
++    expect(boxes[0].props["aria-describedby"]).toContain("-details"); // 期待値生成関数 / 説明ID検証メソッド
++    expect(nodes(tree, "label").some( // 期待値生成関数 / 要素検索関数 / label一致の検査メソッド
++      /**
++       * checkboxとlabelのID参照を確認する。
++       */
++      (label) => label.props.htmlFor === boxes[0].props.id, // label照合のコールバック
++    )).toBe(true); // 真偽値比較メソッド
++  },
++);
++
++it("入力変更直後と再描画後の両方で、古いpreviewから保存できない", // テスト登録関数
++  /**
++   * 再描画前に残ったsubmit handlerも最新の変更番号で拒否する。
++   */
++  async () => { // 古い候補無効化の検証コールバック
++    const old = await preview(); // preview完了関数
++    change(old); // 共通入力の変更通知関数
++    begin(old, 1); // 古い保存フォームを同期送信する関数
++    expect(value.createAction).not.toHaveBeenCalled(); // 期待値生成関数 / 古い保存拒否の検証メソッド
++    expect(nodes(view(), "form")).toHaveLength(1); // 期待値生成関数 / 再描画関数 / 要素検索関数 / 候補非表示の検証メソッド
++  },
++);
++
++it("preview pendingでの連打を止め、入力変更後に到着した応答を使わない", // テスト登録関数
++  /**
++   * pending中も共通入力は操作でき、遅い応答が古い候補を復活させない。
++   */
++  async () => { // 遅延応答の検証コールバック
++    let resolve!: (state: EventPracticeBatchPreviewActionState) => void; // preview応答を返す関数型
++    vi.mocked(value.previewAction).mockReturnValue(new Promise( // mock型取得関数 / 遅延結果設定メソッド / Promiseコンストラクター
++      /**
++       * previewの応答時刻を試験から制御する。
++       */
++      (done) => { // 応答設定のコールバック
++        resolve = done;
 +      },
-+      fieldErrors: {
-+        title: [attack],
-+        weekdays: [attack],
-+        targetRoles: [attack],
++    ));
++    const initial = view(); // 初期フォームを描画する関数
++    begin(initial); // previewを同期送信する関数
++    begin(initial); // 再描画前の連打を再現する関数
++    expect(value.previewAction).toHaveBeenCalledTimes(1); // 期待値生成関数 / preview送信回数検証メソッド
++    const pending = view(); // pending状態を描画する関数
++    expect(nodes(pending, "form")[0].props["aria-busy"]).toBe(true); // 期待値生成関数 / 要素検索関数 / pending表示検証メソッド
++    expect(nodes(pending, "fieldset")[0].props.disabled).toBe(false); // 期待値生成関数 / 要素検索関数 / 入力操作可の検証メソッド
++    change(pending); // 入力変更を通知する関数
++    resolve(ready()); // 遅延応答を返す関数 / preview成功生成関数
++    await finish(); // Action完了を待つ関数
++    expect(nodes(view(), "form")).toHaveLength(1); // 期待値生成関数 / 再描画関数 / 要素検索関数 / 古い候補非表示の検証メソッド
++  },
++);
++
++it("既存一致の候補も明示選択すれば保存でき、選択0件は送らない", // テスト登録関数
++  /**
++   * 初期未選択を作成禁止と混同せず、利用者の明示選択を受け付ける。
++   */
++  async () => { // 明示選択の検証コールバック
++    vi.mocked(value.previewAction).mockResolvedValue(ready([{ // mock型取得関数 / 結果設定メソッド / preview生成関数
++      ...item(), // 候補生成関数
++      duplicate: true,
++      initiallySelected: false,
++    }]));
++    const tree = await preview(); // preview完了関数
++    begin(tree, 1); // 選択0件を送信しようとする関数
++    expect(value.createAction).not.toHaveBeenCalled(); // 期待値生成関数 / 空送信拒否の検証メソッド
++    check(tree, 0, true); // 候補を明示選択する関数
++    begin(view(), 1); // 再描画関数 / 保存を送信する関数
++    await finish(); // 保存Action完了を待つ関数
++    const data = vi.mocked(value.createAction).mock.calls[0][4]; // mock型取得関数
++    expect(data.getAll("selectedDates")).toEqual(["2026-11-01"]); // 期待値生成関数 / 選択日取得メソッド / 配列比較メソッド
++  },
++);
++
++it.each([0, 31, 32])( // 候補数境界の試験を登録する関数
++  "候補%s件で0件・上限超過の保存を止める",
++  /**
++   * 最大31件を送信でき、0件と32件は送らない。
++   */
++  async (count) => { // 候補数境界の検証コールバック
++    const items = Array.from({ length: count }, // 候補配列を生成するメソッド
++      /**
++       * 件数境界だけの試験用に日付文字列を割り当てる。
++       */
++            (_, index) => item( // 候補生成のコールバック / 候補生成関数
++        new Date(Date.UTC(2026, 10, index + 1)).toISOString().slice(0, 10), // 日時コンストラクター / UTC計算メソッド / ISO変換メソッド / 日付取得メソッド
++      ),
++    );
++    vi.mocked(value.previewAction).mockResolvedValue(ready(items)); // mock型取得関数 / preview結果設定メソッド / 成功state生成関数
++    begin(await preview(), 1); // preview完了関数 / 同期保存送信関数
++    if (count === 31) {
++      await finish(); // Action完了を待つ関数
++      expect(value.createAction).toHaveBeenCalledTimes(1); // 期待値生成関数 / 保存回数検証メソッド
++    } else {
++      expect(value.createAction).not.toHaveBeenCalled(); // 期待値生成関数 / 保存拒否検証メソッド
++    }
++  },
++);
++
++it("除外候補は初期選択やイベントを偽装しても選択しない", // テスト登録関数
++  /**
++   * 全件除外を表示し、選択0件のまま送信を抑止する。
++   */
++  async () => { // 除外候補の検証コールバック
++    vi.mocked(value.previewAction).mockResolvedValue(ready([{ // mock型取得関数 / 結果設定メソッド / preview生成関数
++      ...item(), // 候補生成関数
++      dates: null,
++      exclusionReason: "NONEXISTENT_LOCAL_TIME",
++      initiallySelected: true,
++    }]));
++    const tree = await preview(); // preview完了関数
++    check(tree, 0, true); // 除外候補の変更handlerを直接呼ぶ関数
++    const html = renderToStaticMarkup(view()); // 静的描画関数 / フォーム再描画関数
++    expect(html).toContain("すべての候補が除外"); // 期待値生成関数 / 全件除外説明の検証メソッド
++    expect(html).toContain("選択件数: 0"); // 期待値生成関数 / 選択数の検証メソッド
++    begin(view(), 1); // 再描画関数 / 同期送信関数
++    expect(value.createAction).not.toHaveBeenCalled(); // 期待値生成関数 / 保存拒否の検証メソッド
++  },
++);
++
++it("保存pendingと再描画前の連打を止め、入力・選択を固定する", // テスト登録関数
++  /**
++   * 保存依頼後の共通入力通知・checkbox変更が同一入力を変えない。
++   */
++  async () => { // 保存中の固定を検証するコールバック
++    const tree = await preview(); // preview完了関数
++    let resolve!: (state: EventPracticeBatchActionState) => void; // 保存応答を返す関数型
++    vi.mocked(value.createAction).mockReturnValue(new Promise( // mock型取得関数 / 遅延保存設定メソッド / Promiseコンストラクター
++      /**
++       * 保存Actionの応答を手動で完了する。
++       */
++      (done) => { // 保存応答設定のコールバック
++        resolve = done;
++      },
++    ));
++    begin(tree, 1); // 初回保存を送信する関数
++    begin(tree, 1); // 再描画前の連打を再現する関数
++    check(tree, 0, false); // 保存直後の選択変更を試みる関数
++    change(tree); // 保存直後の共通入力変更を試みる関数
++    expect(value.createAction).toHaveBeenCalledTimes(1); // 期待値生成関数 / 送信回数検証メソッド
++    const pending = view(); // 保存中を描画する関数
++    expect(nodes(pending, "fieldset")[0].props.disabled).toBe(true); // 期待値生成関数 / 要素検索関数 / 共通入力固定の検証メソッド
++    expect(nodes(pending, "form")[1].props["aria-busy"]).toBe(true); // 期待値生成関数 / 要素検索関数 / 保存pendingの検証メソッド
++    const call = vi.mocked(value.createAction).mock.calls[0]; // mock型取得関数
++    expect(call[4].getAll("selectedDates")).toEqual(["2026-11-01"]); // 期待値生成関数 / 選択日取得メソッド / 固定選択の検証メソッド
++    resolve({ // 保存応答を返す関数
++      values: call[3].values,
++      requestId: call[3].requestId,
++      fieldErrors: {},
++      formError: "固定エラー",
++      status: "error",
++      outcome: "CREATE_FAILED",
++    });
++    await finish(); // 保存完了を待つ関数
++  },
++);
++
++it("通信断後も同じ入力・選択・操作ID・照合値だけを新しいFormDataで再送する", // テスト登録関数
++  /**
++   * 送信済みFormDataの書換えや古いDOM値を再送入力に使わない。
++   */
++  async () => { // 同一payload再送の検証コールバック
++    const tree = await preview(); // preview完了関数
++    vi.mocked(value.createAction).mockImplementationOnce( // mock型取得関数 / 最初の通信障害を設定するメソッド
++      /**
++       * 通信先へ渡したフォームが変更されても、保持した入力を壊さない。
++       */
++      async (_input, _request, _fingerprint, _previous, data) => { // 通信例外の非同期コールバック
++        data.set("title", "改変された送信値"); // 送信フォームを書き換えるメソッド
++        throw new Error(PRIVATE); // 機密原文を持つ例外コンストラクター
++      },
++    );
++    begin(tree, 1); // 初回保存送信の関数
++    await finish(); // 結果不明への遷移を待つ関数
++    const unknown = view(); // 結果不明を描画する関数
++    const html = renderToStaticMarkup(unknown); // HTML描画関数
++    expect(html).toContain("同じ選択・操作ID"); // 期待値生成関数 / 再確認案内の検証メソッド
++    expect(html).not.toContain(PRIVATE); // 期待値生成関数 / 機密原文非表示の検証メソッド
++    expect(nodes(unknown, "a")).toHaveLength(0); // 期待値生成関数 / 要素検索関数 / 新操作へ誘導しないことの検証メソッド
++    expect(html).not.toContain("入力を変更してpreviewを作成し直す"); // 期待値生成関数 / 再preview非表示の検証メソッド
++    check(unknown, 0, false); // 結果不明中の選択変更を試みる関数
++    begin(view(), 1); // 再描画関数 / 同じ操作を再確認する関数
++    await finish(); // 再確認完了を待つ関数
++    const calls = vi.mocked(value.createAction).mock.calls; // mock型取得関数
++    expect(calls[1][1]).toBe(REQUEST); // 期待値生成関数 / 操作ID固定の検証メソッド
++    expect(calls[1][2]).toBe("ab".repeat(32)); // 期待値生成関数 / 照合値生成メソッド / 照合値固定の検証メソッド
++    expect(calls[1][4]).not.toBe(calls[0][4]); // 期待値生成関数 / フォーム再生成の検証メソッド
++    expect(calls[1][4].get("title")).toBe("定期練習"); // 期待値生成関数 / 値取得メソッド / 正規化共通入力保持の検証メソッド
++    expect(calls[1][4].getAll("selectedDates")).toEqual(["2026-11-01"]); // 期待値生成関数 / 選択日取得メソッド / 選択固定の検証メソッド
++    expect(value.previewAction).toHaveBeenCalledTimes(1); // 期待値生成関数 / 新規preview非実行の検証メソッド
++  },
++);
++
++it.each(["VALIDATION_FAILED", "FORBIDDEN", "PREVIEW_CHANGED", "CONFLICT", "CREATE_FAILED"] as const)( // 既知の失敗コードの試験登録関数 / 読取専用リテラル型
++  "%s後は明示操作で新しいpreviewと操作IDを取得できる",
++  /**
++   * 失敗文言ではなく結果コードで再previewの可否を判断する。
++   */
++  async (outcome) => { // 再preview許可の検証コールバック
++    failure(outcome); // 失敗結果を設定する関数
++    begin(await preview(), 1); // preview完了関数 / 保存送信関数
++    await finish(); // 保存失敗を待つ関数
++    restart(view()); // 再描画関数 / 新しいpreviewの準備へ戻す関数
++    expect(nodes(view(), "form")).toHaveLength(1); // 期待値生成関数 / 再描画関数 / 要素検索関数 / 旧候補破棄の検証メソッド
++    vi.mocked(value.previewAction).mockResolvedValue(ready([item()], NEXT_REQUEST)); // mock型取得関数 / 次の結果設定メソッド / 成功state生成関数 / 候補生成関数
++    begin(await preview(), 1); // 新しいpreview完了関数 / 保存送信関数
++    await finish(); // 保存結果を待つ関数
++    expect(vi.mocked(value.createAction).mock.calls[1][1]).toBe(NEXT_REQUEST); // 期待値生成関数 / mock型取得関数 / 新規操作IDの検証メソッド
++  },
++);
++
++it.each(["CREATED", "ALREADY_COMPLETED"] as const)( // 保存成功コードの試験登録関数 / 読取専用リテラル型
++  "%s後のneedsReloadでは保存ボタンを出さない",
++  /**
++   * 保存成功を再送対象とせず、固定の管理一覧リンクを表示する。
++   */
++  async (outcome) => { // 保存成功の検証コールバック
++    vi.mocked(value.createAction).mockImplementation( // mock型取得関数 / 保存成功を設定するメソッド
++      /**
++       * 保存済みで一覧の再読込だけが必要な結果を返す。
++       */
++      async (input, requestId, fingerprint, _previous, data) => ({ // 保存成功の非同期コールバック
++        status: "success",
++        outcome,
++        values: {
++          ...input,
++          selectedDates: data.getAll("selectedDates") as string[], // 選択日取得メソッド / 文字列配列型へのアサーション
++          requestId,
++          previewFingerprint: fingerprint,
++        },
++        requestId,
++        fieldErrors: {},
++        formError: null,
++        data: {
++          targetMonth: input.targetMonth,
++          createdCount: 1,
++          needsReload: true,
++        },
++      }),
++    );
++    const old = await preview(); // preview完了関数
++    begin(old, 1); // 保存を送信する関数
++    await finish(); // 保存成功を待つ関数
++    const saved = view(); // 保存済みを描画する関数
++    expect(nodes(nodes(saved, "form")[1], "button")).toHaveLength(0); // 期待値生成関数 / 要素検索関数 / 保存ボタン非表示の検証メソッド
++    expect(renderToStaticMarkup(saved)).toContain("1件を下書きで作成済み"); // 期待値生成関数 / HTML描画関数 / 保存済み説明の検証メソッド
++    expect(nodes(saved, "a")[0].props.href).toBe(value.cancelHref); // 期待値生成関数 / 要素検索関数 / 固定一覧リンク検証メソッド
++    begin(saved, 1); // 保存済みのhandlerを再度呼ぶ関数
++    expect(value.createAction).toHaveBeenCalledTimes(1); // 期待値生成関数 / 再保存非実行の検証メソッド
++  },
++);
++
++it("previewの通常通信例外では入力部品を置き換えず、再試行できる", // テスト登録関数
++  /**
++   * 例外原文を表示せず、通常送信を止めて入力の自動resetを避ける。
++   */
++  async () => { // preview障害の検証コールバック
++    vi.mocked(value.previewAction).mockRejectedValueOnce(new Error(PRIVATE)); // mock型取得関数 / 通信障害設定メソッド / 例外コンストラクター
++    const data = commonData(); // 共通入力を作る関数
++    data.set("title", "変更後のタイトル"); // 送信値を変更するメソッド
++    begin(view(), 0, data); // 再描画関数 / previewを同期送信する関数
++    await finish(); // 通信障害の処理を待つ関数
++    const html = renderToStaticMarkup(view()); // HTML描画関数 / フォーム再描画関数
++    expect(html).toContain("入力を保ったまま"); // 期待値生成関数 / 案内文言の検証メソッド
++    expect(html).not.toContain(PRIVATE); // 期待値生成関数 / 機密原文非表示の検証メソッド
++    expect(vi.mocked(value.previewAction).mock.calls[0][1].get("title")).toBe("変更後のタイトル"); // 期待値生成関数 / mock型取得関数 / 値取得メソッド / 送信時点の値の検証メソッド
++    await preview(); // 次のpreviewを完了する関数
++    expect(value.previewAction).toHaveBeenCalledTimes(2); // 期待値生成関数 / 再試行回数検証メソッド
++  },
++);
++
++it.each(["preview", "保存"])( // Next制御例外の試験を登録する関数
++  "%sのNext制御例外を通常エラーに変えない",
++  /**
++   * 本物のnotFound例外を同じ例外として伝播させる。
++   */
++  async (stage) => { // Next制御例外の検証コールバック
++    let control: unknown; // 制御例外値の不明型
++    try {
++      notFound(); // Nextの本物の制御例外を投げる関数
++    } catch (error) {
++      control = error;
++    }
++    if (stage === "preview") {
++      vi.mocked(value.previewAction).mockRejectedValueOnce(control); // mock型取得関数 / 制御例外設定メソッド
++      begin(view()); // 再描画関数 / preview送信関数
++    } else {
++      const tree = await preview(); // preview完了関数
++      vi.mocked(value.createAction).mockRejectedValueOnce(control); // mock型取得関数 / 制御例外設定メソッド
++      begin(tree, 1); // 保存送信関数
++    }
++    await expect(finish()).rejects.toBe(control); // 期待値生成関数 / queue待機関数 / 同一例外の検証メソッド
++  },
++);
++
++it.each(["VALIDATION_FAILED", "TOO_MANY", "FORBIDDEN", "PREVIEW_FAILED"] as const)( // preview失敗コードの試験登録関数 / 読取専用リテラル型
++  "previewの%sでは候補を表示せず、項目エラーを関連付ける",
++  /**
++   * Actionが返す失敗を表示し、対象月と共通入力の表示は維持する。
++   */
++  async (outcome) => { // preview失敗表示の検証コールバック
++    vi.mocked(value.previewAction).mockResolvedValue({ // mock型取得関数 / preview失敗を設定するメソッド
++      status: "error",
++      outcome,
++      values: value.initialValues,
++      requestId: "",
++      formError: "固定のpreviewエラー",
++      fieldErrors: { title: ["タイトルを確認してください。"] },
++    });
++    const tree = await preview(); // preview処理の完了関数
++    expect(nodes(tree, "form")).toHaveLength(1); // 期待値生成関数 / 要素検索関数 / 保存フォーム非表示の検証メソッド
++    const input = nodes(tree, "input").find( // 要素検索関数 / タイトル欄を探すメソッド
++      /**
++       * エラーに対応するタイトル欄を特定する。
++       */
++      (node) => node.props.name === "title", // タイトル欄判定のコールバック
++    );
++    expect(input!.props["aria-invalid"]).toBe(true); // 期待値生成関数 / 不正属性の検証メソッド
++    expect(input!.props["aria-describedby"]).toContain("-title-error"); // 期待値生成関数 / エラーID関連付けの検証メソッド
++    expect(renderToStaticMarkup(tree)).toContain("固定のpreviewエラー"); // 期待値生成関数 / HTML描画関数 / 固定エラー表示の検証メソッド
++  },
++);
++
++it("保存の選択日エラーをcheckboxの説明へ関連付ける", // テスト登録関数
++  /**
++   * 項目エラーを表示し、対応する候補checkboxから参照できる。
++   */
++  async () => { // 保存エラー関連付けの検証コールバック
++    const tree = await preview(); // preview完了関数
++    const failed: EventPracticeBatchActionState = { // 保存失敗state型
++      status: "error",
++      outcome: "VALIDATION_FAILED",
++      values: {
++        ...(ready() as Extract<EventPracticeBatchPreviewActionState, { status: "success" }>).data.input, // preview生成関数 / 成功state抽出型へのアサーション
++        selectedDates: ["2026-11-01"],
++        requestId: REQUEST,
++        previewFingerprint: "ab".repeat(32), // 照合値を生成するメソッド
++      },
++      requestId: REQUEST,
++      formError: "選択を確認してください。",
++      fieldErrors: { selectedDates: ["候補を確認してください。"] },
++    };
++    vi.mocked(value.createAction).mockResolvedValue(failed); // mock型取得関数 / 保存失敗を設定するメソッド
++    begin(tree, 1); // 保存を送信する関数
++    await finish(); // 保存失敗を待つ関数
++    const saved = view(); // 保存失敗を描画する関数
++    const box = nodes(nodes(saved, "form")[1], "input")[0]; // 保存候補の要素検索関数
++    expect(box.props["aria-invalid"]).toBe(true); // 期待値生成関数 / 不正属性の検証メソッド
++    expect(box.props["aria-describedby"]).toContain("-selectedDates-error"); // 期待値生成関数 / エラー関連付けの検証メソッド
++    expect(renderToStaticMarkup(saved)).toContain("候補を確認してください。"); // 期待値生成関数 / HTML描画関数 / エラー表示検証メソッド
++  },
++);
++
++it("再描画前の選択変更を初回保存へ反映し、古い作り直しボタンを保存中に拒否する", // テスト登録関数
++  /**
++   * 同期refで最新選択を固定し、保存開始直後に新操作へ戻ることを防ぐ。
++   */
++  async () => { // 同期境界の検証コールバック
++    vi.mocked(value.previewAction).mockResolvedValue(ready([item(), item("2026-11-07")])); // mock型取得関数 / 結果設定メソッド / preview生成関数 / 候補生成関数
++    const old = await preview(); // preview完了関数
++    check(old, 1, false); // 2件目の選択を再描画前に解除する関数
++    begin(old, 1); // 再描画前に保存を送信する関数
++    restart(old); // 古い作り直しボタンを押す関数
++    expect(nodes(view(), "form")).toHaveLength(2); // 期待値生成関数 / 再描画関数 / 要素検索関数 / 保存フォーム保持の検証メソッド
++    await finish(); // 保存応答を待つ関数
++    const call = vi.mocked(value.createAction).mock.calls[0]; // mock型取得関数
++    expect(call[4].getAll("selectedDates")).toEqual(["2026-11-01"]); // 期待値生成関数 / 選択日取得メソッド / 最新選択の検証メソッド
++  },
++);
++
++it("成功応答直後に古いsubmit handlerを呼んでも再保存しない", // テスト登録関数
++  /**
++   * 成功結果を同期refへ反映し、Reactの再描画前にも追加送信を拒否する。
++   */
++  async () => { // 成功直後の境界検証コールバック
++    const old = await preview(); // preview完了関数
++    const result = ready(); // preview成功state生成関数
++    if (result.status !== "success") throw new Error("fixture"); // 試験データ不整合の例外生成
++    vi.mocked(value.createAction).mockResolvedValue({ // mock型取得関数 / 保存済み結果設定メソッド
++      status: "success",
++      outcome: "CREATED",
++      values: {
++        ...result.data.input,
++        selectedDates: ["2026-11-01"],
++        requestId: REQUEST,
++        previewFingerprint: result.data.fingerprint,
++      },
++      requestId: REQUEST,
++      formError: null,
++      fieldErrors: {},
++      data: {
++        targetMonth: "2026-11",
++        createdCount: 1,
++        needsReload: true,
 +      },
 +    });
-+    expect(html).not.toContain("<img"); // 期待値生成関数 / HTML非生成の検証メソッド
-+    expect(html).toContain("&lt;img"); // 期待値生成関数 / 文字列化の検証メソッド
-+    expect(html).not.toContain(' data-attack="yes"'); // 期待値生成関数 / 属性注入防止の検証メソッド
++    begin(old, 1); // 初回保存を送信する関数
++    await finish(); // 保存成功応答を待つ関数
++    begin(old, 1); // 再描画前の古いhandlerを呼ぶ関数
++    restart(old); // 古い作り直しボタンを押す関数
++    expect(value.createAction).toHaveBeenCalledTimes(1); // 期待値生成関数 / 再保存拒否の検証メソッド
++    expect(renderToStaticMarkup(view())).toContain("作成済み"); // 期待値生成関数 / HTML描画関数 / 再描画関数 / 保存済み表示の検証メソッド
++  },
++);
+diff --git a/tests/event-practice-batch-pages.test.ts b/tests/event-practice-batch-pages.test.ts
+new file mode 100644
+index 0000000..9720ea3
+--- /dev/null
++++ b/tests/event-practice-batch-pages.test.ts
+@@ -0,0 +1,274 @@
++// tests/event-practice-batch-pages.test.ts
++// 実際の共通認可を使い、Auth・DB通信とClient描画・Actionだけを置換する。
++import { createElement } from "react";
++import { renderToStaticMarkup } from "react-dom/server";
++import { beforeEach, expect, it, vi } from "vitest";
++
++import EventPracticeBatchPage, { // 非同期引数と再認可を扱う定期練習作成Page
++  dynamic, // リクエストごとに認可を確認する設定
++} from "@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/page";
++import type {
++  EventPracticeBatchForm, // 定期練習フォームのComponent型参照
++} from "@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm";
++import type {
++  EventPracticeBatchActionState, // 保存Actionのstate型
++  EventPracticeBatchCommonInput, // 正規化済み共通入力の型
++  EventPracticeBatchPreviewActionState, // preview Actionのstate型
++} from "@/domain/club/event/event-practice-batch-types";
++
++const mocks = vi.hoisted( // importより前にmockを作る関数
++  /**
++   * 認可の通信境界と、Pageが渡すAction・propsの観測先を用意する。
++   */
++  () => ({ // mock生成のコールバック
++    user: vi.fn(), // Auth本人取得のmock生成関数
++    member: vi.fn(), // ACTIVE所属取得のmock生成関数
++    form: vi.fn(), // Client propsを記録するmock生成関数
++    preview: vi.fn(), // preview Actionのmock生成関数
++    create: vi.fn(), // 保存Actionのmock生成関数
++  }),
++);
++vi.mock("@/src/infrastructure/supabase/server", // Auth通信を置換する関数
++  /**
++   * 本人取得をmockへ接続するSDKを公開する。
++   */
++  () => ({ // SDKを公開するコールバック
++    createClient:
++      /**
++       * Auth本人確認だけを持つSDKを返す。
++       */
++      async () => ({ // SDK生成の非同期コールバック
++        auth: { getUser: mocks.user }, // 本人取得のmock関数参照
++      }),
++  }),
++);
++vi.mock("@/src/infrastructure/prisma/client", // DB通信を置換する関数
++  /**
++   * 共通認可が使う所属検索だけを置換する。
++   */
++  () => ({ // DB境界を公開するコールバック
++    prisma: {
++      clubMembership: { findFirst: mocks.member }, // 所属検索のmock関数参照
++    },
++  }),
++);
++vi.mock("@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm", // Client描画を置換する関数
++  /**
++   * Clientに渡した値を観測する。
++   */
++  () => ({ // Client Componentの公開コールバック
++    EventPracticeBatchForm: mocks.form, // propsを記録するmock関数参照
++  }),
++);
++vi.mock("@/app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/actions", // Actionを置換する関数
++  /**
++   * bindされた引数を記録し、実保存は行わない。
++   */
++  () => ({ // Actionを公開するコールバック
++    previewEventPracticeBatchAction: mocks.preview, // preview Actionのmock関数参照
++    createEventPracticeBatchAction: mocks.create, // 保存Actionのmock関数参照
++  }),
++);
++
++/**
++ * 実Componentが受け取るprops型。
++ */
++type FormProps = Parameters<typeof EventPracticeBatchForm>[0]; // Componentの引数を取り出す組込み型
++
++/**
++ * 正常な所属・クラブを用意する。
++ */
++function membership() { // 所属とクラブを生成する関数
++  return {
++    id: "membership-a",
++    role: "OWNER",
++    club: {
++      id: "club-id",
++      slug: "club-a",
++      name: "クラブ",
++      timezone: "Asia/Tokyo",
++      planType: "STANDARD",
++      privateValue: "NOT_FOR_CLIENT",
++    },
++  };
++}
++
++/**
++ * Promise形式のroute引数とqueryでPageを描画する。
++ */
++async function page(month?: string | string[]) { // Page描画関数 / 月queryの型
++  const selectedMonth = arguments.length === 0 ? "2026-11" : month;
++  return renderToStaticMarkup(await EventPracticeBatchPage({ // 静的描画関数 / Page Component
++    params: Promise.resolve({ clubSlug: "club-a" }), // 非同期route引数生成メソッド
++    searchParams: Promise.resolve({ month: selectedMonth }), // 非同期query生成メソッド
++  }));
++}
++
++/**
++ * PageがClientへ渡したpropsを取り出す。
++ */
++function formProps(): FormProps { // props取得関数 / フォームprops型
++  return mocks.form.mock.calls[0][0] as FormProps; // 観測値を実props型として扱う型アサーション
++}
++
++beforeEach( // 各試験の準備を登録する関数
++  /**
++   * 本人・ACTIVE管理者を用意し、Clientの表示を短い要素に置換する。
++   */
++  () => { // 準備のコールバック
++    vi.clearAllMocks(); // 呼出し履歴を初期化する関数
++    mocks.user.mockResolvedValue({ // Auth本人を設定するメソッド
++      data: { user: { id: "user-a" } },
++      error: null,
++    });
++    mocks.member.mockResolvedValue(membership()); // 所属結果を設定するメソッド / 所属生成関数
++    mocks.form.mockImplementation( // Clientの代替描画を設定するメソッド
++      /**
++       * Client Componentの実行をせず、propsを記録する。
++       */
++      () => createElement("p", null, "共通入力フォーム"), // 描画のコールバック / React要素生成関数
++    );
 +  },
 +);
 +
-+it("単一欄・曜日・公開対象の変更通知を親へ渡す", // テストを登録する関数
++it("Promise propsを解決して再認可し、限定propsと月全体を渡す", // テストを登録する関数
 +  /**
-+   * 公開対象の全選択も親のpreview無効化で検知できるよう通知関数を渡す。
++   * 未認可のクラブ情報・個人情報をClientへ渡さず、固定の管理一覧へ戻れる。
 +   */
-+  () => { // 変更通知の接続を検証するコールバック
-+    const onChange = vi.fn(); // 変更通知を記録するmock生成関数
-+    const nodes = elements(EventPracticeBatchInputFields(props({ onChange }))); // 要素収集関数 / 共通入力Component / props生成関数
-+    const handlers = nodes.filter( // 通知を渡した要素を抽出するメソッド
-+      /**
-+       * 親から渡した通知関数を保持する要素を探す。
-+       */
-+      (node) => node.props.onChange === onChange, // 関数参照を比較するコールバック
-+    );
-+    expect(handlers).toHaveLength(16); // 期待値生成関数 / 単一8・曜日7・role1の接続数検証メソッド
-+    for (const node of handlers) {
-+      const notify = node.props.onChange as () => void; // 親への通知関数型へのアサーション
-+      notify(); // 親へ変更を通知する関数
++  async () => { // 正常Pageを検証する非同期コールバック
++    await page(); // Pageを描画する関数
++    expect(dynamic).toBe("force-dynamic"); // 期待値生成関数 / 設定比較メソッド
++    expect(mocks.member).toHaveBeenCalledWith(expect.objectContaining({ // 期待値生成関数 / 引数比較メソッド / 部分比較関数
++      where: {
++        userId: "user-a",
++        status: "ACTIVE",
++        club: { is: { slug: "club-a" } },
++      },
++    }));
++    const value = formProps(); // propsを取得する関数
++    expect(Object.keys(value).sort()).toEqual([ // 期待値生成関数 / キー取得メソッド / 並べ替えメソッド / 配列比較メソッド
++      "cancelHref", "createAction", "initialValues", "previewAction", "timezone",
++    ]);
++    expect(value.initialValues.periodStart).toBe("2026-11-01"); // 期待値生成関数 / 月初比較メソッド
++    expect(value.initialValues.periodEnd).toBe("2026-11-30"); // 期待値生成関数 / 月末比較メソッド
++    expect(value.initialValues.targetRoles).toEqual(["OWNER"]); // 期待値生成関数 / 初期公開対象比較メソッド
++    expect(value.timezone).toBe("Asia/Tokyo"); // 期待値生成関数 / timezone比較メソッド
++    expect(value.cancelHref).toBe("/club/club-a/admin/events?month=2026-11&status=ALL"); // 期待値生成関数 / 固定リンク比較メソッド
++    expect(JSON.stringify(value)).not.toContain("NOT_FOR_CLIENT"); // 期待値生成関数 / JSON変換関数 / 機密非含有の検証メソッド
++    expect(mocks.preview).not.toHaveBeenCalled(); // 期待値生成関数 / 初期preview非実行の検証メソッド
++    expect(mocks.create).not.toHaveBeenCalled(); // 期待値生成関数 / 保存非実行の検証メソッド
++  },
++);
++
++it.each([ // 月末のパラメーター試験を登録する関数
++  ["2028-02", "2028-02-29"],
++  ["1900-02", "1900-02-28"],
++  ["0001-01", "0001-01-31"],
++  ["9999-12", "9999-12-31"],
++])("対象月%sの初期期間を月全体にする", // パラメーター試験を登録する関数
++  /**
++   * 閏年と年1〜9999でもUTC月末計算が正しいことを確認する。
++   */
++  async (month, end) => { // 初期期間の検証コールバック
++    await page(month); // Pageを描画する関数
++    expect(formProps().initialValues.periodStart).toBe(`${month}-01`); // 期待値生成関数 / props取得関数 / 月初比較メソッド
++    expect(formProps().initialValues.periodEnd).toBe(end); // 期待値生成関数 / props取得関数 / 月末比較メソッド
++  },
++);
++
++it.each([ // 不正月のパラメーター試験を登録する関数
++  undefined,
++  "",
++  "0000-01",
++  "2026-13",
++  " 2026-11",
++  "2026-11\n",
++  ["2026-11"],
++  ["2026-11", "2026-11"],
++])(
++  "不正・重複月%sを現在月に置き換えない", // パラメーター試験を登録する関数
++  /**
++   * 不正月ではフォームも操作IDも生成しない。
++   */
++  async (month) => { // 不正queryの検証コールバック
++    const html = await page(month); // Pageを描画する関数
++    expect(html).toContain("対象月をYYYY-MM形式"); // 期待値生成関数 / エラー表示の検証メソッド
++    expect(mocks.form).not.toHaveBeenCalled(); // 期待値生成関数 / フォーム非表示の検証メソッド
++    expect(mocks.create).not.toHaveBeenCalled(); // 期待値生成関数 / 保存非実行の検証メソッド
++  },
++);
++
++it("previewはslugと月、保存はslugを固定してActionへ渡す", // テストを登録する関数
++  /**
++   * Pageが新しいrequestIdを生成せず、preview成功後の操作情報を保存Actionへ渡せる。
++   */
++  async () => { // Actionの引数固定を検証する非同期コールバック
++    await page(); // Pageを描画する関数
++    const value = formProps(); // props取得関数
++    const previewState: EventPracticeBatchPreviewActionState = { // previewの初期state型
++      status: "idle",
++      values: value.initialValues,
++      fieldErrors: {},
++      formError: null,
++      requestId: "",
++    };
++    const data = new FormData(); // フォーム生成コンストラクター
++    await value.previewAction(previewState, data); // preview Actionの関数
++    expect(mocks.preview).toHaveBeenCalledWith("club-a", "2026-11", previewState, data); // 期待値生成関数 / 固定引数の検証メソッド
++    const input = {} as EventPracticeBatchCommonInput; // bindだけを確認する共通入力型へのアサーション
++    const previous = {} as EventPracticeBatchActionState; // bindだけを確認する保存state型へのアサーション
++    await value.createAction(input, "request", "fingerprint", previous, data); // 保存Actionの関数
++    expect(mocks.create).toHaveBeenCalledWith("club-a", input, "request", "fingerprint", previous, data); // 期待値生成関数 / 保存引数の検証メソッド
++  },
++);
++
++it.each(["COACH", "OFFICER"])( // 管理者ロールの試験を登録する関数
++  "%sの直接アクセスを許可する",
++  /**
++   * OWNERだけに制限せず、既存の管理者認可を使う。
++   */
++  async (role) => { // 管理者認可の検証コールバック
++    mocks.member.mockResolvedValue({ // 所属結果を設定するメソッド
++      ...membership(), // 所属を生成する関数
++      role,
++    }); // 所属結果設定メソッド / 所属生成関数
++    await page(); // Pageを描画する関数
++    expect(mocks.form).toHaveBeenCalledTimes(1); // 期待値生成関数 / フォーム表示回数の検証メソッド
++  },
++);
++
++it.each(["MEMBER", "所属なし", "未ログイン"])( // 認可拒否の試験を登録する関数
++  "%sの直接アクセスを拒否する",
++  /**
++   * Pageを直接開いても、実際の共通認可で拒否する。
++   */
++  async (kind) => { // 認可拒否の検証コールバック
++    if (kind === "未ログイン") {
++      mocks.user.mockResolvedValue({ // 未ログインを設定するメソッド
++        data: { user: null },
++        error: null,
++      }); // 未ログインを設定するメソッド
++    } else {
++      mocks.member.mockResolvedValue(kind === "MEMBER" ? { // 所属結果を設定するメソッド
++        ...membership(), // 所属を生成する関数
++        role: "MEMBER",
++      } : null); // 所属結果設定メソッド / 所属生成関数
 +    }
-+    expect(onChange).toHaveBeenCalledTimes(16); // 期待値生成関数 / 通知回数の検証メソッド
++    await expect(page()).rejects.toThrow(kind === "未ログイン" ? "NEXT_REDIRECT" : "NEXT_HTTP_ERROR_FALLBACK;404"); // 期待値生成関数 / Page描画関数 / 拒否例外の検証メソッド
++    expect(mocks.form).not.toHaveBeenCalled(); // 期待値生成関数 / フォーム非表示の検証メソッド
++  },
++);
++
++it.each(["STARTER", "PRO"])( // 禁止プランの試験を登録する関数
++  "%sの直接アクセスを拒否する",
++  /**
++   * 管理者でも現在のプランによる制限を適用する。
++   */
++  async (planType) => { // プラン認可の検証コールバック
++    const value = membership(); // 所属生成関数
++    value.club.planType = planType;
++    mocks.member.mockResolvedValue(value); // 所属結果を設定するメソッド
++    await expect(page()).rejects.toThrow(); // 期待値生成関数 / Page描画関数 / プラン拒否の検証メソッド
++    expect(mocks.form).not.toHaveBeenCalled(); // 期待値生成関数 / フォーム非表示の検証メソッド
 +  },
 +);
