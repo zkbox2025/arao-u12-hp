@@ -1,0 +1,1578 @@
+// tests/event-practice-batch.flow.integration.test.ts
+// ガード後だけ専用clientを生成する。DBケースは専用の使い捨て環境でだけ実行する。
+// P2034・件数不一致は明示した障害注入、並列競合・CHECK違反・rollbackは実DBで確認する。
+
+import {
+  randomUUID, // fixtureと操作IDのUUIDを生成する関数
+} from "node:crypto";
+import type {
+  ClubEvent, // DBのイベント行型
+  Prisma, // DB引数・transactionの型namespace
+  PrismaClient, // 専用DBクライアント型
+} from "@prisma/client";
+import {
+  afterAll, // 専用clientの終了処理を登録する関数
+  afterEach, // fixtureの後片付けを登録する関数
+  beforeAll, // ガード後の初期化を登録する関数
+  beforeEach, // fixture生成を登録する関数
+  describe, // 試験群を登録する関数
+  expect, // 期待値を検証する関数
+  it, // 試験を登録する関数
+  vi, // mock境界を設定するVitest API
+} from "vitest";
+
+import type {
+  ClubAccessContext, // 本人・所属・クラブをまとめた認可context型。Auth通信の代用はしない
+} from "@/app/(club-app)/club/club-membership-authorization";
+import type {
+  EventPracticeBatchCommonInput, // 正規化した定期練習の共通入力型
+  EventPracticeBatchInput, // 共通入力・選択日・操作ID・照合値の保存入力型
+} from "@/domain/club/event/event-practice-batch-types";
+import type {
+  EventMonthCopyInput, // 正規化済みの前月複製入力型
+} from "@/domain/club/event/event-month-copy-types";
+
+const GUARD_ERROR = "F11専用の使い捨てローカルDB設定と明示flagを確認してください。";
+const CHECK_ERROR = "F11統合確認に失敗しました。対象ケースと実行条件を確認してください。";
+const MONTH = "2026-01";
+
+/**
+ * URLや明示flagを、秘密情報の出力なしで検証する環境設定の型。
+ */
+type Environment = Record<string, string | undefined>; // 接続用の環境設定型 / キーと値の対応を表す型 / 文字列型 / 未設定を表す型
+
+/**
+ * 件数不一致・DB制約違反の注入箇所を指定する型。
+ */
+type FaultMode = "none" | "count" | "constraint"; // 書込み障害の注入箇所を指定する型
+
+/**
+ * 書込み前に登録したクラブ・ユーザー・所属・元イベントIDの型。
+ */
+type Fixture = { // 事前登録したfixture IDを保持する型
+  clubs: string[]; // 文字列型
+  users: string[]; // 文字列型
+  memberships: string[]; // 文字列型
+  events: Set<string>; // 重複のないID集合の型 / 文字列型
+};
+
+/**
+ * 実transactionのclientを受け取りRepository処理を実行する関数型。
+ */
+type Operation = (transaction: Prisma.TransactionClient) => Promise<unknown>; // transaction処理の関数型 / transaction内のPrismaクライアント型 / 非同期結果の型 / 値が未確定の型
+
+/**
+ * Repositoryが実transactionへ渡す分離レベルと待機時間の型。
+ */
+type Options = { // transaction設定型
+  isolationLevel?: Prisma.TransactionIsolationLevel; // Prismaのtransaction分離レベル型
+  maxWait?: number; // 数値型
+  timeout?: number; // 数値型
+};
+
+/**
+ * 2本の実transactionが完了記録を読んでから先へ進む、一度限りの同期点。
+ */
+type Barrier = { // 実並列読取の同期状態型
+  left: number; // 待機するtransaction数の数値型
+  wait: Promise<void>; // 同期解除を待つ非同期型
+  release: () => void; // 待機と期限タイマーを解除する関数型
+};
+
+const bridge = vi.hoisted( // import前に試験状態を用意する関数
+  /**
+   * import評価前に専用clientの参照と障害注入の状態だけを用意する。
+   */
+  () => ({ // 処理を受け取るコールバック
+    client: undefined as PrismaClient | undefined, // 専用DBクライアントの型 / 未設定を表す型
+    prisma: undefined as typeof import("@prisma/client").Prisma | undefined, // 実モジュールの型だけを参照 / 未設定を表す型
+    mode: "none" as FaultMode, // 書込み障害の注入箇所を指定する型
+    remaining: 0,
+    transactions: 0,
+    injected: 0,
+    barrier: undefined as Barrier | undefined, // 同期点または未設定の型
+    external: 0,
+  }));
+
+/**
+ * 専用flagが両方揃うまで、接続URLを評価しない。
+ */
+function enabled(environment: Environment): boolean { // 専用の実行flagを照合する関数 / 接続用の環境設定型 / 真偽値型
+  return (
+    environment.RUN_EVENT_PRACTICE_BATCH_TESTS === "1" &&
+    environment.RUN_DB_INTEGRATION_TESTS === "1"
+  );
+}
+
+/**
+ * 既存のローカルSupabase用54322/postgresだけを許し、URL・例外原文を出さない。
+ */
+function localConfiguration(environment: Environment): string { // 使い捨てローカルDBの接続条件を検証する関数 / 接続用の環境設定型 / 文字列型
+  try {
+    if (!enabled(environment)) { // 専用の実行flagを照合する関数
+      throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
+    }
+    const source = environment.DATABASE_URL ?? "";
+    const url = new URL(source); // 接続URLを解析するコンストラクター
+    if (
+      environment.EVENT_PRACTICE_BATCH_DISPOSABLE !== "1" ||
+      environment.NODE_ENV === "production" ||
+      environment.VERCEL_ENV === "production" ||
+      source !== source.trim() || // 前後の空白を除くメソッド
+      source.includes("?") || // 値の含有を判定するメソッド
+      source.includes("#") || // 値の含有を判定するメソッド
+      !["postgres:", "postgresql:"].includes(url.protocol) || // 値の含有を判定するメソッド
+      !["127.0.0.1", "localhost"].includes(url.hostname) || // 値の含有を判定するメソッド
+      url.port !== "54322" ||
+      url.pathname !== "/postgres" ||
+      !url.username ||
+      !url.password ||
+      Object.keys(environment).some( // 条件に合う要素の有無を判定するメソッド / 環境設定のキーを列挙する関数
+        /**
+         * 各値が、このケースで許可・期待した条件を満たすか判定する。
+         */
+        (key) => ( // 処理を受け取るコールバック
+          key.startsWith("PG") && // 接頭辞を比較するメソッド
+          Boolean(environment[key]) // 値を真偽値へ変換する関数
+        ))
+    ) {
+      throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
+    }
+    return url.toString(); // 解析済みURLを文字列にするメソッド
+  } catch {
+    throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
+  }
+}
+
+/**
+ * SQL・接続・assertionの原文やcauseを、固定の失敗文へ置き換える。
+ */
+async function safeCheck(operation: () => Promise<void>): Promise<void> { // 例外原文を固定メッセージへ置き換える関数 / 非同期結果の型 / 値を返さない型
+  try {
+    await operation(); // 受け取った試験またはRepository処理を実行する関数
+  } catch {
+    throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
+  }
+}
+
+/**
+ * 実環境の秘密情報を使わず、ガード単体試験用の架空設定を作る。
+ */
+function sampleEnvironment(): Environment { // 架空の接続設定を作る関数 / 接続用の環境設定型
+  return {
+    RUN_EVENT_PRACTICE_BATCH_TESTS: "1",
+    RUN_DB_INTEGRATION_TESTS: "1",
+    EVENT_PRACTICE_BATCH_DISPOSABLE: "1",
+    NODE_ENV: "test",
+    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
+  };
+}
+
+/**
+ * ガード後に生成した専用clientだけを返し、共有client・dotenvの初期化を拒否する。
+ */
+function database(): PrismaClient { // 専用DB client取得関数 / 専用DBクライアントの型
+  if (!bridge.client) {
+    throw new Error(GUARD_ERROR); // 例外を生成するコンストラクター
+  }
+  return bridge.client;
+}
+
+/**
+ * 実際のtransactionを維持し、テストが指定した書込み箇所だけへ障害を注入する。
+ */
+function transactionProxy(transaction: Prisma.TransactionClient): Prisma.TransactionClient { // 実transactionの指定箇所へ障害を注入する関数 / transaction内のPrismaクライアント型
+  return new Proxy(transaction, { // 実処理の参照を制御するコンストラクター
+    /**
+     * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
+     */
+    get(target, property) { // 参照先を制御するメソッドを定義
+      if (
+        property === "clubEvent" &&
+        bridge.mode === "count"
+      ) {
+        return new Proxy(target.clubEvent, { // 実処理の参照を制御するコンストラクター
+          /**
+           * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
+           */
+          get(delegate, method) { // 参照先を制御するメソッドを定義
+            if (method === "createMany") {
+              return (
+                /**
+                 * 実DBでイベントを保存した後、件数不一致を返してrollbackを促す。
+                 */
+                async (args: Prisma.ClubEventCreateManyArgs) => { // 非同期処理を行うコールバック / イベント一括作成の引数型
+                  await delegate.createMany(args); // fixtureまたは生成予定をDBへ保存するメソッド
+                  return {
+                    count: 0,
+                  };
+                });
+            }
+            const value = Reflect.get(delegate, method); // 参照先を取得するメソッド
+            return typeof value === "function" ? value.bind(delegate) : value; // 呼出し元を維持してメソッドを返す関数
+          },
+        });
+      }
+      if (property === "clubEventBatchOperation") {
+        return new Proxy(target.clubEventBatchOperation, { // 完了記録の実delegateを包むコンストラクター
+          /**
+           * DB読取後の同期点と、CHECK違反の注入だけを差し込む。
+           */
+          get(delegate, method) { // 完了記録の参照を制御するメソッド
+            if (method === "findUnique") {
+              return (
+                /**
+                 * 同一snapshot内で完了記録を読んだ2本のtransactionを同期する。
+                 */
+                async (args: Prisma.ClubEventBatchOperationFindUniqueArgs) => { // 同期読取コールバック / 完了記録読取の引数型
+                  const result = await delegate.findUnique(args); // 実DBの完了記録を読むメソッド
+                  const barrier = bridge.barrier;
+                  if (barrier && barrier.left > 0) {
+                    barrier.left -= 1;
+                    if (barrier.left === 0) {
+                      barrier.release(); // 2本の読取後に同期点を解除する関数
+                    }
+                    await barrier.wait;
+                  }
+                  return result;
+                }
+              );
+            }
+            if (method === "create" && bridge.mode === "constraint") {
+              return (
+                /**
+                 * 件数を0へ変えて実DBのCHECK違反を起こし、全件rollbackを要求する。
+                 */
+                async (args: Prisma.ClubEventBatchOperationCreateArgs) => delegate.create({ // 障害注入コールバック / 完了記録作成の引数型 / 実DB作成メソッド
+                  ...args,
+                  data: {
+                    ...args.data,
+                    createdCount: 0,
+                  },
+                })
+              );
+            }
+            const value = Reflect.get(delegate, method); // 実delegateのメソッドを取得する関数
+            return typeof value === "function" ? value.bind(delegate) : value; // 呼出し元を維持するbindメソッド
+          },
+        });
+      }
+      const value = Reflect.get(target, property); // 参照先を取得するメソッド
+      return typeof value === "function" ? value.bind(target) : value; // 呼出し元を維持してメソッドを返す関数
+    },
+  });
+}
+
+/**
+ * 実DBのcommit直前へP2034を注入し、実rollbackとRepositoryの有限再試行を照合する。
+ */
+async function transaction( // 実transactionとP2034注入を接続する関数
+  operation: Operation, // transaction処理の関数型
+  options?: Options // transaction設定型
+): Promise<unknown> { // 非同期結果の型 / 値が未確定の型
+  bridge.transactions += 1;
+  return database().$transaction( // 実DBのtransactionを実行するメソッド / 専用DB client取得関数
+    /**
+     * 実transaction内でRepositoryを実行し、指定回数だけcommit前にP2034を注入する。
+     */
+    async (tx) => { // 非同期処理を行うコールバック
+      const result = await operation(transactionProxy(tx)); // 受け取った試験またはRepository処理を実行する関数 / 実transactionの指定箇所へ障害を注入する関数
+      if (bridge.remaining > 0) {
+        bridge.remaining -= 1;
+        bridge.injected += 1;
+        throw new bridge.prisma!.PrismaClientKnownRequestError("F11 injected serialization failure", { // P2034を再現するPrisma例外のコンストラクター
+          code: "P2034",
+          clientVersion: "F11-test",
+        });
+      }
+      return result;
+    }, options);
+}
+
+vi.mock("@/src/infrastructure/prisma/client", // 対象モジュールを試験用の境界へ置き換える関数
+  /**
+   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
+   */
+  () => ({ // 処理を受け取るコールバック
+    prisma: new Proxy({} as PrismaClient, { // 実処理の参照を制御するコンストラクター / 専用DBクライアントの型
+      /**
+       * 受け取った参照先のメソッドを束縛し、試験用の転送先へ公開する。
+       */
+      get(_target, property) { // 参照先を制御するメソッドを定義
+        if (property === "$transaction") {
+          return transaction; // 実transactionとP2034注入を接続する関数
+        }
+        const client = database(); // 専用DB client取得関数
+        const value = Reflect.get(client, property); // 参照先を取得するメソッド
+        return typeof value === "function" ? value.bind(client) : value; // 呼出し元を維持してメソッドを返す関数
+      },
+    }),
+  }));
+
+/**
+ * dotenv・実Auth・Next・メールの誤ったimportを検出し、外部処理を行わせない。
+ */
+function forbidden(): never { // 外部依存の評価を拒否する関数 / 正常復帰しない型
+  bridge.external += 1;
+  throw new Error("F11 external dependency forbidden"); // 例外を生成するコンストラクター
+}
+vi.mock("dotenv/config", // 対象モジュールを試験用の境界へ置き換える関数
+  /**
+   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
+   */
+  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
+vi.mock("@/src/infrastructure/supabase/server", // 対象モジュールを試験用の境界へ置き換える関数
+  /**
+   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
+   */
+  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
+vi.mock("next/navigation", // 対象モジュールを試験用の境界へ置き換える関数
+  /**
+   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
+   */
+  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
+vi.mock("next/cache", // 対象モジュールを試験用の境界へ置き換える関数
+  /**
+   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
+   */
+  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
+vi.mock("@/lib/mail/resend", // 対象モジュールを試験用の境界へ置き換える関数
+  /**
+   * 共有client・dotenv・外部サービスを評価せず、試験専用の境界へ置き換える。
+   */
+  () => forbidden()); // 処理を受け取るコールバック / 外部依存の評価を拒否する関数
+
+describe("F11接続ガード（実DB・SDK・dotenvなし）", // 試験群を登録する関数
+  /**
+   * ガード単体試験、または明示flagで有効になる専用DBケースを登録する。
+   */
+  () => { // 処理を受け取るコールバック
+    it.each(["RUN_EVENT_PRACTICE_BATCH_TESTS", "RUN_DB_INTEGRATION_TESTS"])( // 値ごとの試験を登録する関数 / 値ごとに試験を登録する関数
+      "%sがない場合はDBケースを有効にしない",
+      /**
+       * 架空の設定を変更して接続前の拒否条件を確認する。
+       */
+      (field) => { // 処理を受け取るコールバック
+        const environment = sampleEnvironment(); // 架空の接続設定を作る関数
+        delete environment[field];
+        expect(enabled(environment)).toBe(false); // 一致を検証するメソッド / 期待値を取得する関数 / 専用の実行flagを照合する関数
+        expect( // 期待値を取得する関数
+          /**
+           * 不正な設定をガードへ渡し、接続前の例外を検証する。
+           */
+          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // ガード例外を検証するメソッド / 処理を受け取るコールバック / 使い捨てローカルDBの接続条件を検証する関数
+      },
+    );
+    it.each([ // 値ごとに試験を登録する関数
+      ["EVENT_PRACTICE_BATCH_DISPOSABLE", "0"],
+      ["NODE_ENV", "production"],
+      ["VERCEL_ENV", "production"],
+      ["DATABASE_URL", "private-invalid-url"],
+      ["DATABASE_URL", "https://fixture:fixture@127.0.0.1:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@remote.invalid:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@localhost.remote.invalid:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.invalid"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#"],
+      ["DATABASE_URL", " postgresql://fixture:fixture@127.0.0.1:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture@127.0.0.1:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.2:54322/postgres"],
+      ["PGHOST", "remote.invalid"],
+      ["PGOPTIONS", "private-options"],
+    ])("危険な設定%sを接続前に固定エラーで拒否する", // 値ごとの試験を登録する関数
+      /**
+       * 架空の設定を変更して接続前の拒否条件を確認する。
+       */
+      (field, value) => { // 処理を受け取るコールバック
+        const environment = sampleEnvironment(); // 架空の接続設定を作る関数
+        environment[field] = value;
+        expect( // 期待値を取得する関数
+          /**
+           * 不正な接続設定を渡し、ガードが例外を返すか検証する。
+           */
+          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // ガード例外を検証するメソッド / 処理を受け取るコールバック / 使い捨てローカルDBの接続条件を検証する関数
+      });
+    it.each(["localhost", "127.0.0.1"])("固定loopback %sだけを許可する", // 値ごとの試験を登録する関数 / 値ごとに試験を登録する関数
+      /**
+       * 架空の設定を変更して接続前の拒否条件を確認する。
+       */
+      (host) => { // 処理を受け取るコールバック
+        const environment = sampleEnvironment(); // 架空の接続設定を作る関数
+        environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
+        expect(localConfiguration(environment)).toBe(environment.DATABASE_URL); // 一致を検証するメソッド / 期待値を取得する関数 / 使い捨てローカルDBの接続条件を検証する関数
+      });
+    it("例外のmessage・causeを安全な失敗へ置き換える", // 試験を登録する関数
+      /**
+       * 接続ガードと固定エラーの振る舞いを、実DBなしで照合する。
+       */
+      async () => { // 非同期処理を行うコールバック
+        const error = await safeCheck( // 例外原文を固定メッセージへ置き換える関数
+          /**
+           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
+           */
+          async () => { // 非同期処理を行うコールバック
+            throw new Error("PRIVATE_SQL_TOKEN", { // 固定例外を生成するコンストラクター
+              cause: "PRIVATE_CONNECTION",
+            }); // 例外を生成するコンストラクター
+          }).catch( // 例外を検証用の値として受け取るメソッド
+            /**
+             * 例外を値として受け取り、messageとcauseの抑止を照合する。
+             */
+            (failure: unknown) => failure); // 処理を受け取るコールバック / 値が未確定の型
+        expect(error).toBeInstanceOf(Error); // 例外の種類を検証するメソッド / 期待値を取得する関数 / 例外のクラスを参照
+        expect(error).toHaveProperty("message", CHECK_ERROR); // プロパティの有無や値を検証するメソッド / 期待値を取得する関数
+        expect(error).not.toHaveProperty("cause"); // プロパティの有無や値を検証するメソッド / 期待値を取得する関数
+        expect(bridge.client).toBeUndefined(); // 未設定であることを検証するメソッド / 期待値を取得する関数
+        expect(bridge.external).toBe(0); // 一致を検証するメソッド / 期待値を取得する関数
+      });
+  });
+
+
+/**
+ * 自然の競合を確認するため、2本の実DB読取を同期する。P2034は注入しない。
+ */
+function synchronize() { // 実並列ケースの同期点を用意する関数
+  let complete!: () => void; // 同期解除の関数型
+  let fail!: (error: Error) => void; // 同期期限切れを返す関数型 / エラー型
+  const wait = new Promise<void>( // 待機Promiseのコンストラクター / 値を返さない型
+    /**
+     * 解除と期限切れの通知先を保持する。
+     */
+    (resolve, reject) => { // Promise初期化コールバック
+      complete = resolve;
+      fail = reject;
+    },
+  );
+  const timer = setTimeout( // 同期点の待機期限を設定する関数
+    /**
+     * 片方が同期点へ到達しない場合も、固定エラーで停止する。
+     */
+    () => fail(new Error(CHECK_ERROR)), // 期限切れ通知のコールバック / 通知関数 / 固定例外コンストラクター
+    5000,
+  );
+  bridge.barrier = {
+    left: 2,
+    wait,
+    /**
+     * 同期期限を解除し、待機中の実transactionを進める。
+     */
+    release() { // 同期点の解除メソッド
+      clearTimeout(timer); // 待機期限のタイマーを解除する関数
+      complete(); // 待機Promiseを完了させる関数
+    },
+  };
+}
+
+it.each(["0", "true", "01"])("専用flagは文字列1以外の%sで有効にしない", // flagの値ごとに試験を登録する関数
+  /**
+   * truthyな値でも実DB試験を有効にしない。
+   */
+  (value) => { // この試験の処理を行うコールバック
+    for (const field of ["RUN_EVENT_PRACTICE_BATCH_TESTS", "RUN_DB_INTEGRATION_TESTS"]) {
+      const environment = sampleEnvironment(); // 架空の接続設定を作る関数
+      environment[field] = value;
+      expect(enabled(environment)).toBe(false); // 取得値を比較するメソッド / 期待値を取得する関数 / 専用flagを検証する関数
+    }
+  });
+
+it("flagがない間はDATABASE_URLのgetterも評価しない", // 試験を登録する関数
+  /**
+   * ガード拒否前にURLを読む実装へ戻っていないことを確認する。
+   */
+  () => { // この試験の処理を行うコールバック
+    const environment: Environment = {}; // 接続ガード設定の型
+    const readUrl = vi.fn( // URL参照を検知するmock関数
+      /**
+       * URL参照を例外で検知する。
+       */
+      () => { // この試験の処理を行うコールバック
+        throw new Error("PRIVATE_CONNECTION"); // 固定例外を生成するコンストラクター
+      },
+    );
+    Object.defineProperty(environment, "DATABASE_URL", { // URL getterを検証用に設定するメソッド
+      enumerable: true,
+      get: readUrl,
+    });
+    expect(enabled(environment)).toBe(false); // 取得値を比較するメソッド / 期待値を取得する関数 / 専用flagを検証する関数
+    expect( // 期待値を取得する関数
+      /**
+       * flag不足はURL参照なしで固定エラーにする。
+       */
+      () => localConfiguration(environment), // この試験の処理を行うコールバック / 専用DBの接続ガードを検証する関数
+    ).toThrow(GUARD_ERROR); // 固定エラーを検証するメソッド
+    expect(readUrl).not.toHaveBeenCalled(); // URL参照の非実行を検証するメソッド / 期待値を取得する関数
+  });
+
+// flag判定では接続URL・dotenv・共有clientを評価しない。
+const describeDatabase = enabled(process.env) ? describe : describe.skip; // 専用flag判定関数 / 実DBケースを登録またはskipする関数
+describeDatabase("F11専用使い捨てDB統合（flag未指定はskip）", // 明示flagに応じて実DB試験を登録する関数
+  /**
+   * 実DBでF11とF10の完了記録・並列・rollback・制約の整合を照合する。
+   */
+  () => { // DBケース登録のコールバック
+    let fixture: Fixture | undefined; // 事前登録したfixtureまたは未設定の型
+    let read: typeof import("@/src/application/club/event/get-event-practice-batch"); // F11 preview Serviceのモジュール型
+    let write: typeof import("@/src/application/club/event/create-event-practice-batch"); // F11保存Serviceのモジュール型
+    let repository: typeof import("@/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository"); // F11保存Repositoryのモジュール型
+    let copyRead: typeof import("@/src/application/club/event/get-event-month-copy"); // F10 preview Serviceのモジュール型
+    let copyWrite: typeof import("@/src/application/club/event/copy-event-month"); // F10保存Serviceのモジュール型
+
+    /**
+     * 書込み前に登録済みのfixture IDだけを返す。
+     */
+    function current(): Fixture { // fixture取得関数 / fixture型
+      if (!fixture) {
+        throw new Error(CHECK_ERROR); // 固定例外コンストラクター
+      }
+      return fixture;
+    }
+
+    /**
+     * 登録済みの本人・所属・クラブから認可contextを用意する。実Authの代用ではない。
+     */
+    function context(club = 0, otherActor = false): ClubAccessContext { // context生成関数 / 認可context型
+      const f = current(); // fixture取得関数
+      return {
+        userId: f.users[otherActor ? 1 : 0],
+        club: {
+          id: f.clubs[club],
+          name: "F11 fixture",
+          slug: `f11-${f.clubs[club]}`,
+          timezone: "Asia/Tokyo",
+          planType: "STANDARD",
+        },
+        membership: {
+          id: f.memberships[club === 1 ? 2 : otherActor ? 1 : 0],
+          role: otherActor ? "COACH" : "OWNER",
+        },
+      };
+    }
+
+    /**
+     * 候補が1日となる共通入力を作る。最大件数のケースだけ期間と曜日を拡大する。
+     */
+    function common(): EventPracticeBatchCommonInput { // 共通入力生成関数 / 正規化済み共通入力型
+      return {
+        targetMonth: MONTH,
+        periodStart: "2026-01-01",
+        periodEnd: "2026-01-01",
+        weekdays: [4],
+        title: "F11 fixture practice",
+        startTime: "09:00",
+        endTime: "12:00",
+        location: "fixture field",
+        meetingTime: "08:30",
+        meetingLocation: "fixture gate",
+        targetRoles: ["OWNER", "MEMBER"],
+      };
+    }
+
+    /**
+     * 実previewの正規化入力・選択日・照合値から保存入力を作る。
+     */
+    async function input( // F11保存入力生成関数
+      values = common(), // 共通入力生成関数
+      actor = context(), // 認可context生成関数
+      selected?: readonly string[], // 明示選択する日付の読取専用文字列配列型
+    ): Promise<EventPracticeBatchInput> { // F11保存入力を返す非同期型
+      const preview = await read.getEventPracticeBatchPreview(actor, values); // F11 preview取得Service関数
+      if (preview.outcome !== "READY") {
+        throw new Error(CHECK_ERROR); // 固定例外コンストラクター
+      }
+      return {
+        ...preview.input,
+        selectedDates: selected ?? preview.items.filter( // 初期選択の候補を抽出するメソッド
+          /**
+           * 除外日や既存一致の初期未選択をそのまま採用する。
+           */
+          (item) => item.initiallySelected, // 初期選択判定のコールバック
+        ).map( // 候補を選択日へ変換するメソッド
+          /**
+           * 選択値は元IDではなく現地日付とする。
+           */
+          (item) => item.date, // 日付抽出のコールバック
+        ),
+        requestId: randomUUID(), // 新しい操作UUIDを作る関数
+        previewFingerprint: preview.fingerprint,
+      };
+    }
+
+    /**
+     * fixtureクラブの生成イベントだけを取得し、事前登録した元・重複fixtureは除く。
+     */
+    async function generated(club = 0): Promise<ClubEvent[]> { // 生成イベント取得関数 / イベント行配列を返す非同期型
+      return database().clubEvent.findMany({ // 専用client取得関数 / 生成イベント読取メソッド
+        where: {
+          clubId: current().clubs[club], // fixture取得関数
+          id: {
+            notIn: [...current().events], // 登録済みfixtureを取得する関数
+          }, // fixture取得関数
+        },
+        orderBy: {
+          startAt: "asc",
+        },
+      });
+    }
+
+    /**
+     * 指定したfixtureクラブの生成件数と完了記録数を照合する。
+     */
+    async function counts( // fixtureの保存件数を照合する関数
+      events: number, // 期待する生成件数の数値型
+      records: number, // 期待する完了記録数の数値型
+      club = 0,
+    ): Promise<void> { // 戻り値のない非同期型
+      expect(await generated(club)).toHaveLength(events); // 期待値生成関数 / 生成イベント取得関数 / 件数検証メソッド
+      expect(await database().clubEventBatchOperation.count({ // 期待値生成関数 / 専用client取得関数 / 記録件数取得メソッド
+        where: {
+          clubId: current().clubs[club], // 登録済みfixtureを取得する関数
+        }, // fixture取得関数
+      })).toBe(records); // 記録件数の比較メソッド
+    }
+
+    /**
+     * F10用の前月イベントを、UUID登録後に作成する。
+     */
+    async function sources(count: number): Promise<ClubEvent[]> { // 前月イベント生成関数 / 件数の数値型 / イベント配列を返す非同期型
+      const f = current(); // fixture取得関数
+      const data = Array.from({ // 指定件数分の選択値を作るメソッド
+        length: count,
+      }, // 元予定を件数分生成するメソッド
+        /**
+         * cleanup対象IDを先に登録し、候補同士が一致しない元予定を作る。
+         */
+        () => { // 元予定生成のコールバック
+          const id = randomUUID(); // 元予定のUUID生成関数
+          f.events.add(id); // 書込み前にイベントIDを登録するメソッド
+          return {
+            id,
+            clubId: f.clubs[0],
+            title: `F10 coexistence ${id}`,
+            targetRoles: ["OWNER" as const], // 公開対象のリテラル型
+            startAt: new Date("2025-12-15T01:00:00.000Z"), // 前月の開始日時コンストラクター
+            createdByMembershipId: f.memberships[0],
+            updatedByMembershipId: f.memberships[0],
+          };
+        },
+      );
+      await database().clubEvent.createMany({ // 元予定をDBへ一括保存するメソッド / ガード済みの専用DB clientを取得する関数
+        data,
+      }); // 専用client取得関数 / 元予定の一括作成メソッド
+      return database().clubEvent.findMany({ // 専用client取得関数 / 登録済み元予定の読取メソッド
+        where: {
+          id: {
+            in: data.map( // 登録済み元IDへ変換するメソッド
+              /**
+               * この呼出しで作った元予定だけを取得する。
+               */
+              (row) => row.id, // 元ID抽出のコールバック
+            ),
+          },
+        },
+      });
+    }
+
+    /**
+     * 実F10 previewから同じledgerを使う保存入力を作る。
+     */
+    async function copyInput(): Promise<EventMonthCopyInput> { // F10保存入力生成関数 / 前月複製入力を返す非同期型
+      const preview = await copyRead.getEventMonthCopyPreview(context(), MONTH); // F10 preview Service関数 / context生成関数
+      if (preview.outcome !== "READY") {
+        throw new Error(CHECK_ERROR); // 固定例外コンストラクター
+      }
+      return {
+        targetMonth: MONTH,
+        requestId: randomUUID(), // 新しい操作ID生成関数
+        previewFingerprint: preview.fingerprint,
+        selectedEventIds: preview.items.map( // 元予定IDへ変換するメソッド
+          /**
+           * 登録したF10候補を明示選択する。
+           */
+          (item) => item.sourceEventId, // 元予定ID抽出のコールバック
+        ),
+      };
+    }
+
+    /**
+     * SQL・接続・assertionの原文を固定メッセージへ置換したDBケースを登録する。
+     */
+    function dbCase(name: string, check: () => Promise<void>): void { // DBケース登録関数 / 見出しの文字列型 / 非同期検証の関数型 / 戻り値なし型
+      it(name, // DBケースを登録する関数
+        /**
+         * 実DB検証を固定エラー境界で実行する。
+         */
+        async () => safeCheck(check), // DB検証の非同期コールバック / 固定エラー境界の関数
+        60_000,
+      );
+    }
+    beforeAll( // ガード後の初期化を登録する関数
+      /**
+       * 全ガード条件を確認した後だけ専用clientと対象Serviceを初期化する。
+       */
+      async () => { // 非同期処理を行うコールバック
+        await safeCheck( // 例外原文を固定メッセージへ置き換える関数
+          /**
+           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
+           */
+          async () => { // 非同期処理を行うコールバック
+            const connectionString = localConfiguration(process.env); // 使い捨てローカルDBの接続条件を検証する関数
+            const prismaModule = await import("@prisma/client"); // ガード後に実装モジュールを遅延読込みする関数
+            const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後に実装モジュールを遅延読込みする関数
+            const db = new prismaModule.PrismaClient({ // 専用DBクライアントを生成するコンストラクター
+              adapter: new PrismaPg({ // 専用PostgreSQL接続を構成するコンストラクター
+                connectionString,
+                max: 4,
+                connectionTimeoutMillis: 3000,
+              }),
+              log: [],
+            });
+            bridge.client = db;
+            bridge.prisma = prismaModule.Prisma;
+            await db.$connect(); // ガード後の専用DBへ接続するメソッド
+            const metadata = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
+              database: string; // 文字列型
+              ledger: string | null; // 文字列型
+            }[]>
+              `
+        SELECT current_database() AS database,
+          to_regclass('public."ClubEventBatchOperation"')::text AS ledger
+      `;
+            expect(metadata[0].database).toBe("postgres"); // 一致を検証するメソッド / 期待値を取得する関数
+            expect(metadata[0].ledger).not.toBeNull(); // nullであることを検証するメソッド / 期待値を取得する関数
+            const checks = await db.$queryRaw<{ // 操作別CHECK定義を取得するメソッド
+              definition: string; // CHECK定義の文字列型
+            }[]>`
+              SELECT pg_get_constraintdef(oid) AS definition
+              FROM pg_constraint
+              WHERE conrelid = 'public."ClubEventBatchOperation"'::regclass
+                AND conname = 'ClubEventBatchOperation_operation_check'
+            `;
+            expect(checks[0]?.definition).toContain("CREATE_PRACTICE_BATCH"); // 期待値生成関数 / F11 migration適用の検証メソッド
+
+            read = await import("@/src/application/club/event/get-event-practice-batch"); // ガード後に実装モジュールを遅延読込みする関数
+            write = await import("@/src/application/club/event/create-event-practice-batch"); // ガード後に実装モジュールを遅延読込みする関数
+            repository = await import( // ガード後に実装モジュールを遅延読込みする関数
+              "@/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository",
+            ); // ガード後に実装モジュールを遅延読込みする関数
+            copyRead = await import("@/src/application/club/event/get-event-month-copy"); // F10 preview Serviceを遅延読込みする関数
+            copyWrite = await import("@/src/application/club/event/copy-event-month"); // F10保存Serviceをガード後に遅延読込みする関数
+          });
+      }, 20_000);
+
+    beforeEach( // fixtureの準備を登録する関数
+      /**
+       * 作成前にfixture UUIDを登録し、このケースの専用データだけを用意する。
+       */
+      async () => { // 非同期処理を行うコールバック
+        bridge.mode = "none";
+        bridge.injected = 0;
+        bridge.barrier?.release(); // 残った同期点を解除する関数
+        bridge.barrier = undefined;
+        bridge.remaining = 0;
+        bridge.transactions = 0;
+        await safeCheck( // 例外原文を固定メッセージへ置き換える関数
+          /**
+           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
+           */
+          async () => { // 非同期処理を行うコールバック
+            fixture = {
+              clubs: [randomUUID(), randomUUID()], // UUIDを生成する関数
+              users: [randomUUID(), randomUUID()], // UUIDを生成する関数
+              memberships: [randomUUID(), randomUUID(), randomUUID()], // UUIDを生成する関数
+              events: new Set(), // 重複のない集合を生成するコンストラクター
+            };
+            const f = current(); // 事前登録したfixture IDを取得する関数
+            await database().club.createMany({ // fixtureまたは生成予定をDBへ保存するメソッド / 専用DB client取得関数
+              data: f.clubs.map( // 各要素を必要な値へ写すメソッド
+                /**
+                 * fixture IDや取得結果を、保存・照合に必要な値へ写す。
+                 */
+                (id) => ({ // 処理を受け取るコールバック
+                  id,
+                  name: "F11 fixture",
+                  slug: `f11-${id}`,
+                  timezone: "Asia/Tokyo",
+                  planType: "STANDARD",
+                })),
+            });
+            await database().appUser.createMany({ // fixtureまたは生成予定をDBへ保存するメソッド / 専用DB client取得関数
+              data: f.users.map( // 各要素を必要な値へ写すメソッド
+                /**
+                 * fixture IDや取得結果を、保存・照合に必要な値へ写す。
+                 */
+                (id) => ({ // 処理を受け取るコールバック
+                  id,
+                  email: `${id}@fixture.example.test`,
+                })),
+            });
+            await database().clubMembership.createMany({ // fixtureまたは生成予定をDBへ保存するメソッド / 専用DB client取得関数
+              data: [
+                {
+                  id: f.memberships[0],
+                  clubId: f.clubs[0],
+                  userId: f.users[0],
+                  role: "OWNER",
+                },
+                {
+                  id: f.memberships[1],
+                  clubId: f.clubs[0],
+                  userId: f.users[1],
+                  role: "COACH",
+                },
+                {
+                  id: f.memberships[2],
+                  clubId: f.clubs[1],
+                  userId: f.users[0],
+                  role: "OWNER",
+                },
+              ],
+            });
+          });
+      }, 30_000);
+
+    afterEach( // fixture限定の削除処理を登録する関数
+      /**
+       * 障害注入を解除し、登録済みfixtureのクラブ・ユーザーだけをcleanupする。
+       */
+      async () => { // 非同期処理を行うコールバック
+        bridge.mode = "none";
+        bridge.injected = 0;
+        bridge.barrier?.release(); // 残った同期点を解除する関数
+        bridge.barrier = undefined;
+        bridge.remaining = 0;
+        const f = fixture;
+        fixture = undefined;
+        if (!f) {
+          return;
+        }
+        await safeCheck( // 例外原文を固定メッセージへ置き換える関数
+          /**
+           * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
+           */
+          async () => { // 非同期処理を行うコールバック
+            try {
+              // DB生成IDの行も登録済みfixtureクラブだけに限定して削除する。
+              await database().clubLineDelivery.deleteMany({ // 登録済みfixtureのDB行だけを削除するメソッド / ガード済みの専用DB clientを取得する関数
+                where: {
+                  clubId: {
+                    in: f.clubs,
+                  },
+                },
+              }); // 事前登録したfixture範囲をDBから削除するメソッド / 専用DB client取得関数
+              await database().club.deleteMany({ // 登録済みfixtureのDB行だけを削除するメソッド / ガード済みの専用DB clientを取得する関数
+                where: {
+                  id: {
+                    in: f.clubs,
+                  },
+                },
+              }); // 事前登録したfixture範囲をDBから削除するメソッド / 専用DB client取得関数
+            } finally {
+              await database().appUser.deleteMany({ // 登録済みfixtureのDB行だけを削除するメソッド / ガード済みの専用DB clientを取得する関数
+                where: {
+                  id: {
+                    in: f.users,
+                  },
+                },
+              }); // 事前登録したfixture範囲をDBから削除するメソッド / 専用DB client取得関数
+            }
+            expect(bridge.external).toBe(0); // 一致を検証するメソッド / 期待値を取得する関数
+          });
+      }, 30_000);
+
+    afterAll( // 専用接続の切断を登録する関数
+      /**
+       * 生成済みの専用clientだけを切断する。
+       */
+      async () => { // 非同期処理を行うコールバック
+        const db = bridge.client;
+        bridge.client = undefined;
+        if (db) {
+          await safeCheck( // 例外原文を固定メッセージへ置き換える関数
+            /**
+             * 専用DBの接続・fixture・照合・cleanupを行い、例外原文を外へ出さない。
+             */
+            async () => { // 非同期処理を行うコールバック
+              await db.$disconnect(); // 専用DB接続を閉じるメソッド
+            });
+        }
+      });
+
+    dbCase("31件を一体保存し、下書き・実行所属・非コピー項目をDBで確認する", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 実previewと生成行を照合し、通知・添付・既読・メモを作らないことを確認する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const values = {
+          ...common(), // 定期練習の共通入力を作る関数
+          periodEnd: "2026-01-31",
+          weekdays: [0, 1, 2, 3, 4, 5, 6] as const, // 値を固定する読取専用リテラル型
+        };
+        const preview = await read.getEventPracticeBatchPreview(context(), values); // 定期練習の実preview取得Service関数 / fixtureの認可contextを作る関数
+        if (preview.outcome !== "READY") {
+          throw new Error(CHECK_ERROR); // 固定例外を生成するコンストラクター
+        }
+        expect(preview.items).toHaveLength(31); // 行数または選択数を比較するメソッド / 期待値を取得する関数
+        const request = await input(values); // 実previewから保存入力を作る関数
+        const result = await write.createEventPracticeBatch(context(), request); // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        expect(result).toEqual({ // 取得結果の構造と値を比較するメソッド / 期待値を取得する関数
+          outcome: "CREATED",
+          receipt: {
+            targetMonth: MONTH,
+            createdCount: 31,
+          },
+        });
+        const events = await database().clubEvent.findMany({ // 対象クラブのDB行を取得するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            clubId: current().clubs[0], // 登録済みfixtureを取得する関数
+          },
+          orderBy: {
+            startAt: "asc",
+          },
+          include: {
+            attachments: true,
+            reads: true,
+            personalMemos: true,
+            lineDeliveries: true,
+          },
+        });
+        expect(events).toHaveLength(31); // 行数または選択数を比較するメソッド / 期待値を取得する関数
+        for (const [index, event] of events.entries()) { // 位置とDB行を順に取得するメソッド
+          expect(event).toMatchObject({ // 必要なDB列や結果を部分比較するメソッド / 期待値を取得する関数
+            genre: "PRACTICE",
+            status: "DRAFT",
+            title: values.title,
+            targetRoles: [...request.targetRoles],
+            location: values.location,
+            meetingLocation: values.meetingLocation,
+            content: null,
+            belongings: null,
+            notes: null,
+            isAllDay: false,
+            firstPublishedAt: null,
+            readRequiredAt: null,
+            createdByMembershipId: current().memberships[0], // 登録済みfixtureを取得する関数
+            updatedByMembershipId: current().memberships[0], // 登録済みfixtureを取得する関数
+            attachments: [],
+            reads: [],
+            personalMemos: [],
+            lineDeliveries: [],
+          });
+          expect(event.startAt.toISOString()).toBe(preview.items[index].dates?.startAt); // 取得値を比較するメソッド / 期待値を取得する関数 / UTC日時をISO文字列へ変換するメソッド
+          expect(event.endAt?.toISOString()).toBe(preview.items[index].dates?.endAt); // 取得値を比較するメソッド / 期待値を取得する関数 / UTC日時をISO文字列へ変換するメソッド
+          expect(event.meetingAt?.toISOString()).toBe(preview.items[index].dates?.meetingAt); // 取得値を比較するメソッド / 期待値を取得する関数 / UTC日時をISO文字列へ変換するメソッド
+        }
+        const ledger = await database().clubEventBatchOperation.findFirstOrThrow({ // 対象クラブの完了記録を取得するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            clubId: current().clubs[0], // 登録済みfixtureを取得する関数
+            requestId: request.requestId,
+          },
+        });
+        expect(ledger).toMatchObject({ // 必要なDB列や結果を部分比較するメソッド / 期待値を取得する関数
+          operation: "CREATE_PRACTICE_BATCH",
+          targetMonth: MONTH,
+          createdCount: 31,
+          executedByMembershipId: current().memberships[0], // 登録済みfixtureを取得する関数
+        });
+        expect(ledger.completedAt).toBeInstanceOf(Date); // 日時または例外の実行時型を検証するメソッド / 期待値を取得する関数
+        await counts(31, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("32件の選択を拒否し、イベント・完了記録を残さない", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 同月内の候補は最大31件のため、32件の不正保存入力を直接検証する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        const dates = Array.from({ // 指定件数分の選択値を作るメソッド
+          length: 32,
+        },
+          /**
+           * 件数検証を超える32個の値を送る。
+           */
+          (_, index) => `2026-01-${String(index + 1).padStart(2, "0")}`, // この試験の処理を行うコールバック / 日を2桁へ揃えるメソッド / 連番を文字列へ変換する関数
+        );
+        const result = await write.createEventPracticeBatch(context(), { // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          ...request,
+          selectedDates: dates,
+        });
+        expect(result.outcome).toBe("VALIDATION_FAILED"); // 取得値を比較するメソッド / 期待値を取得する関数
+        await counts(0, 0); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("生成後の編集・削除後も同じ操作のreceiptを再送できる", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 現在のイベント内容・存在ではなく完了記録からreplayすることを確認する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        const [event] = await generated(); // fixtureクラブの生成イベントを読む関数
+        await database().clubEvent.update({ // fixtureの指定したDB行を更新するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            id: event.id,
+          },
+          data: {
+            title: "fixture edited",
+          },
+        });
+        expect((await write.createEventPracticeBatch(context(), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          .toBe("ALREADY_COMPLETED"); // 取得値を比較するメソッド
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+        await database().clubEvent.delete({ // fixtureの指定したDB行を削除するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            id: event.id,
+          },
+        });
+        const replay = await write.createEventPracticeBatch(context(), request); // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        expect(replay).toMatchObject({ // 必要なDB列や結果を部分比較するメソッド / 期待値を取得する関数
+          outcome: "ALREADY_COMPLETED",
+          receipt: {
+            createdCount: 1,
+          },
+        });
+        await counts(0, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("同一操作IDの実並列送信は1組だけ保存し、同じ入力で完了を確認できる", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 実transactionを読取後に同期し、P2034注入なしで競合させる。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        synchronize(); // 実DB読取を同期する関数
+        const results = await Promise.all([ // 複数の実保存処理を並列実行するメソッド
+          write.createEventPracticeBatch(context(), request), // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          write.createEventPracticeBatch(context(), request), // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        ]);
+        expect(bridge.barrier?.left).toBe(0); // 取得値を比較するメソッド / 期待値を取得する関数
+        expect(bridge.injected).toBe(0); // 取得値を比較するメソッド / 期待値を取得する関数
+        expect(results.filter( // 期待値を取得する関数 / 新規作成した応答だけを抽出するメソッド
+          /**
+           * 新規作成として確定した応答数を数える。
+           */
+          (result) => result.outcome === "CREATED", // この試験の処理を行うコールバック
+        )).toHaveLength(1); // 行数または選択数を比較するメソッド
+        for (const result of results) {
+          expect(["CREATED", "ALREADY_COMPLETED", "RESULT_UNKNOWN"]).toContain(result.outcome); // 許可値や定義の含有を検証するメソッド / 期待値を取得する関数
+        }
+        expect((await write.createEventPracticeBatch(context(), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          .toBe("ALREADY_COMPLETED"); // 取得値を比較するメソッド
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("異なる操作IDで同じpreviewを実並列保存すると片方はPREVIEW_CHANGEDとなる", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * Serializable競合後に再読取し、増えた既存一致を古いpreviewで保存しない。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        synchronize(); // 実DB読取を同期する関数
+        const results = await Promise.all([ // 複数の実保存処理を並列実行するメソッド
+          write.createEventPracticeBatch(context(), request), // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          write.createEventPracticeBatch(context(), { // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            ...request,
+            requestId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+          }),
+        ]);
+        expect(bridge.barrier?.left).toBe(0); // 取得値を比較するメソッド / 期待値を取得する関数
+        expect(bridge.injected).toBe(0); // 取得値を比較するメソッド / 期待値を取得する関数
+        expect(results.map( // 期待値を取得する関数 / 比較する結果の値へ変換するメソッド
+          /**
+           * 実際の並列処理結果だけを順不同で比較する。
+           */
+          (result) => result.outcome, // この試験の処理を行うコールバック
+        ).sort()).toEqual(["CREATED", "PREVIEW_CHANGED"]); // 取得結果の構造と値を比較するメソッド / 応答順に依存せず並べ替えるメソッド
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    for (const mode of ["count", "constraint"] as const) { // 値を固定する読取専用リテラル型
+      dbCase(`${mode}障害では部分保存をrollbackし、同じ入力で再試行できる`, // 固定エラー境界でDB試験を登録する関数
+        /**
+         * 件数不一致と完了記録CHECK違反を、イベント実書込み後に起こす。
+         */
+        async () => { // この試験の処理を行うコールバック
+          const request = await input(); // 実previewから保存入力を作る関数
+          bridge.mode = mode;
+          const result = await write.createEventPracticeBatch(context(), request); // 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          expect(result.outcome).toBe(mode === "count" ? "CREATE_FAILED" : "RESULT_UNKNOWN"); // 取得値を比較するメソッド / 期待値を取得する関数
+          await counts(0, 0); // 生成件数と完了記録数を照合する関数
+          bridge.mode = "none";
+          expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            "CREATED",
+          ); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          await counts(1, 1); // 生成件数と完了記録数を照合する関数
+        });
+    }
+
+    dbCase("注入P2034は有限回再試行し、rollback後の1組だけを保存する", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 自然な並列競合とは分け、commit直前の障害を2回注入する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        bridge.remaining = 2;
+        expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        expect(bridge.injected).toBe(2); // 取得値を比較するメソッド / 期待値を取得する関数
+        expect(bridge.transactions).toBe(3); // 取得値を比較するメソッド / 期待値を取得する関数
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("注入P2034が上限に達したら結果不明とし、同じ入力の再送で確認する", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 初回と最大3回の再試行で止め、新しい操作IDを生成せず再確認する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        bridge.remaining = 4;
+        expect((await write.createEventPracticeBatch(context(), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          .toBe("RESULT_UNKNOWN"); // 取得値を比較するメソッド
+        expect(bridge.injected).toBe(4); // 取得値を比較するメソッド / 期待値を取得する関数
+        expect(bridge.transactions).toBe(4); // 取得値を比較するメソッド / 期待値を取得する関数
+        await counts(0, 0); // 生成件数と完了記録数を照合する関数
+        expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        expect((await write.createEventPracticeBatch(context(), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          .toBe("ALREADY_COMPLETED"); // 取得値を比較するメソッド
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    for (const change of ["role", "membership", "STARTER", "PRO"] as const) { // 値を固定する読取専用リテラル型
+      dbCase(`${change}の最新認可をreplay・新規操作の両方で再確認する`, // 固定エラー境界でDB試験を登録する関数
+        /**
+         * 取得済みcontextを信用せず、保存時点の所属・ロール・プランで拒否する。
+         */
+        async () => { // この試験の処理を行うコールバック
+          const request = await input(); // 実previewから保存入力を作る関数
+          expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            "CREATED",
+          ); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          if (change === "role" || change === "membership") {
+            await database().clubMembership.update({ // fixtureの指定したDB行を更新するメソッド / ガード済みの専用DB clientを取得する関数
+              where: {
+                id: current().memberships[0], // 登録済みfixtureを取得する関数
+              },
+              data: change === "role" ? {
+                role: "MEMBER",
+              } : {
+                status: "WITHDRAWN",
+              },
+            });
+          } else {
+            await database().club.update({ // fixtureの指定したDB行を更新するメソッド / ガード済みの専用DB clientを取得する関数
+              where: {
+                id: current().clubs[0], // 登録済みfixtureを取得する関数
+              },
+              data: {
+                planType: change,
+              },
+            });
+          }
+          expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            "FORBIDDEN",
+          ); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          expect((await write.createEventPracticeBatch(context(), { // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            ...request,
+            requestId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+          })).outcome).toBe("FORBIDDEN"); // 取得値を比較するメソッド
+          await counts(1, 1); // 生成件数と完了記録数を照合する関数
+        });
+    }
+
+    dbCase("preview後のtimezone変更を検出し保存しない", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 時差を変えた最新DB設定と古い照合値の不一致を確認する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        await database().club.update({ // fixtureの指定したDB行を更新するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            id: current().clubs[0], // 登録済みfixtureを取得する関数
+          },
+          data: {
+            timezone: "America/New_York",
+          },
+        });
+        expect((await write.createEventPracticeBatch(context(), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          .toBe("PREVIEW_CHANGED"); // 取得値を比較するメソッド
+        await counts(0, 0); // 生成件数と完了記録数を照合する関数
+      });
+
+    for (const status of ["DRAFT", "PUBLISHED"] as const) { // 値を固定する読取専用リテラル型
+      dbCase(`${status}の完全一致追加を検出し、新previewでの明示選択は許可する`, // 固定エラー境界でDB試験を登録する関数
+        /**
+         * 公開状態を問わない一致検出と、意図した重複作成の許可を実DBで照合する。
+         */
+        async () => { // この試験の処理を行うコールバック
+          const request = await input(); // 実previewから保存入力を作る関数
+          const id = randomUUID(); // 操作またはfixtureのUUIDを生成する関数
+          current().events.add(id); // 書込み前にfixture IDを登録するメソッド / 登録済みfixtureを取得する関数
+          await database().clubEvent.create({ // fixtureまたは完了記録をDBへ保存するメソッド / ガード済みの専用DB clientを取得する関数
+            data: {
+              id,
+              clubId: current().clubs[0], // 登録済みfixtureを取得する関数
+              status,
+              genre: "PRACTICE",
+              title: request.title,
+              targetRoles: [...request.targetRoles],
+              startAt: new Date("2026-01-01T00:00:00.000Z"), // UTC日時のコンストラクターまたはクラス
+              endAt: new Date("2026-01-01T03:00:00.000Z"), // UTC日時のコンストラクターまたはクラス
+              meetingAt: new Date("2025-12-31T23:30:00.000Z"), // UTC日時のコンストラクターまたはクラス
+              location: request.location,
+              meetingLocation: request.meetingLocation,
+            },
+          });
+          expect((await write.createEventPracticeBatch(context(), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            .toBe("PREVIEW_CHANGED"); // 取得値を比較するメソッド
+          await counts(0, 0); // 生成件数と完了記録数を照合する関数
+          const preview = await read.getEventPracticeBatchPreview(context(), common()); // 定期練習の実preview取得Service関数 / fixtureの認可contextを作る関数 / 定期練習の共通入力を作る関数
+          if (preview.outcome !== "READY") {
+            throw new Error(CHECK_ERROR); // 固定例外を生成するコンストラクター
+          }
+          expect(preview.items[0]).toMatchObject({ // 必要なDB列や結果を部分比較するメソッド / 期待値を取得する関数
+            duplicate: true,
+            initiallySelected: false,
+          });
+          const explicit = await input(common(), context(), ["2026-01-01"]); // 実previewから保存入力を作る関数 / 定期練習の共通入力を作る関数 / fixtureの認可contextを作る関数
+          expect((await write.createEventPracticeBatch(context(), explicit)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            "CREATED",
+          ); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          await counts(1, 1); // 生成件数と完了記録数を照合する関数
+        });
+    }
+
+    dbCase("他クラブの所属IDを混ぜたscopeをRepositoryでも拒否する", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 同じAuth本人でも異なるクラブの所属を対象クラブへ流用しない。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        const actor = context(); // fixtureの認可contextを作る関数
+        actor.membership.id = current().memberships[2]; // 登録済みfixtureを取得する関数
+        expect((await read.getEventPracticeBatchPreview(actor, common())).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 定期練習の実preview取得Service関数 / 定期練習の共通入力を作る関数
+          "FORBIDDEN",
+        ); // 取得値を比較するメソッド / 期待値を取得する関数 / 定期練習の実preview取得Service関数 / 定期練習の共通入力を作る関数
+        const result = await repository.createEventPracticeBatch({ // 最新認可と一体保存を行うRepository関数
+          clubId: actor.club.id,
+          membershipId: actor.membership.id,
+          userId: actor.userId,
+        }, request);
+        expect(result.outcome).toBe("FORBIDDEN"); // 取得値を比較するメソッド / 期待値を取得する関数
+        await counts(0, 0); // 生成件数と完了記録数を照合する関数
+        await counts(0, 0, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("同じ操作IDの入力・実行所属の変更はCONFLICTとなる", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 操作IDが同じでも異なる内容や別の実行者の保存済み結果を返さない。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        expect((await write.createEventPracticeBatch(context(), { // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          ...request,
+          title: "fixture different input",
+        })).outcome).toBe("CONFLICT"); // 取得値を比較するメソッド
+        expect((await write.createEventPracticeBatch(context(0, true), request)).outcome) // 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          .toBe("CONFLICT"); // 取得値を比較するメソッド
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("実行所属削除後もSetNullで完了記録と生成イベントを残す", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * 履歴や予定の連鎖削除を避け、実行者参照だけがnullになることを確認する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const request = await input(); // 実previewから保存入力を作る関数
+        expect((await write.createEventPracticeBatch(context(), request)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        const before = await database().clubEventBatchOperation.findFirstOrThrow({ // 対象クラブの完了記録を取得するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            clubId: current().clubs[0], // 登録済みfixtureを取得する関数
+          },
+        });
+        await database().clubMembership.delete({ // fixtureの指定したDB行を削除するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            id: current().memberships[0], // 登録済みfixtureを取得する関数
+          },
+        });
+        const after = await database().clubEventBatchOperation.findUniqueOrThrow({ // 完了記録をIDで取得するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            id: before.id,
+          },
+        });
+        expect(after).toEqual({ // 取得結果の構造と値を比較するメソッド / 期待値を取得する関数
+          ...before,
+          executedByMembershipId: null,
+        });
+        expect((await generated())[0]).toMatchObject({ // 必要なDB列や結果を部分比較するメソッド / 期待値を取得する関数 / fixtureクラブの生成イベントを読む関数
+          createdByMembershipId: null,
+          updatedByMembershipId: null,
+        });
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("操作別CHECK・同クラブunique・実行所属FK・clubId不変をDB自身で検証する", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * Prismaでは表現できない制約を直接書込みで確認し、F10の100件上限も保持する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const db = database(); // ガード済みの専用DB clientを取得する関数
+        const base = {
+          id: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+          clubId: current().clubs[0], // 登録済みfixtureを取得する関数
+          requestId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+          operation: "CREATE_PRACTICE_BATCH",
+          targetMonth: MONTH,
+          inputHash: "ab".repeat(32), // 照合用の文字列を繰り返すメソッド
+          executedByMembershipId: current().memberships[0], // 登録済みfixtureを取得する関数
+          createdCount: 1,
+          completedAt: new Date(), // UTC日時のコンストラクターまたはクラス
+        };
+        await db.clubEventBatchOperation.create({ // fixtureまたは完了記録をDBへ保存するメソッド
+          data: base,
+        });
+        await expect(db.clubEventBatchOperation.create({ // 期待値を取得する関数 / fixtureまたは完了記録をDBへ保存するメソッド
+          data: {
+            ...base,
+            id: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+          },
+        })).rejects.toBeDefined(); // DB書込みが例外で拒否されたことを検証するメソッド
+        await expect(db.clubEventBatchOperation.update({ // 期待値を取得する関数 / fixtureの指定したDB行を更新するメソッド
+          where: {
+            id: base.id,
+          },
+          data: {
+            clubId: current().clubs[1], // 登録済みfixtureを取得する関数
+          },
+        })).rejects.toBeDefined(); // DB書込みが例外で拒否されたことを検証するメソッド
+        const invalid: Partial<Prisma.ClubEventBatchOperationUncheckedCreateInput>[] = [ // 指定したDB列だけを上書きする部分型 / 外部キーを含む完了記録作成の入力型
+          {
+            createdCount: 0,
+          },
+          {
+            createdCount: 32,
+          },
+          {
+            operation: "OTHER",
+          },
+          {
+            targetMonth: "2026-13",
+          },
+          {
+            targetMonth: "0000-01",
+          },
+          {
+            inputHash: "AB".repeat(32), // 照合用の文字列を繰り返すメソッド
+          },
+          {
+            inputHash: "ab".repeat(31), // 照合用の文字列を繰り返すメソッド
+          },
+          {
+            requestId: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+          },
+          {
+            requestId: "aaaaaaaa-aaaa-1aaa-8aaa-aaaaaaaaaaaa",
+          },
+          {
+            executedByMembershipId: current().memberships[2], // 登録済みfixtureを取得する関数
+          },
+          {
+            executedByMembershipId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+          },
+          {
+            operation: "COPY_PREVIOUS_MONTH",
+            createdCount: 101,
+          },
+          {
+            operation: "COPY_PREVIOUS_MONTH",
+            targetMonth: "0001-01",
+          },
+        ];
+        for (const change of invalid) {
+          await expect(db.clubEventBatchOperation.create({ // 期待値を取得する関数 / fixtureまたは完了記録をDBへ保存するメソッド
+            data: {
+              ...base,
+              id: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+              requestId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+              ...change,
+            },
+          })).rejects.toBeDefined(); // DB書込みが例外で拒否されたことを検証するメソッド
+        }
+        await db.clubEventBatchOperation.create({ // fixtureまたは完了記録をDBへ保存するメソッド
+          data: {
+            ...base,
+            id: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+            requestId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+            targetMonth: "0001-01",
+            createdCount: 31,
+          },
+        });
+        await db.clubEventBatchOperation.create({ // fixtureまたは完了記録をDBへ保存するメソッド
+          data: {
+            ...base,
+            id: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+            requestId: randomUUID(), // 操作またはfixtureのUUIDを生成する関数
+            operation: "COPY_PREVIOUS_MONTH",
+            createdCount: 100,
+          },
+        });
+        await counts(0, 3); // 生成件数と完了記録数を照合する関数
+      });
+
+    dbCase("F10の前月複製は引き続き100件を一体保存できる", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * F11追加後も同じledgerのF10操作別上限を狭めないことを確認する。
+       */
+      async () => { // この試験の処理を行うコールバック
+        await sources(100); // 登録したF10用の前月イベントを作る関数
+        const request = await copyInput(); // 実F10 previewから保存入力を作る関数
+        expect(request.selectedEventIds).toHaveLength(100); // 行数または選択数を比較するメソッド / 期待値を取得する関数
+        const result = await copyWrite.copyPreviousMonthEvents(context(), request); // 前月イベント複製の実保存Service関数 / fixtureの認可contextを作る関数
+        expect(result).toEqual({ // 取得結果の構造と値を比較するメソッド / 期待値を取得する関数
+          outcome: "CREATED",
+          receipt: {
+            targetMonth: MONTH,
+            createdCount: 100,
+          },
+        });
+        expect(await database().clubEventBatchOperation.findFirstOrThrow({ // 期待値を取得する関数 / 対象クラブの完了記録を取得するメソッド / ガード済みの専用DB clientを取得する関数
+          where: {
+            clubId: current().clubs[0], // 登録済みfixtureを取得する関数
+          },
+        })).toMatchObject({ // 必要なDB列や結果を部分比較するメソッド
+          operation: "COPY_PREVIOUS_MONTH",
+          createdCount: 100,
+        });
+        await counts(100, 1); // 生成件数と完了記録数を照合する関数
+      });
+
+    for (const first of ["F10", "F11"] as const) { // 値を固定する読取専用リテラル型
+      dbCase(`${first}保存後の同クラブ・同操作IDは別操作からCONFLICTとなる`, // 固定エラー境界でDB試験を登録する関数
+        /**
+         * 両方向とも共通uniqueの範囲で、別操作の完了記録を誤ってreplayしない。
+         */
+        async () => { // この試験の処理を行うコールバック
+          await sources(1); // 登録したF10用の前月イベントを作る関数
+          const practice = await input(); // 実previewから保存入力を作る関数
+          const copy = {
+            ...await copyInput(), // 実F10 previewから保存入力を作る関数
+            requestId: practice.requestId,
+          };
+          if (first === "F10") {
+            expect((await copyWrite.copyPreviousMonthEvents(context(), copy)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 前月イベント複製の実保存Service関数 / fixtureの認可contextを作る関数
+              "CREATED",
+            ); // 取得値を比較するメソッド / 期待値を取得する関数 / 前月イベント複製の実保存Service関数 / fixtureの認可contextを作る関数
+            expect((await write.createEventPracticeBatch(context(), practice)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+              "CONFLICT",
+            ); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+          } else {
+            expect((await write.createEventPracticeBatch(context(), practice)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+              "CREATED",
+            ); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+            expect((await copyWrite.copyPreviousMonthEvents(context(), copy)).outcome).toBe( // 取得値を比較するメソッド / 期待値を取得する関数 / 前月イベント複製の実保存Service関数 / fixtureの認可contextを作る関数
+              "CONFLICT",
+            ); // 取得値を比較するメソッド / 期待値を取得する関数 / 前月イベント複製の実保存Service関数 / fixtureの認可contextを作る関数
+          }
+          await counts(1, 1); // 生成件数と完了記録数を照合する関数
+        });
+    }
+
+    dbCase("同じ操作IDでも別クラブでは独立して保存する", // 固定エラー境界でDB試験を登録する関数
+      /**
+       * uniqueの範囲をクラブ内に保ち、他クラブの完了結果を共有しない。
+       */
+      async () => { // この試験の処理を行うコールバック
+        const first = await input(); // 実previewから保存入力を作る関数
+        const second = {
+          ...await input(common(), context(1)), // 実previewから保存入力を作る関数 / 定期練習の共通入力を作る関数 / fixtureの認可contextを作る関数
+          requestId: first.requestId,
+        };
+        expect((await write.createEventPracticeBatch(context(), first)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        expect((await write.createEventPracticeBatch(context(1), second)).outcome).toBe("CREATED"); // 取得値を比較するメソッド / 期待値を取得する関数 / 入力を再検証して一体保存へ渡すService関数 / fixtureの認可contextを作る関数
+        await counts(1, 1); // 生成件数と完了記録数を照合する関数
+        await counts(1, 1, 1); // 生成件数と完了記録数を照合する関数
+      });
+    dbCase("CHECK・FK・trigger・unique・RLSとData API権限metadataを照合する", // 例外を固定文に限定したDB試験を登録する関数
+      /**
+       * ガード済みの専用DBで、このケースの保存・競合・制約結果を照合する。
+       */
+      async () => { // 非同期処理を行うコールバック
+        const db = database(); // 専用DB client取得関数
+        const tables = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
+          relrowsecurity: boolean; // 真偽値型
+          policies: bigint; // bigint型
+          publicGrants: bigint; // bigint型
+          anon: boolean; // 真偽値型
+          authenticated: boolean; // 真偽値型
+        }[]>
+          `
+      SELECT c.relrowsecurity,
+        (SELECT count(*) FROM pg_policy p WHERE p.polrelid = c.oid) AS policies,
+        (SELECT count(*) FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+          WHERE a.grantee = 0) AS "publicGrants",
+        has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS anon,
+        has_table_privilege('authenticated', c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS authenticated
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public' AND c.relname = 'ClubEventBatchOperation'
+    `;
+        expect(tables).toEqual([{ // 構造と一致を検証するメソッド / 期待値を取得する関数
+          relrowsecurity: true,
+          policies: BigInt(0), // 整数をbigintへ変換する関数
+          publicGrants: BigInt(0), // 整数をbigintへ変換する関数
+          anon: false,
+          authenticated: false,
+        }]);
+        const constraints = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
+          conname: string; // 文字列型
+          confdeltype: string; // 文字列型
+        }[]>
+          `
+      SELECT conname, confdeltype::text FROM pg_constraint
+      WHERE conrelid = 'public."ClubEventBatchOperation"'::regclass
+    `;
+        expect(constraints.map( // 期待値を取得する関数 / 各要素を必要な値へ写すメソッド
+          /**
+           * fixture IDや取得結果を、保存・照合に必要な値へ写す。
+           */
+          (row) => row.conname)).toEqual(expect.arrayContaining([ // 構造と一致を検証するメソッド / 処理を受け取るコールバック / 期待した項目の包含を検証する関数
+            "ClubEventBatchOperation_operation_check",
+            "ClubEventBatchOperation_request_id_check",
+            "ClubEventBatchOperation_target_month_check",
+            "ClubEventBatchOperation_input_hash_check",
+            "ClubEventBatchOperation_created_count_check",
+          ]));
+        expect(constraints.find( // 期待値を取得する関数 / 条件に合う照合対象を探すメソッド
+          /**
+           * 照合対象のID・見出し・制約名に一致する行を探す。
+           */
+          (row) => row.conname === "ClubEventBatchOperation_executedByMembershipId_fkey")?.confdeltype).toBe("n"); // 一致を検証するメソッド / 処理を受け取るコールバック
+        const triggers = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
+          tgname: string; // 文字列型
+        }[]>
+          `
+      SELECT tgname FROM pg_trigger
+      WHERE tgrelid = 'public."ClubEventBatchOperation"'::regclass AND NOT tgisinternal
+    `;
+        expect(triggers.map( // 期待値を取得する関数 / 各要素を必要な値へ写すメソッド
+          /**
+           * fixture IDや取得結果を、保存・照合に必要な値へ写す。
+           */
+          (row) => row.tgname)).toEqual(expect.arrayContaining([ // 構造と一致を検証するメソッド / 処理を受け取るコールバック / 期待した項目の包含を検証する関数
+            "ClubEventBatchOperation_executor_club_match",
+            "ClubEventBatchOperation_club_id_immutable",
+          ]));
+        const indexes = await db.$queryRaw<{ // DBの制約・権限metadataを取得するメソッド
+          indexname: string; // 文字列型
+          indexdef: string; // 文字列型
+        }[]>
+          `
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'ClubEventBatchOperation'
+    `;
+        expect(indexes.find( // 期待値を取得する関数 / 条件に合う照合対象を探すメソッド
+          /**
+           * 照合対象のID・見出し・制約名に一致する行を探す。
+           */
+          (row) => row.indexname === "ClubEventBatchOperation_clubId_requestId_key")?.indexdef).toContain("UNIQUE"); // 文字列に期待した値が含まれるか検証するメソッド / 処理を受け取るコールバック
+      });
+  });
