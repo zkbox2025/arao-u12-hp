@@ -1,1206 +1,1716 @@
-diff --git a/tests/mvp/environment.test.ts b/tests/mvp/environment.test.ts
+diff --git a/tests/mvp/database-fixture.integration.test.ts b/tests/mvp/database-fixture.integration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ee972a19c06959936a054ff9e0814d8063de03cf
+index 0000000000000000000000000000000000000000..025af84fe144bd331cf6adec44d8d5b5cce383ea
 --- /dev/null
-+++ b/tests/mvp/environment.test.ts
-@@ -0,0 +1,594 @@
-+// tests/mvp/environment.test.ts
-+// 架空の設定と一時ファイルだけで検証し、実DB・Auth・Storage・配送を使わない。
++++ b/tests/mvp/database-fixture.integration.test.ts
+@@ -0,0 +1,868 @@
++// tests/mvp/database-fixture.integration.test.ts
++// 通常実行は台帳・入力境界だけ。実DB群はF12とDBの明示flagとガード成功後に限る。
 +
 +import {
-+  mkdtempSync, // 試験専用の一時ディレクトリを作る関数
-+  mkdirSync, // 環境ファイル名のディレクトリを再現する関数
-+  rmSync, // この試験が作成した一時資源だけを削除する関数
-+  symlinkSync, // 内容を読めないリンクの存在を再現する関数
-+  unlinkSync, // このケースで作成したリンクだけを外す関数
-+  writeFileSync, // 架空の環境ファイルを一時領域に作る関数
++  randomUUID, // fixtureの実行識別子と架空Auth IDを生成する関数
++} from "node:crypto";
++import {
++  mkdtempSync, // ガード試験用の一時checkoutを作る関数
++  rmSync, // この試験が作成した一時checkoutを削除する関数
 +} from "node:fs";
 +import {
-+  tmpdir, // OSの一時ディレクトリを返す関数
++  tmpdir, // OSの一時領域を取得する関数
 +} from "node:os";
 +import {
-+  join, // 一時ファイルのパスを組み立てる関数
-+  resolve, // checkoutの絶対パスを求める関数
++  join, // 一時パスを組み立てる関数
++  resolve, // 実行checkoutのパスを求める関数
 +} from "node:path";
-+import {
-+  afterEach, // 各試験後の一時資源の削除を登録する関数
-+  beforeEach, // 各試験専用の環境を作る関数
-+  expect, // 期待値を検証する関数
-+  it, // ケースとパラメーター試験を登録する関数
-+  vi, // 外部境界の評価を検出するmock API
-+} from "vitest";
-+
-+import {
-+  getMvpMigrationDatabase, // 予約済みmigration資源だけを解決する関数
-+  requireMvpTestEnvironment, // F12専用の接続前ガード関数
-+} from "./environment";
-+import {
-+  assertMvpSuiteManifest, // manifestの実在・重複を検証する関数
-+  assertMvpSuiteResults, // 必須suiteと試験群の完了を検証する関数
-+  MVP_SUITES, // 実在する既存必須suiteの一覧
-+} from "./suite-manifest";
 +import type {
-+  MvpSuiteResult, // 集計前のsuite結果型
-+} from "./suite-manifest";
++  Prisma, // transactionのDB型namespace
++  PrismaClient, // ガード後に生成する専用DB client型
++} from "@prisma/client";
++import {
++  afterAll, // 一時資源と専用接続の後処理を登録する関数
++  afterEach, // ケース所有のfixtureを削除する関数
++  beforeAll, // ガード後の接続を登録する関数
++  beforeEach, // ケースごとのログ監視を登録する関数
++  describe, // 通常群と明示実行DB群を登録する関数
++  expect, // 期待値を検証する関数
++  it, // ケースを登録する関数
++  vi, // DBなしの呼出し記録を用意するmock API
++} from "vitest";
++import {
++  cleanupMvpDatabaseFixture, // 非公開の所有台帳からfixtureだけを削除する関数
++  planMvpDatabaseFixture, // DB接続前にUUIDと保存行を計画する関数
++  reserveMvpStorageDeletionJob, // 作成前に追加ジョブのUUIDを登録する関数
++  seedMvpDatabaseFixture, // 計画した行を一体保存する関数
++} from "./database-fixture";
++import type {
++  MvpDatabaseFixture, // 認可・関連行に使うfixture IDの型
++  MvpFixtureOptions, // ケース限定のプラン・所属状態・関連データの入力型
++} from "./database-fixture";
++import {
++  requireMvpTestEnvironment, // dotenv・SDKより先に実行条件を検証する関数
++} from "./environment";
++import type {
++  MvpTestEnvironment, // ガード済み実行環境の型
++} from "./environment";
 +
-+const GUARD_ERROR = "F12専用の使い捨て環境・flag・checkoutを確認してください。";
-+const MANIFEST_ERROR = "F12の必須suite・実行件数・skipを確認してください。";
-+const RUN_ID = "a".repeat(32); // 架空の実行識別子を作るメソッド
-+const PRIVATE = "FAKE_SECRET_DO_NOT_LOG";
-+const forbidden = vi.hoisted( // importより先に外部評価の検出を用意する関数
++const FIXTURE_ERROR = "F12 DB fixtureの作成・所有範囲・後片付けを確認してください。";
++const CHECK_ERROR = "F12 DB fixture試験に失敗しました。対象ケースと実行条件を確認してください。";
++const PRIVATE = "FAKE_PRIVATE_SQL_CREDENTIAL";
++const external = vi.hoisted( // import前に境界の監視を用意する関数
 +  /**
-+   * SDK・dotenvの実行があれば、通信する前に試験を失敗させる。
++   * fixtureが共有client・dotenv・外部SDKを初期化したら、通信前に失敗させる。
 +   */
-+  () => vi.fn( // 評価検出用のmockを作るコールバック / mock生成関数
++  () => vi.fn( // 試験または保存処理のコールバック / 呼出し記録用mockを作る関数
 +    /**
-+     * 接続前ガードが外部SDKを評価したことを通知する。
++     * このDB専用fixtureに不要な外部境界を拒否する。
 +     */
-+    () => { // 外部評価を拒否するコールバック
-+      throw new Error("Unexpected SDK initialization"); // 通信前に失敗する例外のコンストラクター
++    () => { // 試験または保存処理のコールバック
++      throw new Error("F12 fixture must not initialize external services"); // 例外を生成するコンストラクター
 +    },
 +  ),
 +);
-+vi.mock("dotenv/config", forbidden); // dotenvの評価を拒否する関数
-+vi.mock("@prisma/client", forbidden); // Prismaの評価を拒否する関数
-+vi.mock("@prisma/adapter-pg", forbidden); // DBアダプターの評価を拒否する関数
-+vi.mock("pg", forbidden); // 接続プールの評価を拒否する関数
-+vi.mock("@supabase/supabase-js", forbidden); // Auth・Storage SDKの評価を拒否する関数
-+vi.mock("@/src/infrastructure/prisma/client", forbidden); // 共有clientの初期化を拒否する関数
-+
-+let checkout: string; // この試験だけが所有する一時パスの文字列型
++vi.mock("dotenv/config", external); // 外部境界の初期化を拒否する関数 / 外部SDKの評価を拒否するmock関数を参照する
++vi.mock("@/src/infrastructure/prisma/client", external); // 外部境界の初期化を拒否する関数 / 外部SDKの評価を拒否するmock関数を参照する
++vi.mock("@supabase/supabase-js", external); // 外部境界の初期化を拒否する関数 / 外部SDKの評価を拒否するmock関数を参照する
++const directory = mkdtempSync(join(tmpdir(), "f12-fixture-guard-")); // 試験専用の一時領域を作る関数 / 一時パスを組み立てる関数 / 一時領域を取得する関数
++const runId = randomUUID().replaceAll("-", ""); // 文字列の指定箇所を置換するメソッド / UUIDを生成する関数
++const sample = requireMvpTestEnvironment({ // 接続前の実行条件を検証する関数
++  RUN_MVP_TESTS: "1",
++  MVP_TEST_DISPOSABLE: "1",
++  NODE_ENV: "test",
++  DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
++  NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
++  APP_BASE_URL: "http://127.0.0.1:3000",
++}, directory, runId);
 +
 +/**
-+ * 実際のprocess.envに触れず、有効な架空設定を作る。
++ * SQL・本文・SDK例外とVitestが保持する実値を、外へ出さず固定文へ置き換える。
 + */
-+function environment(): Record<string, string | undefined> { // 架空設定生成関数 / 辞書型 / 文字列型 / 未設定の型
++async function safeCheck(operation: () => Promise<void>): Promise<void> { // 例外原文を固定文に置き換える関数 / 非同期結果の型 / 戻り値を使わない型 / コールバック関数型
++  try {
++    await operation(); // 受け取った検証処理を実行する関数
++  } catch {
++    throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++  }
++}
++
++beforeEach( // 各ケースの準備を登録する関数
++  /**
++   * 試験が秘密をconsoleへ出していないことを記録する。
++   */
++  () => { // 試験または保存処理のコールバック
++    for (const method of ["log", "warn", "error"] as const) { // リテラル型を保持するconstアサーション
++      vi.spyOn(console, method).mockImplementation( // 境界処理を置き換えるメソッド / ログ出力を監視する関数
++        /**
++         * 実コンソール出力を抑止する。
++         */
++        () => undefined, // 試験または保存処理のコールバック
++      );
++    }
++  },
++);
++afterEach( // 各ケースの後処理を登録する関数
++  /**
++   * 全ケースで秘密を含むログが出ていないことを確認する。
++   */
++  () => { // 試験または保存処理のコールバック
++    try {
++      expect(external).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数 / 外部SDKの評価を拒否するmock関数を参照する
++      expect(console.log).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数 / ログ出力関数を参照する
++      expect(console.warn).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数 / ログ出力関数を参照する
++      expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数 / ログ出力関数を参照する
++    } finally {
++      vi.restoreAllMocks(); // ログ監視を解除する関数
++    }
++  },
++);
++afterAll( // 所有資源の解放を登録する関数
++  /**
++   * 元checkoutの環境ファイルに触れず、自分の一時領域だけを削除する。
++   */
++  () => rmSync(directory, { // 試験または保存処理のコールバック / 自分の一時資源だけを削除する関数
++    recursive: true,
++    force: true,
++  }),
++);
++
++/**
++ * 呼出し順と削除条件だけを照合するmock client。実DBの制約・rollbackは代用しない。
++ */
++function recordingDatabase() { // 通信しない記録用clientを用意する関数
++  const models = [
++    "club",
++    "appUser",
++    "clubMembership",
++    "child",
++    "childClubMembership",
++    "platformAdmin",
++    "clubEvent",
++    "clubNotice",
++    "clubEventAttachment",
++    "clubNoticeAttachment",
++    "clubEventRead",
++    "clubNoticeRead",
++    "clubEventMemo",
++    "clubLineSetting",
++    "clubLineTarget",
++    "clubLineDelivery",
++    "storageDeletionJob",
++    "supportReport",
++  ];
++  const delegates: Record<string, { // キーと値の対応型 / 文字列型
++    createMany: ReturnType<typeof vi.fn>; // 関数の戻り値型 / 値の宣言から型を取得する型
++    deleteMany: ReturnType<typeof vi.fn>; // 関数の戻り値型 / 値の宣言から型を取得する型
++    count: ReturnType<typeof vi.fn>; // 関数の戻り値型 / 値の宣言から型を取得する型
++  }> = {};
++  for (const model of models) {
++    delegates[model] = {
++      createMany: vi.fn().mockResolvedValue({ count: 1 }), // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
++      deleteMany: vi.fn().mockResolvedValue({ count: 1 }), // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
++      count: vi.fn().mockResolvedValue(0), // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
++    };
++  }
++  const transaction = vi.fn().mockImplementation( // 境界処理を置き換えるメソッド / 呼出し記録用mockを作る関数
++    /**
++     * 通信を行わず、呼出し先を記録するdelegateだけを渡す。
++     */
++    async (operation: (value: unknown) => Promise<void>) => operation(delegates), // 試験または保存処理のコールバック / 未確定値の型 / 非同期結果の型 / 戻り値を使わない型 / 受け取った検証処理を実行する関数 / コールバック関数型
++  );
 +  return {
-+    RUN_MVP_TESTS: "1",
-+    MVP_TEST_DISPOSABLE: "1",
-+    NODE_ENV: "test",
-+    DATABASE_URL: `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/postgres`,
-+    NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
-+    APP_BASE_URL: "http://127.0.0.1:3000",
++    client: {
++      $transaction: transaction, // 通信しないtransactionのmock関数を参照する
++    } as unknown as PrismaClient, // 未確定値の型 / 専用DB clientの型
++    delegates,
++    transaction,
 +  };
 +}
 +
-+/**
-+ * 入力値やcauseを含まず、必ず同じ例外だけを返すことを検証する。
-+ */
-+function fixedFailure( // 固定例外の検証関数
-+  operation: () => unknown, // 検証対象の関数型 / 未確定の戻り値型
-+  message = GUARD_ERROR,
-+): void { // 戻り値を使わない型
-+  let caught: unknown; // 捕捉した例外の未確定型
-+  try {
-+    operation(); // 検証対象を実行する関数
-+  } catch (error) {
-+    caught = error;
-+  }
-+  expect(caught).toBeInstanceOf(Error); // 期待値生成関数 / 例外型の検証メソッド / 例外のコンストラクター
-+  if (!(caught instanceof Error)) { // 例外のコンストラクターによる型の絞込み
-+    throw new Error("Expected a fixed error"); // 試験失敗の例外コンストラクター
-+  }
-+  expect(caught.message).toBe(message); // 期待値生成関数 / 固定文の比較メソッド
-+  expect(caught.cause).toBeUndefined(); // 期待値生成関数 / causeの非公開を検証するメソッド
-+  expect(String(caught)).not.toContain(PRIVATE); // 期待値生成関数 / 文字列変換関数 / 秘密の非含有検証メソッド
-+}
-+
-+/**
-+ * manifestに対応する架空の成功結果を作り、実suiteは起動しない。
-+ */
-+function completeResults(): MvpSuiteResult[] { // 架空結果生成関数 / suite結果の配列型
-+  return MVP_SUITES.map( // 各suiteを架空結果へ写すメソッド
-+    /**
-+     * 各必須群に1件成功した場合の結果契約を再現する。
-+     */
-+    (suite) => ({ // suite結果を生成するコールバック
-+      path: suite.path,
-+      passed: 1,
-+      failed: 0,
-+      skipped: 0,
-+      pending: 0,
-+      groups: suite.requiredGroups.map( // 必須群を架空結果へ写すメソッド
-+        /**
-+         * 実ケース1件が終端成功した群の結果を作る。
-+         */
-+        (name) => ({ // 群別結果を生成するコールバック
-+          name,
-+          passed: 1,
-+          failed: 0,
-+          skipped: 0,
-+          pending: 0,
-+        }),
-+      ),
-+    }),
-+  );
-+}
-+
-+beforeEach( // ケースごとの準備を登録する関数
++describe("F12 fixtureの台帳・保存境界（DB・Auth・SDKなし）", // 試験群を登録する関数
 +  /**
-+   * 元checkoutと分離した空ディレクトリを作り、コンソール出力を監視する。
++   * 実接続なしで、IDの独立性と保存・削除範囲を検証する。
 +   */
-+  () => { // 準備のコールバック
-+    checkout = mkdtempSync(join(tmpdir(), "f12-guard-test-")); // 一時領域生成関数 / パス結合関数 / 一時領域取得関数
-+    for (const method of ["log", "warn", "error"] as const) { // 読取専用のリテラル型
-+      vi.spyOn(console, method).mockImplementation( // ログ監視関数 / 出力を置換するメソッド
-+        /**
-+         * 試験中の実コンソール出力を抑止する。
-+         */
-+        () => undefined, // 出力を抑止するコールバック
-+      );
-+    }
-+  },
-+);
-+afterEach( // ケースごとの後処理を登録する関数
-+  /**
-+   * SDK未評価とログ非出力を確認し、自分の一時ディレクトリだけを削除する。
-+   */
-+  () => { // 検証と後片付けのコールバック
-+    try {
-+      expect(forbidden).not.toHaveBeenCalled(); // 期待値生成関数 / 外部SDK非評価を検証するメソッド
-+      expect(console.log).not.toHaveBeenCalled(); // 期待値生成関数 / ログ非出力の検証メソッド
-+      expect(console.warn).not.toHaveBeenCalled(); // 期待値生成関数 / 警告非出力の検証メソッド
-+      expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / エラー非出力の検証メソッド
-+    } finally {
-+      vi.restoreAllMocks(); // コンソールの監視を解除する関数
-+      rmSync(checkout, { // この試験の一時資源だけを削除する関数
-+        recursive: true,
-+        force: true,
-+      });
-+    }
-+  },
-+);
-+
-+it.each(["RUN_MVP_TESTS", "MVP_TEST_DISPOSABLE"])( // 明示flagの試験を登録するメソッド
-+  "%sが厳密な1でない場合、URL getterもSDKも評価しない",
-+  /**
-+   * flag不足の時点で止まり、URLに秘密があっても参照しないことを確認する。
-+   */
-+  (field) => { // flagごとの検証コールバック
-+    for (const value of [undefined, "", "0", "true", "01", "1 "]) {
-+      const variables = environment(); // 架空設定生成関数
-+      variables[field] = value;
-+      const getter = vi.fn( // URLへのアクセスを検出するmock生成関数
-+        /**
-+         * URL評価自体が誤りであることを検出する。
-+         */
-+        () => { // getterのコールバック
-+          throw new Error(PRIVATE); // 秘密を持つ架空例外のコンストラクター
-+        },
-+      );
-+      for (const name of ["DATABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "APP_BASE_URL"]) {
-+        Object.defineProperty(variables, name, { // URLを遅延getterに置き換える関数
-+          get: getter, // アクセスを記録するgetter関数
++  () => { // 試験または保存処理のコールバック
++    it("同じrunで二度計画してもID・slug・emailが独立し、A OWNERはB MEMBERになる", // ケースを登録する関数
++      /**
++       * PlatformAdminの独立と親子所有を含め、最小の認可材料を確認する。
++       */
++      () => { // 試験または保存処理のコールバック
++        const first = planMvpDatabaseFixture(sample); // DB接続前にUUIDと保存行を計画する関数
++        const second = planMvpDatabaseFixture(sample); // DB接続前にUUIDと保存行を計画する関数
++        expect(first.clubs.a.id).not.toBe(second.clubs.a.id); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(first.users.aOwner.email).not.toBe(second.users.aOwner.email); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(first.clubs.a.slug).not.toBe(second.clubs.a.slug); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(first.actors.aOwner.userId).toBe(first.actors.bMember.userId); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(first.actors.aOwner.role).toBe("OWNER"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(first.actors.bMember.role).toBe("MEMBER"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(Object.values(first.actors).map( // 期待値を生成する関数 / 各要素を保存・照合用の値へ写すメソッド / 値を列挙する関数
++          /**
++           * 各所属のロールを一覧にする。
++           */
++          (actor) => actor.role, // 試験または保存処理のコールバック
++        )).toEqual(["OWNER", "COACH", "OFFICER", "MEMBER", "OWNER", "MEMBER"]); // データの一致を検証するメソッド
++        expect(first.users.platformAdmin.id).not.toBe(first.users.aOwner.id); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(first.related.a.events).toBeUndefined(); // 未設定を検証するメソッド / 期待値を生成する関数
++        expect(first.related.a.targetId).toBeUndefined(); // 未設定を検証するメソッド / 期待値を生成する関数
++      },
++    );
++    it("最小seedには関連行を追加せず、Auth ID・プラン・所属状態だけを差し込める", // ケースを登録する関数
++      /**
++       * 必要な行だけを保存することと、本人IDの対応を確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const authId = randomUUID(); // UUIDを生成する関数
++        const fixture = planMvpDatabaseFixture(sample, { // DB接続前にUUIDと保存行を計画する関数
++          authUserIds: {
++            aMember: authId,
++          },
++          plans: {
++            a: "STARTER",
++            b: "PRO",
++          },
++          statuses: {
++            aCoach: "SUSPENDED",
++            aOfficer: "WITHDRAWN",
++            aMember: "INVITED",
++          },
 +        });
-+      }
-+      fixedFailure( // 固定例外を検証する関数
-+        /**
-+         * 不正flagでガードを実行する。
-+         */
-+        () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
-+      );
-+      expect(getter).not.toHaveBeenCalled(); // 期待値生成関数 / URL非評価の検証メソッド
-+    }
-+  },
-+);
-+
-+it.each(["127.0.0.1", "localhost"])( // 許可hostごとの試験を登録するメソッド
-+  "%sの固定portと通常用postgresを許可し、外部サービス設定を引き継がない",
-+  /**
-+   * 許可変数だけを返し、元の設定を変更しないことを確認する。
-+   */
-+  (host) => { // 許可hostの検証コールバック
-+    const variables = environment(); // 架空設定生成関数
-+    variables.DATABASE_URL = `postgres://fixture:${PRIVATE}@${host}:54322/postgres`;
-+    variables.NEXT_PUBLIC_SUPABASE_URL = `http://${host}:54321/`;
-+    variables.APP_BASE_URL = `http://${host}:3000/`;
-+    variables.RESEND_API_KEY = PRIVATE;
-+    variables.LINE_CHANNEL_ACCESS_TOKEN = PRIVATE;
-+    variables.NEXT_PUBLIC_SUPABASE_ANON_KEY = "fake-anon";
-+    variables.SUPABASE_SERVICE_ROLE_KEY = "fake-service";
-+    const prior = { ...variables };
-+    const result = requireMvpTestEnvironment(variables, checkout, RUN_ID); // 接続前ガード関数
-+    expect(result.databaseUrl).toBe(variables.DATABASE_URL); // 期待値生成関数 / 固定DB接続先の比較メソッド
-+    expect(result.supabaseOrigin).toBe(`http://${host}:54321`); // 期待値生成関数 / originの比較メソッド
-+    expect(result.appOrigin).toBe(`http://${host}:3000`); // 期待値生成関数 / originの比較メソッド
-+    expect(result.variables.RESEND_API_KEY).toBeUndefined(); // 期待値生成関数 / 外部配送キー除外の検証メソッド
-+    expect(result.variables.LINE_CHANNEL_ACCESS_TOKEN).toBeUndefined(); // 期待値生成関数 / LINEキー除外の検証メソッド
-+    expect(result.variables.SUPABASE_SERVICE_ROLE_KEY).toBe("fake-service"); // 期待値生成関数 / 明示キーの比較メソッド
-+    expect(variables).toEqual(prior); // 期待値生成関数 / 入力の非変更を検証するメソッド
-+  },
-+);
-+
-+it.each([ // 禁止環境変数のパラメーター試験を登録するメソッド
-+  ["NODE_ENV", "production"],
-+  ["NODE_ENV", undefined],
-+  ["VERCEL_ENV", "production"],
-+  ["PGHOST", "remote.invalid"],
-+  ["PGPORT", ""],
-+  ["PGDATABASE", "other"],
-+  ["PGSERVICEFILE", "/fake/service"],
-+  ["PGOPTIONS", "-c search_path=other"],
-+  ["DOTENV_CONFIG_PATH", "/fake/private"],
-+  ["NODE_OPTIONS", "--require=fake"],
-+  ["NODE_PATH", "/fake/modules"],
-+  ["SUPABASE_SERVICE_ROLE_KEY", " "],
-+  ["NEXT_PUBLIC_SUPABASE_ANON_KEY", ""],
-+])("本番・上書き変数・不正キー%sを拒否する", // パラメーター試験を登録するメソッド
-+  /**
-+   * 実SDKやdotenvに値を渡す前に、固定例外で拒否する。
-+   */
-+  (field, value) => { // 不正変数の検証コールバック
-+    const variables = environment(); // 架空設定生成関数
-+    variables[field!] = value;
-+    fixedFailure( // 固定例外検証関数
-+      /**
-+       * 禁止変数を含む設定をガードへ渡す。
-+       */
-+      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
-+    );
-+  },
-+);
-+
-+it.each([ // DB接続先のパラメーター試験を登録するメソッド
-+  "postgresql://fixture:secret@remote.invalid:54322/postgres",
-+  "postgresql://fixture:secret@127.0.0.1:5432/postgres",
-+  "postgresql://fixture:secret@127.0.0.1:54322/other",
-+  "postgresql://fixture:secret@127.0.0.1:54322/post%67res",
-+  "postgresql://fixture:secret@127.1:54322/postgres",
-+  "postgresql://fixture:secret@2130706433:54322/postgres",
-+  "postgresql://fixture:secret@%31%32%37.0.0.1:54322/postgres",
-+  "postgresql://fixture:secret@localhost.:54322/postgres",
-+  "postgresql://fixture:secret@127.0.0.1:054322/postgres",
-+  "postgresql://fixture:secret@[::1]:54322/postgres",
-+  "postgresql://fixture@127.0.0.1:54322/postgres",
-+  "postgresql://fixture:%00@127.0.0.1:54322/postgres",
-+  "postgresql://fixture:%zz@127.0.0.1:54322/postgres",
-+  "postgresql://fixture:secret@127.0.0.1:54322/postgres/",
-+  "postgresql://fixture:secret@127.0.0.1:54322/postgres?host=remote.invalid",
-+  "postgresql://fixture:secret@127.0.0.1:54322/postgres?",
-+  "postgresql://fixture:secret@127.0.0.1:54322/postgres#",
-+  " postgresql://fixture:secret@127.0.0.1:54322/postgres",
-+  "postgresql://fixture:secret@127.0.0.1:54322/postgres\n",
-+  "postgresql://fixture:secret@local\nhost:54322/postgres",
-+])("危険なDB URLの表記を拒否する（ケース%#）", // DB接続先のパラメーター試験を登録するメソッド
-+  /**
-+   * 正規化や追加設定で接続先・DB名が変わる入力を許さない。
-+   */
-+  (databaseUrl) => { // DB接続先の検証コールバック
-+    const variables = environment(); // 架空設定生成関数
-+    variables.DATABASE_URL = databaseUrl;
-+    fixedFailure( // 固定例外検証関数
-+      /**
-+       * 架空の不正URLをガードへ渡す。
-+       */
-+      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
-+    );
-+  },
-+);
-+
-+it.each(["NEXT_PUBLIC_SUPABASE_URL", "APP_BASE_URL"])( // HTTP接続先の試験を登録するメソッド
-+  "%sで正規化迂回・認証情報・パス・query・fragmentを拒否する",
-+  /**
-+   * 同じoriginへ解析される別表記も、原文の段階で拒否する。
-+   */
-+  (field) => { // 接続先ごとの検証コールバック
-+    const port = field === "APP_BASE_URL" ? "3000" : "54321";
-+    const invalid = [
-+      `https://127.0.0.1:${port}`,
-+      `http://remote.invalid:${port}`,
-+      `http://127.1:${port}`,
-+      `http://2130706433:${port}`,
-+      `http://0x7f000001:${port}`,
-+      `http://%31%32%37.0.0.1:${port}`,
-+      `http://localhost.:${port}`,
-+      `http://LOCALHOST:${port}`,
-+      `http://127.0.0.1:0${port}`,
-+      `http://fixture:${PRIVATE}@127.0.0.1:${port}`,
-+      `http://127.0.0.1:${port}/auth`,
-+      `http://127.0.0.1:${port}/..`,
-+      `http://127.0.0.1:${port}/%2e`,
-+      `http://127.0.0.1:${port}?`,
-+      `http://127.0.0.1:${port}#`,
-+      `http://127.0.0.1:${port}?host=remote.invalid`,
-+      `http://127.0.0.1:${port} `,
-+      `http://local\thost:${port}`,
-+      `http:\\127.0.0.1:${port}`,
-+      "http://127.0.0.1:9999",
-+    ];
-+    for (const source of invalid) {
-+      const variables = environment(); // 架空設定生成関数
-+      variables[field] = source;
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 許可originに似た別表記をガードへ渡す。
-+         */
-+        () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
-+      );
-+    }
-+  },
-+);
-+
-+it.each([ // 自動読込ファイル名のパラメーター試験を登録するメソッド
-+  ".env",
-+  ".env.local",
-+  ".env.development",
-+  ".env.development.local",
-+  ".env.test",
-+  ".env.test.local",
-+  ".env.production",
-+  ".env.production.local",
-+  ".env.production.backup",
-+])("自動読込され得る%sの存在を内容を読まずに拒否する", // ファイル存在のパラメーター試験を登録するメソッド
-+  /**
-+   * 原文は架空の秘密とし、例外・ログへ混入しないことを確認する。
-+   */
-+  (name) => { // 環境ファイルごとの検証コールバック
-+    writeFileSync(join(checkout, name), PRIVATE); // 架空ファイル作成関数 / 一時パス結合関数
-+    fixedFailure( // 固定例外検証関数
-+      /**
-+       * 環境ファイルの存在する一時checkoutを調べる。
-+       */
-+      () => requireMvpTestEnvironment(environment(), checkout, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
-+    );
-+  },
-+);
-+
-+it(".env.exampleを許可し、dangling linkやディレクトリの.env.localは拒否する", // ケースを登録する関数
-+  /**
-+   * 内容取得やリンク追跡なしで、自動読込される名前の存在を拒否する。
-+   */
-+  () => { // ファイル種別の検証コールバック
-+    writeFileSync(join(checkout, ".env.example"), "NOT_LOADED"); // 架空例の作成関数 / 一時パス結合関数
-+    expect(requireMvpTestEnvironment(environment(), checkout, RUN_ID).runId).toBe(RUN_ID); // 期待値生成関数 / ガード関数 / 架空設定生成関数 / 識別子比較メソッド
-+    const path = join(checkout, ".env.local"); // 一時パス結合関数
-+    symlinkSync(join(checkout, "missing"), path); // dangling link作成関数 / 架空パス結合関数
-+    fixedFailure( // 固定例外検証関数
-+      /**
-+       * リンク先を読まず.env.localを検出する。
-+       */
-+      () => requireMvpTestEnvironment(environment(), checkout, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
-+    );
-+    unlinkSync(path); // このケースが作ったリンクだけを削除する関数
-+    mkdirSync(path); // 同じ名前のディレクトリを作成する関数
-+    fixedFailure( // 固定例外検証関数
-+      /**
-+       * 通常ファイル以外も拒否する。
-+       */
-+      () => requireMvpTestEnvironment(environment(), checkout, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
-+    );
-+  },
-+);
-+
-+it("存在しないcheckout・相対パス・不正runId・getter例外を固定文で拒否する", // ケースを登録する関数
-+  /**
-+   * ファイル操作や入力getterが投げた例外原文も公開しない。
-+   */
-+  () => { // 例外境界の検証コールバック
-+    for (const path of [join(checkout, PRIVATE), "."]) { // 存在しない一時パスを作る関数
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 不正checkoutをガードへ渡す。
-+         */
-+        () => requireMvpTestEnvironment(environment(), path, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
-+      );
-+    }
-+    for (const runId of ["", "../escape", "a".repeat(33), RUN_ID.toUpperCase()]) { // 不正長を作るメソッド / 大文字に変えるメソッド
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 他実行と取り違える識別子を拒否する。
-+         */
-+        () => requireMvpTestEnvironment(environment(), checkout, runId), // 検証コールバック / ガード関数 / 架空設定生成関数
-+      );
-+    }
-+    const variables = environment(); // 架空設定生成関数
-+    Object.defineProperty(variables, "DATABASE_URL", { // 例外を投げるgetterを設定する関数
-+      /**
-+       * 読取に失敗する入力を再現する。
-+       */
-+      get() { // URL取得のgetter関数
-+        throw new Error(PRIVATE); // 原文非公開を検証する架空例外のコンストラクター
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        await seedMvpDatabaseFixture(mock.client, fixture); // 計画した行を一体保存する関数
++        expect(fixture.users.aMember.id).toBe(authId); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(fixture.clubs.a.planType).toBe("STARTER"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(fixture.clubs.b.planType).toBe("PRO"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(fixture.actors.aCoach.status).toBe("SUSPENDED"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(fixture.actors.aOfficer.status).toBe("WITHDRAWN"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(fixture.actors.aMember.status).toBe("INVITED"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(mock.delegates.clubMembership.createMany.mock.calls[0][0].data).toHaveLength(6); // 件数を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(mock.delegates.appUser.createMany.mock.calls[0][0].data).toHaveLength(5); // 件数を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(mock.delegates.clubEvent.createMany).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++        expect(mock.delegates.clubLineSetting.createMany).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++        expect(mock.delegates.child.createMany.mock.calls[0][0].data).toEqual([ // データの一致を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++          {
++            id: fixture.children.own,
++            parentId: fixture.users.aMember.id,
++            name: "本人の子ども",
++          },
++          {
++            id: fixture.children.otherParent,
++            parentId: fixture.users.aCoach.id,
++            name: "他保護者の子ども",
++          },
++        ]);
 +      },
-+    });
-+    fixedFailure( // 固定例外検証関数
-+      /**
-+       * getterの例外を固定文へ置き換える。
-+       */
-+      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / ガード関数
 +    );
-+  },
-+);
-+
-+it("migration例外は同じ実行の予約DBだけに限り、通常DATABASE_URLを広げない", // ケースを登録する関数
-+  /**
-+   * クラスタ・資格情報は保持し、他実行・任意名・URLの持込みを拒否する。
-+   */
-+  () => { // migration資源境界の検証コールバック
-+    const configuration = requireMvpTestEnvironment(environment(), checkout, RUN_ID); // ガード関数 / 架空設定生成関数
-+    for (const name of configuration.migrationDatabaseNames) {
-+      const resource = getMvpMigrationDatabase(configuration, name); // 予約資源解決関数
-+      expect(resource.runId).toBe(RUN_ID); // 期待値生成関数 / 所有実行の比較メソッド
-+      expect(resource.databaseUrl).toBe( // 期待値生成関数 / 同一クラスタ接続先の比較メソッド
-+        `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/${name}`,
-+      );
-+      const variables = environment(); // 架空設定生成関数
-+      variables.DATABASE_URL = resource.databaseUrl;
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * migration DBを通常用接続先へ流用させない。
-+         */
-+        () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
-+      );
-+    }
-+    for (const name of ["postgres", `mvp_f12_${"b".repeat(32)}_fresh`, "other", PRIVATE]) { // 別実行識別子を生成するメソッド
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 他実行や予約外のDB名を拒否する。
-+         */
-+        () => getMvpMigrationDatabase(configuration, name), // 検証コールバック / 予約資源解決関数
-+      );
-+    }
-+    expect(configuration.variables.DATABASE_URL).toBe(configuration.databaseUrl); // 期待値生成関数 / 通常接続先の非変更検証メソッド
-+    for (const forged of [
++    it("関連行は無効なLINE通知先と完了済みジョブを用い、実配送を起動しない", // ケースを登録する関数
++      /**
++       * DBメタデータだけを作り、SDKを必要としないことを確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = planMvpDatabaseFixture(sample, { // DB接続前にUUIDと保存行を計画する関数
++          features: ["attachments", "activity", "line", "support", "copySources"],
++        });
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        await seedMvpDatabaseFixture(mock.client, fixture); // 計画した行を一体保存する関数
++        expect(mock.delegates.clubEvent.createMany.mock.calls[0][0].data).toHaveLength(10); // 件数を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(mock.delegates.clubNotice.createMany.mock.calls[0][0].data).toHaveLength(6); // 件数を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(mock.delegates.clubLineTarget.createMany.mock.calls[0][0].data[0].isEnabled).toBe(false); // 一致を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(mock.delegates.clubLineDelivery.createMany.mock.calls[0][0].data[0].status).toBe("SENT"); // 一致を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(mock.delegates.storageDeletionJob.createMany.mock.calls[0][0].data[0].status).toBe("COMPLETED"); // 一致を検証するメソッド / 期待値を生成する関数 / 行を一括保存するメソッド
++        expect(fixture.related.a.sourceEvents).toHaveLength(2); // 件数を検証するメソッド / 期待値を生成する関数
++      },
++    );
++    it("作成前のcleanupは何もせず、seed失敗の原文を隠し、衝突した既存IDを削除しない", // ケースを登録する関数
++      /**
++       * 失敗したtransactionの所有権を取得せず、既存行を消さないことを確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = planMvpDatabaseFixture(sample); // DB接続前にUUIDと保存行を計画する関数
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        await cleanupMvpDatabaseFixture(mock.client, fixture); // 所有台帳の範囲だけを削除する関数
++        expect(mock.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++        mock.delegates.appUser.createMany.mockRejectedValue(new Error(PRIVATE)); // 非同期障害を設定するメソッド / 例外を生成するコンストラクター / 行を一括保存するメソッド
++        await expect(seedMvpDatabaseFixture(mock.client, fixture)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 計画した行を一体保存する関数
++        await cleanupMvpDatabaseFixture(mock.client, fixture); // 所有台帳の範囲だけを削除する関数
++        expect(mock.transaction).toHaveBeenCalledTimes(1); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++        expect(mock.delegates.club.deleteMany).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++      },
++    );
++    it("追加ジョブを事前登録し、履歴とジョブを親より先に限定削除し、二度cleanupできる", // ケースを登録する関数
++      /**
++       * SetNull後のジョブとRestrictの削除順序・二重保存拒否を確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = planMvpDatabaseFixture(sample, { // DB接続前にUUIDと保存行を計画する関数
++          features: ["attachments", "line"],
++        });
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        expect( // 期待値を生成する関数
++          /**
++           * seed前の追加ジョブ登録を拒否する。
++           */
++          () => reserveMvpStorageDeletionJob(fixture), // 試験または保存処理のコールバック / 追加ジョブのUUIDを保存前に登録する関数
++        ).toThrow(FIXTURE_ERROR); // 例外を検証するメソッド
++        await seedMvpDatabaseFixture(mock.client, fixture); // 計画した行を一体保存する関数
++        const job = reserveMvpStorageDeletionJob(fixture); // 追加ジョブのUUIDを保存前に登録する関数
++        await expect(seedMvpDatabaseFixture(mock.client, fixture)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 計画した行を一体保存する関数
++        await cleanupMvpDatabaseFixture(mock.client, fixture); // 所有台帳の範囲だけを削除する関数
++        await cleanupMvpDatabaseFixture(mock.client, fixture); // 所有台帳の範囲だけを削除する関数
++        expect(mock.transaction).toHaveBeenCalledTimes(2); // 呼出し回数を検証するメソッド / 期待値を生成する関数
++        expect(mock.delegates.clubLineDelivery.deleteMany.mock.calls[0][0]).toEqual({ // データの一致を検証するメソッド / 期待値を生成する関数 / 登録範囲だけを削除するメソッド
++          where: {
++            clubId: {
++              in: [fixture.clubs.a.id, fixture.clubs.b.id],
++            },
++          },
++        });
++        const condition = mock.delegates.storageDeletionJob.deleteMany.mock.calls[0][0].where; // 登録範囲だけを削除するメソッド
++        expect(condition.OR[1].clubId).toBeNull(); // nullを検証するメソッド / 期待値を生成する関数
++        expect(condition.OR[1].id.in).toContain(job); // 指定値の含有を検証するメソッド / 期待値を生成する関数
++        expect(mock.delegates.clubLineDelivery.deleteMany.mock.invocationCallOrder[0]) // 期待値を生成する関数 / 登録範囲だけを削除するメソッド
++          .toBeLessThan(mock.delegates.club.deleteMany.mock.invocationCallOrder[0]); // 呼出し順を比較するメソッド / 登録範囲だけを削除するメソッド
++        expect(mock.delegates.storageDeletionJob.deleteMany.mock.invocationCallOrder[0]) // 期待値を生成する関数 / 登録範囲だけを削除するメソッド
++          .toBeLessThan(mock.delegates.club.deleteMany.mock.invocationCallOrder[0]); // 呼出し順を比較するメソッド / 登録範囲だけを削除するメソッド
++      },
++    );
++    it("cleanup失敗時は台帳を保持し、再試行も同じ範囲だけを削除する", // ケースを登録する関数
++      /**
++       * cleanupのDB例外原文を隠し、成功後だけ完了状態にする。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = planMvpDatabaseFixture(sample); // DB接続前にUUIDと保存行を計画する関数
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        await seedMvpDatabaseFixture(mock.client, fixture); // 計画した行を一体保存する関数
++        mock.delegates.clubLineDelivery.deleteMany.mockRejectedValueOnce(new Error(PRIVATE)); // 一度だけ非同期障害を設定するメソッド / 例外を生成するコンストラクター / 登録範囲だけを削除するメソッド
++        await expect(cleanupMvpDatabaseFixture(mock.client, fixture)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 所有台帳の範囲だけを削除する関数
++        await cleanupMvpDatabaseFixture(mock.client, fixture); // 所有台帳の範囲だけを削除する関数
++        expect(mock.delegates.clubLineDelivery.deleteMany.mock.calls[0][0]) // 期待値を生成する関数 / 登録範囲だけを削除するメソッド
++          .toEqual(mock.delegates.clubLineDelivery.deleteMany.mock.calls[1][0]); // データの一致を検証するメソッド / 登録範囲だけを削除するメソッド
++      },
++    );
++    it("他クラブ参照で本人が残ったcleanupは失敗し、台帳を捨てない", // ケースを登録する関数
++      /**
++       * 親を削除できない場合も、完了扱いにせず同じ台帳で再試行できる。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = planMvpDatabaseFixture(sample); // DB接続前にUUIDと保存行を計画する関数
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        await seedMvpDatabaseFixture(mock.client, fixture); // 計画した行を一体保存する関数
++        mock.delegates.appUser.count.mockResolvedValueOnce(1); // 一度だけ非同期結果を設定するメソッド / 条件に合う行数を取得するメソッド
++        await expect(cleanupMvpDatabaseFixture(mock.client, fixture)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 所有台帳の範囲だけを削除する関数
++        await cleanupMvpDatabaseFixture(mock.client, fixture); // 所有台帳の範囲だけを削除する関数
++        expect(mock.delegates.appUser.deleteMany.mock.calls[0][0].where.memberships) // 期待値を生成する関数 / 登録範囲だけを削除するメソッド
++          .toEqual({ none: {} }); // データの一致を検証するメソッド
++      },
++    );
++    it("公開IDをコピーした偽fixtureからseed・cleanupできない", // ケースを登録する関数
++      /**
++       * 非公開の所有台帳に登録されたオブジェクトだけを受け付ける。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fake = { ...planMvpDatabaseFixture(sample) }; // DB接続前にUUIDと保存行を計画する関数
++        const mock = recordingDatabase(); // 通信しない記録用clientを用意する関数
++        await expect(seedMvpDatabaseFixture(mock.client, fake)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 計画した行を一体保存する関数
++        await expect(cleanupMvpDatabaseFixture(mock.client, fake)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 所有台帳の範囲だけを削除する関数
++        expect(mock.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
++      },
++    );
++    it.each([ // パラメーター試験を登録するメソッド
 +      {
-+        ...configuration,
-+        databaseUrl: `postgresql://fixture:${PRIVATE}@remote.invalid:54322/postgres`,
-+      },
-+      {
-+        ...configuration,
-+        migrationDatabaseNames: ["postgres"],
-+      },
-+    ]) {
-+      const name = forged.migrationDatabaseNames[0];
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 解決時にも接続先と実行ごとの予約名を確認する。
-+         */
-+        () => getMvpMigrationDatabase(forged, name), // 検証コールバック / 予約資源解決関数
-+      );
-+    }
-+    expect(Object.isFrozen(configuration)).toBe(true); // 期待値生成関数 / 環境の凍結判定関数 / 真偽値比較メソッド
-+    expect(Object.isFrozen(configuration.variables)).toBe(true); // 期待値生成関数 / 辞書の凍結判定関数 / 真偽値比較メソッド
-+    expect(Object.isFrozen(configuration.migrationDatabaseNames)).toBe(true); // 期待値生成関数 / 予約一覧の凍結判定関数 / 真偽値比較メソッド
-+  },
-+);
-+
-+it("manifestは実在する既存15本を列挙し、DB・Authのflagを保持する", // ケースを登録する関数
-+  /**
-+   * 実際のファイルの存在を調べるだけで、既存suiteをimportしない。
-+   */
-+  () => { // 実在manifestの検証コールバック
-+    assertMvpSuiteManifest(resolve(import.meta.dirname, "../..")); // 実在manifest検証関数 / checkoutパス解決関数
-+    expect(MVP_SUITES).toHaveLength(15); // 期待値生成関数 / 現在の対象件数の検証メソッド
-+    for (const suite of MVP_SUITES) {
-+      if (suite.database) {
-+        expect(suite.flags.RUN_DB_INTEGRATION_TESTS).toBe("1"); // 期待値生成関数 / DB明示flagの比較メソッド
-+      }
-+      if (suite.auth) {
-+        expect(suite.flags.RUN_CLUB_INVITATION_AUTH_TESTS).toBe("1"); // 期待値生成関数 / Auth明示flagの比較メソッド
-+      }
-+    }
-+    assertMvpSuiteResults(completeResults()); // 全必須結果の検証関数 / 架空結果生成関数
-+  },
-+);
-+
-+it("空manifest・二重登録・不在ファイル・checkout外のリンクを拒否する", // ケースを登録する関数
-+  /**
-+   * 同じケースの二重実行や、存在しないsuiteの成功扱いを防ぐ。
-+   */
-+  () => { // manifest拒否の検証コールバック
-+    const root = resolve(import.meta.dirname, "../.."); // 実checkoutパスを解決する関数
-+    const first = MVP_SUITES[0];
-+    const invalidManifests = [
-+      [],
-+      [first, first],
-+      [
-+        {
-+          ...first,
-+          path: "tests/missing.test.ts",
++        authUserIds: {
++          aOwner: "invalid",
 +        },
-+      ],
-+    ];
-+    for (const suites of invalidManifests) {
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 重複や不在を含むmanifestを検証する。
-+         */
-+        () => assertMvpSuiteManifest(root, suites), // 検証コールバック / manifest検証関数
-+        MANIFEST_ERROR,
-+      );
-+    }
-+    mkdirSync(join(checkout, "tests")); // 架空の試験ディレクトリ作成関数 / パス結合関数
-+    symlinkSync(join(root, first.path), join(checkout, first.path)); // 外部参照リンク作成関数 / リンク先と作成先のパス結合関数
-+    fixedFailure( // 固定例外検証関数
++      },
++      {
++        authUserIds: {
++          aOwner: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
++          platformAdmin: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
++        },
++      },
++      {
++        plans: {
++          a: "INVALID",
++        },
++      },
++      {
++        statuses: {
++          aMember: "INVALID",
++        },
++      },
++      {
++        features: ["INVALID"],
++      },
++    ])("不正なfixture入力を接続前に拒否する（ケース%#）",
 +      /**
-+       * checkout外のファイルを参照するsuiteを拒否する。
++       * 型を偽装した入力でも固定例外で拒否する。
 +       */
-+      () => assertMvpSuiteManifest(checkout, [first]), // 検証コールバック / manifest検証関数
-+      MANIFEST_ERROR,
++      (options) => { // 試験または保存処理のコールバック
++        expect( // 期待値を生成する関数
++          /**
++           * 未検証の外部入力を再現する。
++           */
++          () => planMvpDatabaseFixture(sample, options as MvpFixtureOptions), // 試験または保存処理のコールバック / DB接続前にUUIDと保存行を計画する関数 / ケース別fixture入力型
++        ).toThrow(FIXTURE_ERROR); // 例外を検証するメソッド
++      },
 +    );
 +  },
 +);
 +
-+it.each(["missing", "duplicate", "unknown", "guard-only", "duplicate-group"])( // 集計失敗の試験を登録するメソッド
-+  "%sの結果を完了としない",
++const describeDatabase =
++  process.env.RUN_MVP_TESTS === "1" &&
++  process.env.RUN_DB_INTEGRATION_TESTS === "1"
++    ? describe // 実DB群を登録する関数
++    : describe.skip; // 明示flagがなければDB群をskipする関数
++
++describeDatabase("F12 DB fixture統合（専用flag未指定時はskip）", // 明示flagがある場合だけ実DB群を登録する関数
 +  /**
-+   * suiteの欠落や、DB群なしでガードだけ成功した場合を検出する。
++   * 実DBで所有・unique・FK・rollback・cleanupを確認する。実Authや配送は行わない。
 +   */
-+  (mode) => { // 集計失敗の検証コールバック
-+    const results = completeResults(); // 架空結果生成関数
-+    if (mode === "missing") {
-+      results.pop(); // 必須結果を欠落させるメソッド
-+    } else if (mode === "duplicate") {
-+      results[1] = results[0];
-+    } else if (mode === "unknown") {
-+      results[0].path = "tests/unknown.test.ts";
-+    } else if (mode === "guard-only") {
-+      results[0].groups = [];
-+    } else {
-+      results[0].groups = [results[0].groups[0], results[0].groups[0]];
++  () => { // 試験または保存処理のコールバック
++    let client: PrismaClient | undefined; // 専用DB clientの型 / 未設定の型
++    let configuration: MvpTestEnvironment; // ガード済み実行環境型
++    const fixtures: MvpDatabaseFixture[] = []; // 認可・関連行のfixture ID型
++
++    /**
++     * ガード後に生成済みの専用clientだけを返す。
++     */
++    function database(): PrismaClient { // ガード後の専用clientを取得する関数 / 専用DB clientの型
++      if (!client) {
++        throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++      }
++      return client;
 +    }
-+    fixedFailure( // 固定例外検証関数
++
++    /**
++     * 保存前にcleanup対象を登録し、新しいfixtureを一体保存する。
++     */
++    async function seeded(options: MvpFixtureOptions = {}): Promise<MvpDatabaseFixture> { // 保存前に登録したfixtureを一体保存する関数 / ケース別fixture入力型 / 非同期結果の型 / 認可・関連行のfixture ID型
++      const fixture = planMvpDatabaseFixture(configuration, options); // DB接続前にUUIDと保存行を計画する関数
++      fixtures.push(fixture); // 作成前の行・IDを登録するメソッド
++      await seedMvpDatabaseFixture(database(), fixture); // 計画した行を一体保存する関数 / ガード後の専用clientを取得する関数
++      return fixture;
++    }
++
++    /**
++     * 各実DBケースを、機密を含まない固定例外の境界内で実行する。
++     */
++    function databaseCase(label: string, operation: () => Promise<void>) { // 機密を隠して実DBケースを登録する関数 / 文字列型 / 非同期結果の型 / 戻り値を使わない型 / コールバック関数型
++      it(label, // ケースを登録する関数
++        /**
++         * SQLやassertion原文を漏らさずケースを実行する。
++         */
++        async () => safeCheck(operation), // 試験または保存処理のコールバック / 例外原文を固定文に置き換える関数 / 受け取った検証処理の関数を参照する
++        30_000,
++      );
++    }
++
++    beforeAll( // ガード後の初期化を登録する関数
 +      /**
-+       * 不完全な結果を集計契約へ渡す。
++       * flag・専用checkout・接続先を確認した後だけPrisma SDKを読み込む。
 +       */
-+      () => assertMvpSuiteResults(results), // 検証コールバック / 必須結果検証関数
-+      MANIFEST_ERROR,
++      async () => { // 試験または保存処理のコールバック
++        await safeCheck( // 例外原文を固定文に置き換える関数
++          /**
++           * 本番client・dotenvを使わず、使い捨てローカルDBへだけ接続する。
++           */
++          async () => { // 試験または保存処理のコールバック
++            configuration = requireMvpTestEnvironment( // 接続前の実行条件を検証する関数
++              process.env,
++              resolve(import.meta.dirname, "../.."), // checkoutの実在パスを求める関数
++              runId,
++            );
++            const { PrismaClient: Client } = await import("@prisma/client"); // ガード後にSDKを遅延読込みする関数
++            const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後にSDKを遅延読込みする関数
++            client = new Client({ // 専用DB clientのコンストラクター
++              adapter: new PrismaPg({ // 専用PostgreSQL接続を構成するコンストラクター
++                connectionString: configuration.databaseUrl,
++                max: 2,
++                connectionTimeoutMillis: 3000,
++              }),
++              log: [],
++            });
++            await client.$connect(); // 専用DBへ接続するメソッド
++          },
++        );
++      },
++      20_000,
++    );
++    afterEach( // 各ケースの後処理を登録する関数
++      /**
++       * ケース途中の例外でも、登録したfixtureを逆順で片付ける。
++       */
++      async () => { // 試験または保存処理のコールバック
++        await safeCheck( // 例外原文を固定文に置き換える関数
++          /**
++           * 一つのcleanupが失敗しても他の登録fixtureのcleanupを試みる。
++           */
++          async () => { // 試験または保存処理のコールバック
++            let failed = false;
++            while (fixtures.length > 0) {
++              const fixture = fixtures.pop()!; // 最後に登録したfixtureを取り出すメソッド
++              try {
++                await cleanupMvpDatabaseFixture(database(), fixture); // 所有台帳の範囲だけを削除する関数 / ガード後の専用clientを取得する関数
++              } catch {
++                failed = true;
++              }
++            }
++            if (failed) {
++              throw new Error(CHECK_ERROR); // 例外を生成するコンストラクター
++            }
++          },
++        );
++      },
++    );
++    afterAll( // 所有資源の解放を登録する関数
++      /**
++       * 接続に失敗した場合も、自分が生成した専用clientだけを閉じる。
++       */
++      async () => { // 試験または保存処理のコールバック
++        await safeCheck( // 例外原文を固定文に置き換える関数
++          /**
++           * 実DB接続を解放し、接続秘密やSDK例外を出さない。
++           */
++          async () => { // 試験または保存処理のコールバック
++            await client?.$disconnect(); // 専用DB接続を閉じるメソッド
++            client = undefined;
++          },
++        );
++      },
++    );
++
++    databaseCase("全role・状態・親子所有・独立PlatformAdminの実在IDを返す", // 機密を隠して実DBケースを登録する関数
++      /**
++       * 同じ本人のA OWNERとB MEMBERを含め、DBに保存した認可材料を確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = await seeded(); // 保存前に登録したfixtureを一体保存する関数
++        const members = await database().clubMembership.findMany({ // 条件に合う行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            clubId: {
++              in: [fixture.clubs.a.id, fixture.clubs.b.id],
++            },
++          },
++        });
++        expect(members).toHaveLength(6); // 件数を検証するメソッド / 期待値を生成する関数
++        expect(members.filter( // 期待値を生成する関数 / 条件に合う要素を選ぶメソッド
++          /**
++           * 既定でACTIVEな所属を数える。
++           */
++          (row) => row.status === "ACTIVE", // 試験または保存処理のコールバック
++        )).toHaveLength(6); // 件数を検証するメソッド
++        const children = await database().child.findMany({ // 条件に合う行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: {
++              in: [fixture.children.own, fixture.children.otherParent],
++            },
++          },
++          orderBy: {
++            name: "asc",
++          },
++        });
++        expect(new Set(children.map( // 期待値を生成する関数 / 重複しない集合のコンストラクター / 各要素を保存・照合用の値へ写すメソッド
++          /**
++           * 別の保護者が所有していることを確認する。
++           */
++          (child) => child.parentId, // 試験または保存処理のコールバック
++        )).size).toBe(2); // 一致を検証するメソッド
++        expect(await database().platformAdmin.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: fixture.users.platformAdmin.id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++        expect(await database().appUser.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: fixture.users.platformAdmin.id,
++          },
++        })).toBeNull(); // nullを検証するメソッド
++        expect(await database().clubEvent.count({ // 期待値を生成する関数 / 条件に合う行数を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            clubId: fixture.clubs.a.id,
++          },
++        })).toBe(0); // 一致を検証するメソッド
++      },
++    );
++    databaseCase("Auth IDの対応とSTARTER・PRO・失効状態をケース専用に指定できる", // 機密を隠して実DBケースを登録する関数
++      /**
++       * DBだけの架空Auth IDを使い、Authサービスへ通信せず保存対応だけを確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const id = randomUUID(); // UUIDを生成する関数
++        const fixture = await seeded({ // 保存前に登録したfixtureを一体保存する関数
++          authUserIds: {
++            aMember: id,
++          },
++          plans: {
++            a: "STARTER",
++            b: "PRO",
++          },
++          statuses: {
++            aCoach: "SUSPENDED",
++            aOfficer: "WITHDRAWN",
++            aMember: "INVITED",
++          },
++        });
++        expect(await database().appUser.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++        const member = await database().clubMembership.findUnique({ // 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: fixture.actors.aMember.membershipId,
++          },
++        });
++        expect(member?.userId).toBe(id); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(member?.status).toBe("INVITED"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect((await database().club.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: fixture.clubs.b.id,
++          },
++        }))?.planType).toBe("PRO"); // 一致を検証するメソッド
++      },
++    );
++    databaseCase("公開対象・関連ID・uniqueと同クラブFKを実DBで確認する", // 機密を隠して実DBケースを登録する関数
++      /**
++       * fake credentialとDBメタデータだけを保存し、配送・Storageへ通信しない。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const fixture = await seeded({ // 保存前に登録したfixtureを一体保存する関数
++          features: ["attachments", "activity", "line", "support", "copySources"],
++        });
++        const event = await database().clubEvent.findUniqueOrThrow({ // 指定したIDの行を必須取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: fixture.related.a.events!.member, // 関連行の事前登録を前提にする非nullアサーション
++          },
++        });
++        expect(event.status).toBe("PUBLISHED"); // 一致を検証するメソッド / 期待値を生成する関数
++        expect(event.targetRoles).toEqual(["OWNER", "MEMBER"]); // データの一致を検証するメソッド / 期待値を生成する関数
++        const coach = await database().clubNotice.findUniqueOrThrow({ // 指定したIDの行を必須取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: fixture.related.a.notices!.coach, // 関連行の事前登録を前提にする非nullアサーション
++          },
++        });
++        expect(coach.targetRoles).not.toContain("MEMBER"); // 指定値の含有を検証するメソッド / 期待値を生成する関数
++        await expect(database().clubMembership.create({ // 期待値を生成する関数 / ケース用の行を保存するメソッド / ガード後の専用clientを取得する関数
++          data: {
++            id: randomUUID(), // UUIDを生成する関数
++            clubId: fixture.clubs.a.id,
++            userId: fixture.users.aMember.id,
++          },
++        })).rejects.toThrow(); // 例外を検証するメソッド
++        await expect(database().childClubMembership.create({ // 期待値を生成する関数 / ケース用の行を保存するメソッド / ガード後の専用clientを取得する関数
++          data: {
++            id: randomUUID(), // UUIDを生成する関数
++            clubId: fixture.clubs.a.id,
++            childId: fixture.children.own,
++            parentUserId: fixture.users.aCoach.id,
++          },
++        })).rejects.toThrow(); // 例外を検証するメソッド
++        await expect(database().clubEventAttachment.create({ // 期待値を生成する関数 / ケース用の行を保存するメソッド / ガード後の専用clientを取得する関数
++          data: {
++            id: randomUUID(), // UUIDを生成する関数
++            clubId: fixture.clubs.b.id,
++            eventId: event.id,
++            storagePath: `clubs/${fixture.clubs.b.id}/invalid/${randomUUID()}.pdf`, // UUIDを生成する関数
++            fileName: "fixture.pdf",
++            mimeType: "application/pdf",
++            sizeBytes: 64,
++          },
++        })).rejects.toThrow(); // 例外を検証するメソッド
++      },
++    );
++    databaseCase("二度seedしても他runを残し、RestrictとSetNull後のジョブを片付ける", // 機密を隠して実DBケースを登録する関数
++      /**
++       * 一方のクラブが既に削除されたケースでも、登録ジョブだけを回収する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const first = await seeded({ // 保存前に登録したfixtureを一体保存する関数
++          features: ["attachments", "line", "support"],
++        });
++        const second = planMvpDatabaseFixture({ // DB接続前にUUIDと保存行を計画する関数
++          ...configuration,
++          runId: randomUUID().replaceAll("-", ""), // UUID生成関数 / 実行識別子の正規化メソッド
++        }, {
++          features: ["attachments", "line", "support"],
++        });
++        fixtures.push(second); // 別runのcleanup対象を保存前に登録するメソッド
++        await seedMvpDatabaseFixture(database(), second); // 専用client取得関数 / 計画済み行の一体保存関数
++        const job = reserveMvpStorageDeletionJob(first); // 追加ジョブのUUIDを保存前に登録する関数
++        await database().storageDeletionJob.create({ // ケース用の行を保存するメソッド / ガード後の専用clientを取得する関数
++          data: {
++            id: job,
++            clubId: first.clubs.a.id,
++            bucket: "fixture-unused-bucket",
++            storagePath: `fixture-${job}.pdf`,
++            sourceType: "EVENT_ATTACHMENT",
++            status: "COMPLETED",
++          },
++        });
++        await database().clubLineDelivery.deleteMany({ // 登録範囲に限定して削除するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            clubId: first.clubs.a.id,
++          },
++        });
++        await database().club.delete({ // 指定したfixture行を削除するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: first.clubs.a.id,
++          },
++        });
++        expect((await database().storageDeletionJob.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: job,
++          },
++        }))?.clubId).toBeNull(); // nullを検証するメソッド
++        await cleanupMvpDatabaseFixture(database(), first); // 所有台帳の範囲だけを削除する関数 / ガード後の専用clientを取得する関数
++        expect(await database().storageDeletionJob.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: job,
++          },
++        })).toBeNull(); // nullを検証するメソッド
++        expect(await database().club.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: second.clubs.a.id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++        expect(await database().clubLineDelivery.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: second.related.a.deliveryId!, // 履歴の事前登録を前提にする非nullアサーション
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++      },
++    );
++    databaseCase("作成途中のunique衝突は全rollbackし、衝突相手の本人を削除しない", // 機密を隠して実DBケースを登録する関数
++      /**
++       * 既存AppUserと衝突させ、先に作ったクラブも残らないことを確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const existing = await seeded(); // 保存前に登録したfixtureを一体保存する関数
++        const failed = planMvpDatabaseFixture(configuration, { // DB接続前にUUIDと保存行を計画する関数
++          authUserIds: {
++            aMember: existing.users.aMember.id,
++          },
++        });
++        fixtures.push(failed); // 作成前の行・IDを登録するメソッド
++        await expect(seedMvpDatabaseFixture(database(), failed)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 計画した行を一体保存する関数 / ガード後の専用clientを取得する関数
++        await cleanupMvpDatabaseFixture(database(), failed); // 所有台帳の範囲だけを削除する関数 / ガード後の専用clientを取得する関数
++        expect(await database().club.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: failed.clubs.a.id,
++          },
++        })).toBeNull(); // nullを検証するメソッド
++        expect(await database().appUser.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: existing.users.aMember.id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++      },
++    );
++    databaseCase("他クラブ所属が追加された本人を消さず、cleanup失敗後も再試行できる", // 機密を隠して実DBケースを登録する関数
++      /**
++       * 関係外の所属を巻き込む削除を拒否し、cleanup全体がrollbackすることを確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const first = await seeded(); // 保存前に登録したfixtureを一体保存する関数
++        const other = await seeded(); // 保存前に登録したfixtureを一体保存する関数
++        const membershipId = randomUUID(); // UUIDを生成する関数
++        await database().clubMembership.create({ // ケース用の行を保存するメソッド / ガード後の専用clientを取得する関数
++          data: {
++            id: membershipId,
++            clubId: other.clubs.a.id,
++            userId: first.users.aMember.id,
++            role: "MEMBER",
++          },
++        });
++        await expect(cleanupMvpDatabaseFixture(database(), first)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 所有台帳の範囲だけを削除する関数 / ガード後の専用clientを取得する関数
++        expect(await database().club.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: first.clubs.a.id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++        expect(await database().clubMembership.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: membershipId,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++        await database().clubMembership.delete({ // 指定したfixture行を削除するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: membershipId,
++          },
++        });
++        await cleanupMvpDatabaseFixture(database(), first); // 所有台帳の範囲だけを削除する関数 / ガード後の専用clientを取得する関数
++        expect(await database().club.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド / ガード後の専用clientを取得する関数
++          where: {
++            id: other.clubs.a.id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++      },
++    );
++    databaseCase("後段の保存障害でも実transactionをrollbackし、別fixtureに触れない", // 機密を隠して実DBケースを登録する関数
++      /**
++       * 最後のサポート行作成だけを障害注入し、それ以前の実保存のrollbackを確認する。
++       */
++      async () => { // 試験または保存処理のコールバック
++        const existing = await seeded(); // 保存前に登録したfixtureを一体保存する関数
++        const failed = planMvpDatabaseFixture(configuration, { // DB接続前にUUIDと保存行を計画する関数
++          features: ["attachments", "line", "support"],
++        });
++        fixtures.push(failed); // 作成前の行・IDを登録するメソッド
++        const db = database(); // ガード後の専用clientを取得する関数
++        const injected = new Proxy(db, { // 実処理へ障害を注入するコンストラクター
++          /**
++           * 実transactionのcallbackにだけ、後段保存の障害を差し込む。
++           */
++          get(target, key) { // 所有台帳または参照先を取得するメソッド
++            if (key === "$transaction") {
++              return (
++                /**
++                 * transaction自体は実DBへ実行する。
++                 */
++                async (operation: (transaction: Prisma.TransactionClient) => Promise<void>) => // 試験または保存処理のコールバック / TransactionClientの一括作成入力型 / 非同期結果の型 / 戻り値を使わない型 / コールバック関数型
++                  target.$transaction( // 一体保存・削除の実transactionを実行するメソッド
++                    /**
++                     * サポート以外の保存は実delegateへ転送する。
++                     */
++                    async (transaction) => operation(new Proxy(transaction, { // 試験または保存処理のコールバック / 受け取った検証処理を実行する関数 / 実処理へ障害を注入するコンストラクター
++                      /**
++                       * 最後の関連行作成で固定の架空障害を発生させる。
++                       */
++                      get(delegate, property) { // 所有台帳または参照先を取得するメソッド
++                        if (property === "supportReport") {
++                          return {
++                            /**
++                             * 実DBへの書込みを途中で失敗させる。
++                             */
++                            createMany() { // 計画したfixture行を一括保存するメソッド
++                              throw new Error(PRIVATE); // 例外を生成するコンストラクター
++                            },
++                          };
++                        }
++                        const value = Reflect.get(delegate, property); // 所有台帳または参照先を取得するメソッド
++                        return typeof value === "function" ? value.bind(delegate) : value; // 呼出し元を保持して関数を返すメソッド
++                      },
++                    })),
++                  )
++              );
++            }
++            const value = Reflect.get(target, key); // 所有台帳または参照先を取得するメソッド
++            return typeof value === "function" ? value.bind(target) : value; // 呼出し元を保持して関数を返すメソッド
++          },
++        });
++        await expect(seedMvpDatabaseFixture(injected, failed)).rejects.toThrow(FIXTURE_ERROR); // 例外を検証するメソッド / 期待値を生成する関数 / 計画した行を一体保存する関数
++        await cleanupMvpDatabaseFixture(db, failed); // 所有台帳の範囲だけを削除する関数
++        expect(await db.club.count({ // 期待値を生成する関数 / 条件に合う行数を取得するメソッド
++          where: {
++            id: {
++              in: [failed.clubs.a.id, failed.clubs.b.id],
++            },
++          },
++        })).toBe(0); // 一致を検証するメソッド
++        expect(await db.appUser.findUnique({ // 期待値を生成する関数 / 指定したIDの行を取得するメソッド
++          where: {
++            id: existing.users.aMember.id,
++          },
++        })).not.toBeNull(); // nullを検証するメソッド
++      },
 +    );
 +  },
 +);
-+
-+it.each(["suite", "group"])( // 全体と群別の試験を登録するメソッド
-+  "%sの0件・失敗・skip・未完了・不正件数を成功扱いしない",
-+  /**
-+   * DB群skipを全体の成功件数で隠せないことを確認する。
-+   */
-+  (level) => { // 件数判定の検証コールバック
-+    const invalid = [
-+      { passed: 0 },
-+      { failed: 1 },
-+      { skipped: 1 },
-+      { pending: 1 },
-+      { passed: -1 },
-+      { passed: 0.5 },
-+      { passed: Number.NaN }, // 不正数を表す定数
-+      { passed: Number.POSITIVE_INFINITY }, // 無限値を表す定数
-+    ];
-+    for (const counts of invalid) {
-+      const results = completeResults(); // 架空結果生成関数
-+      const target = level === "suite" ? results[0] : results[0].groups[0];
-+      Object.assign(target, counts); // 失敗件数を架空結果へ反映する関数
-+      fixedFailure( // 固定例外検証関数
-+        /**
-+         * 不正な終端件数を集計契約へ渡す。
-+         */
-+        () => assertMvpSuiteResults(results), // 検証コールバック / 必須結果検証関数
-+        MANIFEST_ERROR,
-+      );
-+    }
-+  },
-+);
-diff --git a/tests/mvp/environment.ts b/tests/mvp/environment.ts
+diff --git a/tests/mvp/database-fixture.ts b/tests/mvp/database-fixture.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a856407724ee0a22ae99b23ad2cc6defa4f4ba8
+index 0000000000000000000000000000000000000000..37bf09bd0d6914ec38cbecc14aba64338b7b35a6
 --- /dev/null
-+++ b/tests/mvp/environment.ts
-@@ -0,0 +1,229 @@
-+// tests/mvp/environment.ts
-+// 接続やdotenvの初期化を行わず、F12の使い捨て環境だけを許可する。
++++ b/tests/mvp/database-fixture.ts
+@@ -0,0 +1,836 @@
++// tests/mvp/database-fixture.ts
++// SDKを初期化せず、作成前のID登録・一体seed・所有範囲だけのcleanupを提供する。
 +
 +import {
-+  readdirSync, // 環境ファイルの名前だけを調べる関数
-+  realpathSync, // checkoutの実在する絶対パスを解決する関数
-+  statSync, // checkoutがディレクトリであることを確認する関数
-+} from "node:fs";
++  randomUUID, // fixture専用のUUIDを生成する関数
++} from "node:crypto";
++import type {
++  ClubMemberRole, // 所属ロールのDB列挙型
++  ClubMembershipStatus, // 所属状態のDB列挙型
++  PlanType, // クラブプランのDB列挙型
++  Prisma, // 各モデルの作成入力型namespace
++  PrismaClient, // 呼出し元がガード後に生成する専用DB clientの型
++} from "@prisma/client";
 +import {
-+  isAbsolute, // 明示されたcheckoutが絶対パスか判定する関数
-+} from "node:path";
++  CLUB_ATTACHMENT_BUCKET, // ストレージ内の保管場所の名前
++} from "@/src/infrastructure/storage/club-attachment-storage-constants";
++import type {
++  MvpTestEnvironment, // ガード済み接続先と生成予定資源を表す型
++} from "./environment";
 +
-+const GUARD_ERROR = "F12専用の使い捨て環境・flag・checkoutを確認してください。";
++const FIXTURE_ERROR = "F12 DB fixtureの作成・所有範囲・後片付けを確認してください。";
++const USER_KEYS = [
++  "aOwner",
++  "aCoach",
++  "aOfficer",
++  "aMember",
++  "bOwner",
++  "platformAdmin",
++] as const; // リテラル型を保持するconstアサーション
 +
 +/**
-+ * 自動読込を使わず、呼出し元から明示的に受け取る環境変数の辞書。
++ * ローカルAuthとの接続時にIDを差し込める本人のキー。bMemberはaOwnerと同じ本人。
 + */
-+export type MvpEnvironmentVariables = Readonly< // 環境変数辞書型 / 読取専用にする型
-+  Record<string, string | undefined> // キーと値の対応型 / 文字列型 / 未設定の型
-+>;
++export type MvpFixtureUserKey = typeof USER_KEYS[number]; // 本人キー型 / プロパティまたは配列要素を参照する型 / 値の宣言から型を取得する型 / 数値型
 +
 +/**
-+ * ガード済み接続先と、後続runnerが引き継いでよい変数・生成予定資源。
-+ * migrationDatabaseNamesは作成済みの証明ではない。作成と所有記録は後続runnerが行う。
++ * 基本の二クラブ以外に、そのケースだけが必要とする関連データの種類。
 + */
-+export type MvpTestEnvironment = Readonly<{ // F12の検証済み実行環境型 / 読取専用にする型
-+  checkoutDirectory: string; // checkoutの絶対パスを表す文字列型
-+  runId: string; // 実行ごとの識別子を表す文字列型
-+  databaseUrl: string; // 通常試験用postgres接続先の文字列型
-+  supabaseOrigin: string; // ローカルAuth・Storageのoriginの文字列型
-+  appOrigin: string; // アプリのoriginの文字列型
-+  variables: MvpEnvironmentVariables; // 許可した変数だけを保持する辞書型
-+  migrationDatabaseNames: readonly string[]; // 同じ実行だけに予約したDB名の読取専用文字列配列型
++export type MvpFixtureFeature = // 関連データ種別型
++  | "content"
++  | "attachments"
++  | "activity"
++  | "line"
++  | "support"
++  | "copySources";
++
++/**
++ * ケース専用のプラン・失効状態・Auth本人ID・関連データを指定する入力。
++ * authUserIdsは新規ローカルAuth user.idだけを渡す。Authの作成・存在照合は後続粒度。
++ */
++export type MvpFixtureOptions = { // ケース別fixture入力型
++  authUserIds?: Partial<Record<MvpFixtureUserKey, string>>; // 任意項目にする型 / キーと値の対応型 / 本人キー型 / 文字列型
++  plans?: {
++    a?: PlanType; // クラブプラン型
++    b?: PlanType; // クラブプラン型
++  };
++  statuses?: Partial<Record<MvpFixtureActorKey, ClubMembershipStatus>>; // 任意項目にする型 / キーと値の対応型 / 所属キー型 / 所属状態型
++  features?: readonly MvpFixtureFeature[]; // 関連データ種別型
++};
++
++/**
++ * 管理者・会員・クラブ間で役割が異なる本人を選ぶためのキー。
++ */
++export type MvpFixtureActorKey = // 所属キー型
++  | "aOwner"
++  | "aCoach"
++  | "aOfficer"
++  | "aMember"
++  | "bOwner"
++  | "bMember";
++
++/**
++ * 認可contextを組み立てるための、実在する本人・所属・クラブと状態。
++ */
++export type MvpFixtureActor = Readonly<{ // 認可用の本人・所属型 / 読取専用にする型
++  userId: string; // 文字列型
++  membershipId: string; // 文字列型
++  clubId: string; // 文字列型
++  role: ClubMemberRole; // 所属ロール型
++  status: ClubMembershipStatus; // 所属状態型
 +}>;
 +
 +/**
-+ * 後続runnerが作成・所有記録・削除に使う、同一クラスタ内のmigration用資源。
++ * 下書き・MEMBER公開・COACH限定を選ぶコンテンツIDの組。
 + */
-+export type MvpMigrationDatabase = { // migration用の生成予定資源型
-+  runId: string; // 所有する実行識別子の文字列型
-+  databaseName: string; // 予約済みDB名の文字列型
-+  databaseUrl: string; // 同一クラスタ内の接続先の文字列型
++export type MvpFixtureContent = Readonly<{ // 公開状態別コンテンツID型 / 読取専用にする型
++  draft: string; // 文字列型
++  member: string; // 文字列型
++  coach: string; // 文字列型
++}>;
++
++/**
++ * 共通seedが返すID。生成台帳は外へ出さず、後片付けはこのオブジェクトの所有記録を使う。
++ */
++export type MvpDatabaseFixture = Readonly<{ // 認可・関連行のfixture ID型 / 読取専用にする型
++  runId: string; // 文字列型
++  scopeId: string; // 文字列型
++  clubs: Readonly<Record<"a" | "b", Readonly<{ // 読取専用にする型 / キーと値の対応型
++    id: string; // 文字列型
++    slug: string; // 文字列型
++    planType: PlanType; // クラブプラン型
++  }>>>;
++  users: Readonly<Record<MvpFixtureUserKey, Readonly<{ // 読取専用にする型 / キーと値の対応型 / 本人キー型
++    id: string; // 文字列型
++    email: string; // 文字列型
++  }>>>;
++  actors: Readonly<Record<MvpFixtureActorKey, MvpFixtureActor>>; // 読取専用にする型 / キーと値の対応型 / 所属キー型 / 認可用の本人・所属型
++  children: Readonly<{ // 読取専用にする型
++    own: string; // 文字列型
++    otherParent: string; // 文字列型
++  }>;
++  related: Readonly<Record<"a" | "b", Readonly<{ // 読取専用にする型 / キーと値の対応型
++    events?: MvpFixtureContent; // 公開状態別コンテンツID型
++    notices?: MvpFixtureContent; // 公開状態別コンテンツID型
++    sourceEvents: readonly string[]; // 文字列型
++    eventAttachmentId?: string; // 文字列型
++    noticeAttachmentId?: string; // 文字列型
++    storageJobId?: string; // 文字列型
++    lineSettingId?: string; // 文字列型
++    targetId?: string; // 文字列型
++    deliveryId?: string; // 文字列型
++    webhookKey?: string; // 文字列型
++    supportReportId?: string; // 文字列型
++  }>>>;
++}>;
++
++/**
++ * 一つの実transactionで保存する、作成前にUUIDを決めた行の集合。
++ */
++type Rows = { // 作成前に登録する保存行集合型
++  clubs: Prisma.ClubCreateManyInput[]; // ClubCreateManyInputの一括作成入力型
++  users: Prisma.AppUserCreateManyInput[]; // AppUserCreateManyInputの一括作成入力型
++  memberships: Prisma.ClubMembershipCreateManyInput[]; // ClubMembershipCreateManyInputの一括作成入力型
++  children: Prisma.ChildCreateManyInput[]; // ChildCreateManyInputの一括作成入力型
++  childMemberships: Prisma.ChildClubMembershipCreateManyInput[]; // ChildClubMembershipCreateManyInputの一括作成入力型
++  admins: Prisma.PlatformAdminCreateManyInput[]; // PlatformAdminCreateManyInputの一括作成入力型
++  events: Prisma.ClubEventCreateManyInput[]; // ClubEventCreateManyInputの一括作成入力型
++  notices: Prisma.ClubNoticeCreateManyInput[]; // ClubNoticeCreateManyInputの一括作成入力型
++  eventAttachments: Prisma.ClubEventAttachmentCreateManyInput[]; // ClubEventAttachmentCreateManyInputの一括作成入力型
++  noticeAttachments: Prisma.ClubNoticeAttachmentCreateManyInput[]; // ClubNoticeAttachmentCreateManyInputの一括作成入力型
++  eventReads: Prisma.ClubEventReadCreateManyInput[]; // ClubEventReadCreateManyInputの一括作成入力型
++  noticeReads: Prisma.ClubNoticeReadCreateManyInput[]; // ClubNoticeReadCreateManyInputの一括作成入力型
++  memos: Prisma.ClubEventMemoCreateManyInput[]; // ClubEventMemoCreateManyInputの一括作成入力型
++  settings: Prisma.ClubLineSettingCreateManyInput[]; // ClubLineSettingCreateManyInputの一括作成入力型
++  targets: Prisma.ClubLineTargetCreateManyInput[]; // ClubLineTargetCreateManyInputの一括作成入力型
++  deliveries: Prisma.ClubLineDeliveryCreateManyInput[]; // ClubLineDeliveryCreateManyInputの一括作成入力型
++  jobs: Prisma.StorageDeletionJobCreateManyInput[]; // StorageDeletionJobCreateManyInputの一括作成入力型
++  reports: Prisma.SupportReportCreateManyInput[]; // SupportReportCreateManyInputの一括作成入力型
 +};
 +
 +/**
-+ * 前後空白・制御文字・query・fragment・バックスラッシュを解析前に拒否する。
++ * 公開fixtureと結び付けた所有台帳。seed失敗時はtransaction rollbackに任せる。
 + */
-+function checkedSource(source: string | undefined): string { // URL原文検証関数 / 文字列型 / 未設定の型
-+  if (
-+    !source ||
-+    /[\s\u0000-\u001f\u007f\\?#]/u.test(source) // 禁止文字の有無を調べるメソッド
-+  ) {
-+    throw new Error(GUARD_ERROR); // 秘密やcauseを含めない例外を生成するコンストラクター
++type FixtureState = { // 非公開の所有台帳型
++  rows: Rows; // 作成前に登録する保存行集合型
++  jobs: Set<string>; // 登録済みジョブIDの集合型 / 文字列型
++  phase: "planned" | "seeding" | "ready" | "cleaning" | "cleaned";
++};
++
++const states = new WeakMap<MvpDatabaseFixture, FixtureState>(); // fixtureと所有台帳を結ぶコンストラクター / 認可・関連行のfixture ID型 / 非公開の所有台帳型
++
++/**
++ * このモジュールが作ったfixtureだけから、非公開の所有台帳を取り出す。
++ */
++function stateOf(fixture: MvpDatabaseFixture): FixtureState { // 非公開の所有台帳を取得する関数 / 認可・関連行のfixture ID型 / 非公開の所有台帳型
++  const state = states.get(fixture); // 所有台帳または参照先を取得するメソッド
++  if (!state) {
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
 +  }
-+  return source;
++  return state;
 +}
 +
 +/**
-+ * 数値IPやencoded host等の正規化を許さず、指定portのHTTP originだけを返す。
++ * IDを先に発行し、同じrun内でも独立した二クラブと任意の関連行を計画する。
++ * DB・Auth・Storageへ接続せず、既存データの再利用・upsertは行わない。
 + */
-+function localOrigin( // origin検証関数
-+  source: string | undefined, // URL原文の文字列型 / 未設定の型
-+  port: string, // 許可portの文字列型
-+): string { // 検証済みoriginの文字列型
-+  const value = checkedSource(source); // URL原文を検証する関数
-+  if (
-+    value !== `http://127.0.0.1:${port}` &&
-+    value !== `http://127.0.0.1:${port}/` &&
-+    value !== `http://localhost:${port}` &&
-+    value !== `http://localhost:${port}/`
-+  ) {
-+    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
-+  }
-+  return new URL(value).origin; // 検証したローカルURLを解析するコンストラクター
-+}
-+
-+/**
-+ * 通常試験のDB名はpostgresに固定し、接続先を変更し得る表記を拒否する。
-+ */
-+function localDatabase(source: string | undefined): string { // DB接続先検証関数 / 文字列型 / 未設定の型
-+  const value = checkedSource(source); // URL原文を検証する関数
-+  if (
-+    !/^postgres(?:ql)?:\/\/[^/@:]+:[^/@]+@(localhost|127\.0\.0\.1):54322\/postgres$/u
-+      .test(value) // 接続先とDB名の厳密な書式を検証するメソッド
-+  ) {
-+    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
-+  }
-+  const url = new URL(value); // 接続URLを解析するコンストラクター
-+  for (const credential of [url.username, url.password]) {
-+    const decoded = decodeURIComponent(credential); // 不正なpercent escapeも拒否する復号関数
-+    if (
-+      !decoded ||
-+      /[\u0000-\u001f\u007f]/u.test(decoded) // 制御文字を検出するメソッド
-+    ) {
-+      throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
-+    }
-+  }
-+  return url.toString(); // 解析済み接続先を文字列にするメソッド
-+}
-+
-+/**
-+ * dotenv・Nextが自動読込するファイルを、内容を開かず名前だけで拒否する。
-+ * .env.exampleは読込対象ではないため許可する。dangling symlinkも名前で検出する。
-+ */
-+function cleanCheckout(directory: string): string { // 環境ファイルを持たないcheckout検証関数 / 文字列型
-+  if (!isAbsolute(directory)) { // 絶対パスを判定する関数
-+    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
-+  }
-+  const absolute = realpathSync(directory); // checkoutの実在パスを取得する関数
-+  if (!statSync(absolute).isDirectory()) { // ファイル情報取得関数 / ディレクトリ判定メソッド
-+    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
-+  }
-+  for (const name of readdirSync(absolute)) { // ファイル名だけを列挙する関数
-+    if (
-+      /^\.env(?:\.(?:local|development(?:\.local)?|test(?:\.local)?|production.*))?$/u
-+        .test(name) // 自動読込対象とproduction派生名を判定するメソッド
-+    ) {
-+      throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
-+    }
-+  }
-+  return absolute;
-+}
-+
-+/**
-+ * 明示flag・使い捨て確認を先に調べ、その後だけURLとcheckoutを評価する。
-+ * 本番build用のNODE_ENV切替はこの契約の対象外。launcherはtestかdevelopmentに限る。
-+ * 戻り値には接続秘密を含むためログへ渡さない。元のprocess.envは変更しない。
-+ */
-+export function requireMvpTestEnvironment( // F12の実行前ガード関数
-+  environment: MvpEnvironmentVariables, // 明示された環境変数辞書型
-+  checkoutDirectory: string, // 専用checkoutの絶対パスの文字列型
-+  runId: string, // 呼出し元が生成する32桁の小文字hex識別子の文字列型
-+): MvpTestEnvironment { // 検証済み実行環境型
++export function planMvpDatabaseFixture( // DB接続前にUUIDと保存行を計画する関数
++  configuration: MvpTestEnvironment, // ガード済み実行環境型
++  options: MvpFixtureOptions = {}, // ケース別fixture入力型
++): MvpDatabaseFixture { // 認可・関連行のfixture ID型
 +  try {
-+    if (
-+      environment.RUN_MVP_TESTS !== "1" ||
-+      environment.MVP_TEST_DISPOSABLE !== "1" ||
-+      (
-+        environment.NODE_ENV !== "test" &&
-+        environment.NODE_ENV !== "development"
-+      ) ||
-+      environment.VERCEL_ENV === "production" ||
-+      !/^[0-9a-f]{32}$/u.test(runId) // 実行識別子の厳密な書式を検証するメソッド
-+    ) {
-+      throw new Error(GUARD_ERROR); // URLに触れず固定例外を生成するコンストラクター
++    if (!/^[0-9a-f]{32}$/u.test(configuration.runId)) { // 書式を検証するメソッド
++      throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
 +    }
-+    for (const key of Object.keys(environment)) { // 値を評価せず環境変数名を列挙する関数
-+      if (
-+        key.startsWith("PG") || // PostgreSQLの接続上書き変数を検出するメソッド
-+        key.startsWith("DOTENV_") || // dotenvの任意ファイル読込指定を検出するメソッド
-+        key === "NODE_OPTIONS" ||
-+        key === "NODE_PATH"
-+      ) {
-+        if (environment[key] !== undefined) {
-+          throw new Error(GUARD_ERROR); // 接続上書きを固定例外で拒否するコンストラクター
-+        }
++    const scopeId = randomUUID(); // UUIDを生成する関数
++    const users = {} as Record<MvpFixtureUserKey, { // キーと値の対応型 / 本人キー型
++      id: string; // 文字列型
++      email: string; // 文字列型
++    }>;
++    for (const key of USER_KEYS) {
++      const id = options.authUserIds?.[key] ?? randomUUID(); // UUIDを生成する関数
++      if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu.test(id)) { // 書式を検証するメソッド
++        throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
 +      }
++      users[key] = Object.freeze({ // 設定の変更を防ぐ関数
++        id: id.toLowerCase(), // 小文字へ正規化するメソッド
++        email: `mvp-f12-${scopeId}-${key.toLowerCase()}@example.test`, // 小文字へ正規化するメソッド
++      });
 +    }
-+    const checkout = cleanCheckout(checkoutDirectory); // 内容を読まず専用checkoutを確認する関数
-+    const databaseUrl = localDatabase(environment.DATABASE_URL); // 通常用postgres接続先を検証する関数
-+    const supabaseOrigin = localOrigin(environment.NEXT_PUBLIC_SUPABASE_URL, "54321"); // Supabase origin検証関数
-+    const appOrigin = localOrigin(environment.APP_BASE_URL, "3000"); // アプリorigin検証関数
-+    const variables: Record<string, string | undefined> = { // 許可する変数辞書型 / 文字列型 / 未設定の型
-+      RUN_MVP_TESTS: "1",
-+      MVP_TEST_DISPOSABLE: "1",
-+      NODE_ENV: environment.NODE_ENV,
-+      DATABASE_URL: databaseUrl,
-+      NEXT_PUBLIC_SUPABASE_URL: supabaseOrigin,
-+      APP_BASE_URL: appOrigin,
-+    };
-+    for (const key of ["NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"]) {
-+      const value = environment[key];
-+      if (value !== undefined) {
-+        if (
-+          !value ||
-+          /\s/u.test(value) // 空白を含むキーを検出するメソッド
-+        ) {
-+          throw new Error(GUARD_ERROR); // キー原文を含めない例外を生成するコンストラクター
-+        }
-+        variables[key] = value;
++    if (new Set(Object.values(users).map( // 重複しない集合のコンストラクター / 各要素を保存・照合用の値へ写すメソッド / 値を列挙する関数
++      /**
++       * 本人キーごとのIDを照合し、PlatformAdminをクラブ本人と兼任させない。
++       */
++      (user) => user.id, // 試験または保存処理のコールバック
++    )).size !== USER_KEYS.length) {
++      throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++    }
++    const clubs = {} as Record<"a" | "b", { // キーと値の対応型
++      id: string; // 文字列型
++      slug: string; // 文字列型
++      planType: PlanType; // クラブプラン型
++    }>;
++    for (const key of ["a", "b"] as const) { // リテラル型を保持するconstアサーション
++      const planType = options.plans?.[key] ?? "STANDARD";
++      if (!["STARTER", "STANDARD", "PRO"].includes(planType)) { // 許可値に含まれるか調べるメソッド
++        throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
 +      }
++      clubs[key] = Object.freeze({ // 設定の変更を防ぐ関数
++        id: randomUUID(), // UUIDを生成する関数
++        slug: `mvp-f12-${scopeId}-${key}`,
++        planType,
++      });
 +    }
-+    return Object.freeze({ // 検証済み環境の設定変更を防ぐ関数
-+      checkoutDirectory: checkout,
-+      runId,
-+      databaseUrl,
-+      supabaseOrigin,
-+      appOrigin,
-+      variables: Object.freeze(variables), // 許可した環境変数の変更を防ぐ関数
-+      migrationDatabaseNames: Object.freeze([ // 予約済みDB名の変更を防ぐ関数
-+        `mvp_f12_${runId}_fresh`,
-+        `mvp_f12_${runId}_upgrade`,
-+      ]),
++    const actors = {} as Record<MvpFixtureActorKey, MvpFixtureActor>; // キーと値の対応型 / 所属キー型 / 認可用の本人・所属型
++    const definitions = [
++      ["aOwner", "a", "aOwner", "OWNER"],
++      ["aCoach", "a", "aCoach", "COACH"],
++      ["aOfficer", "a", "aOfficer", "OFFICER"],
++      ["aMember", "a", "aMember", "MEMBER"],
++      ["bOwner", "b", "bOwner", "OWNER"],
++      ["bMember", "b", "aOwner", "MEMBER"],
++    ] as const; // リテラル型を保持するconstアサーション
++    for (const [key, club, user, role] of definitions) {
++      const status = options.statuses?.[key] ?? "ACTIVE";
++      if (!["INVITED", "ACTIVE", "SUSPENDED", "WITHDRAWN"].includes(status)) { // 許可値に含まれるか調べるメソッド
++        throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++      }
++      actors[key] = Object.freeze({ // 設定の変更を防ぐ関数
++        userId: users[user].id,
++        membershipId: randomUUID(), // UUIDを生成する関数
++        clubId: clubs[club].id,
++        role,
++        status,
++      });
++    }
++    const children = Object.freeze({ // 設定の変更を防ぐ関数
++      own: randomUUID(), // UUIDを生成する関数
++      otherParent: randomUUID(), // UUIDを生成する関数
 +    });
-+  } catch {
-+    throw new Error(GUARD_ERROR); // 入力値・SDK例外・ファイルパス・causeを捨てるコンストラクター
-+  }
-+}
-+
-+/**
-+ * 同一実行に予約したDB名だけを同じ接続先・資格情報から解決する。
-+ * DBの作成・削除は行わず、通常用DATABASE_URLも書き換えない。
-+ */
-+export function getMvpMigrationDatabase( // migration専用資源を解決する関数
-+  configuration: MvpTestEnvironment, // ガード済み環境型
-+  databaseName: string, // 作成予定のDB名の文字列型
-+): MvpMigrationDatabase { // 実行識別子付きmigration資源型
-+  try {
-+    if (
-+      !/^[0-9a-f]{32}$/u.test(configuration.runId) || // 所有する実行識別子を再確認するメソッド
-+      !configuration.migrationDatabaseNames.includes(databaseName) || // この実行に予約したDB名を照合するメソッド
-+      (
-+        databaseName !== `mvp_f12_${configuration.runId}_fresh` &&
-+        databaseName !== `mvp_f12_${configuration.runId}_upgrade`
-+      )
-+    ) {
-+      throw new Error(GUARD_ERROR); // 他実行のDBを固定例外で拒否するコンストラクター
-+    }
-+    const url = new URL(localDatabase(configuration.databaseUrl)); // 同一クラスタURLのコンストラクター / 通常接続先の再検証関数
-+    url.pathname = `/${databaseName}`;
-+    return {
-+      runId: configuration.runId,
-+      databaseName,
-+      databaseUrl: url.toString(), // DB名だけ変更した接続先を文字列にするメソッド
-+    };
-+  } catch {
-+    throw new Error(GUARD_ERROR); // 接続秘密や例外原文を捨てるコンストラクター
-+  }
-+}
-diff --git a/tests/mvp/suite-manifest.ts b/tests/mvp/suite-manifest.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..638274f80da529f500fe0e13698fb1d73cab3255
---- /dev/null
-+++ b/tests/mvp/suite-manifest.ts
-@@ -0,0 +1,365 @@
-+// tests/mvp/suite-manifest.ts
-+// 実在する既存suiteだけを列挙し、未実行・skipを完了として集計しない。
-+
-+import {
-+  realpathSync, // suiteの実在パスを解決する関数
-+  statSync, // suiteが通常ファイルであることを確認する関数
-+} from "node:fs";
-+import {
-+  resolve, // checkoutを基準にsuiteのパスを解決する関数
-+  sep, // checkout配下を照合するパス区切り文字
-+} from "node:path";
-+
-+const MANIFEST_ERROR = "F12の必須suite・実行件数・skipを確認してください。";
-+
-+/**
-+ * 既存suiteのパス、実行flag、実DB・実Authの要否、必須試験群の契約。
-+ * Authをmockするsuiteはauthをfalseとする。Storageや配送の実行許可は意味しない。
-+ */
-+export type MvpSuite = { // 必須suiteの契約型
-+  path: string; // 実在する試験パスの文字列型
-+  flags: Readonly<Record<string, "1">>; // 読取専用のflag辞書型 / 文字列キー型
-+  database: boolean; // 実DBが必要か表す真偽値型
-+  auth: boolean; // 実Authが必要か表す真偽値型
-+  requiredGroups: readonly string[]; // 必須群の完全名を保持する読取専用文字列配列型
-+};
-+
-+/**
-+ * runnerが試験結果から収集する、終端状態ごとのケース件数。
-+ */
-+export type MvpCaseCounts = { // 実行件数の契約型
-+  passed: number; // 成功件数の数値型
-+  failed: number; // 失敗件数の数値型
-+  skipped: number; // skip・todo件数の数値型
-+  pending: number; // 未完了・未分類件数の数値型
-+};
-+
-+/**
-+ * suite全体と必須群の結果。群の件数には配下のケースを含める。
-+ * Vitest等からの変換・プロセス終了検査は後続runnerが担当する。
-+ */
-+export type MvpSuiteResult = MvpCaseCounts & { // suiteの実行結果型 / 件数契約型
-+  path: string; // 対象suiteパスの文字列型
-+  groups: readonly (MvpCaseCounts & { // 群別結果の読取専用配列型 / 件数契約型
-+    name: string; // 必須群と照合する完全名の文字列型
-+  })[];
-+};
-+
-+/**
-+ * 現在実在する8本のtest:db、ローカルAuth契約、F06〜F11のflowを一度ずつ列挙する。
-+ * 新規F12 suiteやE2Eは実装後の粒度で実在を確認してから追加する。
-+ */
-+export const MVP_SUITES: readonly MvpSuite[] = [ // 既存必須suiteの読取専用配列型
-+  {
-+    path: "tests/club-id-integrity.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "clubId整合性",
-+    ],
-+  },
-+  {
-+    path: "tests/storage-deletion-jobs.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "StorageDeletionJob",
-+    ],
-+  },
-+  {
-+    path: "tests/club-line-setting.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "ClubLineSetting Repository",
-+    ],
-+  },
-+  {
-+    path: "tests/club-membership-repository.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "ClubMembership Repository",
-+    ],
-+  },
-+  {
-+    path: "tests/club-invitation-schema.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "ClubInvitation DB制約",
-+    ],
-+  },
-+  {
-+    path: "tests/club-invitation-repository.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "ClubInvitation Repository",
-+    ],
-+  },
-+  {
-+    path: "tests/club-invitation-acceptance-repository.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "招待受取人の読取Repository（ローカルDB）",
-+    ],
-+  },
-+  {
-+    path: "tests/club-invitation-recovery.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "復旧CLIと実RepositoryのDB統合",
-+    ],
-+  },
-+  {
-+    path: "tests/club-invitation-auth.local.integration.test.ts",
-+    flags: {
-+      RUN_CLUB_INVITATION_AUTH_TESTS: "1",
-+    },
-+    database: false,
-+    auth: true,
-+    requiredGroups: [
-+      "ローカルSupabaseの招待Auth契約",
-+    ],
-+  },
-+  {
-+    path: "tests/club-invitation-acceptance.flow.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+      RUN_CLUB_INVITATION_ACCEPTANCE_TESTS: "1",
-+      RUN_CLUB_INVITATION_AUTH_TESTS: "1",
-+      CLUB_INVITATION_ACCEPTANCE_DISPOSABLE: "1",
-+    },
-+    database: true,
-+    auth: true,
-+    requiredGroups: [
-+      "F06実DB・実Auth（3つの実行flagがない通常実行ではskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/club-account.flow.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+      RUN_CLUB_ACCOUNT_TESTS: "1",
-+      CLUB_ACCOUNT_DISPOSABLE: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F07 Action・Service・Repositoryと実DB",
-+    ],
-+  },
-+  {
-+    path: "tests/support-report.flow.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+      RUN_SUPPORT_REPORT_TESTS: "1",
-+      SUPPORT_REPORT_DISPOSABLE: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F08実DBフロー（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/platform-support.flow.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+      RUN_PLATFORM_SUPPORT_TESTS: "1",
-+      PLATFORM_SUPPORT_DISPOSABLE: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F09実DB統合（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/event-month-copy.flow.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+      RUN_EVENT_MONTH_COPY_TESTS: "1",
-+      EVENT_MONTH_COPY_DISPOSABLE: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F10専用使い捨てDB統合（flag未指定はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/event-practice-batch.flow.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+      RUN_EVENT_PRACTICE_BATCH_TESTS: "1",
-+      EVENT_PRACTICE_BATCH_DISPOSABLE: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F11専用使い捨てDB統合（flag未指定はskip）",
-+    ],
-+  },
-+];
-+
-+/**
-+ * 重複・空manifest・不正flag・存在しないsuiteを実行前に拒否する。
-+ * ファイル本文やSDKは読まない。checkout外へのsymlinkも対象にしない。
-+ */
-+export function assertMvpSuiteManifest( // suite一覧の実在と契約を検証する関数
-+  checkoutDirectory: string, // 専用checkoutのパスの文字列型
-+  suites: readonly MvpSuite[] = MVP_SUITES, // 検証対象の読取専用suite配列型
-+): void { // 戻り値を使わない型
-+  try {
-+    if (suites.length === 0) {
-+      throw new Error(MANIFEST_ERROR); // 空manifestを固定例外で拒否するコンストラクター
-+    }
-+    const root = realpathSync(checkoutDirectory); // checkoutの実在パスを解決する関数
-+    const paths = new Set<string>(); // 試験パスの重複を検出する集合のコンストラクター / 文字列型
-+    for (const suite of suites) {
-+      if (
-+        !/^tests\/[a-z0-9.-]+\.test\.ts$/u.test(suite.path) || // 既存suiteの相対パス書式を検証するメソッド
-+        suite.path.includes("..") || // 親への移動を検出するメソッド
-+        paths.has(suite.path) || // 同じsuiteの重複を検出するメソッド
-+        (
-+          !suite.database &&
-+          !suite.auth
-+        ) ||
-+        suite.requiredGroups.length === 0 ||
-+        new Set(suite.requiredGroups).size !== suite.requiredGroups.length || // 群名の重複を調べる集合のコンストラクター
-+        Object.keys(suite.flags).length === 0 || // flag名を列挙する関数
-+        (
-+          suite.database &&
-+          suite.flags.RUN_DB_INTEGRATION_TESTS !== "1"
-+        )
-+      ) {
-+        throw new Error(MANIFEST_ERROR); // 不正な契約を固定例外で拒否するコンストラクター
-+      }
-+      for (const group of suite.requiredGroups) {
-+        if (
-+          !group ||
-+          group !== group.trim() // 群名の前後空白を除くメソッド
-+        ) {
-+          throw new Error(MANIFEST_ERROR); // 空の群名を固定例外で拒否するコンストラクター
-+        }
-+      }
-+      for (const [key, value] of Object.entries(suite.flags)) { // flag名と値を列挙する関数
-+        if (
-+          !/^[A-Z][A-Z0-9_]+$/u.test(key) || // flag名の書式を検証するメソッド
-+          value !== "1"
-+        ) {
-+          throw new Error(MANIFEST_ERROR); // 曖昧なflagを固定例外で拒否するコンストラクター
-+        }
-+      }
-+      const absolute = realpathSync(resolve(root, suite.path)); // suiteの実在パス解決関数 / 相対パス結合関数
-+      if (
-+        !absolute.startsWith(`${root}${sep}`) || // checkout配下であることを照合するメソッド
-+        !statSync(absolute).isFile() // ファイル情報取得関数 / 通常ファイル判定メソッド
-+      ) {
-+        throw new Error(MANIFEST_ERROR); // 対象外ファイルを固定例外で拒否するコンストラクター
-+      }
-+      paths.add(suite.path); // 検証したsuiteパスを重複検査へ登録するメソッド
-+    }
-+  } catch {
-+    throw new Error(MANIFEST_ERROR); // ファイルパスや例外原文を公開しないコンストラクター
-+  }
-+}
-+
-+/**
-+ * 成功した実ケースを1件以上含み、失敗・skip・未完了がない件数だけを許す。
-+ */
-+function assertCompletedCases(counts: MvpCaseCounts): void { // ケース件数検証関数 / 件数契約型 / 戻り値を使わない型
-+  for (const count of [counts.passed, counts.failed, counts.skipped, counts.pending]) {
-+    if (
-+      !Number.isSafeInteger(count) || // 安全な整数を判定する関数
-+      count < 0
-+    ) {
-+      throw new Error(MANIFEST_ERROR); // 不正な件数を固定例外で拒否するコンストラクター
-+    }
-+  }
-+  if (
-+    counts.passed === 0 ||
-+    counts.failed !== 0 ||
-+    counts.skipped !== 0 ||
-+    counts.pending !== 0
-+  ) {
-+    throw new Error(MANIFEST_ERROR); // 未実行やskipを固定例外で拒否するコンストラクター
-+  }
-+}
-+
-+/**
-+ * manifest全件と必須DB・Auth群の成功を照合する、集計用の純粋な契約。
-+ * ガード単体試験だけの成功では完了しない。runnerの起動・結果変換は後続粒度。
-+ */
-+export function assertMvpSuiteResults( // 必須suiteと群別結果を照合する関数
-+  results: readonly MvpSuiteResult[], // 実行結果の読取専用配列型
-+): void { // 戻り値を使わない型
-+  try {
-+    if (results.length !== MVP_SUITES.length) {
-+      throw new Error(MANIFEST_ERROR); // suite欠落や余分な結果を拒否するコンストラクター
-+    }
-+    const paths = new Set<string>(); // 結果パスの重複を検出する集合のコンストラクター / 文字列型
-+    for (const result of results) {
-+      if (paths.has(result.path)) { // 同じsuiteの二重集計を検出するメソッド
-+        throw new Error(MANIFEST_ERROR); // 二重集計を固定例外で拒否するコンストラクター
-+      }
-+      paths.add(result.path); // 集計したパスを記録するメソッド
-+      const suite = MVP_SUITES.find( // manifestから対象suiteを探すメソッド
++    const rows: Rows = { // 作成前に登録する保存行集合型
++      clubs: Object.values(clubs).map( // 各要素を保存・照合用の値へ写すメソッド / 値を列挙する関数
 +        /**
-+         * 実在を確認した相対パスとの完全一致を調べる。
++         * 各クラブの固定timezoneとケース専用プランを保存入力にする。
 +         */
-+        (candidate) => candidate.path === result.path, // パスを照合するコールバック
-+      );
-+      if (!suite) {
-+        throw new Error(MANIFEST_ERROR); // 未登録suiteを固定例外で拒否するコンストラクター
-+      }
-+      assertCompletedCases(result); // suite全体の終端件数を検証する関数
-+      const groups = new Set<string>(); // 群名の二重集計を防ぐ集合のコンストラクター / 文字列型
-+      for (const group of result.groups) {
-+        if (groups.has(group.name)) { // 同じ群の重複を判定するメソッド
-+          throw new Error(MANIFEST_ERROR); // 群の二重集計を固定例外で拒否するコンストラクター
-+        }
-+        groups.add(group.name); // 集計済み群を記録するメソッド
-+        assertCompletedCases(group); // 群別の終端件数を検証する関数
-+        if (group.passed > result.passed) {
-+          throw new Error(MANIFEST_ERROR); // suiteより多い件数を固定例外で拒否するコンストラクター
-+        }
-+      }
-+      for (const required of suite.requiredGroups) {
-+        if (!groups.has(required)) { // 必須群の欠落を判定するメソッド
-+          throw new Error(MANIFEST_ERROR); // ガードだけの成功を拒否するコンストラクター
-+        }
++        (club) => ({ // 試験または保存処理のコールバック
++          ...club,
++          name: "F12 fixture",
++          timezone: "Asia/Tokyo",
++        }),
++      ),
++      users: USER_KEYS.filter( // 条件に合う要素を選ぶメソッド
++        /**
++         * PlatformAdminはAppUser・クラブ所属を持たない独立した運営者にする。
++         */
++        (key) => key !== "platformAdmin", // 試験または保存処理のコールバック
++      ).map( // 各要素を保存・照合用の値へ写すメソッド
++        /**
++         * Auth IDを指定した場合も、同じIDの新しいAppUser行だけを作る。
++         */
++        (key) => ({ // 試験または保存処理のコールバック
++          ...users[key],
++          name: "F12 fixture",
++        }),
++      ),
++      memberships: Object.values(actors).map( // 各要素を保存・照合用の値へ写すメソッド / 値を列挙する関数
++        /**
++         * 本人・所属・クラブを対応させた状態を保存入力にする。
++         */
++        (actor) => ({ // 試験または保存処理のコールバック
++          id: actor.membershipId,
++          userId: actor.userId,
++          clubId: actor.clubId,
++          role: actor.role,
++          status: actor.status,
++        }),
++      ),
++      children: [
++        {
++          id: children.own,
++          parentId: users.aMember.id,
++          name: "本人の子ども",
++        },
++        {
++          id: children.otherParent,
++          parentId: users.aCoach.id,
++          name: "他保護者の子ども",
++        },
++      ],
++      childMemberships: [
++        {
++          id: randomUUID(), // UUIDを生成する関数
++          clubId: clubs.a.id,
++          childId: children.own,
++          parentUserId: users.aMember.id,
++          status: "ACTIVE",
++        },
++        {
++          id: randomUUID(), // UUIDを生成する関数
++          clubId: clubs.a.id,
++          childId: children.otherParent,
++          parentUserId: users.aCoach.id,
++          status: "ACTIVE",
++        },
++      ],
++      admins: [
++        {
++          ...users.platformAdmin,
++          name: "F12 independent admin",
++          role: "DEVELOPER",
++          isActive: true,
++        },
++      ],
++      events: [],
++      notices: [],
++      eventAttachments: [],
++      noticeAttachments: [],
++      eventReads: [],
++      noticeReads: [],
++      memos: [],
++      settings: [],
++      targets: [],
++      deliveries: [],
++      jobs: [],
++      reports: [],
++    };
++    const features = new Set(options.features ?? []); // 重複しない集合のコンストラクター
++    for (const feature of features) {
++      if (!["content", "attachments", "activity", "line", "support", "copySources"].includes(feature)) { // 許可値に含まれるか調べるメソッド
++        throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
 +      }
 +    }
++    const related = {} as Record<"a" | "b", MvpDatabaseFixture["related"]["a"]>; // キーと値の対応型 / プロパティまたは配列要素を参照する型 / 認可・関連行のfixture ID型
++    for (const key of ["a", "b"] as const) { // リテラル型を保持するconstアサーション
++      const clubId = clubs[key].id;
++      const owner = key === "a" ? actors.aOwner : actors.bOwner;
++      const member = key === "a" ? actors.aMember : actors.bMember;
++      const item: {
++        events?: MvpFixtureContent; // 公開状態別コンテンツID型
++        notices?: MvpFixtureContent; // 公開状態別コンテンツID型
++        sourceEvents: string[]; // 文字列型
++        eventAttachmentId?: string; // 文字列型
++        noticeAttachmentId?: string; // 文字列型
++        storageJobId?: string; // 文字列型
++        lineSettingId?: string; // 文字列型
++        targetId?: string; // 文字列型
++        deliveryId?: string; // 文字列型
++        webhookKey?: string; // 文字列型
++        supportReportId?: string; // 文字列型
++      } = {
++        sourceEvents: [],
++      };
++      if (
++        features.has("content") || // 登録の有無を確認するメソッド
++        features.has("attachments") || // 登録の有無を確認するメソッド
++        features.has("activity") || // 登録の有無を確認するメソッド
++        features.has("line") // 登録の有無を確認するメソッド
++      ) {
++        item.events = Object.freeze({ // 設定の変更を防ぐ関数
++          draft: randomUUID(), // UUIDを生成する関数
++          member: randomUUID(), // UUIDを生成する関数
++          coach: randomUUID(), // UUIDを生成する関数
++        });
++        item.notices = Object.freeze({ // 設定の変更を防ぐ関数
++          draft: randomUUID(), // UUIDを生成する関数
++          member: randomUUID(), // UUIDを生成する関数
++          coach: randomUUID(), // UUIDを生成する関数
++        });
++        for (const kind of ["draft", "member", "coach"] as const) { // リテラル型を保持するconstアサーション
++          const status = kind === "draft" ? "DRAFT" : "PUBLISHED";
++          const targetRoles: ClubMemberRole[] = [ // 所属ロール型
++            "OWNER",
++            kind === "coach" ? "COACH" : "MEMBER",
++          ];
++          const publication = kind === "draft" ? null : new Date("2026-03-01T00:00:00.000Z"); // 日時を生成するコンストラクター
++          rows.events.push({ // 作成前の行・IDを登録するメソッド
++            id: item.events[kind],
++            clubId,
++            title: `F12 ${kind}`,
++            content: "架空のイベント本文",
++            status,
++            targetRoles,
++            startAt: new Date("2026-03-10T00:00:00.000Z"), // 日時を生成するコンストラクター
++            endAt: new Date("2026-03-10T02:00:00.000Z"), // 日時を生成するコンストラクター
++            genre: "PRACTICE",
++            createdByMembershipId: owner.membershipId,
++            updatedByMembershipId: owner.membershipId,
++            firstPublishedAt: publication,
++            readRequiredAt: publication,
++          });
++          rows.notices.push({ // 作成前の行・IDを登録するメソッド
++            id: item.notices[kind],
++            clubId,
++            title: `F12 ${kind}`,
++            content: "架空のお知らせ本文",
++            status,
++            targetRoles,
++            createdByMembershipId: owner.membershipId,
++            updatedByMembershipId: owner.membershipId,
++            firstPublishedAt: publication,
++            readRequiredAt: publication,
++          });
++        }
++      }
++      if (
++        features.has("attachments") && // 登録の有無を確認するメソッド
++        item.events &&
++        item.notices
++      ) {
++        item.eventAttachmentId = randomUUID(); // UUIDを生成する関数
++        item.noticeAttachmentId = randomUUID(); // UUIDを生成する関数
++        item.storageJobId = randomUUID(); // UUIDを生成する関数
++        rows.eventAttachments.push({ // 作成前の行・IDを登録するメソッド
++          id: item.eventAttachmentId,
++          clubId,
++          eventId: item.events.member,
++          storagePath: `clubs/${clubId}/events/${item.events.member}/${item.eventAttachmentId}.pdf`,
++          fileName: "fixture.pdf",
++          mimeType: "application/pdf",
++          sizeBytes: 64,
++        });
++        rows.noticeAttachments.push({ // 作成前の行・IDを登録するメソッド
++          id: item.noticeAttachmentId,
++          clubId,
++          noticeId: item.notices.member,
++          storagePath: `clubs/${clubId}/notices/${item.notices.member}/${item.noticeAttachmentId}.pdf`,
++          fileName: "fixture.pdf",
++          mimeType: "application/pdf",
++          sizeBytes: 64,
++        });
++        rows.jobs.push({ // 作成前の行・IDを登録するメソッド
++          id: item.storageJobId,
++          clubId,
++          bucket: CLUB_ATTACHMENT_BUCKET,
++          storagePath: `clubs/${clubId}/events/${item.events.member}/${item.storageJobId}.pdf`,
++          sourceType: "EVENT_ATTACHMENT",
++          status: "COMPLETED",
++        });
++      }
++      if (
++        features.has("activity") && // 登録の有無を確認するメソッド
++        item.events &&
++        item.notices
++      ) {
++        rows.eventReads.push({ // 作成前の行・IDを登録するメソッド
++          id: randomUUID(), // UUIDを生成する関数
++          clubId,
++          eventId: item.events.member,
++          membershipId: member.membershipId,
++        });
++        rows.noticeReads.push({ // 作成前の行・IDを登録するメソッド
++          id: randomUUID(), // UUIDを生成する関数
++          clubId,
++          noticeId: item.notices.member,
++          membershipId: member.membershipId,
++        });
++        rows.memos.push({ // 作成前の行・IDを登録するメソッド
++          id: randomUUID(), // UUIDを生成する関数
++          clubId,
++          eventId: item.events.member,
++          membershipId: member.membershipId,
++          content: "架空の個人メモ",
++        });
++      }
++      if (
++        features.has("line") && // 登録の有無を確認するメソッド
++        item.events
++      ) {
++        item.lineSettingId = randomUUID(); // UUIDを生成する関数
++        item.targetId = randomUUID(); // UUIDを生成する関数
++        item.deliveryId = randomUUID(); // UUIDを生成する関数
++        item.webhookKey = randomUUID(); // UUIDを生成する関数
++        rows.settings.push({ // 作成前の行・IDを登録するメソッド
++          id: item.lineSettingId,
++          clubId,
++          webhookKey: item.webhookKey,
++          lineChannelId: `fixture-${scopeId}`,
++          lineChannelAccessTokenEncrypted: "F12_FAKE_CIPHERTEXT_NEVER_DECRYPT",
++          lineChannelSecretEncrypted: "F12_FAKE_CIPHERTEXT_NEVER_DECRYPT",
++        });
++        rows.targets.push({ // 作成前の行・IDを登録するメソッド
++          id: item.targetId,
++          clubId,
++          lineSettingId: item.lineSettingId,
++          lineGroupId: `fixture-${scopeId}-${key}`,
++          targetName: "架空の無効通知先",
++          targetRoles: ["OWNER", "MEMBER"],
++          isEnabled: false,
++        });
++        rows.deliveries.push({ // 作成前の行・IDを登録するメソッド
++          id: item.deliveryId,
++          clubId,
++          targetId: item.targetId,
++          eventId: item.events.member,
++          contentType: "EVENT",
++          contentTitle: "架空の送信履歴",
++          requestedByMembershipId: owner.membershipId,
++          status: "SENT",
++          sentAt: new Date("2026-03-01T00:00:00.000Z"), // 日時を生成するコンストラクター
++          idempotencyKey: `mvp-f12-${item.deliveryId}`,
++          requestId: randomUUID(), // UUIDを生成する関数
++        });
++      }
++      if (features.has("support")) { // 登録の有無を確認するメソッド
++        item.supportReportId = randomUUID(); // UUIDを生成する関数
++        rows.reports.push({ // 作成前の行・IDを登録するメソッド
++          id: item.supportReportId,
++          clubId,
++          membershipId: owner.membershipId,
++          category: "BUG",
++          status: "OPEN",
++          message: "架空のサポート本文",
++          handledByPlatformAdminId: users.platformAdmin.id,
++        });
++      }
++      if (features.has("copySources")) { // 登録の有無を確認するメソッド
++        for (const status of ["DRAFT", "PUBLISHED"] as const) { // リテラル型を保持するconstアサーション
++          const id = randomUUID(); // UUIDを生成する関数
++          item.sourceEvents.push(id); // 作成前の行・IDを登録するメソッド
++          const publication = status === "PUBLISHED" ? new Date("2026-02-01T00:00:00.000Z") : null; // 日時を生成するコンストラクター
++          rows.events.push({ // 作成前の行・IDを登録するメソッド
++            id,
++            clubId,
++            status,
++            firstPublishedAt: publication,
++            readRequiredAt: publication,
++            title: `F12 source ${status}`,
++            targetRoles: ["OWNER", "MEMBER"],
++            startAt: new Date("2026-02-10T00:00:00.000Z"), // 日時を生成するコンストラクター
++            endAt: new Date("2026-02-10T02:00:00.000Z"), // 日時を生成するコンストラクター
++            genre: "PRACTICE",
++            createdByMembershipId: owner.membershipId,
++          });
++        }
++      }
++      Object.freeze(item.sourceEvents); // 設定の変更を防ぐ関数
++      related[key] = Object.freeze(item); // 設定の変更を防ぐ関数
++    }
++    const fixture: MvpDatabaseFixture = Object.freeze({ // 認可・関連行のfixture ID型 / 設定の変更を防ぐ関数
++      runId: configuration.runId,
++      scopeId,
++      clubs: Object.freeze(clubs), // 設定の変更を防ぐ関数
++      users: Object.freeze(users), // 設定の変更を防ぐ関数
++      actors: Object.freeze(actors), // 設定の変更を防ぐ関数
++      children,
++      related: Object.freeze(related), // 設定の変更を防ぐ関数
++    });
++    states.set(fixture, { // 所有台帳を登録するメソッド
++      rows,
++      jobs: new Set(rows.jobs.map( // 重複しない集合のコンストラクター / 各要素を保存・照合用の値へ写すメソッド
++        /**
++         * clubIdがSetNullされても追跡できるよう、作成前にジョブIDを記録する。
++         */
++        (job) => job.id!, // 試験または保存処理のコールバック
++      )),
++      phase: "planned",
++    });
++    return fixture;
 +  } catch {
-+    throw new Error(MANIFEST_ERROR); // 結果本文や例外原文を公開しないコンストラクター
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++  }
++}
++
++/**
++ * ガード後の専用clientで、計画済みの全行を一つのtransactionに保存する。
++ * 途中失敗はrollbackし、衝突した既存AppUserをcleanup対象にしない。
++ */
++export async function seedMvpDatabaseFixture( // 計画した行を一体保存する関数
++  database: PrismaClient, // 専用DB clientの型
++  fixture: MvpDatabaseFixture, // 認可・関連行のfixture ID型
++): Promise<void> { // 非同期結果の型 / 戻り値を使わない型
++  const state = stateOf(fixture); // 非公開の所有台帳を取得する関数
++  if (state.phase !== "planned") {
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++  }
++  state.phase = "seeding";
++  try {
++    const rows = state.rows;
++    await database.$transaction( // 一体保存・削除の実transactionを実行するメソッド
++      /**
++       * 親から関連行へ順に作成し、途中状態を他のケースへ残さない。
++       */
++      async (transaction) => { // 試験または保存処理のコールバック
++        if (rows.clubs.length > 0) {
++          await transaction.club.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.clubs,
++          });
++        }
++        if (rows.users.length > 0) {
++          await transaction.appUser.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.users,
++          });
++        }
++        if (rows.memberships.length > 0) {
++          await transaction.clubMembership.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.memberships,
++          });
++        }
++        if (rows.children.length > 0) {
++          await transaction.child.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.children,
++          });
++        }
++        if (rows.childMemberships.length > 0) {
++          await transaction.childClubMembership.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.childMemberships,
++          });
++        }
++        if (rows.admins.length > 0) {
++          await transaction.platformAdmin.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.admins,
++          });
++        }
++        if (rows.events.length > 0) {
++          await transaction.clubEvent.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.events,
++          });
++        }
++        if (rows.notices.length > 0) {
++          await transaction.clubNotice.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.notices,
++          });
++        }
++        if (rows.eventAttachments.length > 0) {
++          await transaction.clubEventAttachment.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.eventAttachments,
++          });
++        }
++        if (rows.noticeAttachments.length > 0) {
++          await transaction.clubNoticeAttachment.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.noticeAttachments,
++          });
++        }
++        if (rows.eventReads.length > 0) {
++          await transaction.clubEventRead.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.eventReads,
++          });
++        }
++        if (rows.noticeReads.length > 0) {
++          await transaction.clubNoticeRead.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.noticeReads,
++          });
++        }
++        if (rows.memos.length > 0) {
++          await transaction.clubEventMemo.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.memos,
++          });
++        }
++        if (rows.settings.length > 0) {
++          await transaction.clubLineSetting.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.settings,
++          });
++        }
++        if (rows.targets.length > 0) {
++          await transaction.clubLineTarget.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.targets,
++          });
++        }
++        if (rows.deliveries.length > 0) {
++          await transaction.clubLineDelivery.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.deliveries,
++          });
++        }
++        if (rows.jobs.length > 0) {
++          await transaction.storageDeletionJob.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.jobs,
++          });
++        }
++        if (rows.reports.length > 0) {
++          await transaction.supportReport.createMany({ // 計画したfixture行を一括保存するメソッド
++            data: rows.reports,
++          });
++        }
++      },
++      {
++        timeout: 15_000,
++      },
++    );
++    state.phase = "ready";
++  } catch {
++    state.phase = "planned";
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++  }
++}
++
++/**
++ * seed後のケースが追加するStorage削除ジョブのUUIDを、保存前に所有台帳へ登録する。
++ */
++export function reserveMvpStorageDeletionJob(fixture: MvpDatabaseFixture): string { // 追加ジョブのUUIDを保存前に登録する関数 / 認可・関連行のfixture ID型 / 文字列型
++  const state = stateOf(fixture); // 非公開の所有台帳を取得する関数
++  if (state.phase !== "ready") {
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++  }
++  const id = randomUUID(); // UUIDを生成する関数
++  state.jobs.add(id); // 所有IDを登録するメソッド
++  return id;
++}
++
++/**
++ * LINEのRestrictとStorageのSetNullを考慮し、登録範囲だけを一体で削除する。
++ * 保存失敗した計画には触らず、失敗したcleanupは台帳を残して再試行できる。
++ */
++export async function cleanupMvpDatabaseFixture( // 所有台帳の範囲だけを削除する関数
++  database: PrismaClient, // 専用DB clientの型
++  fixture: MvpDatabaseFixture, // 認可・関連行のfixture ID型
++): Promise<void> { // 非同期結果の型 / 戻り値を使わない型
++  const state = stateOf(fixture); // 非公開の所有台帳を取得する関数
++  if (
++    state.phase === "planned" ||
++    state.phase === "cleaned"
++  ) {
++    return;
++  }
++  if (state.phase !== "ready") {
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++  }
++  state.phase = "cleaning";
++  try {
++    const clubIds = state.rows.clubs.map( // 各要素を保存・照合用の値へ写すメソッド
++      /**
++       * 公開オブジェクトではなく、作成時の非公開台帳からクラブIDを取り出す。
++       */
++      (club) => club.id!, // 試験または保存処理のコールバック
++    );
++    const userIds = state.rows.users.map( // 各要素を保存・照合用の値へ写すメソッド
++      /**
++       * このfixtureが新規作成した本人だけを選ぶ。
++       */
++      (user) => user.id, // 試験または保存処理のコールバック
++    );
++    await database.$transaction( // 一体保存・削除の実transactionを実行するメソッド
++      /**
++       * 依存する履歴・ジョブを先に処理し、他クラブ所属があれば本人を消さない。
++       */
++      async (transaction) => { // 試験または保存処理のコールバック
++        await transaction.clubLineDelivery.deleteMany({ // 登録範囲に限定して削除するメソッド
++          where: {
++            clubId: {
++              in: clubIds,
++            },
++          },
++        });
++        await transaction.storageDeletionJob.deleteMany({ // 登録範囲に限定して削除するメソッド
++          where: {
++            OR: [
++              {
++                clubId: {
++                  in: clubIds,
++                },
++              },
++              {
++                id: {
++                  in: [...state.jobs],
++                },
++                clubId: null,
++              },
++            ],
++          },
++        });
++        await transaction.club.deleteMany({ // 登録範囲に限定して削除するメソッド
++          where: {
++            id: {
++              in: clubIds,
++            },
++          },
++        });
++        await transaction.appUser.deleteMany({ // 登録範囲に限定して削除するメソッド
++          where: {
++            id: {
++              in: userIds,
++            },
++            memberships: {
++              none: {},
++            },
++          },
++        });
++        await transaction.platformAdmin.deleteMany({ // 登録範囲に限定して削除するメソッド
++          where: {
++            id: {
++              in: state.rows.admins.map( // 各要素を保存・照合用の値へ写すメソッド
++                /**
++                 * このfixtureが作成した独立運営者だけを選ぶ。
++                 */
++                (admin) => admin.id, // 試験または保存処理のコールバック
++              ),
++            },
++            handledSupportReports: {
++              none: {},
++            },
++          },
++        });
++        const remainingUsers = await transaction.appUser.count({ // 条件に合う行数を取得するメソッド
++          where: {
++            id: {
++              in: userIds,
++            },
++          },
++        });
++        const remainingAdmins = await transaction.platformAdmin.count({ // 条件に合う行数を取得するメソッド
++          where: {
++            id: {
++              in: state.rows.admins.map( // 各要素を保存・照合用の値へ写すメソッド
++                /**
++                 * 他クラブの報告に参照される運営者を誤って完了扱いにしない。
++                 */
++                (admin) => admin.id, // 試験または保存処理のコールバック
++              ),
++            },
++          },
++        });
++        if (
++          remainingUsers !== 0 ||
++          remainingAdmins !== 0
++        ) {
++          throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
++        }
++      },
++      {
++        timeout: 15_000,
++      },
++    );
++    state.phase = "cleaned";
++  } catch {
++    state.phase = "ready";
++    throw new Error(FIXTURE_ERROR); // 例外を生成するコンストラクター
 +  }
 +}
