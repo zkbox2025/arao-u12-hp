@@ -1,354 +1,1206 @@
-diff --git a/docs/runbooks/event-practice-batch.md b/docs/runbooks/event-practice-batch.md
+diff --git a/tests/mvp/environment.test.ts b/tests/mvp/environment.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..223fe4867c50e7d587abd9612cb7e49df1971145
+index 0000000000000000000000000000000000000000..ee972a19c06959936a054ff9e0814d8063de03cf
 --- /dev/null
-+++ b/docs/runbooks/event-practice-batch.md
-@@ -0,0 +1,348 @@
-+<!-- docs/runbooks/event-practice-batch.md -->
++++ b/tests/mvp/environment.test.ts
+@@ -0,0 +1,594 @@
++// tests/mvp/environment.test.ts
++// 架空の設定と一時ファイルだけで検証し、実DB・Auth・Storage・配送を使わない。
 +
-+# F11 定期練習予定の一括作成：適用・再送・受入手順
++import {
++  mkdtempSync, // 試験専用の一時ディレクトリを作る関数
++  mkdirSync, // 環境ファイル名のディレクトリを再現する関数
++  rmSync, // この試験が作成した一時資源だけを削除する関数
++  symlinkSync, // 内容を読めないリンクの存在を再現する関数
++  unlinkSync, // このケースで作成したリンクだけを外す関数
++  writeFileSync, // 架空の環境ファイルを一時領域に作る関数
++} from "node:fs";
++import {
++  tmpdir, // OSの一時ディレクトリを返す関数
++} from "node:os";
++import {
++  join, // 一時ファイルのパスを組み立てる関数
++  resolve, // checkoutの絶対パスを求める関数
++} from "node:path";
++import {
++  afterEach, // 各試験後の一時資源の削除を登録する関数
++  beforeEach, // 各試験専用の環境を作る関数
++  expect, // 期待値を検証する関数
++  it, // ケースとパラメーター試験を登録する関数
++  vi, // 外部境界の評価を検出するmock API
++} from "vitest";
 +
-+F11粒度14の運用書です。調査基準はコミット `ed0869f` です。
-+仕様は [F11.md](../implementation/phases/F11.md)、
-+対象範囲は [粒度14の計画](../implementation/phases/F11-granular-plan.md) を参照します。
-+共通の完了記録と前月複製の運用は [F10運用書](event-month-copy.md) を参照します。
-+F11.mdの粒度1にある「後続」「未接続」は、その時点の記録です。
-+本書は基準コミットに接続済みの処理を説明します。
++import {
++  getMvpMigrationDatabase, // 予約済みmigration資源だけを解決する関数
++  requireMvpTestEnvironment, // F12専用の接続前ガード関数
++} from "./environment";
++import {
++  assertMvpSuiteManifest, // manifestの実在・重複を検証する関数
++  assertMvpSuiteResults, // 必須suiteと試験群の完了を検証する関数
++  MVP_SUITES, // 実在する既存必須suiteの一覧
++} from "./suite-manifest";
++import type {
++  MvpSuiteResult, // 集計前のsuite結果型
++} from "./suite-manifest";
 +
-+この文書patchだけではDB・Client・アプリの変更は発生しません。
-+粒度1〜13を適用済みの環境で、この文書追加だけを理由にmigrationを再生成しません。
-+文書の追加完了、実DB試験の完了、実ブラウザー・HTTP受入の完了は分けて記録します。
-+本書作成では実DB・Auth・Storage・LINE・メールを操作せず、過去の受入結果も未確認です。
++const GUARD_ERROR = "F12専用の使い捨て環境・flag・checkoutを確認してください。";
++const MANIFEST_ERROR = "F12の必須suite・実行件数・skipを確認してください。";
++const RUN_ID = "a".repeat(32); // 架空の実行識別子を作るメソッド
++const PRIVATE = "FAKE_SECRET_DO_NOT_LOG";
++const forbidden = vi.hoisted( // importより先に外部評価の検出を用意する関数
++  /**
++   * SDK・dotenvの実行があれば、通信する前に試験を失敗させる。
++   */
++  () => vi.fn( // 評価検出用のmockを作るコールバック / mock生成関数
++    /**
++     * 接続前ガードが外部SDKを評価したことを通知する。
++     */
++    () => { // 外部評価を拒否するコールバック
++      throw new Error("Unexpected SDK initialization"); // 通信前に失敗する例外のコンストラクター
++    },
++  ),
++);
++vi.mock("dotenv/config", forbidden); // dotenvの評価を拒否する関数
++vi.mock("@prisma/client", forbidden); // Prismaの評価を拒否する関数
++vi.mock("@prisma/adapter-pg", forbidden); // DBアダプターの評価を拒否する関数
++vi.mock("pg", forbidden); // 接続プールの評価を拒否する関数
++vi.mock("@supabase/supabase-js", forbidden); // Auth・Storage SDKの評価を拒否する関数
++vi.mock("@/src/infrastructure/prisma/client", forbidden); // 共有clientの初期化を拒否する関数
 +
-+## 利用条件と生成する範囲
++let checkout: string; // この試験だけが所有する一時パスの文字列型
 +
-+- 同クラブのACTIVE所属と管理者ロールOWNER・COACH・OFFICERが必要です。
-+  現行の `CLUB_APP` 対応プランはSTANDARDです。MEMBER、所属失効、他クラブ、STARTER・PROは拒否します。
-+  Pageと両Actionで認可し、Repositoryも新規保存・replayの前に最新の所属・ロール・プランを確認します。
-+- 対象月は西暦1〜9999年の単一 `YYYY-MM` です。
-+  作成Pageは月の未指定・不正値・配列queryを現在月に置き換えず、入力エラーを表示します。
-+  管理者一覧からは、その一覧で解決した表示月を渡します。
-+- 期間は同じ対象月の開始日〜終了日で、両端を含みます。初期値はその月全体です。
-+  月を跨ぐ任意31日間ではありません。曜日は日曜0〜土曜6から複数選択します。
-+  曜日未選択は入力エラー、有効な条件で該当日がなければ候補0件です。
-+- 除外前の候補上限は31件、保存する選択は1〜31件です。
-+  同月内の実在日付では最大31件ですが、改変入力・上限超過の内部結果も拒否します。
-+  チェックを減らして上限を回避する運用にはしません。
-+- 共通入力は対象月・期間・曜日・タイトル・開始／終了時刻・場所・集合時刻／場所・公開対象です。
-+  終了は必須で、同日の開始より後だけを許可します。同時刻・逆転・翌日送りは認めません。
-+  集合時刻は発生日の同日内の任意入力です。開始後の集合は警告付きで許可します。
-+- 公開対象 `targetRoles` はOWNERを必ず含み、COACH・OFFICER・MEMBERを追加できます。
-+  これは生成イベントの公開対象ロールです。LINEの送信先を選ぶ項目ではありません。
-+- 保存行は `genre=PRACTICE`、`status=DRAFT`、`isAllDay=false` に固定します。
-+  `content`・`belongings`・`notes`・`firstPublishedAt`・`readRequiredAt` はnullです。
-+  作成者・更新者は実行したMembershipです。
-+  PDF添付・既読・個人メモ・LINE履歴を作らず、公開・LINE通知も行いません。
-+  内容確認後の公開は既存の通常編集による別操作です。この機能に一括公開は含みません。
++/**
++ * 実際のprocess.envに触れず、有効な架空設定を作る。
++ */
++function environment(): Record<string, string | undefined> { // 架空設定生成関数 / 辞書型 / 文字列型 / 未設定の型
++  return {
++    RUN_MVP_TESTS: "1",
++    MVP_TEST_DISPOSABLE: "1",
++    NODE_ENV: "test",
++    DATABASE_URL: `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/postgres`,
++    NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
++    APP_BASE_URL: "http://127.0.0.1:3000",
++  };
++}
 +
-+根拠：`app/(club-app)/club/club-app-authorization.ts / requireClubAppAdminAccess`、
-+`domain/club/plan-features.ts / hasClubFeature`、
-+`domain/club/event/event-practice-batch-form.ts / validateEventPracticeBatchPreviewInput`、
-+`src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts / isCurrentActor / eventData`。
++/**
++ * 入力値やcauseを含まず、必ず同じ例外だけを返すことを検証する。
++ */
++function fixedFailure( // 固定例外の検証関数
++  operation: () => unknown, // 検証対象の関数型 / 未確定の戻り値型
++  message = GUARD_ERROR,
++): void { // 戻り値を使わない型
++  let caught: unknown; // 捕捉した例外の未確定型
++  try {
++    operation(); // 検証対象を実行する関数
++  } catch (error) {
++    caught = error;
++  }
++  expect(caught).toBeInstanceOf(Error); // 期待値生成関数 / 例外型の検証メソッド / 例外のコンストラクター
++  if (!(caught instanceof Error)) { // 例外のコンストラクターによる型の絞込み
++    throw new Error("Expected a fixed error"); // 試験失敗の例外コンストラクター
++  }
++  expect(caught.message).toBe(message); // 期待値生成関数 / 固定文の比較メソッド
++  expect(caught.cause).toBeUndefined(); // 期待値生成関数 / causeの非公開を検証するメソッド
++  expect(String(caught)).not.toContain(PRIVATE); // 期待値生成関数 / 文字列変換関数 / 秘密の非含有検証メソッド
++}
 +
-+## 日時・既存一致・除外の確認
++/**
++ * manifestに対応する架空の成功結果を作り、実suiteは起動しない。
++ */
++function completeResults(): MvpSuiteResult[] { // 架空結果生成関数 / suite結果の配列型
++  return MVP_SUITES.map( // 各suiteを架空結果へ写すメソッド
++    /**
++     * 各必須群に1件成功した場合の結果契約を再現する。
++     */
++    (suite) => ({ // suite結果を生成するコールバック
++      path: suite.path,
++      passed: 1,
++      failed: 0,
++      skipped: 0,
++      pending: 0,
++      groups: suite.requiredGroups.map( // 必須群を架空結果へ写すメソッド
++        /**
++         * 実ケース1件が終端成功した群の結果を作る。
++         */
++        (name) => ({ // 群別結果を生成するコールバック
++          name,
++          passed: 1,
++          failed: 0,
++          skipped: 0,
++          pending: 0,
++        }),
++      ),
++    }),
++  );
++}
 +
-+| 項目 | 現行の扱い |
-+| --- | --- |
-+| 発生日・曜日 | クラブtimezone上の現地カレンダーで日付と曜日を決める。UTC日付や端末のtimezoneで曜日を選ばない |
-+| UTC変換と表示 | 各発生日の開始・終了・任意集合を厳密にUTCへ変換。previewは使用timezoneとUTC offset付きの現地日時を表示する |
-+| DST gap／fold | 不存在時刻はNONEXISTENT_LOCAL_TIME、候補UTCが複数の曖昧時刻はAMBIGUOUS_LOCAL_TIMEとして選択不可。自動補正・片方のUTCの自動採用はしない |
-+| 開始・終了・集合 | いずれかが変換不能ならその日の候補を除外する。UTC変換後に終了が開始以下の場合もINVALID_INTERVALとして除外する |
-+| その他の除外 | INVALID_DATE_TIME・OUT_OF_RANGEも理由を表示する。全候補と除外理由を残し、除外日は選択・保存できない |
-+| 開始後の集合 | MEETING_AFTER_STARTの警告を表示する。警告だけなら選択できるため、日時の意図を確認する |
-+| 既存イベントとの完全一致 | 同クラブの生成後の12列と対象ロール集合で比較。既存の公開／下書き状態を問わず、作成者・公開日時・PDF等は比較しない |
-+| 一致した候補 | 初期未選択。生成可能な候補は、利用者が意図した重複として明示選択すれば保存できる。除外候補は明示選択でも保存できない |
++beforeEach( // ケースごとの準備を登録する関数
++  /**
++   * 元checkoutと分離した空ディレクトリを作り、コンソール出力を監視する。
++   */
++  () => { // 準備のコールバック
++    checkout = mkdtempSync(join(tmpdir(), "f12-guard-test-")); // 一時領域生成関数 / パス結合関数 / 一時領域取得関数
++    for (const method of ["log", "warn", "error"] as const) { // 読取専用のリテラル型
++      vi.spyOn(console, method).mockImplementation( // ログ監視関数 / 出力を置換するメソッド
++        /**
++         * 試験中の実コンソール出力を抑止する。
++         */
++        () => undefined, // 出力を抑止するコールバック
++      );
++    }
++  },
++);
++afterEach( // ケースごとの後処理を登録する関数
++  /**
++   * SDK未評価とログ非出力を確認し、自分の一時ディレクトリだけを削除する。
++   */
++  () => { // 検証と後片付けのコールバック
++    try {
++      expect(forbidden).not.toHaveBeenCalled(); // 期待値生成関数 / 外部SDK非評価を検証するメソッド
++      expect(console.log).not.toHaveBeenCalled(); // 期待値生成関数 / ログ非出力の検証メソッド
++      expect(console.warn).not.toHaveBeenCalled(); // 期待値生成関数 / 警告非出力の検証メソッド
++      expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / エラー非出力の検証メソッド
++    } finally {
++      vi.restoreAllMocks(); // コンソールの監視を解除する関数
++      rmSync(checkout, { // この試験の一時資源だけを削除する関数
++        recursive: true,
++        force: true,
++      });
++    }
++  },
++);
 +
-+12列は `title`・`content`・`genre`・`targetRoles`・`startAt`・`endAt`・
-+`isAllDay`・`location`・`meetingAt`・`meetingLocation`・`belongings`・`notes` です。
-+既存一致は重複を禁止するDB unique制約ではありません。
-+新しい操作IDで既存一致を明示選択すると、同じ内容が追加作成されます。
++it.each(["RUN_MVP_TESTS", "MVP_TEST_DISPOSABLE"])( // 明示flagの試験を登録するメソッド
++  "%sが厳密な1でない場合、URL getterもSDKも評価しない",
++  /**
++   * flag不足の時点で止まり、URLに秘密があっても参照しないことを確認する。
++   */
++  (field) => { // flagごとの検証コールバック
++    for (const value of [undefined, "", "0", "true", "01", "1 "]) {
++      const variables = environment(); // 架空設定生成関数
++      variables[field] = value;
++      const getter = vi.fn( // URLへのアクセスを検出するmock生成関数
++        /**
++         * URL評価自体が誤りであることを検出する。
++         */
++        () => { // getterのコールバック
++          throw new Error(PRIVATE); // 秘密を持つ架空例外のコンストラクター
++        },
++      );
++      for (const name of ["DATABASE_URL", "NEXT_PUBLIC_SUPABASE_URL", "APP_BASE_URL"]) {
++        Object.defineProperty(variables, name, { // URLを遅延getterに置き換える関数
++          get: getter, // アクセスを記録するgetter関数
++        });
++      }
++      fixedFailure( // 固定例外を検証する関数
++        /**
++         * 不正flagでガードを実行する。
++         */
++        () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
++      );
++      expect(getter).not.toHaveBeenCalled(); // 期待値生成関数 / URL非評価の検証メソッド
++    }
++  },
++);
 +
-+根拠：`domain/club/event/event-practice-batch-date-times.ts / generateEventPracticeBatchDateTimes`、
-+`domain/club/event/event-practice-batch-policy.ts / buildEventPracticeBatchEvent`、
-+`src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository.ts / findClubEventExactDuplicateId`、
-+`src/application/club/event/get-event-practice-batch.ts / getEventPracticeBatchPreview`。
++it.each(["127.0.0.1", "localhost"])( // 許可hostごとの試験を登録するメソッド
++  "%sの固定portと通常用postgresを許可し、外部サービス設定を引き継がない",
++  /**
++   * 許可変数だけを返し、元の設定を変更しないことを確認する。
++   */
++  (host) => { // 許可hostの検証コールバック
++    const variables = environment(); // 架空設定生成関数
++    variables.DATABASE_URL = `postgres://fixture:${PRIVATE}@${host}:54322/postgres`;
++    variables.NEXT_PUBLIC_SUPABASE_URL = `http://${host}:54321/`;
++    variables.APP_BASE_URL = `http://${host}:3000/`;
++    variables.RESEND_API_KEY = PRIVATE;
++    variables.LINE_CHANNEL_ACCESS_TOKEN = PRIVATE;
++    variables.NEXT_PUBLIC_SUPABASE_ANON_KEY = "fake-anon";
++    variables.SUPABASE_SERVICE_ROLE_KEY = "fake-service";
++    const prior = { ...variables };
++    const result = requireMvpTestEnvironment(variables, checkout, RUN_ID); // 接続前ガード関数
++    expect(result.databaseUrl).toBe(variables.DATABASE_URL); // 期待値生成関数 / 固定DB接続先の比較メソッド
++    expect(result.supabaseOrigin).toBe(`http://${host}:54321`); // 期待値生成関数 / originの比較メソッド
++    expect(result.appOrigin).toBe(`http://${host}:3000`); // 期待値生成関数 / originの比較メソッド
++    expect(result.variables.RESEND_API_KEY).toBeUndefined(); // 期待値生成関数 / 外部配送キー除外の検証メソッド
++    expect(result.variables.LINE_CHANNEL_ACCESS_TOKEN).toBeUndefined(); // 期待値生成関数 / LINEキー除外の検証メソッド
++    expect(result.variables.SUPABASE_SERVICE_ROLE_KEY).toBe("fake-service"); // 期待値生成関数 / 明示キーの比較メソッド
++    expect(variables).toEqual(prior); // 期待値生成関数 / 入力の非変更を検証するメソッド
++  },
++);
 +
-+## DB・Client・アプリの適用順
++it.each([ // 禁止環境変数のパラメーター試験を登録するメソッド
++  ["NODE_ENV", "production"],
++  ["NODE_ENV", undefined],
++  ["VERCEL_ENV", "production"],
++  ["PGHOST", "remote.invalid"],
++  ["PGPORT", ""],
++  ["PGDATABASE", "other"],
++  ["PGSERVICEFILE", "/fake/service"],
++  ["PGOPTIONS", "-c search_path=other"],
++  ["DOTENV_CONFIG_PATH", "/fake/private"],
++  ["NODE_OPTIONS", "--require=fake"],
++  ["NODE_PATH", "/fake/modules"],
++  ["SUPABASE_SERVICE_ROLE_KEY", " "],
++  ["NEXT_PUBLIC_SUPABASE_ANON_KEY", ""],
++])("本番・上書き変数・不正キー%sを拒否する", // パラメーター試験を登録するメソッド
++  /**
++   * 実SDKやdotenvに値を渡す前に、固定例外で拒否する。
++   */
++  (field, value) => { // 不正変数の検証コールバック
++    const variables = environment(); // 架空設定生成関数
++    variables[field!] = value;
++    fixedFailure( // 固定例外検証関数
++      /**
++       * 禁止変数を含む設定をガードへ渡す。
++       */
++      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
++    );
++  },
++);
 +
-+新しい環境への導入や、粒度5のmigrationが未適用の場合の手順です。
-+以下のDB・環境ファイルを使うコマンドは、担当者が対象を確認して手動実行します。
-+本書作成では実行しません。接続URLや環境ファイルの値を受入記録・チャットへ転記しません。
++it.each([ // DB接続先のパラメーター試験を登録するメソッド
++  "postgresql://fixture:secret@remote.invalid:54322/postgres",
++  "postgresql://fixture:secret@127.0.0.1:5432/postgres",
++  "postgresql://fixture:secret@127.0.0.1:54322/other",
++  "postgresql://fixture:secret@127.0.0.1:54322/post%67res",
++  "postgresql://fixture:secret@127.1:54322/postgres",
++  "postgresql://fixture:secret@2130706433:54322/postgres",
++  "postgresql://fixture:secret@%31%32%37.0.0.1:54322/postgres",
++  "postgresql://fixture:secret@localhost.:54322/postgres",
++  "postgresql://fixture:secret@127.0.0.1:054322/postgres",
++  "postgresql://fixture:secret@[::1]:54322/postgres",
++  "postgresql://fixture@127.0.0.1:54322/postgres",
++  "postgresql://fixture:%00@127.0.0.1:54322/postgres",
++  "postgresql://fixture:%zz@127.0.0.1:54322/postgres",
++  "postgresql://fixture:secret@127.0.0.1:54322/postgres/",
++  "postgresql://fixture:secret@127.0.0.1:54322/postgres?host=remote.invalid",
++  "postgresql://fixture:secret@127.0.0.1:54322/postgres?",
++  "postgresql://fixture:secret@127.0.0.1:54322/postgres#",
++  " postgresql://fixture:secret@127.0.0.1:54322/postgres",
++  "postgresql://fixture:secret@127.0.0.1:54322/postgres\n",
++  "postgresql://fixture:secret@local\nhost:54322/postgres",
++])("危険なDB URLの表記を拒否する（ケース%#）", // DB接続先のパラメーター試験を登録するメソッド
++  /**
++   * 正規化や追加設定で接続先・DB名が変わる入力を許さない。
++   */
++  (databaseUrl) => { // DB接続先の検証コールバック
++    const variables = environment(); // 架空設定生成関数
++    variables.DATABASE_URL = databaseUrl;
++    fixedFailure( // 固定例外検証関数
++      /**
++       * 架空の不正URLをガードへ渡す。
++       */
++      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
++    );
++  },
++);
 +
-+1. 接続先・用途・復旧担当を確認する。専用DB試験には破棄可能なローカルDBを用意する。
-+   localhostであることだけでは、使い捨てDBである保証にはならない。
-+2. F11コードとschema、先行分を含む既存migration履歴を用意する。
-+   `prisma/migrations/20261027000000_f10_event_month_copy/migration.sql` がledgerを作成し、
-+   `prisma/migrations/20261031000000_f11_event_practice_batch/migration.sql` が操作別CHECKを更新する。
-+   適用済みSQLは編集しない。
-+3. F11アプリを稼働させる前に、対象DBでstatusを確認し、未適用の既存migrationをdeployする。
-+4. 同じコードのschemaをvalidateし、Prisma Clientをgenerateする。
-+   DBとClientを整えてから、そのコードのアプリをビルドし起動・再起動する。
-+5. コード試験、専用DB試験、実ブラウザー・HTTP受入をそれぞれ実施し、結果を記録する。
++it.each(["NEXT_PUBLIC_SUPABASE_URL", "APP_BASE_URL"])( // HTTP接続先の試験を登録するメソッド
++  "%sで正規化迂回・認証情報・パス・query・fragmentを拒否する",
++  /**
++   * 同じoriginへ解析される別表記も、原文の段階で拒否する。
++   */
++  (field) => { // 接続先ごとの検証コールバック
++    const port = field === "APP_BASE_URL" ? "3000" : "54321";
++    const invalid = [
++      `https://127.0.0.1:${port}`,
++      `http://remote.invalid:${port}`,
++      `http://127.1:${port}`,
++      `http://2130706433:${port}`,
++      `http://0x7f000001:${port}`,
++      `http://%31%32%37.0.0.1:${port}`,
++      `http://localhost.:${port}`,
++      `http://LOCALHOST:${port}`,
++      `http://127.0.0.1:0${port}`,
++      `http://fixture:${PRIVATE}@127.0.0.1:${port}`,
++      `http://127.0.0.1:${port}/auth`,
++      `http://127.0.0.1:${port}/..`,
++      `http://127.0.0.1:${port}/%2e`,
++      `http://127.0.0.1:${port}?`,
++      `http://127.0.0.1:${port}#`,
++      `http://127.0.0.1:${port}?host=remote.invalid`,
++      `http://127.0.0.1:${port} `,
++      `http://local\thost:${port}`,
++      `http:\\127.0.0.1:${port}`,
++      "http://127.0.0.1:9999",
++    ];
++    for (const source of invalid) {
++      const variables = environment(); // 架空設定生成関数
++      variables[field] = source;
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 許可originに似た別表記をガードへ渡す。
++         */
++        () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
++      );
++    }
++  },
++);
 +
-+確認済みの `.env.local` が対象ローカルDBを指している場合の手動コマンドです。
-+実行シェルの既存環境変数も接続先へ影響するため、ファイル名だけで判断しません。
++it.each([ // 自動読込ファイル名のパラメーター試験を登録するメソッド
++  ".env",
++  ".env.local",
++  ".env.development",
++  ".env.development.local",
++  ".env.test",
++  ".env.test.local",
++  ".env.production",
++  ".env.production.local",
++  ".env.production.backup",
++])("自動読込され得る%sの存在を内容を読まずに拒否する", // ファイル存在のパラメーター試験を登録するメソッド
++  /**
++   * 原文は架空の秘密とし、例外・ログへ混入しないことを確認する。
++   */
++  (name) => { // 環境ファイルごとの検証コールバック
++    writeFileSync(join(checkout, name), PRIVATE); // 架空ファイル作成関数 / 一時パス結合関数
++    fixedFailure( // 固定例外検証関数
++      /**
++       * 環境ファイルの存在する一時checkoutを調べる。
++       */
++      () => requireMvpTestEnvironment(environment(), checkout, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
++    );
++  },
++);
 +
-+```sh
-+npx dotenv-cli -e .env.local -- npx prisma migrate status
-+```
++it(".env.exampleを許可し、dangling linkやディレクトリの.env.localは拒否する", // ケースを登録する関数
++  /**
++   * 内容取得やリンク追跡なしで、自動読込される名前の存在を拒否する。
++   */
++  () => { // ファイル種別の検証コールバック
++    writeFileSync(join(checkout, ".env.example"), "NOT_LOADED"); // 架空例の作成関数 / 一時パス結合関数
++    expect(requireMvpTestEnvironment(environment(), checkout, RUN_ID).runId).toBe(RUN_ID); // 期待値生成関数 / ガード関数 / 架空設定生成関数 / 識別子比較メソッド
++    const path = join(checkout, ".env.local"); // 一時パス結合関数
++    symlinkSync(join(checkout, "missing"), path); // dangling link作成関数 / 架空パス結合関数
++    fixedFailure( // 固定例外検証関数
++      /**
++       * リンク先を読まず.env.localを検出する。
++       */
++      () => requireMvpTestEnvironment(environment(), checkout, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
++    );
++    unlinkSync(path); // このケースが作ったリンクだけを削除する関数
++    mkdirSync(path); // 同じ名前のディレクトリを作成する関数
++    fixedFailure( // 固定例外検証関数
++      /**
++       * 通常ファイル以外も拒否する。
++       */
++      () => requireMvpTestEnvironment(environment(), checkout, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
++    );
++  },
++);
 +
-+未適用の履歴がある場合だけ、既存SQLを適用します。
++it("存在しないcheckout・相対パス・不正runId・getter例外を固定文で拒否する", // ケースを登録する関数
++  /**
++   * ファイル操作や入力getterが投げた例外原文も公開しない。
++   */
++  () => { // 例外境界の検証コールバック
++    for (const path of [join(checkout, PRIVATE), "."]) { // 存在しない一時パスを作る関数
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 不正checkoutをガードへ渡す。
++         */
++        () => requireMvpTestEnvironment(environment(), path, RUN_ID), // 検証コールバック / ガード関数 / 架空設定生成関数
++      );
++    }
++    for (const runId of ["", "../escape", "a".repeat(33), RUN_ID.toUpperCase()]) { // 不正長を作るメソッド / 大文字に変えるメソッド
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 他実行と取り違える識別子を拒否する。
++         */
++        () => requireMvpTestEnvironment(environment(), checkout, runId), // 検証コールバック / ガード関数 / 架空設定生成関数
++      );
++    }
++    const variables = environment(); // 架空設定生成関数
++    Object.defineProperty(variables, "DATABASE_URL", { // 例外を投げるgetterを設定する関数
++      /**
++       * 読取に失敗する入力を再現する。
++       */
++      get() { // URL取得のgetter関数
++        throw new Error(PRIVATE); // 原文非公開を検証する架空例外のコンストラクター
++      },
++    });
++    fixedFailure( // 固定例外検証関数
++      /**
++       * getterの例外を固定文へ置き換える。
++       */
++      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / ガード関数
++    );
++  },
++);
 +
-+```sh
-+npx dotenv-cli -e .env.local -- npx prisma migrate deploy
-+```
++it("migration例外は同じ実行の予約DBだけに限り、通常DATABASE_URLを広げない", // ケースを登録する関数
++  /**
++   * クラスタ・資格情報は保持し、他実行・任意名・URLの持込みを拒否する。
++   */
++  () => { // migration資源境界の検証コールバック
++    const configuration = requireMvpTestEnvironment(environment(), checkout, RUN_ID); // ガード関数 / 架空設定生成関数
++    for (const name of configuration.migrationDatabaseNames) {
++      const resource = getMvpMigrationDatabase(configuration, name); // 予約資源解決関数
++      expect(resource.runId).toBe(RUN_ID); // 期待値生成関数 / 所有実行の比較メソッド
++      expect(resource.databaseUrl).toBe( // 期待値生成関数 / 同一クラスタ接続先の比較メソッド
++        `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/${name}`,
++      );
++      const variables = environment(); // 架空設定生成関数
++      variables.DATABASE_URL = resource.databaseUrl;
++      fixedFailure( // 固定例外検証関数
++        /**
++         * migration DBを通常用接続先へ流用させない。
++         */
++        () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
++      );
++    }
++    for (const name of ["postgres", `mvp_f12_${"b".repeat(32)}_fresh`, "other", PRIVATE]) { // 別実行識別子を生成するメソッド
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 他実行や予約外のDB名を拒否する。
++         */
++        () => getMvpMigrationDatabase(configuration, name), // 検証コールバック / 予約資源解決関数
++      );
++    }
++    expect(configuration.variables.DATABASE_URL).toBe(configuration.databaseUrl); // 期待値生成関数 / 通常接続先の非変更検証メソッド
++    for (const forged of [
++      {
++        ...configuration,
++        databaseUrl: `postgresql://fixture:${PRIVATE}@remote.invalid:54322/postgres`,
++      },
++      {
++        ...configuration,
++        migrationDatabaseNames: ["postgres"],
++      },
++    ]) {
++      const name = forged.migrationDatabaseNames[0];
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 解決時にも接続先と実行ごとの予約名を確認する。
++         */
++        () => getMvpMigrationDatabase(forged, name), // 検証コールバック / 予約資源解決関数
++      );
++    }
++    expect(Object.isFrozen(configuration)).toBe(true); // 期待値生成関数 / 環境の凍結判定関数 / 真偽値比較メソッド
++    expect(Object.isFrozen(configuration.variables)).toBe(true); // 期待値生成関数 / 辞書の凍結判定関数 / 真偽値比較メソッド
++    expect(Object.isFrozen(configuration.migrationDatabaseNames)).toBe(true); // 期待値生成関数 / 予約一覧の凍結判定関数 / 真偽値比較メソッド
++  },
++);
 +
-+```sh
-+npx dotenv-cli -e .env.local -- npx prisma validate
-+npx dotenv-cli -e .env.local -- npx prisma generate
-+```
++it("manifestは実在する既存15本を列挙し、DB・Authのflagを保持する", // ケースを登録する関数
++  /**
++   * 実際のファイルの存在を調べるだけで、既存suiteをimportしない。
++   */
++  () => { // 実在manifestの検証コールバック
++    assertMvpSuiteManifest(resolve(import.meta.dirname, "../..")); // 実在manifest検証関数 / checkoutパス解決関数
++    expect(MVP_SUITES).toHaveLength(15); // 期待値生成関数 / 現在の対象件数の検証メソッド
++    for (const suite of MVP_SUITES) {
++      if (suite.database) {
++        expect(suite.flags.RUN_DB_INTEGRATION_TESTS).toBe("1"); // 期待値生成関数 / DB明示flagの比較メソッド
++      }
++      if (suite.auth) {
++        expect(suite.flags.RUN_CLUB_INVITATION_AUTH_TESTS).toBe("1"); // 期待値生成関数 / Auth明示flagの比較メソッド
++      }
++    }
++    assertMvpSuiteResults(completeResults()); // 全必須結果の検証関数 / 架空結果生成関数
++  },
++);
 +
-+既存SQLを適用するための新しいmigration生成、`db push`、`migrate reset`、seedは不要です。
-+Prisma schemaの列構造はF11で増やしていませんが、SQLの操作別CHECKの適用が必要です。
-+F11 migrationはoperationの許可、対象月、件数の3つのCHECKを同一transactionで更新します。
-+F11は1〜31件・0001-01可、F10は1〜100件・0001-01不可です。
-+既存F10行、UUID・hashのCHECK、unique・FK・trigger・RLS・Data API権限は維持します。
++it("空manifest・二重登録・不在ファイル・checkout外のリンクを拒否する", // ケースを登録する関数
++  /**
++   * 同じケースの二重実行や、存在しないsuiteの成功扱いを防ぐ。
++   */
++  () => { // manifest拒否の検証コールバック
++    const root = resolve(import.meta.dirname, "../.."); // 実checkoutパスを解決する関数
++    const first = MVP_SUITES[0];
++    const invalidManifests = [
++      [],
++      [first, first],
++      [
++        {
++          ...first,
++          path: "tests/missing.test.ts",
++        },
++      ],
++    ];
++    for (const suites of invalidManifests) {
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 重複や不在を含むmanifestを検証する。
++         */
++        () => assertMvpSuiteManifest(root, suites), // 検証コールバック / manifest検証関数
++        MANIFEST_ERROR,
++      );
++    }
++    mkdirSync(join(checkout, "tests")); // 架空の試験ディレクトリ作成関数 / パス結合関数
++    symlinkSync(join(root, first.path), join(checkout, first.path)); // 外部参照リンク作成関数 / リンク先と作成先のパス結合関数
++    fixedFailure( // 固定例外検証関数
++      /**
++       * checkout外のファイルを参照するsuiteを拒否する。
++       */
++      () => assertMvpSuiteManifest(checkout, [first]), // 検証コールバック / manifest検証関数
++      MANIFEST_ERROR,
++    );
++  },
++);
 +
-+`prisma.config.ts` はdotenvを評価します。上記は接続先を確認して行う運用操作であり、
-+統合試験ファイルがガード前に.envを読むことを許可する説明ではありません。
-+既存方針は [docs/ops2.md](../ops2.md) のPrisma適用・Client生成箇所も参照します。
-+本番反映の実施は本書追加の範囲外です。コードを戻す場合も、新規操作を止めて保存結果を確認し、
-+復旧担当へ引き継ぎます。適用済みmigrationやledgerを削除して復旧を試みません。
++it.each(["missing", "duplicate", "unknown", "guard-only", "duplicate-group"])( // 集計失敗の試験を登録するメソッド
++  "%sの結果を完了としない",
++  /**
++   * suiteの欠落や、DB群なしでガードだけ成功した場合を検出する。
++   */
++  (mode) => { // 集計失敗の検証コールバック
++    const results = completeResults(); // 架空結果生成関数
++    if (mode === "missing") {
++      results.pop(); // 必須結果を欠落させるメソッド
++    } else if (mode === "duplicate") {
++      results[1] = results[0];
++    } else if (mode === "unknown") {
++      results[0].path = "tests/unknown.test.ts";
++    } else if (mode === "guard-only") {
++      results[0].groups = [];
++    } else {
++      results[0].groups = [results[0].groups[0], results[0].groups[0]];
++    }
++    fixedFailure( // 固定例外検証関数
++      /**
++       * 不完全な結果を集計契約へ渡す。
++       */
++      () => assertMvpSuiteResults(results), // 検証コールバック / 必須結果検証関数
++      MANIFEST_ERROR,
++    );
++  },
++);
 +
-+## 通常の操作
++it.each(["suite", "group"])( // 全体と群別の試験を登録するメソッド
++  "%sの0件・失敗・skip・未完了・不正件数を成功扱いしない",
++  /**
++   * DB群skipを全体の成功件数で隠せないことを確認する。
++   */
++  (level) => { // 件数判定の検証コールバック
++    const invalid = [
++      { passed: 0 },
++      { failed: 1 },
++      { skipped: 1 },
++      { pending: 1 },
++      { passed: -1 },
++      { passed: 0.5 },
++      { passed: Number.NaN }, // 不正数を表す定数
++      { passed: Number.POSITIVE_INFINITY }, // 無限値を表す定数
++    ];
++    for (const counts of invalid) {
++      const results = completeResults(); // 架空結果生成関数
++      const target = level === "suite" ? results[0] : results[0].groups[0];
++      Object.assign(target, counts); // 失敗件数を架空結果へ反映する関数
++      fixedFailure( // 固定例外検証関数
++        /**
++         * 不正な終端件数を集計契約へ渡す。
++         */
++        () => assertMvpSuiteResults(results), // 検証コールバック / 必須結果検証関数
++        MANIFEST_ERROR,
++      );
++    }
++  },
++);
+diff --git a/tests/mvp/environment.ts b/tests/mvp/environment.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..7a856407724ee0a22ae99b23ad2cc6defa4f4ba8
+--- /dev/null
++++ b/tests/mvp/environment.ts
+@@ -0,0 +1,229 @@
++// tests/mvp/environment.ts
++// 接続やdotenvの初期化を行わず、F12の使い捨て環境だけを許可する。
 +
-+1. 管理者月別一覧 `/club/{clubSlug}/admin/events?month=YYYY-MM` を開く。
-+   表示月を確認して「定期練習を一括作成」から
-+   `/club/{clubSlug}/admin/events/create-practice-batch?month=YYYY-MM` へ進む。
-+   一覧の公開状態・ジャンルの絞込みは生成条件に引き継がない。
-+2. 同月内の期間、曜日、共通内容、時間、公開対象を入力し、「作成予定をpreviewする」を押す。
-+   この段階は読取だけ。preview成功ごとにサーバーが新しいrequestIdを発行する。
-+   Page表示だけでは操作IDを発行しない。
-+3. 全候補の日付・件数・timezone・日時・警告・除外・既存一致を確認して選択する。
-+   候補0件・全件除外・選択0件では保存できない。
-+   初回保存前の共通入力変更は古いpreviewを無効にするため、現在の条件で再previewする。
-+   入力変更前に送ったpreview応答が遅れて到着しても、それを保存に使わない。
-+4. 「選択した予定を下書き作成」を押す。共通入力と選択を固定し、処理中の連打を止める。
-+   正常成功・replay成功は、同クラブの対象月の管理者一覧へ戻る。
-+5. 遷移先は `/club/{clubSlug}/admin/events?month=YYYY-MM&status=ALL` に
-+   `toast=event-practice-batch-created` と `toastId={requestId}` を付けた固定経路。
-+   文言は「定期練習の予定を下書きとして作成しました。」で、任意の件数をURLから表示しない。
-+   選択件数分の下書きと生成列を確認する。toastのURLだけを保存成功の証拠にしない。
++import {
++  readdirSync, // 環境ファイルの名前だけを調べる関数
++  realpathSync, // checkoutの実在する絶対パスを解決する関数
++  statSync, // checkoutがディレクトリであることを確認する関数
++} from "node:fs";
++import {
++  isAbsolute, // 明示されたcheckoutが絶対パスか判定する関数
++} from "node:path";
 +
-+根拠：`app/(club-app)/club/[clubSlug]/admin/events/page.tsx / AdminEventsMonthPage`、
-+`app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/page.tsx / EventPracticeBatchPage`、
-+同ディレクトリの `EventPracticeBatchForm.tsx / EventPracticeBatchForm / SelectionForm` と
-+`actions.ts / previewEventPracticeBatchAction / createEventPracticeBatchAction`、
-+`domain/club/event/event-toast.ts / getClubEventToastMessage`。
++const GUARD_ERROR = "F12専用の使い捨て環境・flag・checkoutを確認してください。";
 +
-+## 初回送信後の再確認・再preview
++/**
++ * 自動読込を使わず、呼出し元から明示的に受け取る環境変数の辞書。
++ */
++export type MvpEnvironmentVariables = Readonly< // 環境変数辞書型 / 読取専用にする型
++  Record<string, string | undefined> // キーと値の対応型 / 文字列型 / 未設定の型
++>;
 +
-+フォームは初回保存時の共通入力・selectedDates・requestId・previewFingerprintをメモリに保持します。
-+「同じ選択・操作IDで再確認する」は、その値を変えず新しいFormDataへ詰めて再送する操作です。
-+現在も同じ本人・所属に権限があることが必要です。自動で別の操作IDに置き換えません。
-+保存エラーの区別にはstateのoutcomeを使います。固定文言の一致で分岐する契約ではありません。
++/**
++ * ガード済み接続先と、後続runnerが引き継いでよい変数・生成予定資源。
++ * migrationDatabaseNamesは作成済みの証明ではない。作成と所有記録は後続runnerが行う。
++ */
++export type MvpTestEnvironment = Readonly<{ // F12の検証済み実行環境型 / 読取専用にする型
++  checkoutDirectory: string; // checkoutの絶対パスを表す文字列型
++  runId: string; // 実行ごとの識別子を表す文字列型
++  databaseUrl: string; // 通常試験用postgres接続先の文字列型
++  supabaseOrigin: string; // ローカルAuth・Storageのoriginの文字列型
++  appOrigin: string; // アプリのoriginの文字列型
++  variables: MvpEnvironmentVariables; // 許可した変数だけを保持する辞書型
++  migrationDatabaseNames: readonly string[]; // 同じ実行だけに予約したDB名の読取専用文字列配列型
++}>;
 +
-+| 状態・結果 | 行うこと |
-+| --- | --- |
-+| CREATED／ALREADY_COMPLETED | 保存済み。対象月の一覧で確認する。同じ入力のreplayでは追加作成しない |
-+| previewのVALIDATION_FAILED／TOO_MANY／FORBIDDEN／PREVIEW_FAILED | 候補を保存しない。項目エラー、期間・曜日・権限等を確認し、条件を整えてpreviewを再試行する |
-+| 保存のVALIDATION_FAILED／PREVIEW_CHANGED | この送信で新規作成しない。選択日、timezone、既存一致などを確認し、「入力を変更してpreviewを作成し直す」を使う |
-+| CONFLICT | 操作IDが別入力・実行所属・操作種別等で使用されている。元操作の結果を確認し、必要な別操作だけ新しいpreviewで開始する |
-+| FORBIDDEN・認証／所属拒否 | 現在のログイン・ACTIVE所属・管理ロール・プランを確認する。新しいIDで認可を回避しない |
-+| CREATE_FAILED | 同じフォームから同じpayloadで再確認できる。条件を変える必要がある場合は、明示的にpreviewを作り直して別操作にする |
-+| RESULT_UNKNOWN・保存の通常通信例外 | 保存の成否が未確定。同じタブ・payload・操作IDを保ち、再確認する。新previewや新しい操作を始めない |
-+| 保存済みsuccessでneedsReload=true | commit後の一覧再検証だけが失敗。保存ボタンは出さず「作成済み」を表示する。「対象月の管理一覧を開く」で一覧を確認し、再保存しない |
-+| タブを閉じた／再読込などでpayloadを失った | メモリから復元できない。新しい操作の前に、権限ある担当者が元のクラブ・操作ID・実行所属・対象月・完了記録と生成結果を確認する。判断不能なら保留する |
++/**
++ * 後続runnerが作成・所有記録・削除に使う、同一クラスタ内のmigration用資源。
++ */
++export type MvpMigrationDatabase = { // migration用の生成予定資源型
++  runId: string; // 所有する実行識別子の文字列型
++  databaseName: string; // 予約済みDB名の文字列型
++  databaseUrl: string; // 同一クラスタ内の接続先の文字列型
++};
 +
-+保存後のRESULT_UNKNOWNでは再previewボタンを表示しません。
-+CREATE_FAILEDでは同payloadの再送と明示的な再previewの両方を許可します。
-+その他の既知の保存エラーでは、権限等を確認してから新しいpreviewへ戻ります。
-+これらは `EventPracticeBatchForm.tsx / SelectionForm / beginSave / restartPreview` と
-+`EventPracticeBatchForm / invalidate / beginPreview` の現行制御に基づきます。
++/**
++ * 前後空白・制御文字・query・fragment・バックスラッシュを解析前に拒否する。
++ */
++function checkedSource(source: string | undefined): string { // URL原文検証関数 / 文字列型 / 未設定の型
++  if (
++    !source ||
++    /[\s\u0000-\u001f\u007f\\?#]/u.test(source) // 禁止文字の有無を調べるメソッド
++  ) {
++    throw new Error(GUARD_ERROR); // 秘密やcauseを含めない例外を生成するコンストラクター
++  }
++  return source;
++}
 +
-+previewFingerprintは現在の候補を照合する値、inputHashは送信入力を照合する値です。
-+両者を混同しません。inputHashは正規化共通入力・選択日・previewFingerprintと認可scopeから作ります。
-+同じrequestIdでも共通入力・選択・照合値・実行所属が異なればCONFLICTになります。
-+新しいpreviewは新しい操作IDになるため、結果不明な操作の照会の代用にはしません。
-+保存結果照会専用APIや、失ったフォームを復元する機能はありません。
++/**
++ * 数値IPやencoded host等の正規化を許さず、指定portのHTTP originだけを返す。
++ */
++function localOrigin( // origin検証関数
++  source: string | undefined, // URL原文の文字列型 / 未設定の型
++  port: string, // 許可portの文字列型
++): string { // 検証済みoriginの文字列型
++  const value = checkedSource(source); // URL原文を検証する関数
++  if (
++    value !== `http://127.0.0.1:${port}` &&
++    value !== `http://127.0.0.1:${port}/` &&
++    value !== `http://localhost:${port}` &&
++    value !== `http://localhost:${port}/`
++  ) {
++    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
++  }
++  return new URL(value).origin; // 検証したローカルURLを解析するコンストラクター
++}
 +
-+根拠：`src/infrastructure/security/event-practice-batch-fingerprint.ts / buildEventPracticeBatchFingerprint / buildEventPracticeBatchInputHash`、
-+`src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts / existingResult / createEventPracticeBatch`。
++/**
++ * 通常試験のDB名はpostgresに固定し、接続先を変更し得る表記を拒否する。
++ */
++function localDatabase(source: string | undefined): string { // DB接続先検証関数 / 文字列型 / 未設定の型
++  const value = checkedSource(source); // URL原文を検証する関数
++  if (
++    !/^postgres(?:ql)?:\/\/[^/@:]+:[^/@]+@(localhost|127\.0\.0\.1):54322\/postgres$/u
++      .test(value) // 接続先とDB名の厳密な書式を検証するメソッド
++  ) {
++    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
++  }
++  const url = new URL(value); // 接続URLを解析するコンストラクター
++  for (const credential of [url.username, url.password]) {
++    const decoded = decodeURIComponent(credential); // 不正なpercent escapeも拒否する復号関数
++    if (
++      !decoded ||
++      /[\u0000-\u001f\u007f]/u.test(decoded) // 制御文字を検出するメソッド
++    ) {
++      throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
++    }
++  }
++  return url.toString(); // 解析済み接続先を文字列にするメソッド
++}
 +
-+## 完了記録とF10との共存
++/**
++ * dotenv・Nextが自動読込するファイルを、内容を開かず名前だけで拒否する。
++ * .env.exampleは読込対象ではないため許可する。dangling symlinkも名前で検出する。
++ */
++function cleanCheckout(directory: string): string { // 環境ファイルを持たないcheckout検証関数 / 文字列型
++  if (!isAbsolute(directory)) { // 絶対パスを判定する関数
++    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
++  }
++  const absolute = realpathSync(directory); // checkoutの実在パスを取得する関数
++  if (!statSync(absolute).isDirectory()) { // ファイル情報取得関数 / ディレクトリ判定メソッド
++    throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
++  }
++  for (const name of readdirSync(absolute)) { // ファイル名だけを列挙する関数
++    if (
++      /^\.env(?:\.(?:local|development(?:\.local)?|test(?:\.local)?|production.*))?$/u
++        .test(name) // 自動読込対象とproduction派生名を判定するメソッド
++    ) {
++      throw new Error(GUARD_ERROR); // 固定メッセージの例外を生成するコンストラクター
++    }
++  }
++  return absolute;
++}
 +
-+`ClubEventBatchOperation` は成功した操作の完了記録です。未完了の記録を先に作りません。
-+同クラブ・requestIdに加え、operation・inputHash・実行所属・対象月・件数・完了日時を照合します。
-+生成後にイベントを編集・削除しても記録を残し、同じ入力のreplayで復元・再作成はしません。
-+実行Membership削除時は実行者参照がSetNull、クラブ削除時はそのクラブの記録がcascade削除されます。
-+実行所属を失った操作者のreplayを許可する保証ではありません。認可は常に先に確認します。
++/**
++ * 明示flag・使い捨て確認を先に調べ、その後だけURLとcheckoutを評価する。
++ * 本番build用のNODE_ENV切替はこの契約の対象外。launcherはtestかdevelopmentに限る。
++ * 戻り値には接続秘密を含むためログへ渡さない。元のprocess.envは変更しない。
++ */
++export function requireMvpTestEnvironment( // F12の実行前ガード関数
++  environment: MvpEnvironmentVariables, // 明示された環境変数辞書型
++  checkoutDirectory: string, // 専用checkoutの絶対パスの文字列型
++  runId: string, // 呼出し元が生成する32桁の小文字hex識別子の文字列型
++): MvpTestEnvironment { // 検証済み実行環境型
++  try {
++    if (
++      environment.RUN_MVP_TESTS !== "1" ||
++      environment.MVP_TEST_DISPOSABLE !== "1" ||
++      (
++        environment.NODE_ENV !== "test" &&
++        environment.NODE_ENV !== "development"
++      ) ||
++      environment.VERCEL_ENV === "production" ||
++      !/^[0-9a-f]{32}$/u.test(runId) // 実行識別子の厳密な書式を検証するメソッド
++    ) {
++      throw new Error(GUARD_ERROR); // URLに触れず固定例外を生成するコンストラクター
++    }
++    for (const key of Object.keys(environment)) { // 値を評価せず環境変数名を列挙する関数
++      if (
++        key.startsWith("PG") || // PostgreSQLの接続上書き変数を検出するメソッド
++        key.startsWith("DOTENV_") || // dotenvの任意ファイル読込指定を検出するメソッド
++        key === "NODE_OPTIONS" ||
++        key === "NODE_PATH"
++      ) {
++        if (environment[key] !== undefined) {
++          throw new Error(GUARD_ERROR); // 接続上書きを固定例外で拒否するコンストラクター
++        }
++      }
++    }
++    const checkout = cleanCheckout(checkoutDirectory); // 内容を読まず専用checkoutを確認する関数
++    const databaseUrl = localDatabase(environment.DATABASE_URL); // 通常用postgres接続先を検証する関数
++    const supabaseOrigin = localOrigin(environment.NEXT_PUBLIC_SUPABASE_URL, "54321"); // Supabase origin検証関数
++    const appOrigin = localOrigin(environment.APP_BASE_URL, "3000"); // アプリorigin検証関数
++    const variables: Record<string, string | undefined> = { // 許可する変数辞書型 / 文字列型 / 未設定の型
++      RUN_MVP_TESTS: "1",
++      MVP_TEST_DISPOSABLE: "1",
++      NODE_ENV: environment.NODE_ENV,
++      DATABASE_URL: databaseUrl,
++      NEXT_PUBLIC_SUPABASE_URL: supabaseOrigin,
++      APP_BASE_URL: appOrigin,
++    };
++    for (const key of ["NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"]) {
++      const value = environment[key];
++      if (value !== undefined) {
++        if (
++          !value ||
++          /\s/u.test(value) // 空白を含むキーを検出するメソッド
++        ) {
++          throw new Error(GUARD_ERROR); // キー原文を含めない例外を生成するコンストラクター
++        }
++        variables[key] = value;
++      }
++    }
++    return Object.freeze({ // 検証済み環境の設定変更を防ぐ関数
++      checkoutDirectory: checkout,
++      runId,
++      databaseUrl,
++      supabaseOrigin,
++      appOrigin,
++      variables: Object.freeze(variables), // 許可した環境変数の変更を防ぐ関数
++      migrationDatabaseNames: Object.freeze([ // 予約済みDB名の変更を防ぐ関数
++        `mvp_f12_${runId}_fresh`,
++        `mvp_f12_${runId}_upgrade`,
++      ]),
++    });
++  } catch {
++    throw new Error(GUARD_ERROR); // 入力値・SDK例外・ファイルパス・causeを捨てるコンストラクター
++  }
++}
 +
-+一意性は `clubId + requestId` です。operationはuniqueへ追加していません。
-+同じクラブでF10のCOPY_PREVIOUS_MONTHとF11のCREATE_PRACTICE_BATCHに同じIDを流用すると、
-+どちらの順序でも後の操作はCONFLICTです。別クラブの同じIDは独立して扱います。
-+F10は元イベント選択、F11は現地日付選択です。入力・IDを使い回さないでください。
++/**
++ * 同一実行に予約したDB名だけを同じ接続先・資格情報から解決する。
++ * DBの作成・削除は行わず、通常用DATABASE_URLも書き換えない。
++ */
++export function getMvpMigrationDatabase( // migration専用資源を解決する関数
++  configuration: MvpTestEnvironment, // ガード済み環境型
++  databaseName: string, // 作成予定のDB名の文字列型
++): MvpMigrationDatabase { // 実行識別子付きmigration資源型
++  try {
++    if (
++      !/^[0-9a-f]{32}$/u.test(configuration.runId) || // 所有する実行識別子を再確認するメソッド
++      !configuration.migrationDatabaseNames.includes(databaseName) || // この実行に予約したDB名を照合するメソッド
++      (
++        databaseName !== `mvp_f12_${configuration.runId}_fresh` &&
++        databaseName !== `mvp_f12_${configuration.runId}_upgrade`
++      )
++    ) {
++      throw new Error(GUARD_ERROR); // 他実行のDBを固定例外で拒否するコンストラクター
++    }
++    const url = new URL(localDatabase(configuration.databaseUrl)); // 同一クラスタURLのコンストラクター / 通常接続先の再検証関数
++    url.pathname = `/${databaseName}`;
++    return {
++      runId: configuration.runId,
++      databaseName,
++      databaseUrl: url.toString(), // DB名だけ変更した接続先を文字列にするメソッド
++    };
++  } catch {
++    throw new Error(GUARD_ERROR); // 接続秘密や例外原文を捨てるコンストラクター
++  }
++}
+diff --git a/tests/mvp/suite-manifest.ts b/tests/mvp/suite-manifest.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..638274f80da529f500fe0e13698fb1d73cab3255
+--- /dev/null
++++ b/tests/mvp/suite-manifest.ts
+@@ -0,0 +1,365 @@
++// tests/mvp/suite-manifest.ts
++// 実在する既存suiteだけを列挙し、未実行・skipを完了として集計しない。
 +
-+ledger削除、requestId変更、別管理者への引継ぎで結果不明の再送を通しません。
-+記録の照会は権限ある担当者が必要最小限のメタデータで行います。
-+本文・個人情報・Cookie・トークン・接続URL・生SQL例外・hash素材をログや共有資料へ出しません。
-+UIの照合値も認証・認可の代用ではありません。
++import {
++  realpathSync, // suiteの実在パスを解決する関数
++  statSync, // suiteが通常ファイルであることを確認する関数
++} from "node:fs";
++import {
++  resolve, // checkoutを基準にsuiteのパスを解決する関数
++  sep, // checkout配下を照合するパス区切り文字
++} from "node:path";
 +
-+根拠：`prisma/schema.prisma / ClubEventBatchOperation`、
-+`src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts / isCurrentActor / existingResult`。
-+P2034は初回の後に最大3回再試行し、上限ではRESULT_UNKNOWNです。
-+P2002後は別transactionで再認可し、成功記録だけを再照合します。
-+同ファイルの `existingOnly` はこの照合専用モードであり、「既存の公開イベントだけ」の意味ではありません。
-+`skipDuplicates: false` も重複を黙って除外する設定ではありません。
-+既存コメントの意味の不整合は、コードを変更せず、実際の制御に従って説明しています。
++const MANIFEST_ERROR = "F12の必須suite・実行件数・skipを確認してください。";
 +
-+## ユーザー操作からDBまでの確認箇所
++/**
++ * 既存suiteのパス、実行flag、実DB・実Authの要否、必須試験群の契約。
++ * Authをmockするsuiteはauthをfalseとする。Storageや配送の実行許可は意味しない。
++ */
++export type MvpSuite = { // 必須suiteの契約型
++  path: string; // 実在する試験パスの文字列型
++  flags: Readonly<Record<string, "1">>; // 読取専用のflag辞書型 / 文字列キー型
++  database: boolean; // 実DBが必要か表す真偽値型
++  auth: boolean; // 実Authが必要か表す真偽値型
++  requiredGroups: readonly string[]; // 必須群の完全名を保持する読取専用文字列配列型
++};
 +
-+以下はリポジトリルートからのパスです。同じディレクトリのファイル名も併記します。
++/**
++ * runnerが試験結果から収集する、終端状態ごとのケース件数。
++ */
++export type MvpCaseCounts = { // 実行件数の契約型
++  passed: number; // 成功件数の数値型
++  failed: number; // 失敗件数の数値型
++  skipped: number; // skip・todo件数の数値型
++  pending: number; // 未完了・未分類件数の数値型
++};
 +
-+| 段階 | ファイル・関数、入力→出力 | DB変更 |
-+| --- | --- | --- |
-+| 入口・初期表示 | `app/(club-app)/club/[clubSlug]/admin/events/page.tsx / AdminEventsMonthPage` → `create-practice-batch/page.tsx / EventPracticeBatchPage`。slug・表示月→同月全体の初期値とAction | 一覧・認可の読取のみ |
-+| 入力とpreview要求 | `app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchInputFields.tsx / EventPracticeBatchInputFields` と `EventPracticeBatchForm.tsx / EventPracticeBatchForm` → `actions.ts / previewEventPracticeBatchAction`。共通入力FormData→再認可・構造検証済み入力 | 保存なし |
-+| preview生成 | `src/application/club/event/get-event-practice-batch.ts / getEventPracticeBatchPreview` → `src/infrastructure/prisma/repositories/event-practice-batch-read-repository.ts / findEventPracticeBatchPreviewData`。context・共通入力→最新timezone、候補日時、一致情報→限定DTOとfingerprint。Actionが成功時にrequestIdを発行 | 最新所属・プラン・一致イベントの読取。preview保存テーブルはない |
-+| 日時と一致 | `domain/club/event/event-practice-batch-date-times.ts / generateEventPracticeBatchDateTimes` が現地日とUTC候補を列挙。`src/infrastructure/prisma/repositories/club-event-exact-duplicate-repository.ts / findClubEventExactDuplicateId` が同クラブの代表IDだけを返す | 日時列挙は純粋処理。一致検索は読取のみ。既存ID・本文をClientへ返さない |
-+| 選択と保存要求 | `app/(club-app)/club/[clubSlug]/admin/events/create-practice-batch/EventPracticeBatchForm.tsx / SelectionForm / beginSave` → `actions.ts / createEventPracticeBatchAction`。共通入力・選択日・操作ID・照合値を固定→再認可・bound値照合 | ここまで保存なし。clubId・実行者・UTC値・固定保存列をClientから採用しない |
-+| 一体保存 | `src/application/club/event/create-event-practice-batch.ts / createEventPracticeBatch` → `src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts / createEventPracticeBatch`。contextのscope・正規化入力→最新認可、完了記録の先行照合、新規時の再previewとfingerprint照合→固定outcomeと最小receipt | Serializable transactionでClubEventのDRAFT群とClubEventBatchOperationを一体保存。途中失敗でrollback。replayは追加作成なし |
-+| 完了表示 | Action → `app/(club-app)/club/revalidate-club-paths.ts / revalidateClubEventPaths` → 固定管理者一覧。`domain/club/event/event-toast.ts / getClubEventToastMessage` が固定文言を返す | commitの外で再検証・遷移。再検証失敗で保存を呼び直さない |
++/**
++ * suite全体と必須群の結果。群の件数には配下のケースを含める。
++ * Vitest等からの変換・プロセス終了検査は後続runnerが担当する。
++ */
++export type MvpSuiteResult = MvpCaseCounts & { // suiteの実行結果型 / 件数契約型
++  path: string; // 対象suiteパスの文字列型
++  groups: readonly (MvpCaseCounts & { // 群別結果の読取専用配列型 / 件数契約型
++    name: string; // 必須群と照合する完全名の文字列型
++  })[];
++};
 +
-+本体の接続に後続粒度待ちはありません。実環境の受入は以下で別に確認します。
++/**
++ * 現在実在する8本のtest:db、ローカルAuth契約、F06〜F11のflowを一度ずつ列挙する。
++ * 新規F12 suiteやE2Eは実装後の粒度で実在を確認してから追加する。
++ */
++export const MVP_SUITES: readonly MvpSuite[] = [ // 既存必須suiteの読取専用配列型
++  {
++    path: "tests/club-id-integrity.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "clubId整合性",
++    ],
++  },
++  {
++    path: "tests/storage-deletion-jobs.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "StorageDeletionJob",
++    ],
++  },
++  {
++    path: "tests/club-line-setting.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "ClubLineSetting Repository",
++    ],
++  },
++  {
++    path: "tests/club-membership-repository.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "ClubMembership Repository",
++    ],
++  },
++  {
++    path: "tests/club-invitation-schema.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "ClubInvitation DB制約",
++    ],
++  },
++  {
++    path: "tests/club-invitation-repository.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "ClubInvitation Repository",
++    ],
++  },
++  {
++    path: "tests/club-invitation-acceptance-repository.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "招待受取人の読取Repository（ローカルDB）",
++    ],
++  },
++  {
++    path: "tests/club-invitation-recovery.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "復旧CLIと実RepositoryのDB統合",
++    ],
++  },
++  {
++    path: "tests/club-invitation-auth.local.integration.test.ts",
++    flags: {
++      RUN_CLUB_INVITATION_AUTH_TESTS: "1",
++    },
++    database: false,
++    auth: true,
++    requiredGroups: [
++      "ローカルSupabaseの招待Auth契約",
++    ],
++  },
++  {
++    path: "tests/club-invitation-acceptance.flow.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++      RUN_CLUB_INVITATION_ACCEPTANCE_TESTS: "1",
++      RUN_CLUB_INVITATION_AUTH_TESTS: "1",
++      CLUB_INVITATION_ACCEPTANCE_DISPOSABLE: "1",
++    },
++    database: true,
++    auth: true,
++    requiredGroups: [
++      "F06実DB・実Auth（3つの実行flagがない通常実行ではskip）",
++    ],
++  },
++  {
++    path: "tests/club-account.flow.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++      RUN_CLUB_ACCOUNT_TESTS: "1",
++      CLUB_ACCOUNT_DISPOSABLE: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "F07 Action・Service・Repositoryと実DB",
++    ],
++  },
++  {
++    path: "tests/support-report.flow.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++      RUN_SUPPORT_REPORT_TESTS: "1",
++      SUPPORT_REPORT_DISPOSABLE: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "F08実DBフロー（専用flag未指定時はskip）",
++    ],
++  },
++  {
++    path: "tests/platform-support.flow.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++      RUN_PLATFORM_SUPPORT_TESTS: "1",
++      PLATFORM_SUPPORT_DISPOSABLE: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "F09実DB統合（専用flag未指定時はskip）",
++    ],
++  },
++  {
++    path: "tests/event-month-copy.flow.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++      RUN_EVENT_MONTH_COPY_TESTS: "1",
++      EVENT_MONTH_COPY_DISPOSABLE: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "F10専用使い捨てDB統合（flag未指定はskip）",
++    ],
++  },
++  {
++    path: "tests/event-practice-batch.flow.integration.test.ts",
++    flags: {
++      RUN_DB_INTEGRATION_TESTS: "1",
++      RUN_EVENT_PRACTICE_BATCH_TESTS: "1",
++      EVENT_PRACTICE_BATCH_DISPOSABLE: "1",
++    },
++    database: true,
++    auth: false,
++    requiredGroups: [
++      "F11専用使い捨てDB統合（flag未指定はskip）",
++    ],
++  },
++];
 +
-+## コード試験・専用DB試験
++/**
++ * 重複・空manifest・不正flag・存在しないsuiteを実行前に拒否する。
++ * ファイル本文やSDKは読まない。checkout外へのsymlinkも対象にしない。
++ */
++export function assertMvpSuiteManifest( // suite一覧の実在と契約を検証する関数
++  checkoutDirectory: string, // 専用checkoutのパスの文字列型
++  suites: readonly MvpSuite[] = MVP_SUITES, // 検証対象の読取専用suite配列型
++): void { // 戻り値を使わない型
++  try {
++    if (suites.length === 0) {
++      throw new Error(MANIFEST_ERROR); // 空manifestを固定例外で拒否するコンストラクター
++    }
++    const root = realpathSync(checkoutDirectory); // checkoutの実在パスを解決する関数
++    const paths = new Set<string>(); // 試験パスの重複を検出する集合のコンストラクター / 文字列型
++    for (const suite of suites) {
++      if (
++        !/^tests\/[a-z0-9.-]+\.test\.ts$/u.test(suite.path) || // 既存suiteの相対パス書式を検証するメソッド
++        suite.path.includes("..") || // 親への移動を検出するメソッド
++        paths.has(suite.path) || // 同じsuiteの重複を検出するメソッド
++        (
++          !suite.database &&
++          !suite.auth
++        ) ||
++        suite.requiredGroups.length === 0 ||
++        new Set(suite.requiredGroups).size !== suite.requiredGroups.length || // 群名の重複を調べる集合のコンストラクター
++        Object.keys(suite.flags).length === 0 || // flag名を列挙する関数
++        (
++          suite.database &&
++          suite.flags.RUN_DB_INTEGRATION_TESTS !== "1"
++        )
++      ) {
++        throw new Error(MANIFEST_ERROR); // 不正な契約を固定例外で拒否するコンストラクター
++      }
++      for (const group of suite.requiredGroups) {
++        if (
++          !group ||
++          group !== group.trim() // 群名の前後空白を除くメソッド
++        ) {
++          throw new Error(MANIFEST_ERROR); // 空の群名を固定例外で拒否するコンストラクター
++        }
++      }
++      for (const [key, value] of Object.entries(suite.flags)) { // flag名と値を列挙する関数
++        if (
++          !/^[A-Z][A-Z0-9_]+$/u.test(key) || // flag名の書式を検証するメソッド
++          value !== "1"
++        ) {
++          throw new Error(MANIFEST_ERROR); // 曖昧なflagを固定例外で拒否するコンストラクター
++        }
++      }
++      const absolute = realpathSync(resolve(root, suite.path)); // suiteの実在パス解決関数 / 相対パス結合関数
++      if (
++        !absolute.startsWith(`${root}${sep}`) || // checkout配下であることを照合するメソッド
++        !statSync(absolute).isFile() // ファイル情報取得関数 / 通常ファイル判定メソッド
++      ) {
++        throw new Error(MANIFEST_ERROR); // 対象外ファイルを固定例外で拒否するコンストラクター
++      }
++      paths.add(suite.path); // 検証したsuiteパスを重複検査へ登録するメソッド
++    }
++  } catch {
++    throw new Error(MANIFEST_ERROR); // ファイルパスや例外原文を公開しないコンストラクター
++  }
++}
 +
-+### DBへ接続しない確認
++/**
++ * 成功した実ケースを1件以上含み、失敗・skip・未完了がない件数だけを許す。
++ */
++function assertCompletedCases(counts: MvpCaseCounts): void { // ケース件数検証関数 / 件数契約型 / 戻り値を使わない型
++  for (const count of [counts.passed, counts.failed, counts.skipped, counts.pending]) {
++    if (
++      !Number.isSafeInteger(count) || // 安全な整数を判定する関数
++      count < 0
++    ) {
++      throw new Error(MANIFEST_ERROR); // 不正な件数を固定例外で拒否するコンストラクター
++    }
++  }
++  if (
++    counts.passed === 0 ||
++    counts.failed !== 0 ||
++    counts.skipped !== 0 ||
++    counts.pending !== 0
++  ) {
++    throw new Error(MANIFEST_ERROR); // 未実行やskipを固定例外で拒否するコンストラクター
++  }
++}
 +
-+既存の依存を使い、環境ファイルを読み込まずに実行します。
-+
-+```sh
-+npm run typecheck
-+npm run lint
-+RUN_EVENT_PRACTICE_BATCH_TESTS=0 RUN_DB_INTEGRATION_TESTS=0 \
-+  npx vitest run tests/event-practice-batch*.test.ts
-+```
-+
-+このコマンドではDBケースはskipです。ガードの単体試験成功とDBの保証を区別します。
-+通常の `test:db` はF11専用flowを列挙していません。
-+`verify:local` もF11専用script・flagを設定せず、flag未指定なら内部の `npm test` でもDBケースはskipです。
-+この説明を、環境ファイルを読む `verify:local` 全体がDB未接続という保証には使いません。
-+
-+| 実行対象 | 主な確認 | 限界 |
-+| --- | --- | --- |
-+| `tests/event-practice-batch-form.test.ts` | 対象月内・期間・同日終了・共通入力・選択1〜31件・未許可項目の拒否 | DB認可・実HTTPは行わない |
-+| `tests/event-practice-batch-date-times.test.ts` | 現地曜日・月末・閏年・UTC前日・DST gap／fold・除外・集合警告 | 実ブラウザーの表示・端末差は別途確認 |
-+| `tests/event-practice-batch-policy.test.ts`・`tests/event-practice-batch-fingerprint.test.ts` | 固定12列、ロール集合、scope・共通入力・選択・timezone・既存一致の照合 | 実並列の証明ではない |
-+| `tests/event-practice-batch-read-repository.test.ts`・`tests/event-practice-batch-mutation-repository.test.ts` | 最新認可、上限付き一致検索、replay・有限retry・一体保存境界 | DB呼出しはmock。実rollback・unique・FK・CHECKは専用DBで確認 |
-+| `tests/event-practice-batch-services.test.ts` | 限定DTO・初期未選択・結果契約・最小receipt・機密非返却 | Repositoryをmock |
-+| `tests/event-practice-batch-actions.test.ts` | 両Actionの直接呼出し、共通認可、改変・多重項目・File拒否、再検証・固定遷移 | Auth・DB境界はmock。実HTTP POST／Origin拒否は別途確認 |
-+| `tests/event-practice-batch-input-fields.test.ts`・`tests/event-practice-batch-pages.test.ts` | 初期値・月の厳密性・label・エラーID・認可とAction接続 | 静的描画・認可境界のmock |
-+| `tests/event-practice-batch-forms.test.ts`・`tests/event-practice-batch-navigation.test.ts` | 古いpreview無効化、連打、同入力再送、outcome別操作、入口・固定toast | hook・Action queue等を置換。実フォーカス・通信・読み上げは別途確認 |
-+| `tests/event-practice-batch.flow.integration.test.ts` のガード | 架空設定で接続前の拒否、flag不足時のURL未評価、例外原文抑止 | flagなしでDBケースは実行しない |
-+
-+### 専用の使い捨てDBだけで行う確認
-+
-+対象は `tests/event-practice-batch.flow.integration.test.ts` です。
-+同ファイルの `enabled`・`localConfiguration` を接続条件の正本とします。
-+
-+- `RUN_EVENT_PRACTICE_BATCH_TESTS=1` と `RUN_DB_INTEGRATION_TESTS=1` の両方が必要。
-+  専用script `test:event-practice-batch:local` が設定します。
-+- 別途 `EVENT_PRACTICE_BATCH_DISPOSABLE=1` が必要。scriptでは自動同意しません。
-+- `NODE_ENV`・`VERCEL_ENV` はproduction以外。
-+- DATABASE_URLはpostgres／postgresql、hostはlocalhost／127.0.0.1、portは54322、DB名はpostgres。
-+  user・password必須、前後空白・query・fragmentは禁止。空の `?`・`#` も拒否します。
-+- 値のある `PG` 接頭辞の環境変数は拒否します。URL以外の接続設定の混入を避けます。
-+- F11までのmigration・Client生成が済み、接続roleにfixture作成・削除とmetadata読取の権限が必要。
-+  専用試験がmigration・seed・接続先の変更を自動実行することはありません。
-+
-+両flagが揃うまでURLを評価せず、全ガード通過後に専用PrismaPg clientを遅延生成します。
-+共有Prisma client・dotenv・実Auth・Next・メールの評価はmock境界で拒否します。
-+実Storage・PDF・LINE・メールは使いません。fixtureのAppUserはAuthログインアカウントではありません。
-+
-+確認済みの使い捨てローカルDBを指す `.env.local` を用いる場合の手動コマンドです。
-+外側のdotenvによる読込みは担当者が行う準備であり、試験のガード前自動読込みではありません。
-+
-+```sh
-+npx dotenv-cli -e .env.local -- env EVENT_PRACTICE_BATCH_DISPOSABLE=1 \
-+  npm run test:event-practice-batch:local
-+```
-+
-+ガード・DBケースとも失敗0・skip 0で成功したことを確認します。skipを合格に数えません。
-+中断後は登録済みfixtureのUUID・クラブ範囲を確認し、担当者へ引き継ぎます。
-+cleanupは書込み前に登録したfixtureクラブ・ユーザーの範囲に限定し、全件削除は行いません。
-+
-+| 専用DBの確認 | 内容 |
-+| --- | --- |
-+| 上限・保存列 | 31件一体保存／32件入力拒否。PRACTICE・DRAFT・実行Membership・公開日時null、添付・既読・メモ・LINE行なし |
-+| 冪等性 | 同ID逐次／実並列、異なるIDの実並列によるPREVIEW_CHANGED、異入力・実行所属のCONFLICT、編集・削除後のreplay |
-+| rollback・retry | 実書込み後の件数不一致・完了記録CHECK違反で全件rollback。注入P2034の有限retry・上限後の同payload確認 |
-+| 最新設定・クラブ境界 | role・所属・プラン変更、timezone・公開／下書きの既存一致変更、他クラブscope拒否、明示選択許可 |
-+| DB制約と権限 | SetNull・同クラブunique・実行所属参照・clubId不変・操作別CHECK。RLS有効、policyなし、PUBLIC／anon／authenticated権限metadata |
-+| F10との共存 | F10の100件一体保存、同クラブ同IDのF10→F11／F11→F10双方CONFLICT、別クラブ同IDの独立保存 |
-+
-+自然な実並列は `synchronize` で2本のDB読取を同期し、P2034を注入せず競合させます。
-+`transaction` のP2034、`transactionProxy` の件数不一致・CHECK違反は明示した障害注入です。
-+実DBのrollback結果と、競合の発生方法を区別して記録します。
-+RLS項目は権限metadata確認であり、実ブラウザーのData API通信を実行した結果ではありません。
-+F10の独立した受入も必要な場合は、F10運用書の別flag・別専用コマンドで確認します。
-+このF11専用コマンドだけでF10全受入の完了にはしません。
-+
-+## 実ブラウザー・HTTP受入表
-+
-+実Authを伴う確認は、許可された検証環境・検証アカウントで担当者が実施します。
-+専用DB試験のfixtureをログインに流用しません。結果は証跡確認後に更新します。
-+
-+| ID | 操作・条件 | 期待結果 | 結果 |
-+| --- | --- | --- | --- |
-+| M01 | OWNER・COACH・OFFICER／STANDARDで表示月から入る | 同月全体が初期期間。曜日・時間は利用者が指定し、previewまでDB作成なし | 未確認 |
-+| M02 | 未ログイン、MEMBER、失効所属、他クラブ、STARTER・PROでPageと両Actionへアクセス | ログイン遷移または拒否。他クラブの候補表示・保存なし | 未確認 |
-+| M03 | 月未指定・配列・不正月、期間の月跨ぎ、終了同時刻／逆転、未選択曜日を送る | 不正値をfallback・翌日補正せず拒否。有効な0候補は空表示、0件保存不可 | 未確認 |
-+| M04 | Asia/Tokyoの月初0時、複数曜日、月末、閏年を指定する | UTC前日でも現地日・曜日と件数が一致。月初末の対象日を落とさない | 未確認 |
-+| M05 | NYの2026-03-08 02:30、2026-11-01 01:30を開始・終了・集合で試す | gap／foldの理由を表示し選択不可。通常のDST日も現地日時・offsetが正しい | 未確認 |
-+| M06 | 開始後の集合、集合未設定、不正timezone、全件除外を試す | 警告のみの候補は選択可、未設定は保持。不正timezoneで保存せず、全件除外も保存不可 | 未確認 |
-+| M07 | 既存の公開・下書きイベントと完全一致する候補を作る | 両状態とも初期未選択。意図した明示選択は保存可能。既存ID・本文をClientへ返さない | 未確認 |
-+| M08 | preview後に共通入力を変更し、遅い旧応答も到着させる | 変更直後も旧previewから保存不可。現在入力で作り直す。保存後の入力・選択は固定 | 未確認 |
-+| M09 | preview後にtimezone・一致状態・権限を別操作で変える | 保存時に最新状態でPREVIEW_CHANGEDまたはFORBIDDEN。失効後のreplayも拒否 | 未確認 |
-+| M10 | 31候補を保存し、32件選択等の改変も試す | 31件は全件と完了記録が一体保存、32件は拒否。保存列・公開日時null・関連行なしを照合 | 未確認 |
-+| M11 | preview・保存の連打、Enter連続、同payloadの並列再送 | UIで重複送信を抑止。同IDで1群・1記録。別IDの同previewは変更検出と区別する | 未確認 |
-+| M12 | 保存送信後に通信断・応答喪失を再現して復帰する | RESULT_UNKNOWNでは新操作を作らず同payload・同IDで再確認。完了済みなら追加しない | 未確認 |
-+| M13 | 保存後の一覧再検証だけを失敗させる | 作成済み件数・再読込案内を表示し保存ボタンなし。needsReloadを保存失敗と扱わない | 未確認 |
-+| M14 | 成功後の一覧、状態フィルター、toast、生成下書きを確認する | 対象月・status=ALLへ固定遷移。固定toast、任意URL件数を不採用。自動公開・通知なし | 未確認 |
-+| M15 | キーボードだけで入力・候補選択・エラー修正・再確認する。読み上げも確認する | label・fieldset・説明／エラーの関連付け、操作順・フォーカス可視性・移動、件数・pending・成功・失敗の認識を確認。未達は受入残件にする | 未確認 |
-+| H01 | 正規画面の実際のNext Action POSTを同一セッション・同payloadで直接再送する | UIを経由しても省略しても再認可・入力照合。保存済みreplayで増えない | 未確認 |
-+| H02 | 検証環境でMEMBER・他クラブ・失効所属の両Action POST、bound値・選択日・固定列を改変する | 認可・構造・bound照合で拒否しDB非更新。clientのclubIdやpreviousStateを信用しない | 未確認 |
-+| H03 | 実稼働形式の検証環境で不正OriginのAction POSTを送る | Next側の拒否応答とDB非更新を確認。Serviceを直接呼ぶ単体試験の成功では代替しない | 未確認 |
-+
-+M15は実フォーカスの移動や通知を保証済みとする記載ではありません。実際の操作・読み上げで確認します。
-+HTTP確認は正規画面のリクエスト形式を利用し、Action ID・Cookie・payloadを公開資料へ保存しません。
-+H03は特定のHTTPステータスだけで合格にせず、拒否とDB非更新の両方を確認します。
-+`allowedDevOrigins` の設定だけではServer ActionのOrigin拒否の証明にはなりません。
-+
-+## F11.md受入条件との対応・完了記録
-+
-+| F11.mdの受入条件 | 単体・mockの根拠 | 専用DBの確認 | 手動の対応 |
-+| --- | --- | --- | --- |
-+| timezoneと曜日がずれない | date-times・read Repository・Service・フォーム試験 | previewと保存日時の一致、timezone変更検出 | M04・M05・M06・M09 |
-+| 同じ操作の二重送信で重複しない | fingerprint・mutation Repository・Action・forms試験 | 逐次／実並列・replay・異入力／異操作種別の衝突 | M08・M11・M12・M13・H01 |
-+| 31件超を拒否する | form・date-times・read／mutation Repository・Service・Action・forms試験 | 31件保存／32件拒否、操作別CHECK | M03・M10・H02 |
-+| 全件DRAFT、LINE・PDF・既読を作らない | policy・mutation Repository・Service・Action・forms試験 | 固定列・公開日時null・関連行0 | M10・M14 |
-+| MEMBERはAction直接呼出しでも実行できない | 両Action・Page・Repositoryの認可試験 | 最新role・所属・プラン、他クラブscope拒否 | M02・M09・H02 |
-+
-+上表の短縮した試験名は「DBへ接続しない確認」の具体的なファイルに対応します。
-+以下は本書作成時の状態です。過去の実行結果を推測して完了にはしません。
-+
-+| 確認対象 | 状態 | 担当者が残す証跡 |
-+| --- | --- | --- |
-+| 文書と現行実装の照合 | 作成時に静的確認。コマンドは実行結果ではない | 基準commit・変更文書・参照照合・patch check結果 |
-+| 型・lint・単体／mock・接続ガード | 本粒度では未実行。過去結果は未確認 | 実行commit・コマンド・成功／失敗／skip件数 |
-+| 実DBの並列・rollback・制約・権限 | 本粒度では未実行。過去結果は未確認 | 使い捨て環境の確認、全DBケース結果・所要時間・cleanup結果 |
-+| 実ブラウザー・HTTP・アクセシビリティ | 本粒度では未確認 | M01〜M15・H01〜H03ごとの結果、ブラウザー・端末・担当者・日時 |
-+
-+必要な受入が未実施・不合格なら、文書追加の完了とF11全体の受入完了を分けて報告します。
-+本粒度ではソース、試験コード、認可、DB制約、Next設定、F10運用書、配送を追加変更しません。
++/**
++ * manifest全件と必須DB・Auth群の成功を照合する、集計用の純粋な契約。
++ * ガード単体試験だけの成功では完了しない。runnerの起動・結果変換は後続粒度。
++ */
++export function assertMvpSuiteResults( // 必須suiteと群別結果を照合する関数
++  results: readonly MvpSuiteResult[], // 実行結果の読取専用配列型
++): void { // 戻り値を使わない型
++  try {
++    if (results.length !== MVP_SUITES.length) {
++      throw new Error(MANIFEST_ERROR); // suite欠落や余分な結果を拒否するコンストラクター
++    }
++    const paths = new Set<string>(); // 結果パスの重複を検出する集合のコンストラクター / 文字列型
++    for (const result of results) {
++      if (paths.has(result.path)) { // 同じsuiteの二重集計を検出するメソッド
++        throw new Error(MANIFEST_ERROR); // 二重集計を固定例外で拒否するコンストラクター
++      }
++      paths.add(result.path); // 集計したパスを記録するメソッド
++      const suite = MVP_SUITES.find( // manifestから対象suiteを探すメソッド
++        /**
++         * 実在を確認した相対パスとの完全一致を調べる。
++         */
++        (candidate) => candidate.path === result.path, // パスを照合するコールバック
++      );
++      if (!suite) {
++        throw new Error(MANIFEST_ERROR); // 未登録suiteを固定例外で拒否するコンストラクター
++      }
++      assertCompletedCases(result); // suite全体の終端件数を検証する関数
++      const groups = new Set<string>(); // 群名の二重集計を防ぐ集合のコンストラクター / 文字列型
++      for (const group of result.groups) {
++        if (groups.has(group.name)) { // 同じ群の重複を判定するメソッド
++          throw new Error(MANIFEST_ERROR); // 群の二重集計を固定例外で拒否するコンストラクター
++        }
++        groups.add(group.name); // 集計済み群を記録するメソッド
++        assertCompletedCases(group); // 群別の終端件数を検証する関数
++        if (group.passed > result.passed) {
++          throw new Error(MANIFEST_ERROR); // suiteより多い件数を固定例外で拒否するコンストラクター
++        }
++      }
++      for (const required of suite.requiredGroups) {
++        if (!groups.has(required)) { // 必須群の欠落を判定するメソッド
++          throw new Error(MANIFEST_ERROR); // ガードだけの成功を拒否するコンストラクター
++        }
++      }
++    }
++  } catch {
++    throw new Error(MANIFEST_ERROR); // 結果本文や例外原文を公開しないコンストラクター
++  }
++}
