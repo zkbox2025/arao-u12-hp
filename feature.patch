@@ -1,1142 +1,1731 @@
-diff --git a/package.json b/package.json
-index a20e9255a83d3736aa292d803c1e372c17248732..bb06ac4c681d245d5007ad35ebeab8932834f0fe 100644
---- a/package.json
-+++ b/package.json
-@@ -10,6 +10,7 @@
-     "typecheck": "tsc --noEmit",
-     "test": "vitest run",
-     "test:watch": "vitest",
-+    "test:integration": "node --import tsx scripts/test-integration.mjs",
-     "test:db": "RUN_DB_INTEGRATION_TESTS=1 vitest run tests/club-id-integrity.integration.test.ts tests/storage-deletion-jobs.integration.test.ts tests/club-line-setting.integration.test.ts tests/club-membership-repository.integration.test.ts tests/club-invitation-schema.integration.test.ts tests/club-invitation-repository.integration.test.ts tests/club-invitation-acceptance-repository.integration.test.ts tests/club-invitation-recovery.integration.test.ts",
-     "prisma:validate": "prisma validate",
-     "env:validate": "node scripts/validate-env.mjs",
-diff --git a/scripts/test-integration.mjs b/scripts/test-integration.mjs
+diff --git a/tests/mvp/migration-databases.ts b/tests/mvp/migration-databases.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0d8cb14f3df5db570a0325670505dd2eb8a08088
+index 0000000000000000000000000000000000000000..99d35cd6c35b9cd598d6f97b6b25ebf151350471
 --- /dev/null
-+++ b/scripts/test-integration.mjs
-@@ -0,0 +1,393 @@
-+// scripts/test-integration.mjs
-+// .envを持たない専用checkoutでだけ既存の統合試験を起動し、原文を出さず結果を照合する。
-+// @ts-check
++++ b/tests/mvp/migration-databases.ts
+@@ -0,0 +1,664 @@
++// tests/mvp/migration-databases.ts
++// 予約DBの作成・変更なしmigrationコピー・履歴照合と、所有確認付きcleanupだけを扱う。
 +
 +import {
-+  spawn, // Vitestを独立した子プロセスで起動する関数
++  spawnSync, // インストール済みPrisma CLIの終了を期限付きで待つ関数
 +} from "node:child_process";
 +import {
-+  randomUUID, // 実行ごとの識別子を作る関数
++  createHash, // migration原文のchecksumを作る関数
++  randomUUID, // 所有マーカーのnonceを作る関数
 +} from "node:crypto";
 +import {
-+  mkdtempSync, // JSON結果専用の一時ディレクトリを作る関数
-+  readFileSync, // 子プロセスのJSON結果だけを読む関数
-+  realpathSync, // suiteの実在パスを解決する関数
-+  rmSync, // 自分が作った一時結果だけを削除する関数
-+  statSync, // suiteが通常ファイルであることを確認する関数
++  copyFileSync, // migrationとschemaを変更せずコピーする関数
++  mkdirSync, // prefix用ディレクトリを作る関数
++  mkdtempSync, // この実行専用の一時領域を作る関数
++  readdirSync, // migrationの実在名だけを列挙する関数
++  readFileSync, // migrationの原文を読む関数
++  realpathSync, // 別checkoutへのリンクを検出する関数
++  rmSync, // 所有する一時ディレクトリだけを削除する関数
++  statSync, // 通常ファイルを確認する関数
++  writeFileSync, // dotenvを使わない専用CLI設定を作る関数
 +} from "node:fs";
 +import {
 +  tmpdir, // OSの一時領域を返す関数
 +} from "node:os";
 +import {
-+  join, // パスを結合する関数
-+  resolve, // checkout基準の絶対パスを求める関数
++  join, // パスを組み立てる関数
 +} from "node:path";
-+import {
-+  fileURLToPath, // 実行するcheckoutのパスを求める関数
-+  pathToFileURL, // 直接起動かどうかを照合する関数
-+} from "node:url";
++import type {
++  Client, // 専用PostgreSQL接続の型
++} from "pg";
 +
 +import {
-+  requireMvpTestEnvironment, // 明示flag・ローカル接続先・環境ファイル不在を確認する関数
-+} from "../tests/mvp/environment";
-+import {
-+  assertMvpSuiteManifest, // 既存suiteの実在と重複を確認する関数
-+  assertMvpSuiteResults, // 既存必須suiteとDB・Auth群の完了を確認する関数
-+  MVP_SUITES, // 実在する既存15本の必須suite
-+} from "../tests/mvp/suite-manifest";
++  getMvpMigrationDatabase, // 同一実行に予約したmigration DBの接続先だけを解決する関数
++  requireMvpTestEnvironment, // SDK評価前に専用flag・URL・checkoutを検証する関数
++} from "./environment";
++import type {
++  MvpTestEnvironment, // ガード済みの専用実行環境型
++} from "./environment";
 +
-+const RUN_ERROR = "F12統合試験が未完了です。専用環境・必須suite・後片付けを確認してください。";
-+const CHECKOUT = fileURLToPath(new URL("../", import.meta.url)); // URL解析コンストラクター / ファイルパス変換関数
-+const TIMEOUT = 15 * 60_000;
-+
-+/**
-+ * Vitest子プロセスへ渡す引数と許可済み環境の契約。
-+ * @typedef {object} IntegrationLaunch
-+ * @property {string} checkoutDirectory .envを持たない専用checkout。
-+ * @property {string} outputFile この実行専用のJSON出力先。
-+ * @property {Record<string, string | undefined>} environment 許可した変数だけの辞書。
-+ */
++const FAILURE = "F12 migration試験の接続・履歴・所有資源を確認してください。";
++const BOUNDARIES = {
++  legacy: "20260816221153_add_club_app_schema",
++  f10: "20261027000000_f10_event_month_copy",
++  latest: "20261031000000_f11_event_practice_batch",
++};
 +
 +/**
-+ * ガード・結果読取・後片付けは本物を使い、子プロセス起動だけを試験で置換する契約。
-+ * @typedef {object} IntegrationOptions
-+ * @property {Record<string, string | undefined>} [environment] 呼出し元の明示設定。
-+ * @property {string} [checkoutDirectory] 検証対象checkout。
-+ * @property {(request: IntegrationLaunch) => Promise<void>} [launch] Vitest子プロセスの完了待機。
++ * 既存データを投入する旧形式、F10、現在のF11までの適用段階。
 + */
++export type MvpMigrationStage = keyof typeof BOUNDARIES; // 適用段階型 / 境界定数から取得するキー型
 +
 +/**
-+ * 接続先・試験原文を含めず、成功したsuiteとケースの件数だけを返す契約。
-+ * @typedef {object} IntegrationSummary
-+ * @property {number} suites 成功したsuiteの件数。
-+ * @property {number} passed 成功したケースの件数。
++ * 接続秘密や削除権限を列挙せず、WeakMapの所有台帳と照合するハンドル。
 + */
++export type MvpMigrationHandle = Readonly<{ // DB所有ハンドル型 / 読取専用型
++  runId: string; // 実行識別子の文字列型
++  databaseName: string; // 同一実行に予約したDB名の文字列型
++}>;
 +
 +/**
-+ * 既存15本に、粒度2・3で実装済みのDB・ローカルサービスsuiteだけを加える。
-+ * @returns {import("../tests/mvp/suite-manifest.ts").MvpSuite[]} 必須suiteの一覧。
++ * 値・SQL例外を含まず、この実行が解放できなかった資源だけを返す。
 + */
-+export function getIntegrationSuites() { // 実在する統合試験の契約一覧を返す関数
-+  return [
-+    ...MVP_SUITES,
-+    {
-+      path: "tests/mvp/database-fixture.integration.test.ts",
-+      flags: {
-+        RUN_DB_INTEGRATION_TESTS: "1",
-+      },
-+      database: true,
-+      auth: false,
-+      requiredGroups: ["F12 DB fixture統合（専用flag未指定時はskip）"],
-+    },
-+    {
-+      path: "tests/mvp/local-services-fixture.integration.test.ts",
-+      flags: {
-+        RUN_DB_INTEGRATION_TESTS: "1",
-+      },
-+      database: true,
-+      auth: true,
-+      requiredGroups: ["F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）"],
-+    },
-+  ];
-+}
++export type MvpMigrationCleanup = { // 後片付け結果型
++  runId: string; // 所有する実行の文字列型
++  databaseName: string; // 残存時に識別できる予約DB名の文字列型
++  remainingDatabase: boolean; // 存在または結果不明を表す真偽値型
++  openClients: number; // 解放を確認できない専用接続数の数値型
++  temporaryDirectories: number; // 削除できなかった一時領域数の数値型
++};
 +
 +/**
-+ * 個々の成功ケースから群別件数を作る。未発見・skip・失敗・壊れたJSONは許可しない。
-+ * @param {import("vitest/reporters").JsonTestResults} report Vitest 4のJSON結果。
-+ * @param {string} checkoutDirectory 検証checkout。
-+ * @returns {number} 実行した成功ケースの総数。
++ * コピー元の原文と、Prisma履歴に期待するSHA-256を対応させる。
 + */
-+export function assertIntegrationReport(report, checkoutDirectory) { // 最終JSONから必須実行を検証する関数
-+  try {
-+    const suites = getIntegrationSuites(); // 必須suiteの一覧を取得する関数
-+    if (
-+      report.success !== true ||
-+      report.numFailedTests !== 0 ||
-+      report.numFailedTestSuites !== 0 ||
-+      report.numPendingTests !== 0 ||
-+      report.numPendingTestSuites !== 0 ||
-+      report.numTodoTests !== 0 ||
-+      report.testResults.length !== suites.length
-+    ) {
-+      throw new Error(RUN_ERROR); // 秘密を含めない例外を作るコンストラクター
-+    }
-+    const seen = new Set(); // suiteの二重集計を防ぐ集合のコンストラクター
-+    const results = [];
-+    let total = 0;
-+    for (const file of report.testResults) {
-+      const suite = suites.find( // 絶対パスが完全一致するsuiteを探すメソッド
-+        /**
-+         * checkout外・未知のファイルを結果として受け入れない。
-+         */
-+        (candidate) => resolve(checkoutDirectory, candidate.path) === file.name, // パス照合のコールバック / 絶対パス解決関数
-+      );
-+      if (
-+        !suite ||
-+        seen.has(file.name) || // 二重集計を検出するメソッド
-+        file.status !== "passed" ||
-+        file.message !== "" ||
-+        file.assertionResults.length === 0
-+      ) {
-+        throw new Error(RUN_ERROR); // hook失敗や空ファイルも拒否するコンストラクター
-+      }
-+      seen.add(file.name); // 集計済みパスを記録するメソッド
-+      for (const test of file.assertionResults) {
-+        if (
-+          test.status !== "passed" ||
-+          !Array.isArray(test.ancestorTitles) || // 群名配列を検証する関数
-+          test.failureMessages?.length
-+        ) {
-+          throw new Error(RUN_ERROR); // skip・todo・未完了も拒否するコンストラクター
-+        }
-+      }
-+      const groups = suite.requiredGroups.map( // 必須群を結果へ写すメソッド
-+        /**
-+         * 群の配下に成功した実ケースが存在することを確認する。
-+         */
-+        (name) => { // 群別件数を作るコールバック
-+          const count = file.assertionResults.filter( // 必須群の配下だけを選ぶメソッド
-+            /**
-+             * 最上位のdescribe名を完全一致で照合する。
-+             */
-+            (test) => test.ancestorTitles[0] === name, // 群名を照合するコールバック
-+          ).length;
-+          if (count === 0) {
-+            throw new Error(RUN_ERROR); // ガードだけの成功を拒否するコンストラクター
-+          }
-+          return {
-+            name,
-+            passed: count,
-+            failed: 0,
-+            skipped: 0,
-+            pending: 0,
-+          };
-+        },
-+      );
-+      total += file.assertionResults.length;
-+      results.push({ // suite別の完了件数を登録するメソッド
-+        path: suite.path,
-+        passed: file.assertionResults.length,
-+        failed: 0,
-+        skipped: 0,
-+        pending: 0,
-+        groups,
-+      });
-+    }
-+    if (
-+      !Number.isSafeInteger(report.numTotalTests) || // 実行件数が安全な整数か調べる関数
-+      report.numTotalTests !== total ||
-+      report.numPassedTests !== total ||
-+      total === 0
-+    ) {
-+      throw new Error(RUN_ERROR); // 合計と各ケースの不一致を拒否するコンストラクター
-+    }
-+    assertMvpSuiteResults(results.filter( // 既存manifestの結果を検証する関数 / 既存suite抽出メソッド
-+      /**
-+       * F12の追加suiteは直前の検証を使い、既存15本は共通の完了契約を再利用する。
-+       */
-+      (result) => MVP_SUITES.some( // 既存suiteとの対応を調べるコールバック / 一致判定メソッド
-+        /**
-+         * 既存manifestの相対パスと照合する。
-+         */
-+        (suite) => suite.path === result.path, // パス照合のコールバック
-+      ),
-+    ));
-+    return total;
-+  } catch {
-+    throw new Error(RUN_ERROR); // assertion原文やJSON内容を公開しないコンストラクター
++type Migration = { // migration原本の照合型
++  name: string; // migration名の文字列型
++  file: string; // 通常ファイルの絶対パス型
++  checksum: string; // 原文のSHA-256文字列型
++};
++
++/**
++ * PostgreSQLのDB識別子と所有role・実行固有のコメントを保持する。
++ */
++type Identity = { // DB実体の識別型
++  oid: string; // DB OIDの文字列型
++  owner: string; // DB所有roleの文字列型
++  marker: string | null; // 所有コメントの文字列型 / 未設定の型
++};
++
++/**
++ * 途中失敗でも登録済みの接続・一時領域・作成試行を追える非公開台帳。
++ */
++type State = { // 予約DBごとの所有台帳型
++  configuration: MvpTestEnvironment; // ガード済み環境型
++  handle: MvpMigrationHandle; // 公開ハンドル型
++  databaseUrl: string; // 予約DB専用接続先の文字列型
++  marker: string; // 実行とnonceを含む非公開の所有証明文字列型
++  identity?: Identity; // 作成後のDB識別型
++  attempted: boolean; // CREATE要求を送ったかの真偽値型
++  ready: boolean; // 作成と所有確認が完了したかの真偽値型
++  busy: boolean; // 同じハンドルでの並列操作を拒否する真偽値型
++  clients: Set<Client>; // 所有接続の集合型 / 専用pg接続型
++  directories: Set<string>; // 自分が作った一時パスの集合型 / 文字列型
++};
++
++const broken = new WeakSet<Client>(); // 障害を通知した所有接続の弱参照集合型 / pg接続型
++const states = new WeakMap<MvpMigrationHandle, State>(); // 所有台帳のコンストラクター / ハンドル型 / 内部状態型
++
++/**
++ * 原本パスに外部リンクを許さず、コピーとchecksumが同じ通常ファイルを使う。
++ */
++function sourceFile(path: string): string { // 原本ファイルの検証関数 / 文字列型
++  if (
++    realpathSync(path) !== path || // 実在パスを照合する関数
++    !statSync(path).isFile() // ファイル情報取得関数 / 通常ファイル判定メソッド
++  ) {
++    throw new Error(FAILURE); // 原文を含めない例外コンストラクター
 +  }
++  return path;
 +}
 +
 +/**
-+ * 子プロセスを期限付きで待つ。出力は公開せず、異常終了・割込み・期限超過を拒否する。
-+ * POSIXではworkerを含むプロセス群へ終了通知し、猶予後に強制停止する。
-+ * @param {IntegrationLaunch} request 起動先と許可済み環境。
-+ * @returns {Promise<void>} 子プロセスとそのstdioが終了するまでの待機。
++ * 現在のcheckoutに実在するmigrationを、元の順序と原文checksumで列挙する。
 + */
-+export async function launchIntegration(request) { // Vitest子プロセスを起動して終了を待つ関数
-+  await new Promise( // 子プロセスの完了を待つPromiseのコンストラクター
++function migrations(configuration: MvpTestEnvironment): Migration[] { // 原本一覧取得関数 / 実行環境型 / migration配列型
++  const directory = join(configuration.checkoutDirectory, "prisma/migrations"); // 原本ディレクトリのパス結合関数
++  const names = readdirSync(directory, {  // 実在ファイル名を列挙する関数
++    withFileTypes: true
++  }); // ファイル名と種別だけを列挙する関数
++  const result: Migration[] = []; // migration原本の配列型
++  for (const entry of names) {
++    if (entry.name === "migration_lock.toml") {
++      continue;
++    }
++    if (
++      !entry.isDirectory() || // ディレクトリを判定するメソッド
++      !/^\d{14}_[a-z0-9_]+$/u.test(entry.name) // migration名を検証するメソッド
++    ) {
++      throw new Error(FAILURE); // 不明な原本構成を拒否するコンストラクター
++    }
++    const file = sourceFile(join(directory, entry.name, "migration.sql")); // 原本検証関数 / パス結合関数
++    result.push({ // 原本情報を記録するメソッド
++      name: entry.name,
++      file,
++      checksum: createHash("sha256").update(readFileSync(file)).digest("hex"), // hash生成関数 / 原文読取関数 / hash入力・出力メソッド
++    });
++  }
++  result.sort( // migration名の順に並べるメソッド
 +    /**
-+     * 終了イベントまでtimerと割込み監視を保持する。
++     * migrationのタイムスタンプを含む名前順を保持する。
 +     */
-+    (accept, reject) => { // 非同期完了を制御するコールバック
-+      const grouped = process.platform !== "win32";
-+      const child = spawn(process.execPath, [ // ローカルNodeでVitestを起動する関数
-+        resolve(request.checkoutDirectory, "node_modules/vitest/vitest.mjs"), // インストール済みVitestのパスを解決する関数
-+        "run",
-+        "--config",
-+        resolve(request.checkoutDirectory, "vitest.integration.config.mts"), // 専用設定のパスを解決する関数
-+        "--reporter=json",
-+        `--outputFile=${request.outputFile}`,
-+      ], {
-+        cwd: request.checkoutDirectory,
-+        env: {
-+          ...request.environment,
-+          NODE_ENV: "test",
-+        },
-+        shell: false,
-+        detached: grouped,
-+        stdio: "ignore",
++    (
++      left,
++      right
++    ) => left.name.localeCompare(right.name), // 名前比較のコールバック / 文字列比較メソッド
++  );
++  if (
++    result.length === 0 ||
++    result[result.length - 1].name !== BOUNDARIES.latest
++  ) {
++    throw new Error(FAILURE); // 未確認の末尾migrationを拒否するコンストラクター
++  }
++  return result;
++}
++
++/**
++ * 公開値を信用せず、所有台帳と接続前ガードを毎回照合する。
++ */
++function stateFor(handle: MvpMigrationHandle): State { // 内部台帳の取得関数 / DBハンドル型 / 内部状態型
++  const state = states.get(handle); // 同じハンドルの台帳を取得するメソッド
++  if (!state) {
++    throw new Error(FAILURE); // 偽造ハンドルを拒否するコンストラクター
++  }
++  const configuration = requireMvpTestEnvironment( // SDK・CLI評価前の接続ガード関数
++    state.configuration.variables,
++    state.configuration.checkoutDirectory,
++    handle.runId,
++  );
++  const resource = getMvpMigrationDatabase(configuration, handle.databaseName); // 同一実行の予約DBだけを解決する関数
++  if (
++    resource.databaseUrl !== state.databaseUrl ||
++    new URL(configuration.databaseUrl).username !== "postgres" // 接続URLを解析するコンストラクター
++  ) {
++    throw new Error(FAILURE); // postgres所有の専用cluster以外を拒否するコンストラクター
++  }
++  return state;
++}
++
++/**
++ * 接続前に台帳登録し、connect・endの途中失敗も後片付けへ引き継ぐ。
++ */
++async function connection( // 接続前に台帳登録して専用接続を作る関数
++  state: State, // 予約DBの非公開所有台帳型
++  databaseUrl: string // 文字列型
++): Promise<Client> { // 接続生成関数 / 台帳型 / 接続先文字列型 / 専用pg接続の非同期型
++  stateFor(state.handle); // 接続直前にも所有と環境を照合する関数
++  const { Client: PgClient } = await import("pg"); // ガード後にpg SDKを遅延評価する関数
++  const client = new PgClient({ // 専用pg接続のコンストラクター
++    connectionString: databaseUrl,
++    connectionTimeoutMillis: 5_000,
++    statement_timeout: 10_000,
++    lock_timeout: 2_000,
++    ssl: false,
++    options: "-c search_path=public",
++  });
++  state.clients.add(client); // connectより前に所有接続を登録するメソッド
++  client.on("error", // 接続切断の非同期通知を受け取るメソッド
++    /**
++     * pgが通知した例外原文を出さず、成功扱いを防ぐため接続障害だけを記録する。
++     */
++    () => { // 所有接続の障害を記録するコールバック
++      broken.add(client); // 障害を通知した接続を登録するメソッド
++    },
++  );
++  await client.connect(); // 専用DBへ接続するメソッド
++  return client;
++}
++
++/**
++ * 成功したendだけを台帳から外し、失敗した接続を見失わない。
++ */
++async function disconnect( // 所有接続を解放し台帳から外す関数
++  state: State, // 予約DBの非公開所有台帳型
++  client: Client // 専用pg接続型
++): Promise<void> { // 接続解放関数 / 台帳型 / pg接続型 / 完了待機型
++  try {
++    await client.end(); // 自分の接続だけを終了するメソッド
++  } catch {
++    throw new Error(FAILURE); // 解放例外の原文も公開しないコンストラクター
++  }
++  state.clients.delete(client); // 解放済みの接続を台帳から外すメソッド
++}
++
++/**
++ * 既存のcluster roleと現在の権限を確認し、ロールの作成や変更は行わない。
++ */
++async function admin(state: State): Promise<Client> { // 管理接続生成関数 / 台帳型 / pg接続の非同期型
++  const client = await connection(state, state.configuration.databaseUrl); // 既存postgres DBへの管理接続を作る関数
++  const result = await client.query( // cluster roleと現在の権限を確認するメソッド
++    `SELECT rolname, rolcreatedb, rolsuper, rolname = current_user AS is_current
++     FROM pg_roles WHERE rolname = ANY($1::text[])`,
++    [["anon", "authenticated", "postgres"]],
++  );
++  if (
++    result.rows.length !== 3 ||
++    !result.rows.some( // postgresでのCREATE権限を確認するメソッド
++      /**
++       * 設定名だけでなく、接続後のcurrent_userと権限を照合する。
++       */
++      (role) => role.rolname === "postgres" && // 初期化・照合・後片付けのコールバック
++        role.is_current &&
++        (role.rolcreatedb ||
++          role.rolsuper), // 権限照合のコールバック
++    )
++  ) {
++    throw new Error(FAILURE); // 不足role・権限を拒否するコンストラクター
++  }
++  return client;
++}
++
++/**
++ * 対象名1件だけを調べ、他実行のDB一覧を取得・削除しない。
++ */
++async function identity( // 対象DBのOID・所有role・markerを取得する関数
++  client: Client, // 専用pg接続型
++  name: string // 文字列型
++): Promise<Identity | undefined> { // DB実体照合関数 / pg接続型 / 名前文字列型 / DB識別情報の非同期型
++  const result = await client.query<Identity>( // DB識別情報を取得するメソッド / DB識別型
++    `SELECT oid::text, pg_get_userbyid(datdba) AS owner,
++       shobj_description(oid, 'pg_database') AS marker
++     FROM pg_database WHERE datname = $1`,
++    [name],
++  );
++  return result.rows[0];
++}
++
++/**
++ * 同じ名前の別DBへ削除権限を持ち越さず、OID・role・実行固有markerを照合する。
++ */
++function owned( // 作成時と現在の所有実体を照合する関数
++  state: State, // 予約DBの非公開所有台帳型
++  current: Identity | undefined // OID・所有role・markerの識別型 / 未設定の型
++): boolean { // 所有実体の照合関数 / 台帳型 / DB識別型 / 真偽値型
++  return !!current &&
++    typeof current.oid === "string" &&
++    /^[0-9]+$/u.test(current.oid) && // 実体を識別するOID文字列の検証メソッド
++    current.owner === "postgres" &&
++    current.marker === state.marker &&
++    (!state.identity ||
++      state.identity.oid === current.oid);
++}
++
++/**
++ * 同一runに予約された2つのDB名を計画する。SDK・DB・CLIはまだ評価しない。
++ */
++export function planMvpMigrationDatabases(configuration: MvpTestEnvironment): readonly MvpMigrationHandle[] { // 予約DB計画関数 / ガード済み環境型 / 所有ハンドルの読取専用配列型
++  const checked = requireMvpTestEnvironment( // URLやSDKより先に実行条件を照合する関数
++    configuration.variables,
++    configuration.checkoutDirectory,
++    configuration.runId,
++  );
++  return checked.migrationDatabaseNames.map( // 同じrunの予約名をハンドルへ写すメソッド
++    /**
++     * 作成前から失敗時の後片付け先を登録する。
++     */
++    (databaseName) => { // 所有台帳を作るコールバック
++      const resource = getMvpMigrationDatabase(configuration, databaseName); // 予約済みDBだけを解決する関数
++      const handle = Object.freeze({ // 公開ハンドルの改変を防ぐ関数
++        runId: resource.runId,
++        databaseName,
 +      });
-+      let interrupted = false;
-+      /** @type {ReturnType<typeof setTimeout> | undefined} */
-+      let force;
-+      /**
-+       * 起動した子だけに通知し、停止済みの場合の例外原文を捨てる。
-+       * @param {NodeJS.Signals} signal 終了通知。
-+       */
-+      function terminate(signal) { // 子プロセス群へ終了を通知する関数
-+        try {
-+          if (
-+            grouped &&
-+            child.pid
-+          ) {
-+            process.kill(-child.pid, signal); // POSIXの子プロセス群へ通知する関数
-+          } else {
-+            child.kill(signal); // 子プロセスへ通知するメソッド
-+          }
-+        } catch {
-+          interrupted = true;
-+        }
-+      }
-+      /**
-+       * 期限超過・割込みを成功とせず、後片付けに短い猶予を与える。
-+       */
-+      function stop() { // 子プロセスを停止させる関数
-+        if (interrupted) {
-+          return;
-+        }
-+        interrupted = true;
-+        terminate("SIGTERM"); // 子プロセス群へ終了通知を送る関数
-+        force = setTimeout( // 強制停止の猶予timerを作る関数
-+          /**
-+           * 通常終了しないworkerを残さないよう強制停止する。
-+           */
-+          () => terminate("SIGKILL"), // 強制停止のコールバック / 子プロセス群へ通知する関数
-+          3_000,
-+        );
-+      }
-+      const timer = setTimeout(stop, TIMEOUT); // 全体の実行期限を設定する関数 / 子プロセス停止関数の参照
-+      process.once("SIGINT", stop); // 割込みを監視するメソッド / 子プロセス停止関数の参照
-+      process.once("SIGTERM", stop); // 終了要求を監視するメソッド / 子プロセス停止関数の参照
-+      child.once("error", // 起動失敗を監視するメソッド
-+        /**
-+         * closeまで待機し、OSの例外原文を外へ渡さない。
-+         */
-+        () => { // 起動失敗を記録するコールバック
-+          interrupted = true;
-+        },
-+      );
-+      child.once("close", // workerとstdioの終了を監視するメソッド
-+        /**
-+         * listenerとtimerを必ず解除し、終了コードとsignalを確認する。
-+         */
-+        (code, signal) => { // 終了状態を受け取るコールバック
-+          if (
-+            interrupted &&
-+            grouped &&
-+            child.pid
-+          ) {
-+            // leaderが先に終了しても、同じ群に残ったworkerを停止させる。
-+            terminate("SIGKILL"); // 登録した子プロセス群の残存を停止する関数
-+          }
-+          clearTimeout(timer); // 実行期限timerを解除する関数
-+          clearTimeout(force); // 強制停止timerを解除する関数
-+          process.removeListener("SIGINT", stop); // 割込み監視を解除するメソッド / 子プロセス停止関数の参照
-+          process.removeListener("SIGTERM", stop); // 終了要求監視を解除するメソッド / 子プロセス停止関数の参照
-+          if (
-+            interrupted ||
-+            code !== 0 ||
-+            signal !== null
-+          ) {
-+            reject(new Error(RUN_ERROR)); // 失敗で完了する関数 / 固定例外のコンストラクター
-+          } else {
-+            accept(undefined); // 正常終了を通知する関数
-+          }
-+        },
-+      );
++      states.set(handle, { // SDK評価前に内部台帳へ登録するメソッド
++        configuration: checked,
++        handle,
++        databaseUrl: resource.databaseUrl,
++        marker: `mvp_f12:${resource.runId}:${randomUUID()}`, // 所有nonceを作る関数
++        attempted: false,
++        ready: false,
++        busy: false,
++        clients: new Set(), // 専用接続を保持する集合のコンストラクター
++        directories: new Set(), // 自分の一時パスを保持する集合のコンストラクター
++      });
++      stateFor(handle); // ガードと予約資源の対応を照合する関数
++      return handle;
 +    },
 +  );
 +}
 +
 +/**
-+ * .envを持たない専用checkoutを検証し、許可した変数だけで統合試験を実行する。
-+ * DBの作成・migration・サービス起動は行わない。失敗時も自分のJSON結果だけを削除する。
-+ * @param {IntegrationOptions} [options] 明示環境と試験用の子プロセス起動境界。
-+ * @returns {Promise<IntegrationSummary>} 秘密を含まない成功件数。
++ * 不在を確認した予約DBだけを作り、所有コメントとOIDを保存する。既存DBは採用しない。
 + */
-+export async function runIntegration(options = {}) { // 接続前ガードから最終結果検証までを実行する関数
-+  let directory;
++export async function createMvpMigrationDatabase(handle: MvpMigrationHandle): Promise<void> { // 所有DB作成関数 / ハンドル型 / 非同期完了型
++  const state = stateFor(handle); // 所有台帳を取得する関数
++  if (state.busy ||
++    state.attempted) {
++    throw new Error(FAILURE); // 同時・二重作成を拒否するコンストラクター
++  }
++  state.busy = true;
++  let client: Client | undefined; // 管理接続型 / 未設定の型
 +  try {
-+    const configuration = requireMvpTestEnvironment( // SDK・Vitest起動前の実行条件を確認する関数
-+      options.environment ?? process.env,
-+      options.checkoutDirectory ?? CHECKOUT,
-+      randomUUID().replaceAll("-", ""), // UUID生成関数 / 小文字hex識別子へ変換するメソッド
-+    );
-+    if (
-+      !configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-+      !configuration.variables.SUPABASE_SERVICE_ROLE_KEY
-+    ) {
-+      throw new Error(RUN_ERROR); // Authを含む必須suiteのキー不足を拒否するコンストラクター
++    client = await admin(state); // role・権限確認済みの管理接続を作る関数
++    if (await identity(client, handle.databaseName)) { // 既存DBの実体を確認する関数
++      throw new Error(FAILURE); // 同名の既存DBは触らずに拒否するコンストラクター
 +    }
-+    assertMvpSuiteManifest(configuration.checkoutDirectory); // 既存manifestの実在と重複を確認する関数
-+    const suites = getIntegrationSuites(); // 実行するsuiteを取得する関数
-+    for (const suite of suites) {
-+      const expected = resolve(configuration.checkoutDirectory, suite.path); // suiteの絶対パスを解決する関数
-+      if (
-+        realpathSync(expected) !== expected || // checkout外へのsymlinkを拒否する関数
-+        !statSync(expected).isFile() // ファイル情報取得関数 / 通常ファイル判定メソッド
-+      ) {
-+        throw new Error(RUN_ERROR); // 不在または別checkoutのsuiteを拒否するコンストラクター
-+      }
++    state.attempted = true;
++    // 名前は予約資源解決済み、markerはrunIdと内部生成UUIDだけで構成する。
++    await client.query(`CREATE DATABASE "${handle.databaseName}" WITH TEMPLATE template0 ENCODING 'UTF8' OWNER postgres`); // 登録済みの新規DBだけを作るメソッド
++    await client.query(`COMMENT ON DATABASE "${handle.databaseName}" IS '${state.marker}'`); // 実行固有の所有証明を記録するメソッド
++    state.identity = await identity(client, handle.databaseName); // 作成したDBの実体を取得する関数
++    if (!owned(state, state.identity)) { // 所有role・marker・OIDを確認する関数
++      throw new Error(FAILURE); // 所有不明の状態を成功にしないコンストラクター
 +    }
-+    const environment = {
-+      ...configuration.variables,
-+      NODE_ENV: "test",
-+      TZ: "UTC",
-+    };
-+    for (const suite of suites) {
-+      Object.assign(environment, suite.flags); // ガード成功後に既存の専用flagだけを付ける関数
-+    }
-+    directory = mkdtempSync(join(tmpdir(), "mvp-integration-")); // 専用一時領域生成関数 / パス結合関数 / 一時領域取得関数
-+    const outputFile = join(directory, "results.json"); // 秘密を含み得るJSONの出力先を組み立てる関数
-+    // 子プロセスへ引き継ぐ環境も再検証し、flag追加で接続先が変わらないことを確認する。
-+    requireMvpTestEnvironment(environment, configuration.checkoutDirectory, configuration.runId); // 子プロセス用環境の検証関数
-+    await (options.launch ?? launchIntegration)({ // 起動境界を選んで実行する関数
-+      checkoutDirectory: configuration.checkoutDirectory,
-+      outputFile,
-+      environment,
-+    });
-+    const report = JSON.parse(readFileSync(outputFile, "utf8")); // JSON解析関数 / 自分の結果ファイルだけを読む関数
-+    const passed = assertIntegrationReport(report, configuration.checkoutDirectory); // 必須suiteと群別完了を検証する関数
-+    return {
-+      suites: suites.length,
-+      passed,
-+    };
++    state.ready = true;
 +  } catch {
-+    throw new Error(RUN_ERROR); // SDK・OS・JSON・assertionの原文を公開しないコンストラクター
++    throw new Error(FAILURE); // SQL・資格情報・causeを公開しないコンストラクター
++  } finally {
++    try {
++      if (client) {
++        await disconnect(state, client); // 自分の管理接続だけを解放する関数
++      }
++    } finally {
++      state.busy = false;
++    }
++  }
++}
++
++/**
++ * 所有を再確認してから専用接続を渡す。古い列へのcurrent Prisma Clientは使用しない。
++ */
++export async function withMvpMigrationDatabase<T>( // 予約DBでSQL検証を実行する関数 / 任意の処理結果型
++  handle: MvpMigrationHandle, // 所有ハンドル型
++  operation: (client: Client) => Promise<T>, // 専用pg接続型 / 検証処理の非同期関数型
++): Promise<T> { // 検証処理の結果を返す非同期型
++  const state = stateFor(handle); // ガード済み所有台帳を取得する関数
++  if (!state.ready ||
++    state.busy) {
++    throw new Error(FAILURE); // 未作成または並列操作を拒否するコンストラクター
++  }
++  state.busy = true;
++  let management: Client | undefined; // 管理接続型 / 未設定の型
++  let target: Client | undefined; // 対象DB接続型 / 未設定の型
++  try {
++    management = await admin(state); // 管理接続を生成して権限を確認する関数
++    if (!owned(state, await identity(management, handle.databaseName))) { // 実体を取得する関数 / 所有情報照合関数
++      throw new Error(FAILURE); // 同名DBの入替えを拒否するコンストラクター
++    }
++    await disconnect(state, management); // SQL検証前に管理接続を解放する関数
++    management = undefined;
++    target = await connection(state, state.databaseUrl); // 所有する予約DBへだけ接続する関数
++    const result = await operation(target); // 渡されたSQL検証処理を実行する関数
++    if (broken.has(target)) { // 非同期の接続障害通知を照合するメソッド
++      throw new Error(FAILURE); // 接続障害を成功扱いしない例外コンストラクター
++    }
++    return result;
++  } catch {
++    throw new Error(FAILURE); // SQL結果や例外原文を公開しないコンストラクター
++  } finally {
++    try {
++      if (target) {
++        await disconnect(state, target); // 自分の専用DB接続を解放する関数
++      }
++      if (management) {
++        await disconnect(state, management); // 自分の管理接続を解放する関数
++      }
++    } finally {
++      state.busy = false;
++    }
++  }
++}
++
++/**
++ * CLIのstatus=1を無条件に許さず、DBの有効な履歴と未適用名の応答を併せて確認する。
++ */
++export function assertMvpMigrationStatus( // CLI statusの終了状態を照合する関数
++  result: Pick<ReturnType<typeof spawnSync>, "status" | "signal" | "error" | "stdout" | "stderr">, // 子プロセス結果の必要項目型 / 起動関数の戻り値型
++  pending: readonly string[], // DB履歴と原本の差分で確定した未適用名の読取専用配列型
++  hasHistory: boolean, // migration履歴テーブルの有無の真偽値型
++): void { // 戻り値を使わない型
++  const text = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
++  const pendingList = /Following migrations? have not yet been applied:/u.test(text) && // Prisma 7の未適用応答を判定するメソッド
++    pending.every( // DBで確定した未適用名が応答にあるか確認するメソッド
++      /**
++       * 接続障害・別履歴の応答を未適用と混同しない。
++       */
++      (name) => text.split(/\r?\n/u).includes(name), // 名前照合コールバック / 応答を行へ分割するメソッド / 完全一致判定メソッド
++    );
++  const unmanaged = !hasHistory &&
++    text.includes("The current database is not managed by Prisma Migrate."); // 履歴がない新規DBの応答を照合するメソッド
++  const completed = pending.length === 0 &&
++    result.status === 0;
++  const waiting = pending.length > 0 &&
++    result.status === 1 &&
++    (pendingList || unmanaged);
++  if (
++    result.error ||
++    result.signal ||
++    !(completed || waiting)
++  ) {
++    throw new Error(FAILURE); // 真のCLIエラーを固定例外で拒否するコンストラクター
++  }
++}
++
++/**
++ * 変更なしコピーしたprefixをdeployし、適用前後のstatus・履歴・checksumを照合する。
++ */
++export async function deployMvpMigrationStage( // 段階migrationの適用と履歴照合を実行する関数
++  handle: MvpMigrationHandle, // 所有ハンドル型
++  stage: MvpMigrationStage, // 検証するmigration段階型
++): Promise<void> { // 完了を待つ非同期型
++  const state = stateFor(handle); // 接続前ガードと所有台帳を取得する関数
++  let directory: string | undefined; // 自分の一時パスの文字列型 / 未設定の型
++  try {
++    const all = migrations(state.configuration); // 原本とchecksumを列挙する関数
++    const index = all.findIndex( // 必要な末尾の境界を探すメソッド
++      /**
++       * 計画で確認済みの境界名と完全一致させる。
++       */
++      (migration) => migration.name === BOUNDARIES[stage], // 境界照合のコールバック
++    );
++    if (index < 0) {
++      throw new Error(FAILURE); // 例外を作るコンストラクター
++    } // 存在しない段階を拒否する例外コンストラクター
++    const prefix = all.slice(0, index + 1); // 変更せず適用するprefixを切り出すメソッド
++    directory = mkdtempSync(join(tmpdir(), "mvp-migrations-")); // 所有一時領域生成関数 / パス結合関数 / 一時領域取得関数
++    state.directories.add(directory); // 作成直後に一時資源を台帳へ登録するメソッド
++    const migrationDirectory = join(directory, "migrations"); // prefix出力先のパス結合関数
++    mkdirSync(migrationDirectory); // prefixディレクトリを作成する関数
++    copyFileSync(sourceFile(join(state.configuration.checkoutDirectory, "prisma/schema.prisma")), join(directory, "schema.prisma")); // 原本検証関数 / パス結合関数 / schema原文のコピー関数
++    copyFileSync(sourceFile(join(state.configuration.checkoutDirectory, "prisma/migrations/migration_lock.toml")), join(migrationDirectory, "migration_lock.toml")); // 原本検証関数 / パス結合関数 / provider設定のコピー関数
++    for (const migration of prefix) {
++      const target = join(migrationDirectory, migration.name); // コピー先のパス結合関数
++      mkdirSync(target); // migrationディレクトリを作る関数
++      copyFileSync(migration.file, join(target, "migration.sql")); // 原文のコピー関数 / パス結合関数
++      const checksum = createHash("sha256").update(readFileSync(join(target, "migration.sql"))).digest("hex"); // SHA-256生成関数 / コピー後の原文読取関数 / パス結合関数 / hash入力・出力メソッド
++      if (checksum !== migration.checksum) {
++        throw new Error(FAILURE); // 例外を作るコンストラクター
++      } // 原文の変更を拒否する例外コンストラクター
++    }
++    const config = join(directory, "prisma.config.mjs"); // dotenvを読み込まない設定パスの結合関数
++    writeFileSync( // dotenvを評価しない専用CLI設定を作る関数
++      config,
++      `// prisma.config.mjs
++/**
++ * dotenvを読まず、この実行の予約DBと変更なしコピーだけをCLIへ渡す。
++ */
++export default {
++  schema: "./schema.prisma",
++  migrations: {
++    path: "./migrations",
++  },
++  datasource: {
++    url: process.env.DATABASE_URL,
++  },
++};
++`,
++    );
++    await withMvpMigrationDatabase(handle, // 所有DBへの接続を生成・解放する関数
++      /**
++       * 生きたDB履歴を基準とし、SQL文字列検索だけでmigration成功とはしない。
++       */
++      async (client) => { // SQLとCLIの結果を照合するコールバック
++        const presence = await client.query(`SELECT to_regclass('public._prisma_migrations') IS NOT NULL AS present`); // 履歴テーブルの有無を問い合わせるメソッド
++        const previous = presence.rows[0].present
++          ? (await client.query(`SELECT migration_name, checksum, finished_at, rolled_back_at, logs FROM public._prisma_migrations ORDER BY migration_name`)).rows // DB履歴を取得するメソッド
++          : [];
++        for (let position = 0; position < previous.length; position += 1) {
++          const row = previous[position];
++          const expected = prefix[position];
++          if (
++            !expected ||
++            row.migration_name !== expected.name ||
++            row.checksum !== expected.checksum ||
++            !row.finished_at ||
++            row.rolled_back_at ||
++            row.logs
++          ) {
++            throw new Error(FAILURE); // 例外を作るコンストラクター
++          } // divergence・失敗履歴・checksum変更を拒否する例外コンストラクター
++        }
++        const pending = prefix.slice(previous.length).map( // 未適用prefixを切り出すメソッド / 名前へ写すメソッド
++          /**
++           * CLIと照合する実際の未適用名を返す。
++           */
++          (migration) => migration.name, // 未適用名を返すコールバック
++        );
++        /**
++         * 元のenvやdotenv設定を引き継がず、予約DBと専用configだけでCLIを起動する。
++         */
++        function command(action: "status" | "deploy") { // Prisma CLIの起動関数 / 許可するサブコマンド型
++          stateFor(handle); // CLI評価直前に接続先と予約名を再確認する関数
++          return spawnSync(process.execPath, [ // Prisma CLIを期限付きで起動する関数
++            join(state.configuration.checkoutDirectory, "node_modules/prisma/build/index.js"), // 導入済みCLIのパス結合関数
++            "migrate", action, "--config", config,
++          ], {
++            cwd: directory,
++            env: {
++              NODE_ENV: "test",
++              DATABASE_URL: state.databaseUrl,
++              CHECKPOINT_DISABLE: "1",
++              PRISMA_HIDE_UPDATE_MESSAGE: "1",
++              NO_COLOR: "1",
++            },
++            encoding: "utf8",
++            timeout: 60_000,
++            maxBuffer: 1024 * 1024,
++            shell: false,
++          });
++        }
++        assertMvpMigrationStatus(command("status"), pending, presence.rows[0].present); // status照合関数 / CLI起動関数
++        const applied = command("deploy"); // migrationを実際に適用するCLI起動関数
++        if (applied.status !== 0 ||
++          applied.signal ||
++          applied.error) {
++          throw new Error(FAILURE); // 例外を作るコンストラクター
++        } // 適用失敗を拒否する例外コンストラクター
++        const history = await client.query(`SELECT migration_name, checksum, finished_at, rolled_back_at, logs FROM public._prisma_migrations ORDER BY migration_name`); // 適用後のDB履歴を取得するメソッド
++        if (history.rows.length !== prefix.length) {
++          throw new Error(FAILURE); // 例外を作るコンストラクター
++        } // migration欠落を拒否する例外コンストラクター
++        for (let position = 0; position < prefix.length; position += 1) {
++          const row = history.rows[position];
++          if (
++            row.migration_name !== prefix[position].name ||
++            row.checksum !== prefix[position].checksum ||
++            !row.finished_at ||
++            row.rolled_back_at ||
++            row.logs
++          ) {
++            throw new Error(FAILURE); // 例外を作るコンストラクター
++          } // 履歴と原本の不一致を拒否する例外コンストラクター
++        }
++        assertMvpMigrationStatus(command("status"), [], true); // 適用後statusを照合する関数 / CLI起動関数
++      },
++    );
++  } catch {
++    throw new Error(FAILURE); // CLI出力・SQL・資格情報を公開しないコンストラクター
 +  } finally {
 +    if (directory) {
 +      try {
-+        rmSync(directory, { // この実行の結果だけを削除する関数
++        rmSync(directory, {  // 所有資源だけを削除する関数
 +          recursive: true,
-+          force: true,
-+        });
++          force: true
++        }); // この実行のprefixコピーだけを削除する関数
 +      } catch {
-+        throw new Error(RUN_ERROR); // 後片付け失敗も非成功にするコンストラクター
++        throw new Error(FAILURE); // 一時資源の削除例外を公開しないコンストラクター
 +      }
++      state.directories.delete(directory); // 削除済み一時資源を台帳から外すメソッド
 +    }
 +  }
 +}
 +
-+if (
-+  process.argv[1] &&
-+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url // 起動パスのURL変換関数 / 絶対パス解決関数
-+) {
++/**
++ * 専用接続を解放してから、予約名・OID・role・markerが一致するDBだけを削除する。
++ * 他の接続をterminateせず、busy・接続・権限・所有・DROP失敗は残存として返す。
++ */
++export async function cleanupMvpMigrationDatabase(handle: MvpMigrationHandle): Promise<MvpMigrationCleanup> { // 所有DB後片付け関数 / ハンドル型 / cleanup結果の非同期型
++  const state = stateFor(handle); // 環境と所有台帳を再確認する関数
++  let remainingDatabase = state.attempted;
++  if (state.busy) {
++    return {
++      ...handle,
++      remainingDatabase,
++      openClients: state.clients.size,
++      temporaryDirectories: state.directories.size,
++    };
++  }
++  state.busy = true;
 +  try {
-+    const result = await runIntegration(); // ガード付き統合試験を起動する関数
-+    console.log(`F12 integration: ${result.suites} suites, ${result.passed} passed`); // 秘密を含まない件数だけを出力する関数
-+  } catch {
-+    console.error(RUN_ERROR); // 固定メッセージだけを出力する関数
-+    process.exitCode = 1;
++    for (const client of state.clients) {
++      try {
++        await disconnect(state, client); // 自分の専用接続だけを解放する関数
++      } catch {
++        remainingDatabase = true;
++      }
++    }
++    if (state.attempted &&
++      state.clients.size === 0) {
++      let management: Client | undefined; // 自分の管理接続型 / 未設定の型
++      try {
++        management = await admin(state); // 接続先・role・権限を再確認する関数
++        const current = await identity(management, handle.databaseName); // 対象1件の実体を取得する関数
++        if (!current) {
++          remainingDatabase = false;
++          state.ready = false;
++        } else if (owned(state, current)) { // 作成時の所有実体と照合する関数
++          const sessions = await management.query(`SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = $1`, [handle.databaseName]); // 他の接続を解放せず件数だけを調べるメソッド
++          if (sessions.rows[0].count === 0) {
++            await management.query(`DROP DATABASE "${handle.databaseName}"`); // 所有を確認したDBだけを削除するメソッド
++            remainingDatabase = false;
++            state.ready = false;
++          }
++        }
++      } catch {
++        remainingDatabase = true;
++      } finally {
++        if (management) {
++          try {
++            await disconnect(state, management); // 自分の管理接続を解放する関数
++          } catch {
++            remainingDatabase = true;
++          }
++        }
++      }
++    }
++    for (const directory of state.directories) {
++      try {
++        rmSync(directory, {  // 所有資源だけを削除する関数
++          recursive: true,
++          force: true
++        }); // 登録済み一時資源だけを削除する関数
++        state.directories.delete(directory); // 削除完了資源を台帳から外すメソッド
++      } catch {
++        // 一時資源の残存件数を返し、成功扱いしない。
++      }
++    }
++    return {
++      ...handle,
++      remainingDatabase,
++      openClients: state.clients.size,
++      temporaryDirectories: state.directories.size,
++    };
++  } finally {
++    state.busy = false;
 +  }
 +}
-diff --git a/tests/mvp/integration-runner.test.ts b/tests/mvp/integration-runner.test.ts
+diff --git a/tests/mvp/migrations.integration.test.ts b/tests/mvp/migrations.integration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..396f55bb87caee1bd5f8b0b88880b9d28f34e89e
+index 0000000000000000000000000000000000000000..46acd2b6660d1a13f17a5102fc07ea95da37d690
 --- /dev/null
-+++ b/tests/mvp/integration-runner.test.ts
-@@ -0,0 +1,616 @@
-+// tests/mvp/integration-runner.test.ts
-+// 架空の設定とJSON・子プロセスstubだけを使い、実DB・Auth・Storageを起動しない。
++++ b/tests/mvp/migrations.integration.test.ts
+@@ -0,0 +1,1055 @@
++// tests/mvp/migrations.integration.test.ts
++// 通常実行は架空のpg・CLIだけを使う。実DBケースは専用flagと使い捨てclusterでだけ実行する。
 +
 +import {
-+  EventEmitter, // 子プロセスの終了通知を再現するクラス
++  createHash, // SHA-256を計算する関数
++  randomUUID, // UUIDを生成する関数
++} from "node:crypto";
++import {
++  EventEmitter, // pgの非同期接続障害を再現するクラス
 +} from "node:events";
 +import {
-+  existsSync, // 一時結果の削除を確認する関数
-+  mkdirSync, // 架空checkoutのディレクトリを作る関数
-+  mkdtempSync, // 試験専用の一時領域を作る関数
-+  realpathSync, // checkoutの実在パスを求める関数
-+  rmSync, // 試験が所有する一時資源だけを削除する関数
-+  writeFileSync, // 架空suite・JSONを書き込む関数
++  existsSync, // 一時資源の有無を確認する関数
++  mkdirSync, // ディレクトリを作る関数
++  mkdtempSync, // 専用一時領域を作る関数
++  readdirSync, // 実在ファイル名を列挙する関数
++  readFileSync, // 原文を読む関数
++  realpathSync, // 実在パスを照合する関数
++  rmSync, // 所有資源だけを削除する関数
++  writeFileSync, // 架空原本または専用設定を書き込む関数
 +} from "node:fs";
 +import {
 +  tmpdir, // OSの一時領域を返す関数
 +} from "node:os";
 +import {
-+  dirname, // suiteの親ディレクトリを求める関数
-+  join, // 一時パスを結合する関数
-+  resolve, // suiteの絶対パスを解決する関数
++  join, // 名前を区切り文字で連結するメソッド
++  resolve, // checkoutの絶対パスを求める関数
 +} from "node:path";
-+import {
-+  afterEach, // 各試験の後片付けを登録する関数
-+  beforeEach, // 各試験の準備を登録する関数
-+  expect, // 期待値を検証する関数
-+  it, // 通常・パラメーター試験を登録する関数
-+  vi, // 子プロセス境界とtimerを置換するAPI
-+} from "vitest";
 +import type {
-+  JsonTestResults, // Vitest 4のJSON結果契約型
-+} from "vitest/reporters";
++  Client, // 専用pg接続型
++} from "pg";
++import {
++  afterAll, // 所有資源の後片付けを登録する関数
++  afterEach, // 各試験の後片付けを登録する関数
++  beforeAll, // 接続前ガードと初期化を登録する関数
++  beforeEach, // 各試験の準備を登録する関数
++  describe, // 試験群を登録する関数
++  expect, // 期待値を作る関数
++  it, // 通常・パラメーター試験を登録する関数
++  vi, // mock・出力監視のVitest API
++} from "vitest";
 +
 +import {
-+  assertIntegrationReport, // JSONから全suiteと必須群の完了を確認する関数
-+  getIntegrationSuites, // 実装済み統合suiteの一覧を返す関数
-+  launchIntegration, // 期限付きでVitestを起動して終了を待つ関数
-+  runIntegration, // 実行前ガードからJSON検証と削除までを行う関数
-+} from "../../scripts/test-integration.mjs";
++  assertMvpMigrationStatus, // CLI応答とDB履歴由来の未適用名を照合する関数
++  cleanupMvpMigrationDatabase, // 所有実体が一致したDBだけを削除する関数
++  createMvpMigrationDatabase, // role・権限・不在確認後に予約DBを作る関数
++  deployMvpMigrationStage, // 変更なしprefixを適用して履歴を照合する関数
++  planMvpMigrationDatabases, // SDK評価前に2つの予約DBハンドルを計画する関数
++  withMvpMigrationDatabase, // 所有確認した専用接続でSQL検証する関数
++} from "./migration-databases";
++import type {
++  MvpMigrationHandle, // 非公開の所有台帳と照合するハンドル型
++} from "./migration-databases";
 +import {
-+  MVP_SUITES, // 既存15本の必須suite
-+} from "./suite-manifest";
-+import unitConfig from "../../vitest.mvp-unit.config.mjs"; // 既存設定を継承したunit専用設定
-+import integrationConfig from "../../vitest.integration.config.mjs"; // 試験本文のimport前にもガードする設定生成関数
-+import baseConfig from "../../vitest.config.mjs"; // 維持すべき既存alias・node環境の設定
-+import packageJson from "../../package.json"; // 既存コマンドと専用コマンドの定義
++  requireMvpTestEnvironment, // SDK評価前に接続先と専用flagを照合する関数
++} from "./environment";
 +
-+const boundary = vi.hoisted( // importより前に子プロセス境界を準備する関数
-+  /**
-+   * 実プロセス起動やSDK評価を検出するmockを作る。
-+   */
-+  () => ({ // 境界mockを返すコールバック
-+    spawn: vi.fn(), // 子プロセス起動を記録するmock生成関数
-+    forbidden: vi.fn( // SDKの評価を拒否するmock生成関数
-+      /**
-+       * 実SDKに到達したら通信前に試験を失敗させる。
-+       */
-+      () => { // SDK評価を拒否するコールバック
-+        throw new Error("Unexpected SDK initialization"); // 試験失敗の例外コンストラクター
-+      },
-+    ),
-+    removeFailure: false,
-+    configCheckout: "",
-+  }),
-+);
-+vi.mock("node:child_process", // 実際の子プロセス起動を置換する関数
-+  /**
-+   * runnerのspawnを記録用mockへ向ける。
-+   */
-+  () => ({ // 子プロセスモジュールの代替を返すコールバック
-+    spawn: boundary.spawn, // 起動境界のmock関数を参照する
-+  }),
-+);
-+vi.mock("node:fs", // 結果削除失敗だけを制御する関数
-+  /**
-+   * 通常のファイル操作は本物を使い、runnerが作った結果の削除失敗だけを再現する。
-+   */
-+  async (importOriginal) => { // 実モジュールを読み込むコールバック
-+    const original = await importOriginal<typeof import("node:fs")>(); // 実モジュール取得関数 / ファイルシステムモジュールの型
-+    return {
-+      ...original,
-+      /**
-+       * 他の一時資源は削除可能なまま、runnerのJSON後片付け失敗を再現する。
-+       */
-+      rmSync:
-+      /**
-+       * runnerの結果削除だけを失敗可能にし、他のファイル操作は本物へ渡す。
-+       */
-+      (
-+        path: Parameters<typeof rmSync>[0], // 削除先の引数型 / ファイル削除関数の型
-+        options: Parameters<typeof rmSync>[1], // 削除設定の引数型 / ファイル削除関数の型
-+      ) => { // 削除代替のコールバック
-+        if (
-+          boundary.removeFailure &&
-+          String(path).includes("mvp-integration-") // パス文字列化関数 / runner専用資源の名前照合メソッド
-+        ) {
-+          throw new Error("FAKE_PRIVATE_REMOVE_ERROR"); // 秘密原文非出力を確認する架空例外コンストラクター
-+        }
-+        original.rmSync(path, options); // 通常のファイル削除関数
-+      },
-+    };
-+  },
-+);
-+vi.mock("./environment", // 設定試験のガード先だけを所有checkoutへ向ける関数
-+  /**
-+   * 接続ガードは実装を使い、設定の単体試験だけ実プロジェクトの.env名へ依存させない。
-+   */
-+  async (importOriginal) => { // 実ガードを読み込むコールバック
-+    const actual = await importOriginal<typeof import("./environment")>(); // 実モジュール読込関数 / 接続前ガードのモジュール型
-+    return {
-+      ...actual,
-+      /**
-+       * 通常は指定されたcheckoutを検証し、設定試験の間だけ所有する架空checkoutを使う。
-+       */
-+      requireMvpTestEnvironment( // 本物のガードに検証を委譲する関数
-+        variables: Parameters<typeof actual.requireMvpTestEnvironment>[0], // 接続前ガードの環境引数型
-+        directory: string, // checkoutパスの文字列型
-+        runId: string, // 実行識別子の文字列型
-+      ) {
-+        return actual.requireMvpTestEnvironment( // 実装済みの接続前ガード関数
-+          variables,
-+          boundary.configCheckout || directory,
-+          runId,
-+        );
-+      },
-+    };
-+  },
-+);
-+vi.mock("dotenv/config", boundary.forbidden); // dotenvの評価を拒否する関数
-+vi.mock("@prisma/client", boundary.forbidden); // DB SDKの評価を拒否する関数
-+vi.mock("@prisma/adapter-pg", boundary.forbidden); // DBアダプターの評価を拒否する関数
-+vi.mock("@supabase/supabase-js", boundary.forbidden); // Auth・Storage SDKの評価を拒否する関数
-+vi.mock("@/src/infrastructure/prisma/client", boundary.forbidden); // 共有DB clientの評価を拒否する関数
-+
-+const PRIVATE = "FAKE_PRIVATE_SQL_TOKEN";
-+const RUN_ERROR = "F12統合試験が未完了です。専用環境・必須suite・後片付けを確認してください。";
-+let checkout: string; // 試験が所有するcheckoutの文字列型
-+const outputs: string[] = []; // runnerの結果資源のパス配列型
++const FAILURE = "F12 migration試験の接続・履歴・所有資源を確認してください。";
++const PRIVATE = "FAKE_PRIVATE_SQL_PASSWORD";
++const LEGACY = "20260816221153_add_club_app_schema";
++const F10 = "20261027000000_f10_event_month_copy";
++const F11 = "20261031000000_f11_event_practice_batch";
++const RUN_ID = "c".repeat(32); // 架空識別子やhashを作るメソッド
 +
 +/**
-+ * 実際のprocess.envに依存しない架空のローカル設定を返す。
++ * 架空pgが持つ作成DB・所有実体・migration履歴。
 + */
-+function environment(): Record<string, string | undefined> { // 架空設定生成関数 / 設定辞書型 / 文字列型 / 未設定の型
++type FakeDatabase = { // メモリ上のDB実体と履歴の型
++  oid: string; // 文字列型
++  owner: string; // 文字列型
++  marker: string | null; // 文字列型
++  history: Record<string, unknown>[]; // キーと値の辞書型 / 文字列型 / 値が未確定の型
++};
++
++const boundary = vi.hoisted( // import前にmock境界を準備する関数
++  /**
++   * 通信しない子プロセス・pgの状態と障害注入点を用意する。
++   */
++  () => ({ // 初期化・照合・後片付けのコールバック
++    live: false,
++    connections: [] as string[], // 文字列型
++    databases: new Map<string, FakeDatabase>(), // キーと値のMap型・コンストラクター / 文字列型 / メモリ上のDB実体と履歴の型
++    drops: [] as string[], // 文字列型
++    queries: [] as string[], // 文字列型
++    directories: [] as string[], // 文字列型
++    oid: 100,
++    sessions: 0,
++    roles: true,
++    createResponseLost: false,
++    commentResponseLost: false,
++    endFailure: false,
++    dropFailure: false,
++    cliFailure: "",
++    copied: [] as string[], // 文字列型
++    forbidden: vi.fn(), // 呼出しを記録するmockを作る関数
++  }),
++);
++vi.mock("dotenv/config", boundary.forbidden); // SDK・CLIの評価境界を置き換える関数
++vi.mock("@/src/infrastructure/prisma/client", boundary.forbidden); // SDK・CLIの評価境界を置き換える関数
++vi.mock("@prisma/client", boundary.forbidden); // SDK・CLIの評価境界を置き換える関数
++vi.mock("pg", // SDK・CLIの評価境界を置き換える関数
++  /**
++   * 実DB群がガード後にliveへ切り替えた場合だけ、本物のpgを評価する。
++   */
++  async (importOriginal) => { // 初期化・照合・後片付けのコールバック
++    const actual =
++      process.env.RUN_MVP_TESTS === "1" &&
++        process.env.RUN_DB_INTEGRATION_TESTS === "1"
++        ? await importOriginal<typeof import("pg")>() // 元のpgモジュールを読み込む関数 / pgモジュールの型
++        : undefined;
++    return {
++      /**
++       * module cacheを共有しても、生成時点のlive切替で専用群だけ実pgへ転送する。
++       */
++      Client: class {
++        /**
++         * 実接続群のガード後だけ実Clientを生成し、単体群には通信しない代替を返す。
++         */
++        constructor(options: ConstructorParameters<typeof import("pg").Client>[0]) { // 生成時に切り替えるコンストラクター / pg Clientの引数を取り出す型
++          if (boundary.live) {
++            if (!actual) {
++              throw new Error(FAILURE); // ガード前の実SDK生成を拒否する例外コンストラクター
++            }
++            return new actual.Client(options); // 専用接続用の実pgコンストラクター
++          }
++          return new FakeClient(options as { // 通信しないpg接続代替コンストラクター / 接続設定の型アサーション
++            connectionString: string // 接続先の文字列型
++          }); // 通信しない代替コンストラクター / 接続設定の型アサーション / 文字列型
++        }
++      },
++    };
++  },
++);
++vi.mock("node:child_process", // SDK・CLIの評価境界を置き換える関数
++  /**
++   * 単体群では同じ原本のコピーを読むだけとし、実群だけ実CLIを起動する。
++   */
++  async (importOriginal) => { // 初期化・照合・後片付けのコールバック
++    const original = await importOriginal<typeof import("node:child_process")>(); // 置換前の実モジュールを読み込む関数
++    return {
++      ...original,
++      spawnSync:
++        /**
++         * 終了コードと履歴書込を模擬し、本物のPrisma・SQLを起動しない。
++         */
++        (...args: Parameters<typeof original.spawnSync>) => { // 初期化・照合・後片付けのコールバック / 関数の引数を取り出す型 / 宣言済みの値から型を取り出す型
++          if (boundary.live) {
++            return original.spawnSync(...args); // Prisma CLIの終了を期限付きで待つ関数
++          }
++          const argv = args[1] as string[]; // 文字列型
++          const options = args[2] as {
++            env: Record<string, string>;  // キーと値の辞書型 / 文字列型
++            cwd: string  // 文字列型
++          };
++          const database = boundary.databases.get(new URL(options.env.DATABASE_URL).pathname.slice(1))!; // 試験が登録した値の存在を表す型アサーション / 登録した値を取得するメソッド / 配列または文字列の必要範囲を取り出すメソッド / 接続URLを解析するコンストラクター
++          boundary.directories.push(options.cwd); // 記録を配列へ登録するメソッド
++          const names = readdirSync(join(options.cwd, "migrations")).filter( // 条件に合う要素だけを選ぶメソッド / 実在ファイル名を列挙する関数 / パスを結合する関数
++            /**
++             * コピー済みの実在migration名だけを選ぶ。
++             */
++            (name) => name !== "migration_lock.toml", // 初期化・照合・後片付けのコールバック
++          ).sort(); // 名前順に並べるメソッド
++          const pending = names.slice(database.history.length); // 配列または文字列の必要範囲を取り出すメソッド
++          if (boundary.cliFailure === "status" &&
++            argv[2] === "status") {
++            return {
++              status: 1,
++              signal: null,
++              stdout: "",
++              stderr: PRIVATE
++            };
++          }
++          if (argv[2] === "deploy") {
++            if (boundary.cliFailure === "deploy") {
++              return {
++                status: 1,
++                signal: null,
++                stdout: PRIVATE,
++                stderr: ""
++              };
++            }
++            database.history = names.map( // 各要素を対応する結果へ写すメソッド
++              /**
++               * コピー先のbyte列から、架空の適用済み履歴を作る。
++               */
++              (name) => { // 初期化・照合・後片付けのコールバック
++                const bytes = readFileSync(join(options.cwd, "migrations", name, "migration.sql")); // 原文を読む関数 / パスを結合する関数
++                boundary.copied.push(bytes.toString()); // 記録を配列へ登録するメソッド / 原文byte列を文字列にするメソッド
++                return {
++                  migration_name: name,
++                  checksum: createHash("sha256").update(bytes).digest("hex"), // hashを16進文字列へ変換するメソッド / 原文byte列をhashへ入力するメソッド / SHA-256を計算する関数
++                  finished_at: new Date(), // 完了時刻のDateコンストラクター
++                  rolled_back_at: null,
++                  logs: null,
++                };
++              },
++            );
++            if (boundary.cliFailure === "checksum") {
++              database.history[0].checksum = "invalid";
++            }
++            if (boundary.cliFailure === "unfinished") {
++              database.history[0].finished_at = null;
++            }
++            if (boundary.cliFailure === "missing") {
++              database.history.pop(); // 履歴を欠落させるメソッド
++            }
++            return {
++              status: 0,
++              signal: null,
++              stdout: "",
++              stderr: ""
++            };
++          }
++          return {
++            status: pending.length ? 1 : 0,
++            signal: null,
++            stdout: pending.length ? `Following migrations have not yet been applied:\n${pending.join("\n")}\n` : "Database schema is up to date!", // 名前を区切り文字で連結するメソッド
++            stderr: "",
++          };
++        },
++    };
++  },
++);
++
++/**
++ * 管理DBの予約名だけを操作するメモリ上のpg代替。実SQLの正しさは実DB群で確認する。
++ */
++class FakeClient extends EventEmitter { // 通信しないpg代替クラス / 接続障害通知のイベントクラス
++  database: string; // 文字列型
++
++  /**
++   * 接続先を記録し、実ネットワークを開かない。
++   */
++  constructor(options: {  // 通信しない接続代替のコンストラクター
++    connectionString: string  // 文字列型
++  }) {
++    super(); // 接続イベントの記録を初期化するコンストラクター
++    this.database = new URL(options.connectionString).pathname.slice(1); // 配列または文字列の必要範囲を取り出すメソッド / 接続URLを解析するコンストラクター
++    boundary.connections.push(this.database); // 記録を配列へ登録するメソッド
++  }
++
++  /**
++   * 接続の非同期境界だけを再現する。
++   */
++  async connect() { } // 専用DBへ接続するメソッド
++
++  /**
++   * 解放失敗を注入し、台帳に未解放接続が残ることを確認する。
++   */
++  async end() { // 接続解放の成功・失敗を再現するメソッド
++    if (boundary.endFailure) {
++      throw new Error(PRIVATE); // 例外を作るコンストラクター
++    }
++  }
++
++  /**
++   * 所有確認と履歴照合に必要な応答だけを返し、SQLの意味を検証したことにはしない。
++   */
++  async query( // SQLを実行せず、架空のpg応答を返すメソッド
++    sql: string, // 文字列型
++    values: unknown[] = [] // 値が未確定の型
++  ) {
++    boundary.queries.push(sql); // 記録を配列へ登録するメソッド
++    if (sql.includes("FROM pg_roles")) { // 値の一致を確認するメソッド
++      return {
++        rows: boundary.roles ? [
++          {
++            rolname: "anon"
++          },
++          {
++            rolname: "authenticated"
++          },
++          {
++            rolname: "postgres",
++            is_current: true,
++            rolcreatedb: true
++          },
++        ] : []
++      };
++    }
++    if (sql.includes("FROM pg_database")) { // 値の一致を確認するメソッド
++      const database = boundary.databases.get(String(values[0])); // 登録した値を取得するメソッド / 文字列へ変換する関数
++      return {
++        rows: database ? [{
++          ...database
++        }] : []
++      };
++    }
++    if (sql.startsWith("CREATE DATABASE")) { // SQL操作名を照合するメソッド
++      const name = sql.split('"')[1]; // 区切りに沿って分割するメソッド
++      boundary.databases.set(name, {  // 台帳へ値を登録するメソッド
++        oid: String(++boundary.oid),  // 文字列へ変換する関数
++        owner: "postgres",
++        marker: null,
++        history: []
++      });
++      if (boundary.createResponseLost) {
++        throw new Error(PRIVATE); // 例外を作るコンストラクター
++      }
++      return {
++        rows: []
++      };
++    }
++    if (sql.startsWith("COMMENT ON DATABASE")) { // SQL操作名を照合するメソッド
++      boundary.databases.get(sql.split('"')[1])!.marker = sql.split("'")[1]; // 試験が登録した値の存在を表す型アサーション / 登録した値を取得するメソッド / 区切りに沿って分割するメソッド
++      if (boundary.commentResponseLost) {
++        throw new Error(PRIVATE); // 例外を作るコンストラクター
++      }
++      return {
++        rows: []
++      };
++    }
++    if (sql.includes("FROM pg_stat_activity")) { // 値の一致を確認するメソッド
++      return {
++        rows: [{
++          count: boundary.sessions
++        }]
++      };
++    }
++    if (sql.startsWith("DROP DATABASE")) { // SQL操作名を照合するメソッド
++      if (boundary.dropFailure) {
++        throw new Error(PRIVATE); // 例外を作るコンストラクター
++      }
++      const name = sql.split('"')[1]; // 区切りに沿って分割するメソッド
++      boundary.databases.delete(name); // 完了した資源を台帳から外すメソッド
++      boundary.drops.push(name); // 記録を配列へ登録するメソッド
++      return {
++        rows: []
++      };
++    }
++    const database = boundary.databases.get(this.database)!; // 試験が登録した値の存在を表す型アサーション / 登録した値を取得するメソッド
++    if (sql.includes("to_regclass")) { // 値の一致を確認するメソッド
++      return {
++        rows: [{
++          present: database.history.length > 0
++        }]
++      };
++    }
++    if (sql.includes("FROM public._prisma_migrations")) { // 値の一致を確認するメソッド
++      return {
++        rows: database.history
++      };
++    }
++    return {
++      rows: []
++    };
++  }
++}
++
++/**
++ * 実際の環境変数や秘密情報を使わない、許可済み書式の設定。
++ */
++function environment(): Record<string, string | undefined> { // 秘密を含まない架空設定を作る関数 / キーと値の辞書型 / 文字列型 / 未設定の型
 +  return {
 +    RUN_MVP_TESTS: "1",
 +    MVP_TEST_DISPOSABLE: "1",
 +    NODE_ENV: "test",
-+    DATABASE_URL: `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/postgres`,
++    DATABASE_URL: `postgresql://postgres:${PRIVATE}@127.0.0.1:54322/postgres`,
 +    NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
 +    APP_BASE_URL: "http://127.0.0.1:3000",
-+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "fake-anon",
-+    SUPABASE_SERVICE_ROLE_KEY: "fake-service",
 +  };
 +}
 +
-+/**
-+ * 最終JSONの形式だけを再現し、本物のsuiteやサービスを一切起動しない。
-+ */
-+function report(): JsonTestResults { // 架空結果生成関数 / VitestのJSON結果型
-+  const files = getIntegrationSuites().map( // 必須suite一覧取得関数 / ファイル別結果を生成するメソッド
-+    /**
-+     * 各必須群が1件ずつ終端成功した架空結果を作る。
-+     */
-+    (suite) => ({ // ファイル別結果を作るコールバック
-+      name: resolve(checkout, suite.path), // suiteの絶対パスを解決する関数
-+      status: "passed" as const, // 成功状態を表すリテラル型
-+      message: "",
-+      startTime: 1,
-+      endTime: 2,
-+      assertionResults: suite.requiredGroups.map( // 必須群の結果を作るメソッド
-+        /**
-+         * JSON reporterのancestorTitlesに対応する群名を保持する。
-+         */
-+        (name) => ({ // 架空の成功ケースを作るコールバック
-+          ancestorTitles: [name],
-+          fullName: `${name} succeeds`,
-+          title: "succeeds",
-+          status: "passed" as const, // ケース成功状態のリテラル型
-+          meta: {},
-+          failureMessages: [],
-+          tags: [],
-+        }),
-+      ),
-+    }),
-+  );
-+  const total = files.reduce( // 全ケース数を合計するメソッド
-+    /**
-+     * ファイル配下のケース数を足す。
-+     */
-+    (count, file) => count + file.assertionResults.length, // 合計件数を作るコールバック
-+    0,
-+  );
-+  return {
-+    success: true,
-+    numFailedTests: 0,
-+    numFailedTestSuites: 0,
-+    numPassedTests: total,
-+    numPassedTestSuites: files.length,
-+    numPendingTests: 0,
-+    numPendingTestSuites: 0,
-+    numTodoTests: 0,
-+    numTotalTests: total,
-+    numTotalTestSuites: files.length,
-+    startTime: 1,
-+    testResults: files,
-+    snapshot: {} as JsonTestResults["snapshot"], // この検証で参照しないsnapshot結果型
-+  };
-+}
-+
-+/**
-+ * 子プロセスの代わりにJSONを書き、後片付け対象を記録する。
-+ */
-+async function successfulLaunch( // JSON生成だけで完了する起動代替関数
-+  request: Parameters<typeof launchIntegration>[0], // runner引数から起動要求を取り出す型
-+) {
-+  outputs.push(dirname(request.outputFile)); // 結果の親ディレクトリ取得関数 / 削除確認一覧への登録メソッド
-+  writeFileSync(request.outputFile, JSON.stringify(report())); // 架空JSON書込関数 / JSON化関数 / 架空結果生成関数
-+}
-+
-+beforeEach( // 各試験の準備を登録する関数
++describe("F12 migration DBのガード・所有・CLI境界（通信なし）", // 試験群を登録する関数
 +  /**
-+   * 実ファイルの本文を使わない空のcheckoutと、必要なsuite名だけを用意する。
++   * 架空DBとコピー用の小さな原本だけで、破壊的操作の範囲を検証する。
 +   */
-+  () => { // 試験準備のコールバック
-+    vi.clearAllMocks(); // mock呼出し記録を初期化する関数
-+    boundary.removeFailure = false;
-+    boundary.configCheckout = "";
-+    outputs.length = 0;
-+    checkout = realpathSync(mkdtempSync(join(tmpdir(), "f12-runner-test-"))); // 実在パス解決関数 / 一時領域生成関数 / パス結合関数 / 一時領域取得関数
-+    for (const suite of getIntegrationSuites()) { // 必須suite一覧を取得する関数
-+      const file = join(checkout, suite.path); // 架空suiteのパスを組み立てる関数
-+      mkdirSync(dirname(file), { recursive: true }); // 親パス取得関数 / ディレクトリ作成関数
-+      writeFileSync(file, "// fake suite; never imported\n"); // 空の架空suite作成関数
-+    }
-+    for (const name of ["log", "warn", "error"] as const) { // コンソールメソッド名のリテラル型
-+      vi.spyOn(console, name).mockImplementation( // 出力監視関数 / コンソールの出力を抑止するメソッド
-+        /**
-+         * 実際の出力を抑止し、秘密の非出力を確認する。
-+         */
-+        () => undefined, // 出力を抑止するコールバック
-+      );
-+    }
-+  },
-+);
-+afterEach( // 各試験の後片付けを登録する関数
-+  /**
-+   * SDK非評価・原文非出力を確認し、所有する資源とmockだけを解除する。
-+   */
-+  () => { // 検証と後片付けのコールバック
-+    try {
-+      expect(boundary.forbidden).not.toHaveBeenCalled(); // 期待値生成関数 / SDK非評価の検証メソッド
-+      expect(console.log).not.toHaveBeenCalled(); // 期待値生成関数 / ログ非出力の検証メソッド
-+      expect(console.warn).not.toHaveBeenCalled(); // 期待値生成関数 / 警告非出力の検証メソッド
-+      expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / 秘密非出力の検証メソッド
-+    } finally {
-+      boundary.removeFailure = false;
-+      boundary.configCheckout = "";
-+      vi.restoreAllMocks(); // コンソール・OS操作の監視を解除する関数
-+      vi.useRealTimers(); // 試験用timerを解除する関数
-+      vi.unstubAllEnvs(); // 試験で置換した環境変数を戻す関数
-+      for (const path of [checkout, ...outputs]) {
-+        rmSync(path, { // この試験が所有する一時領域だけを削除する関数
-+          recursive: true,
-+          force: true,
-+        });
-+      }
-+    }
-+  },
-+);
-+
-+it.each([ // 接続前拒否のパラメーター試験を登録するメソッド
-+  ["RUN_MVP_TESTS", "0"],
-+  ["MVP_TEST_DISPOSABLE", "0"],
-+  ["NODE_ENV", "production"],
-+  ["DATABASE_URL", `postgresql://fixture:${PRIVATE}@remote.invalid:54322/postgres`],
-+  ["NEXT_PUBLIC_SUPABASE_URL", "https://remote.invalid"],
-+  ["SUPABASE_SERVICE_ROLE_KEY", undefined],
-+  ["NEXT_PUBLIC_SUPABASE_ANON_KEY", undefined],
-+  ["PGHOST", "remote.invalid"],
-+  ["DOTENV_CONFIG_PATH", PRIVATE],
-+  ["NODE_OPTIONS", "--require=private"],
-+])("不正な%sはVitestとSDKを起動する前に拒否する", // 接続前拒否の試験を登録するメソッド
-+  /**
-+   * 架空の危険環境で実行し、起動境界に到達しないことを確認する。
-+   */
-+  async (key, value) => { // 接続前拒否のコールバック
-+    const variables = environment(); // 架空設定を生成する関数
-+    variables[key!] = value; // パラメーター試験の項目名が存在することを表す型アサーション
-+    const launch = vi.fn(successfulLaunch); // JSON生成代替を包むmock生成関数 / 起動代替関数の参照
-+    await expect(runIntegration({ // 期待値生成関数 / ガード付きrunner関数
-+      environment: variables,
-+      checkoutDirectory: checkout,
-+      launch, // 子プロセス起動代替関数の参照
-+    })).rejects.toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+    expect(launch).not.toHaveBeenCalled(); // 期待値生成関数 / 子プロセス非起動を検証するメソッド
-+    expect(boundary.spawn).not.toHaveBeenCalled(); // 期待値生成関数 / spawn非呼出しを検証するメソッド
-+  },
-+);
-+
-+it("環境ファイルや必須suiteの欠落があれば起動しない", // 試験を登録する関数
-+  /**
-+   * ファイル内容を読まず.env名を拒否し、その後は欠落suiteも検出する。
-+   */
-+  async () => { // checkout拒否のコールバック
-+    const launch = vi.fn(successfulLaunch); // 起動代替を包むmock生成関数 / 起動代替関数の参照
-+    const path = join(checkout, ".env.local"); // 架空の環境ファイル名を組み立てる関数
-+    writeFileSync(path, PRIVATE); // 架空の環境ファイルを作る関数
-+    await expect(runIntegration({ // 期待値生成関数 / ガード付きrunner関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      launch, // 起動代替関数の参照
-+    })).rejects.toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+    rmSync(path); // 試験が作った架空ファイルだけを削除する関数
-+    rmSync(join(checkout, MVP_SUITES[0].path)); // 必須suiteを欠落させる関数 / パス結合関数
-+    await expect(runIntegration({ // 期待値生成関数 / ガード付きrunner関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      launch, // 起動代替関数の参照
-+    })).rejects.toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+    expect(launch).not.toHaveBeenCalled(); // 期待値生成関数 / 起動非呼出しを検証するメソッド
-+  },
-+);
-+
-+it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用flagだけを渡す", // 試験を登録する関数
-+  /**
-+   * ガード後の起動・結果検証・一時JSON削除までを本物のファイル操作で確認する。
-+   */
-+  async () => { // 正常系のコールバック
-+    const variables = environment(); // 架空設定を生成する関数
-+    variables.RESEND_API_KEY = PRIVATE;
-+    variables.LINE_CHANNEL_ACCESS_TOKEN = PRIVATE;
-+    variables.RUN_UNKNOWN_TESTS = "1";
-+    const launch = vi.fn(successfulLaunch); // 起動代替を包むmock生成関数 / 起動代替関数の参照
-+    const result = await runIntegration({ // ガード付きrunnerを実行する関数
-+      environment: variables,
-+      checkoutDirectory: checkout,
-+      launch, // 起動代替関数の参照
-+    });
-+    expect(result).toEqual({ // 期待値生成関数 / 成功件数の比較メソッド
-+      suites: 17,
-+      passed: 17,
-+    });
-+    expect(launch).toHaveBeenCalledTimes(1); // 期待値生成関数 / 起動回数の検証メソッド
-+    const child = launch.mock.calls[0][0].environment;
-+    expect(child.RESEND_API_KEY).toBeUndefined(); // 期待値生成関数 / 外部メールキー除外の検証メソッド
-+    expect(child.LINE_CHANNEL_ACCESS_TOKEN).toBeUndefined(); // 期待値生成関数 / LINEキー除外の検証メソッド
-+    expect(child.RUN_UNKNOWN_TESTS).toBeUndefined(); // 期待値生成関数 / 任意flag除外の検証メソッド
-+    for (const suite of getIntegrationSuites()) { // 必須suite一覧を取得する関数
-+      for (const [key, value] of Object.entries(suite.flags)) { // 必須flagを列挙する関数
-+        expect(child[key]).toBe(value); // 期待値生成関数 / 各suite専用flagの比較メソッド
-+      }
-+    }
-+    expect(child.DATABASE_URL).toBe(variables.DATABASE_URL); // 期待値生成関数 / DB接続先非変更の比較メソッド
-+    expect(variables.RUN_DB_INTEGRATION_TESTS).toBeUndefined(); // 期待値生成関数 / 元環境非変更の検証メソッド
-+    expect(new Set(getIntegrationSuites().map( // 期待値生成関数 / パス集合コンストラクター / 必須一覧取得関数 / パス抽出メソッド
++  () => { // 初期化・照合・後片付けのコールバック
++    let checkout: string; // 文字列型
++    let handles: readonly MvpMigrationHandle[]; // 所有台帳と照合するDBハンドル型
++    beforeEach( // 各試験の準備を登録する関数
 +      /**
-+       * 同じsuiteを二度起動する計画になっていないことを確認する。
++       * SDKを使わない専用checkoutと、改行を含む原本3つを作る。
 +       */
-+      (suite) => suite.path, // suiteパス抽出のコールバック
-+    )).size).toBe(17); // 件数を比較するメソッド
-+    expect(existsSync(outputs[0])).toBe(false); // 期待値生成関数 / 結果資源存在の判定関数 / 削除済み状態の比較メソッド
-+  },
-+);
-+
-+it.each([ // 不完全JSONのパラメーター試験を登録するメソッド
-+  "missing",
-+  "duplicate",
-+  "unknown",
-+  "empty",
-+  "skip",
-+  "todo",
-+  "pending",
-+  "failed",
-+  "hook",
-+  "guard-only",
-+  "failed-count",
-+  "pending-suite",
-+  "total",
-+  "success",
-+  "malformed",
-+])("%sの結果は完了にせず、秘密を返さずJSONも削除する", // 不完全JSONの試験を登録するメソッド
-+  /**
-+   * 終了コード0でも、必須実ケースが終端成功していなければ失敗する。
-+   */
-+  async (mode) => { // 結果改変のコールバック
-+    const launch = vi.fn( // JSONを改変する起動代替mockを作る関数
-+      /**
-+       * 本物のVitestを起動せず、失敗・skip・hook障害等を含むJSONを再現する。
-+       */
-+      async (request: Parameters<typeof successfulLaunch>[0]) => { // 起動代替のコールバック / 起動要求を抽出する型
-+        const value = report(); // 架空のJSON結果を作る関数
-+        const file = value.testResults[0];
-+        if (mode === "missing") {
-+          value.testResults.pop(); // ファイルを欠落させるメソッド
-+        } else if (mode === "duplicate") {
-+          value.testResults[1] = file;
-+        } else if (mode === "unknown") {
-+          file.name = resolve(checkout, "tests/unknown.test.ts"); // 未登録パスを解決する関数
-+        } else if (mode === "empty") {
-+          file.assertionResults = [];
-+        } else if (mode === "skip") {
-+          file.assertionResults[0].status = "skipped";
-+        } else if (mode === "todo") {
-+          file.assertionResults[0].status = "todo";
-+        } else if (mode === "pending") {
-+          file.assertionResults[0].status = "pending";
-+        } else if (mode === "failed") {
-+          file.assertionResults[0].status = "failed";
-+        } else if (mode === "hook") {
-+          file.message = PRIVATE;
-+        } else if (mode === "guard-only") {
-+          file.assertionResults[0].ancestorTitles = ["guard"];
-+        } else if (mode === "failed-count") {
-+          value.numFailedTests = 1;
-+        } else if (mode === "pending-suite") {
-+          value.numPendingTestSuites = 1;
-+        } else if (mode === "total") {
-+          value.numTotalTests += 1;
-+        } else if (mode === "success") {
-+          value.success = false;
++      () => { // 初期化・照合・後片付けのコールバック
++        vi.clearAllMocks(); // 呼出し履歴を初期化する関数
++        boundary.live = false;
++        boundary.connections = [];
++        boundary.databases.clear(); // 架空DBの記録を初期化するメソッド
++        boundary.queries = [];
++        boundary.drops = [];
++        boundary.directories = [];
++        boundary.copied = [];
++        boundary.sessions = 0;
++        boundary.roles = true;
++        boundary.createResponseLost = false;
++        boundary.commentResponseLost = false;
++        boundary.endFailure = false;
++        boundary.dropFailure = false;
++        boundary.cliFailure = "";
++        checkout = realpathSync(mkdtempSync(join(tmpdir(), "f12-migration-unit-"))); // 実在パスを照合する関数 / 専用一時領域を作る関数 / パスを結合する関数 / OSの一時領域を返す関数
++        for (const name of [LEGACY, F10, F11]) {
++          const folder = join(checkout, "prisma/migrations", name); // パスを結合する関数
++          mkdirSync(folder, {  // ディレクトリを作る関数
++            recursive: true
++          });
++          writeFileSync(join(folder, "migration.sql"), `-- ${name}\r\nSELECT 1;\r\n`); // 架空原本または専用設定を書き込む関数 / パスを結合する関数
 +        }
-+        outputs.push(dirname(request.outputFile)); // 結果の親パス取得関数 / 削除確認一覧への登録メソッド
-+        writeFileSync(request.outputFile, // 架空のJSONを書き込む関数
-+          mode === "malformed" ? PRIVATE : JSON.stringify(value), // 結果をJSON化する関数
++        writeFileSync(join(checkout, "prisma/schema.prisma"), "// fake schema; no CLI evaluation\n"); // 架空schema書込関数 / パス結合関数
++        writeFileSync(join(checkout, "prisma/migrations/migration_lock.toml"), 'provider = "postgresql"\n'); // 架空原本または専用設定を書き込む関数 / パスを結合する関数
++        handles = planMvpMigrationDatabases(requireMvpTestEnvironment(environment(), checkout, RUN_ID)); // SDK評価前に2つの予約DBを計画する関数 / 接続より前に専用flag・URL・checkoutを検証する関数 / 秘密を含まない架空設定を作る関数
++        for (const method of ["log", "warn", "error"] as const) { // リテラル型を保持する型アサーション
++          vi.spyOn(console, method).mockImplementation( // 実出力を抑止するメソッド / コンソール出力を監視する関数
++            /**
++             * 秘密の実出力を抑止し、呼出しの有無を検証する。
++             */
++            () => undefined, // 初期化・照合・後片付けのコールバック
++          );
++        }
++      },
++    );
++    afterEach( // 各試験の後片付けを登録する関数
++      /**
++       * 所有ハンドルを使って補償し、架空資源とログ監視を解除する。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        boundary.endFailure = false;
++        boundary.dropFailure = false;
++        for (const handle of handles) {
++          await cleanupMvpMigrationDatabase(handle); // 解放後に所有を照合してDBを後片付けする関数
++        }
++        try {
++          expect(boundary.forbidden).not.toHaveBeenCalled(); // 境界呼出しの有無を確認するメソッド / 期待値を作る関数
++          expect(console.log).not.toHaveBeenCalled(); // 境界呼出しの有無を確認するメソッド / 期待値を作る関数
++          expect(console.warn).not.toHaveBeenCalled(); // 境界呼出しの有無を確認するメソッド / 期待値を作る関数
++          expect(console.error).not.toHaveBeenCalled(); // 境界呼出しの有無を確認するメソッド / 期待値を作る関数
++        } finally {
++          vi.restoreAllMocks(); // 出力監視を解除する関数
++          rmSync(checkout, {  // 所有資源だけを削除する関数
++            recursive: true,
++            force: true
++          });
++        }
++      },
++    );
++
++    it("SDKなしで2つの予約名を計画し、偽造ハンドル・任意DB名を拒否する", // 通常・パラメーター試験を登録する関数
++      /**
++       * 公開値のコピーから削除権限を取得できないことを確認する。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        expect(handles.map( // 期待値を作る関数 / 各要素を対応する結果へ写すメソッド
++          /**
++           * この実行に予約したDB名を取り出す。
++           */
++          (handle) => handle.databaseName, // 初期化・照合・後片付けのコールバック
++        )).toEqual([`mvp_f12_${RUN_ID}_fresh`, `mvp_f12_${RUN_ID}_upgrade`]); // 構造と値を比較するメソッド
++        expect(boundary.connections).toHaveLength(0); // 件数を確認するメソッド / 期待値を作る関数
++        await expect(createMvpMigrationDatabase({  // 期待値を作る関数 / 不在と権限を確認して予約DBを作る関数
++          ...handles[0]
++        })).rejects.toThrow(FAILURE); // 固定例外での拒否を確認するメソッド
++        await expect(cleanupMvpMigrationDatabase({  // 期待値を作る関数 / 解放後に所有を照合してDBを後片付けする関数
++          runId: RUN_ID,
++          databaseName: "postgres"
++        })).rejects.toThrow(FAILURE); // 固定例外での拒否を確認するメソッド
++        expect(boundary.connections).toHaveLength(0); // 件数を確認するメソッド / 期待値を作る関数
++      },
++    );
++    it("flag不正はURL getterやSDKを評価せずに拒否する", // 通常・パラメーター試験を登録する関数
++      /**
++       * 型だけでガード済みと扱わず、計画時にも明示条件を先に確認する。
++       */
++      () => { // 初期化・照合・後片付けのコールバック
++        const valid = requireMvpTestEnvironment(environment(), checkout, RUN_ID); // 接続より前に専用flag・URL・checkoutを検証する関数 / 秘密を含まない架空設定を作る関数
++        const forged = {
++          ...valid,
++          variables: {
++            ...valid.variables,
++            RUN_MVP_TESTS: "0"
++          },
++        };
++        const getter = vi.fn( // 呼出しを記録するmockを作る関数
++          /**
++           * flag不正の時点で止まり、接続先を参照しないことを確認する。
++           */
++          () => { throw new Error(PRIVATE); }, // 初期化・照合・後片付けのコールバック / 例外を作るコンストラクター
++        );
++        Object.defineProperty(forged, "databaseUrl", {  // URLのgetterを検証用に設定する関数
++          get: getter
++        });
++        expect( // 期待値を作る関数
++          /**
++           * 拒否される設定を計画関数へ渡す。
++           */
++          () => planMvpMigrationDatabases(forged), // 初期化・照合・後片付けのコールバック / SDK評価前に2つの予約DBを計画する関数
++        ).toThrow(); // 固定例外での拒否を確認するメソッド
++        expect(getter).not.toHaveBeenCalled(); // 境界呼出しの有無を確認するメソッド / 期待値を作る関数
++        expect(boundary.connections).toHaveLength(0); // 件数を確認するメソッド / 期待値を作る関数
++      },
++    );
++    it("環境ファイルが後から現れた場合もSDKより前に拒否する", // 通常・パラメーター試験を登録する関数
++      /**
++       * plan時のチェックだけでは接続を許可しない。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        const path = join(checkout, ".env.local"); // パスを結合する関数
++        writeFileSync(path, PRIVATE); // 架空原本または専用設定を書き込む関数
++        await expect(createMvpMigrationDatabase(handles[0])).rejects.toThrow(); // 固定例外での拒否を確認するメソッド / 期待値を作る関数 / 不在と権限を確認して予約DBを作る関数
++        expect(boundary.connections).toHaveLength(0); // 件数を確認するメソッド / 期待値を作る関数
++        rmSync(path); // 所有資源だけを削除する関数
++      },
++    );
++    it("既存DB・role不足ではCREATEせず、既存postgresや同名DBをdropしない", // 通常・パラメーター試験を登録する関数
++      /**
++       * CREATE前の拒否では、同名の既存実体を所有扱いしない。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        boundary.databases.set(handles[0].databaseName, {  // 台帳へ値を登録するメソッド
++          oid: "1",
++          owner: "postgres",
++          marker: null,
++          history: []
++        });
++        await expect(createMvpMigrationDatabase(handles[0])).rejects.toThrow(FAILURE); // 固定例外での拒否を確認するメソッド / 期待値を作る関数 / 不在と権限を確認して予約DBを作る関数
++        boundary.roles = false;
++        await expect(createMvpMigrationDatabase(handles[1])).rejects.toThrow(FAILURE); // 固定例外での拒否を確認するメソッド / 期待値を作る関数 / 不在と権限を確認して予約DBを作る関数
++        boundary.roles = true;
++        expect(boundary.queries.some( // 期待値を作る関数 / 条件に合う要素があるか調べるメソッド
++          /**
++           * role確認と不在確認が終わる前のDDLを検出する。
++           */
++          (sql) => sql.startsWith("CREATE DATABASE"), // 初期化・照合・後片付けのコールバック / SQL操作名を照合するメソッド
++        )).toBe(false); // 値を比較するメソッド
++        await cleanupMvpMigrationDatabase(handles[0]); // 解放後に所有を照合してDBを後片付けする関数
++        expect(boundary.drops).toEqual([]); // 構造と値を比較するメソッド / 期待値を作る関数
++      },
++    );
++    it("作成・CLI・end・DROPを順に行い、prefixの原文とchecksumを保持する", // 通常・パラメーター試験を登録する関数
++      /**
++       * 旧形式からF10・最新まで同じDBを進め、CLI境界と一時コピー削除を確認する。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        await createMvpMigrationDatabase(handles[0]); // 不在と権限を確認して予約DBを作る関数
++        for (const stage of ["legacy", "f10", "latest"] as const) { // リテラル型を保持する型アサーション
++          await deployMvpMigrationStage(handles[0], stage); // 変更なしprefixを適用し履歴を照合する関数
++        }
++        expect(boundary.databases.get(handles[0].databaseName)!.history).toHaveLength(3); // 件数を確認するメソッド / 期待値を作る関数 / 試験が登録した値の存在を表す型アサーション / 登録した値を取得するメソッド
++        expect(boundary.copied[0]).toBe(`-- ${LEGACY}\r\nSELECT 1;\r\n`); // 値を比較するメソッド / 期待値を作る関数
++        expect(boundary.directories.every( // 期待値を作る関数 / 全要素が条件を満たすか調べるメソッド
++          /**
++           * CLI結果に関わらず、自分のコピー領域だけが削除される。
++           */
++          (path) => !existsSync(path), // 初期化・照合・後片付けのコールバック / 一時資源の有無を確認する関数
++        )).toBe(true); // 値を比較するメソッド
++        expect(await cleanupMvpMigrationDatabase(handles[0])).toEqual({ // 構造と値を比較するメソッド / 期待値を作る関数 / 解放後に所有を照合してDBを後片付けする関数
++          ...handles[0],
++          remainingDatabase: false,
++          openClients: 0,
++          temporaryDirectories: 0,
++        });
++        expect(boundary.drops).toEqual([handles[0].databaseName]); // 構造と値を比較するメソッド / 期待値を作る関数
++      },
++    );
++    it.each(["oid", "owner", "marker"])("作成後の%sが違う実体はdropしない", // パラメーター試験を登録する関数
++      /**
++       * 同じ名前でも別の実体へ所有権を引き継がない。
++       */
++      async (field) => { // 初期化・照合・後片付けのコールバック
++        await createMvpMigrationDatabase(handles[0]); // 不在と権限を確認して予約DBを作る関数
++        const current = boundary.databases.get(handles[0].databaseName)!; // 試験が登録した値の存在を表す型アサーション / 登録した値を取得するメソッド
++        current[field as "oid" | "owner" | "marker"] = "other";
++        const report = await cleanupMvpMigrationDatabase(handles[0]); // 解放後に所有を照合してDBを後片付けする関数
++        expect(report.remainingDatabase).toBe(true); // 値を比較するメソッド / 期待値を作る関数
++        expect(boundary.drops).toEqual([]); // 構造と値を比較するメソッド / 期待値を作る関数
++      },
++    );
++    it.each(["sessions", "end", "drop"])("%sの残存は報告し、他接続をterminateしない", // パラメーター試験を登録する関数
++      /**
++       * 自分の接続も解放不明ならDROPを控え、再試行で解放を確認する。
++       */
++      async (mode) => { // 初期化・照合・後片付けのコールバック
++        await createMvpMigrationDatabase(handles[0]); // 不在と権限を確認して予約DBを作る関数
++        if (mode === "sessions") {
++          boundary.sessions = 1;
++        }
++        if (mode === "drop") {
++          boundary.dropFailure = true;
++        }
++        if (mode === "end") {
++          boundary.endFailure = true;
++          await expect(withMvpMigrationDatabase(handles[0], // 期待値を作る関数 / 所有確認済みの専用接続でSQL検証を行う関数
++            /**
++             * SQLが成功しても接続解放失敗を成功扱いしない。
++             */
++            async () => undefined, // 初期化・照合・後片付けのコールバック
++          )).rejects.toThrow(); // 固定例外での拒否を確認するメソッド
++        }
++        const report = await cleanupMvpMigrationDatabase(handles[0]); // 解放後に所有を照合してDBを後片付けする関数
++        expect(report.remainingDatabase).toBe(true); // 値を比較するメソッド / 期待値を作る関数
++        expect(JSON.stringify(report)).not.toContain(PRIVATE); // 内容の含有を確認するメソッド / 期待値を作る関数 / 秘密の非含有を確認するJSON化関数
++        expect(boundary.queries.some( // 期待値を作る関数 / 条件に合う要素があるか調べるメソッド
++          /**
++           * 他セッションを強制終了するSQLを使わない。
++           */
++          (sql) => /terminate|WITH\s*\(FORCE\)/iu.test(sql), // 初期化・照合・後片付けのコールバック / 書式を検証するメソッド
++        )).toBe(false); // 値を比較するメソッド
++        boundary.sessions = 0;
++        boundary.endFailure = false;
++        boundary.dropFailure = false;
++        expect((await cleanupMvpMigrationDatabase(handles[0])).remainingDatabase).toBe(false); // 値を比較するメソッド / 期待値を作る関数 / 解放後に所有を照合してDBを後片付けする関数
++      },
++    );
++    it.each(["create", "comment"])("%sの応答不明は所有証明がある場合だけ補償する", // パラメーター試験を登録する関数
++      /**
++       * コメントが残った場合だけ回収し、証明のないCREATE結果を採用しない。
++       */
++      async (stage) => { // 初期化・照合・後片付けのコールバック
++        boundary.createResponseLost = stage === "create";
++        boundary.commentResponseLost = stage === "comment";
++        await expect(createMvpMigrationDatabase(handles[0])).rejects.toThrow(FAILURE); // 固定例外での拒否を確認するメソッド / 期待値を作る関数 / 不在と権限を確認して予約DBを作る関数
++        const report = await cleanupMvpMigrationDatabase(handles[0]); // 解放後に所有を照合してDBを後片付けする関数
++        expect(report.remainingDatabase).toBe(stage === "create"); // 値を比較するメソッド / 期待値を作る関数
++        expect(boundary.drops).toHaveLength(stage === "create" ? 0 : 1); // 件数を確認するメソッド / 期待値を作る関数
++      },
++    );
++    it.each(["status", "deploy", "checksum", "unfinished", "missing"])("CLIの%s失敗は完了にしない", // パラメーター試験を登録する関数
++      /**
++       * 終了0でも履歴が一致しなければ拒否し、コピー領域は削除する。
++       */
++      async (mode) => { // 初期化・照合・後片付けのコールバック
++        await createMvpMigrationDatabase(handles[0]); // 不在と権限を確認して予約DBを作る関数
++        boundary.cliFailure = mode;
++        await expect(deployMvpMigrationStage(handles[0], "latest")).rejects.toThrow(FAILURE); // 固定例外での拒否を確認するメソッド / 期待値を作る関数 / 変更なしprefixを適用し履歴を照合する関数
++        expect(boundary.directories.every( // 期待値を作る関数 / 全要素が条件を満たすか調べるメソッド
++          /**
++           * 秘密を含み得る一時結果・設定を残さない。
++           */
++          (path) => !existsSync(path), // 初期化・照合・後片付けのコールバック / 一時資源の有無を確認する関数
++        )).toBe(true); // 値を比較するメソッド
++      },
++    );
++    it("pgの非同期障害は原文を出さず、検証成功にしない", // 試験を登録する関数
++      /**
++       * idle接続のerrorイベントも握り潰した成功にせず、所有接続を解放可能にする。
++       */
++      async () => { // 接続障害のコールバック
++        await createMvpMigrationDatabase(handles[0]); // 予約DBを作る関数
++        await expect(withMvpMigrationDatabase(handles[0], // 期待値生成関数 / 専用接続で検証する関数
++          /**
++           * SQL応答外の非同期接続障害を再現する。
++           */
++          async (client) => { // 非同期障害を通知するコールバック
++            client.emit("error", new Error(PRIVATE)); // 接続障害通知メソッド / 秘密を持つ架空例外コンストラクター
++          },
++        )).rejects.toThrow(FAILURE); // 固定例外を検証するメソッド
++        expect((await cleanupMvpMigrationDatabase(handles[0])).openClients).toBe(0); // 期待値生成関数 / 所有資源の後片付け関数 / 接続解放の比較メソッド
++      },
++    );
++    it("適用前のchecksum改変はCLI起動前に拒否する", // 試験を登録する関数
++      /**
++       * deployの再実行で壊れた適用済み履歴を成功扱いしない。
++       */
++      async () => { // 履歴改変を検証するコールバック
++        await createMvpMigrationDatabase(handles[0]); // 予約DBを作る関数
++        await deployMvpMigrationStage(handles[0], "legacy"); // 旧形式まで適用する関数
++        boundary.databases.get(handles[0].databaseName)!.history[0].checksum = "changed"; // 架空DB取得メソッド / 登録済み値の存在を表す型アサーション
++        const before = boundary.directories.length;
++        await expect(deployMvpMigrationStage(handles[0], "latest")).rejects.toThrow(FAILURE); // 期待値生成関数 / 段階適用関数 / 拒否を確認するメソッド
++        expect(boundary.directories).toHaveLength(before); // 期待値生成関数 / CLI非起動を確認するメソッド
++      },
++    );
++    it("検証処理中のcleanupはDROPせず、処理完了後だけ削除する", // 試験を登録する関数
++      /**
++       * 同じハンドルでSQL検証と削除を同時実行しないことを確認する。
++       */
++      async () => { // 非同期処理中の所有資源を検証するコールバック
++        await createMvpMigrationDatabase(handles[0]); // 予約DBを作る関数
++        let entered!: () => void; // 処理開始を通知する関数型 / 戻り値を使わない型
++        let release!: () => void; // 処理を再開する関数型 / 戻り値を使わない型
++        const started = new Promise<void>( // 処理開始を待つPromiseの型・コンストラクター
++          /**
++           * 接続と所有確認が完了した時点を試験へ通知する。
++           */
++          (resolve) => { // 開始通知関数を保存するコールバック
++            entered = resolve;
++          },
++        );
++        const operation = withMvpMigrationDatabase(handles[0], // 所有確認済みのSQL処理を開始する関数
++          /**
++           * cleanupを検証する間だけ処理を一時停止する。
++           */
++          async () => { // 開始と再開を同期するコールバック
++            entered(); // 処理開始を通知する関数
++            await new Promise<void>( // 再開通知を待つPromiseの型・コンストラクター
++              /**
++               * 後片付けの検証後に解除する待機点を保持する。
++               */
++              (resolve) => { // 再開通知関数を保存するコールバック
++                release = resolve;
++              },
++            );
++          },
++        );
++        await started;
++        try {
++          const report = await cleanupMvpMigrationDatabase(handles[0]); // 操作中の後片付け要求を行う関数
++          expect(report.remainingDatabase).toBe(true); // 期待値生成関数 / 残存報告を比較するメソッド
++          expect(boundary.drops).toHaveLength(0); // 期待値生成関数 / DROP非実行を確認するメソッド
++        } finally {
++          release(); // SQL処理を再開する関数
++          await operation;
++        }
++        expect((await cleanupMvpMigrationDatabase(handles[0])).remainingDatabase).toBe(false); // 期待値生成関数 / 所有DBの後片付け関数 / 削除完了を比較するメソッド
++      },
++    );
++    it("未適用status=1だけを許し、接続障害・signal・timeoutを区別する", // 通常・パラメーター試験を登録する関数
++      /**
++       * DB履歴が示す未適用名とCLI応答が揃った場合だけ許可する。
++       */
++      () => { // 初期化・照合・後片付けのコールバック
++        const pending = {
++          status: 1,
++          signal: null,
++          error: undefined,
++          stdout: `Following migration have not yet been applied:\n${F11}`,
++          stderr: ""
++        };
++        assertMvpMigrationStatus(pending, [F11], true); // CLIのstatusとDB由来の未適用名を照合する関数
++        assertMvpMigrationStatus({  // CLIのstatusとDB由来の未適用名を照合する関数
++          ...pending,
++          stdout: "",
++          stderr: "The current database is not managed by Prisma Migrate."
++        }, [F11], false);
++        for (const result of [
++          {
++            ...pending,
++            stdout: PRIVATE
++          },
++          {
++            ...pending,
++            status: 0
++          },
++          {
++            ...pending,
++            signal: "SIGTERM" as const  // リテラル型を保持する型アサーション
++          },
++          {
++            ...pending,
++            error: new Error(PRIVATE)  // 例外を作るコンストラクター
++          },
++        ]) {
++          expect( // 期待値を作る関数
++            /**
++             * 未適用以外の終了や障害原文を拒否する。
++             */
++            () => assertMvpMigrationStatus(result, [F11], true), // 初期化・照合・後片付けのコールバック / CLIのstatusとDB由来の未適用名を照合する関数
++          ).toThrow(FAILURE); // 固定例外での拒否を確認するメソッド
++        }
++      },
++    );
++  },
++);
++
++/**
++ * 旧schemaに存在する列だけを使い、正常なA/Bの親・関連行を投入する。
++ */
++async function seedLegacy(client: Client) { // 旧schemaの列だけで正常なA/Bデータを投入する関数 / 専用pg接続型
++  const clubs = [randomUUID(), randomUUID()]; // UUIDを生成する関数
++  const users = [randomUUID(), randomUUID()]; // UUIDを生成する関数
++  const memberships = [randomUUID(), randomUUID()]; // UUIDを生成する関数
++  const events = [randomUUID(), randomUUID()]; // UUIDを生成する関数
++  const notices = [randomUUID(), randomUUID()]; // UUIDを生成する関数
++  for (let index = 0; index < 2; index += 1) {
++    await client.query(`INSERT INTO "Club" (id,"updatedAt",name,slug,"planType") VALUES ($1,NOW(),'migration fixture',$2,'STANDARD')`, [clubs[index], `migration-${clubs[index]}`]); // SQLを実行するメソッド
++    await client.query(`INSERT INTO "AppUser" (id,"updatedAt",email,name) VALUES ($1,NOW(),$2,'fixture user')`, [users[index], `${users[index]}@example.test`]); // SQLを実行するメソッド
++    await client.query(`INSERT INTO "ClubMembership" (id,"updatedAt","clubId","userId",role) VALUES ($1,NOW(),$2,$3,'OWNER')`, [memberships[index], clubs[index], users[index]]); // SQLを実行するメソッド
++    const child = randomUUID(); // UUIDを生成する関数
++    await client.query(`INSERT INTO "Child" (id,"updatedAt","parentId",name) VALUES ($1,NOW(),$2,'fixture child')`, [child, users[index]]); // SQLを実行するメソッド
++    await client.query(`INSERT INTO "ChildClubMembership" (id,"updatedAt","clubId","childId","parentUserId") VALUES ($1,NOW(),$2,$3,$4)`, [randomUUID(), clubs[index], child, users[index]]); // SQLを実行するメソッド / UUIDを生成する関数
++    await client.query( // SQLを実行するメソッド
++      `INSERT INTO "ClubEvent" (id,"updatedAt","clubId",title,content,"targetRoles","startAt","createdByMembershipId","updatedByMembershipId")
++      VALUES ($1,NOW(),$2,'fixture event','fixture body',ARRAY['OWNER']::"ClubMemberRole"[],'2026-02-01 00:00:00',$3,$3)`, [events[index], clubs[index], memberships[index]]);
++    await client.query( // SQLを実行するメソッド
++      `INSERT INTO "ClubNotice" (id,"updatedAt","clubId",title,content,"targetRoles","createdByMembershipId","updatedByMembershipId")
++      VALUES ($1,NOW(),$2,'fixture notice','fixture body',ARRAY['OWNER']::"ClubMemberRole"[],$3,$3)`, [notices[index], clubs[index], memberships[index]]);
++    await client.query( // SQLを実行するメソッド
++      `INSERT INTO "ClubInvitation" (id,"updatedAt","clubId",email,role,status,"tokenHash","expiresAt","membershipId","invitedByMembershipId")
++      VALUES ($1,NOW(),$2,$3,'OWNER','SENT',$4,'2027-12-31',$5,$5)`, [randomUUID(), clubs[index], `${users[index]}@example.test`, randomUUID(), memberships[index]]); // UUIDを生成する関数
++    await client.query(`INSERT INTO "SupportReport" (id,"updatedAt","clubId","membershipId",message) VALUES ($1,NOW(),$2,$3,'fixture report')`, [randomUUID(), clubs[index], memberships[index]]); // SQLを実行するメソッド / UUIDを生成する関数
++  }
++  return {
++    clubs,
++    users,
++    memberships,
++    events,
++    notices
++  };
++}
++
++/**
++ * 追加列に左右されず、旧データの各主要列・関連ID・時刻が保持されることを照合する。
++ */
++async function legacySnapshot(client: Client) { // 旧データの主要列と関連IDを取得する関数 / 専用pg接続型
++  const result = await client.query( // SQLを実行するメソッド
++    `
++    SELECT 'club' AS kind, id, jsonb_build_array("createdAt","updatedAt",name,slug,"planType",timezone) AS value FROM "Club"
++    UNION ALL SELECT 'user',id,jsonb_build_array("createdAt","updatedAt",email,name) FROM "AppUser"
++    UNION ALL SELECT 'membership',id,jsonb_build_array("createdAt","updatedAt","clubId","userId",role,status) FROM "ClubMembership"
++    UNION ALL SELECT 'child',id,jsonb_build_array("createdAt","updatedAt","parentId",name) FROM "Child"
++    UNION ALL SELECT 'child-membership',id,jsonb_build_array("clubId","childId","parentUserId",status) FROM "ChildClubMembership"
++    UNION ALL SELECT 'event',id,jsonb_build_array("updatedAt","clubId",title,content,"targetRoles","startAt","createdByMembershipId","updatedByMembershipId") FROM "ClubEvent"
++    UNION ALL SELECT 'notice',id,jsonb_build_array("updatedAt","clubId",title,content,"targetRoles","createdByMembershipId","updatedByMembershipId") FROM "ClubNotice"
++    UNION ALL SELECT 'invitation',id,jsonb_build_array("updatedAt","clubId",email,role,status,"tokenHash","expiresAt","membershipId","invitedByMembershipId") FROM "ClubInvitation"
++    UNION ALL SELECT 'report',id,jsonb_build_array("updatedAt","clubId","membershipId",message) FROM "SupportReport"
++    ORDER BY kind,id
++  `);
++  return result.rows;
++}
++
++/**
++ * SQLSTATEを検証し、エラー原文や実値をVitestの外へ渡さない。
++ */
++async function rejectedSql( // 実SQLの拒否をSQLSTATEで確認する関数
++  client: Client, // 専用pg接続型
++  sql: string, // 文字列型
++  values: unknown[], // 値が未確定の型
++  code: string // 文字列型
++) {
++  let caught: unknown; // 値が未確定の型
++  try {
++    await client.query(sql, values); // SQLを実行するメソッド
++  } catch (error) {
++    caught = error;
++  }
++  expect(caught).toBeDefined(); // SQLが拒否されたことを確認するメソッド / 期待値を作る関数
++  expect((caught as {  // 期待値を作る関数
++    code?: unknown  // 値が未確定の型
++  }).code).toBe(code); // 値を比較するメソッド
++}
++
++/**
++ * 最新DBの主要テーブル、実制約・trigger・RLS・Data API権限をcatalogから検証する。
++ */
++async function verifyCatalog(client: Client) { // 主要テーブル・実制約・RLS・権限を照合する関数 / 専用pg接続型
++  const tables = [
++    "Club", "AppUser", "Child", "ClubMembership", "ChildClubMembership", "ClubInvitation",
++    "ClubEvent", "ClubEventMemo", "ClubNotice", "ClubEventAttachment", "ClubNoticeAttachment",
++    "ClubEventRead", "ClubNoticeRead", "ClubLineSetting", "ClubLineTarget", "ClubLineRegistrationToken",
++    "ClubEmailSetting", "SupportReport", "ClubLineDelivery", "PlatformAdmin", "StorageDeletionJob",
++    "ClubEventBatchOperation",
++  ];
++  const catalog = await client.query( // SQLを実行するメソッド
++    `SELECT c.relname,c.relrowsecurity,
++      has_table_privilege('anon',c.oid,'SELECT,INSERT,UPDATE,DELETE') AS anon,
++      has_table_privilege('authenticated',c.oid,'SELECT,INSERT,UPDATE,DELETE') AS authenticated
++    FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
++    WHERE n.nspname='public' AND c.relkind='r' AND c.relname=ANY($1::text[])`, [tables]);
++  expect(catalog.rows).toHaveLength(tables.length); // 件数を確認するメソッド / 期待値を作る関数
++  for (const row of catalog.rows) {
++    // StorageDeletionJobは既存SQLでRLSを設定せず、default privilegesの剥奪で非公開にしている。
++    if (row.relname !== "StorageDeletionJob") {
++      expect(row.relrowsecurity).toBe(true); // 値を比較するメソッド / 期待値を作る関数
++    }
++    expect(row.anon).toBe(false); // 値を比較するメソッド / 期待値を作る関数
++    expect(row.authenticated).toBe(false); // 値を比較するメソッド / 期待値を作る関数
++  }
++  const constraints = await client.query( // SQLを実行するメソッド
++    `SELECT conname,contype,convalidated FROM pg_constraint
++    WHERE connamespace='public'::regnamespace AND conname=ANY($1::text[])`, [[
++    "ClubEventMemo_eventId_clubId_fkey",
++    "ChildClubMembership_clubId_parentUserId_fkey",
++    "ClubLineDelivery_content_source_check",
++    "ClubInvitation_claim_pair_check",
++    "ClubEventBatchOperation_operation_check",
++    "ClubEventBatchOperation_request_id_check",
++    "ClubEventBatchOperation_target_month_check",
++    "ClubEventBatchOperation_input_hash_check",
++    "ClubEventBatchOperation_created_count_check",
++  ]]);
++  expect(constraints.rows).toHaveLength(9); // 件数を確認するメソッド / 期待値を作る関数
++  expect(constraints.rows.every( // 期待値を作る関数 / 全要素が条件を満たすか調べるメソッド
++    /**
++     * NOT VALIDのまま既存行検証を省略していないことを確認する。
++     */
++    (row) => row.convalidated, // 初期化・照合・後片付けのコールバック
++  )).toBe(true); // 値を比較するメソッド
++  const indexes = await client.query( // SQLを実行するメソッド
++    `SELECT indexname,indexdef FROM pg_indexes
++    WHERE schemaname='public' AND indexname=ANY($1::text[])`, [[
++    "ClubInvitation_active_email_key", "ClubEventBatchOperation_clubId_requestId_key",
++  ]]);
++  expect(indexes.rows).toHaveLength(2); // 件数を確認するメソッド / 期待値を作る関数
++  expect(indexes.rows.find( // 期待値を作る関数 / 条件に合う1件を探すメソッド
++    /**
++     * 有効な招待だけを対象とする実在の部分uniqueを確認する。
++     */
++    (row) => row.indexname === "ClubInvitation_active_email_key", // 初期化・照合・後片付けのコールバック
++  )?.indexdef).toContain("WHERE"); // 内容の含有を確認するメソッド
++  const triggers = await client.query( // SQLを実行するメソッド
++    `SELECT tgname FROM pg_trigger
++    WHERE NOT tgisinternal AND tgname=ANY($1::text[])`, [[
++    "ClubEvent_created_by_club_match", "ClubEvent_updated_by_club_match",
++    "ClubEvent_club_id_immutable", "ClubInvitation_membership_club_match",
++    "ClubEventBatchOperation_executor_club_match", "ClubEventBatchOperation_club_id_immutable",
++  ]]);
++  expect(triggers.rows).toHaveLength(6); // 件数を確認するメソッド / 期待値を作る関数
++}
++
++const enabled = process.env.RUN_MVP_TESTS === "1" &&
++  process.env.RUN_DB_INTEGRATION_TESTS === "1";
++const describeDatabase = enabled ? describe : describe.skip; // 専用flagに応じて実DB群を登録またはskipする関数
++describeDatabase("F12 空DB・旧データDBのmigration統合（専用flag未指定時はskip）", // 専用flagがある場合だけ実DB群を登録する関数
++  /**
++   * 2つの新規DBで実CLI・履歴・データ保持・自然な制約拒否を確認する。
++   */
++  () => { // 初期化・照合・後片付けのコールバック
++    let handles: readonly MvpMigrationHandle[] = []; // 所有台帳と照合するDBハンドル型
++    beforeAll( // 接続前ガードと初期化を登録する関数
++      /**
++       * SDKより前にガードし、公開postgres DBにはDDLを行わない。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        try {
++          const configuration = requireMvpTestEnvironment( // 接続より前に専用flag・URL・checkoutを検証する関数
++            process.env,
++            resolve(import.meta.dirname, "../.."), // checkoutの絶対パスを求める関数
++            randomUUID().replaceAll("-", ""), // UUIDから区切りを除くメソッド / UUIDを生成する関数
++          );
++          handles = planMvpMigrationDatabases(configuration); // SDK評価前に2つの予約DBを計画する関数
++          boundary.live = true;
++          for (const handle of handles) {
++            await createMvpMigrationDatabase(handle); // 不在と権限を確認して予約DBを作る関数
++          }
++        } catch {
++          throw new Error(FAILURE); // 例外を作るコンストラクター
++        }
++      },
++      60_000,
++    );
++    afterAll( // 所有資源の後片付けを登録する関数
++      /**
++       * ケース途中の失敗でも、接続解放後に所有を再確認してDBを補償する。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        const remaining: string[] = []; // 残存または確認不能の予約DB名を保持する文字列配列型
++        for (const handle of [...handles].reverse()) { // 作成の逆順へ並べるメソッド
++          try {
++            const report = await cleanupMvpMigrationDatabase(handle); // 解放後に所有を照合してDBを後片付けする関数
++            if (report.remainingDatabase ||
++              report.openClients ||
++              report.temporaryDirectories) {
++              remaining.push(handle.databaseName); // 接続秘密を含まない残存名だけを登録するメソッド
++            }
++          } catch {
++            remaining.push(handle.databaseName); // 確認不能な予約名だけを登録するメソッド
++          }
++        }
++        boundary.live = false;
++        if (remaining.length > 0) {
++          throw new Error(`F12 migrationの所有資源が残存または確認不能です: ${remaining.join(", ")}`); // 予約資源名だけを含む例外コンストラクター / 予約名の連結メソッド // 例外を作るコンストラクター
++        }
++      },
++      60_000,
++    );
++    it("空→最新と、旧データ→F10→F11を適用し、履歴・制約・データを保持する", // 通常・パラメーター試験を登録する関数
++      /**
++       * SQL検索ではなく本物のdeployとSQL実行で両経路の受入を確認する。
++       */
++      async () => { // 初期化・照合・後片付けのコールバック
++        const [fresh, upgrade] = handles;
++        await deployMvpMigrationStage(fresh, "latest"); // 変更なしprefixを適用し履歴を照合する関数
++        await withMvpMigrationDatabase(fresh, // 所有確認済みの専用接続でSQL検証を行う関数
++          /**
++           * storage schemaなしの空DBにも全migrationを適用できることを確認する。
++           */
++          async (client) => { // 初期化・照合・後片付けのコールバック
++            await verifyCatalog(client); // 主要テーブル・実制約・RLS・権限を照合する関数
++            expect((await client.query(`SELECT count(*)::int AS count FROM pg_policies WHERE schemaname='storage'`)).rows[0].count).toBe(0); // 値を比較するメソッド / 期待値を作る関数 / SQLを実行するメソッド
++          },
++        );
++        await deployMvpMigrationStage(upgrade, "legacy"); // 変更なしprefixを適用し履歴を照合する関数
++        const fixture = await withMvpMigrationDatabase(upgrade, seedLegacy); // 所有確認済みの専用接続でSQL検証を行う関数 / 旧schemaの列だけで正常なA/Bデータを投入する関数
++        const before = await withMvpMigrationDatabase(upgrade, legacySnapshot); // 所有確認済みの専用接続でSQL検証を行う関数 / 旧データの主要列と関連IDを取得する関数
++        await withMvpMigrationDatabase(upgrade, // 所有確認済みの専用接続でSQL検証を行う関数
++          /**
++           * 既存Storage policyがある経路も用意し、無関係なpolicyを消さないことを確認する。
++           */
++          async (client) => { // 初期化・照合・後片付けのコールバック
++            await client.query( // SQLを実行するメソッド
++              `CREATE SCHEMA storage;
++              CREATE TABLE storage.objects (id text,bucket_id text);
++              ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
++              CREATE POLICY mvp_club_images ON storage.objects FOR SELECT USING (bucket_id='club-images');
++              CREATE POLICY mvp_unrelated ON storage.objects FOR SELECT USING (bucket_id='other');`);
++          },
++        );
++        await deployMvpMigrationStage(upgrade, "f10"); // 変更なしprefixを適用し履歴を照合する関数
++        await withMvpMigrationDatabase(upgrade, // 所有確認済みの専用接続でSQL検証を行う関数
++          /**
++           * 旧データの保持、実FK・部分unique・triggerとpolicyの削除範囲を確認する。
++           */
++          async (client) => { // 初期化・照合・後片付けのコールバック
++            expect(await legacySnapshot(client)).toEqual(before); // 構造と値を比較するメソッド / 期待値を作る関数 / 旧データの主要列と関連IDを取得する関数
++            const policies = await client.query(`SELECT policyname FROM pg_policies WHERE schemaname='storage' AND tablename='objects' ORDER BY policyname`); // SQLを実行するメソッド
++            expect(policies.rows).toEqual([{  // 構造と値を比較するメソッド / 期待値を作る関数
++              policyname: "mvp_unrelated"
++            }]);
++            await rejectedSql(client, `INSERT INTO "ClubEventAttachment" (id,"clubId","eventId","storagePath","fileName","mimeType","sizeBytes") VALUES ($1,$2,$3,$1,'fixture.pdf','application/pdf',1)`, [randomUUID(), fixture.clubs[0], fixture.events[1]], "23503"); // 実SQLの拒否をSQLSTATEで確認する関数 / UUIDを生成する関数
++            await rejectedSql(client, `UPDATE "ClubEvent" SET "createdByMembershipId"=$1 WHERE id=$2`, [fixture.memberships[1], fixture.events[0]], "23514"); // 実SQLの拒否をSQLSTATEで確認する関数
++            await rejectedSql(client, `UPDATE "ClubEvent" SET "clubId"=$1 WHERE id=$2`, [fixture.clubs[1], fixture.events[0]], "23514"); // 実SQLの拒否をSQLSTATEで確認する関数
++            await rejectedSql(client, `INSERT INTO "ClubMembership" (id,"updatedAt","clubId","userId") VALUES ($1,NOW(),$2,$3)`, [randomUUID(), fixture.clubs[0], fixture.users[0]], "23505"); // 実SQLの拒否をSQLSTATEで確認する関数 / UUIDを生成する関数
++            await rejectedSql(client, `INSERT INTO "ClubInvitation" (id,"updatedAt","clubId",email,role,"tokenHash","expiresAt","invitedByMembershipId") VALUES ($1,NOW(),$2,UPPER($3),'OWNER',$4,'2027-12-31',$5)`, [randomUUID(), fixture.clubs[0], `${fixture.users[0]}@example.test`, randomUUID(), fixture.memberships[0]], "23505"); // 実SQLの拒否をSQLSTATEで確認する関数 / UUIDを生成する関数
++            await client.query( // SQLを実行するメソッド
++              `INSERT INTO "ClubEventBatchOperation" (id,"clubId","requestId",operation,"targetMonth","inputHash","executedByMembershipId","createdCount","completedAt")
++              SELECT 'copy-'||s,$1,'00000000-0000-4000-8000-'||lpad(s::text,12,'0'),'COPY_PREVIOUS_MONTH','2026-02',repeat('a',64),$2,100,NOW()
++              FROM generate_series(1,100) s`, [fixture.clubs[0], fixture.memberships[0]]);
++          },
++        );
++        const copied = await withMvpMigrationDatabase(upgrade, // 所有確認済みの専用接続でSQL検証を行う関数
++          /**
++           * 100件の正当なF10記録を原形のまま比較できるよう取得する。
++           */
++          async (client) => (await client.query(`SELECT * FROM "ClubEventBatchOperation" ORDER BY id`)).rows, // 初期化・照合・後片付けのコールバック / SQLを実行するメソッド
++        );
++        expect(copied).toHaveLength(100); // 件数を確認するメソッド / 期待値を作る関数
++        await deployMvpMigrationStage(upgrade, "latest"); // 変更なしprefixを適用し履歴を照合する関数
++        await withMvpMigrationDatabase(upgrade, // 所有確認済みの専用接続でSQL検証を行う関数
++          /**
++           * F11のCHECK変更後も旧行を保持し、操作別件数・対象月の境界を確認する。
++           */
++          async (client) => { // 初期化・照合・後片付けのコールバック
++            await verifyCatalog(client); // 主要テーブル・実制約・RLS・権限を照合する関数
++            expect(await legacySnapshot(client)).toEqual(before); // 構造と値を比較するメソッド / 期待値を作る関数 / 旧データの主要列と関連IDを取得する関数
++            expect((await client.query(`SELECT * FROM "ClubEventBatchOperation" ORDER BY id`)).rows).toEqual(copied); // 構造と値を比較するメソッド / 期待値を作る関数 / SQLを実行するメソッド
++            const sql = `INSERT INTO "ClubEventBatchOperation" (id,"clubId","requestId",operation,"targetMonth","inputHash","executedByMembershipId","createdCount","completedAt") VALUES ($1,$2,$1,$3,$4,repeat('b',64),$5,$6,NOW())`;
++            for (const [operation, month, count] of [
++              ["CREATE_PRACTICE_BATCH", "2026-02", 32],
++              ["COPY_PREVIOUS_MONTH", "2026-02", 101],
++              ["COPY_PREVIOUS_MONTH", "0001-01", 1],
++              ["CREATE_PRACTICE_BATCH", "0000-01", 1],
++              ["CREATE_PRACTICE_BATCH", "2026-13", 1],
++              ["CREATE_PRACTICE_BATCH", "2026-02", 0],
++              ["OTHER", "2026-02", 1],
++            ] as const) { // リテラル型を保持する型アサーション
++              await rejectedSql(client, sql, [randomUUID(), fixture.clubs[0], operation, month, fixture.memberships[0], count], "23514"); // 実SQLの拒否をSQLSTATEで確認する関数 / UUIDを生成する関数
++            }
++            const request = randomUUID(); // UUIDを生成する関数
++            const values = [request, fixture.clubs[0], "CREATE_PRACTICE_BATCH", "0001-01", fixture.memberships[0], 31];
++            await client.query(sql, values); // SQLを実行するメソッド
++            await rejectedSql(client, sql, values, "23505"); // 実SQLの拒否をSQLSTATEで確認する関数
++            await client.query(`DELETE FROM "ClubMembership" WHERE id=$1`, [fixture.memberships[0]]); // SQLを実行するメソッド
++            const event = await client.query(`SELECT "clubId","createdByMembershipId","updatedByMembershipId" FROM "ClubEvent" WHERE id=$1`, [fixture.events[0]]); // SQLを実行するメソッド
++            expect(event.rows[0]).toEqual({  // 構造と値を比較するメソッド / 期待値を作る関数
++              clubId: fixture.clubs[0],
++              createdByMembershipId: null,
++              updatedByMembershipId: null
++            });
++            const history = await client.query(`SELECT "executedByMembershipId" FROM "ClubEventBatchOperation" WHERE id=$1`, [request]); // SQLを実行するメソッド
++            expect(history.rows[0].executedByMembershipId).toBeNull(); // 履歴参照が解除されたことを確認するメソッド / 期待値を作る関数
++          },
 +        );
 +      },
++      600_000,
 +    );
-+    await expect(runIntegration({ // 期待値生成関数 / ガード付きrunner関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      launch, // 起動代替関数の参照
-+    })).rejects.toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+    expect(existsSync(outputs[0])).toBe(false); // 期待値生成関数 / ファイル存在判定関数 / 結果削除の比較メソッド
 +  },
 +);
-+
-+it("結果未生成・起動失敗・後片付け失敗を成功扱いしない", // 試験を登録する関数
-+  /**
-+   * launch例外と結果ファイル不在でも秘密を出さず、削除失敗も失敗へ伝える。
-+   */
-+  async () => { // ファイル・起動例外のコールバック
-+    for (const fail of [true, false]) {
-+      await expect(runIntegration({ // 期待値生成関数 / ガード付きrunner関数
-+        environment: environment(), // 架空設定生成関数
-+        checkoutDirectory: checkout,
-+        /**
-+         * 子プロセス開始失敗と結果ファイル欠落を再現する。
-+         */
-+        launch:
-+        /**
-+         * 起動失敗またはJSON未生成の子プロセスを再現する。
-+         */
-+        async () => { // 起動境界を置換するコールバック
-+          if (fail) {
-+            throw new Error(PRIVATE); // 起動失敗の架空例外コンストラクター
-+          }
-+        },
-+      })).rejects.toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+    }
-+    boundary.removeFailure = true;
-+    await expect(runIntegration({ // 期待値生成関数 / ガード付きrunner関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      launch: successfulLaunch, // JSON生成だけを行う起動代替関数の参照
-+    })).rejects.toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+  },
-+);
-+
-+it("成功JSONと必須群の対応を直接検証し、F12の実DB群欠落も拒否する", // 試験を登録する関数
-+  /**
-+   * 既存manifestだけでなく、追加済みF12の実接続群も必須にする。
-+   */
-+  () => { // F12群の検証コールバック
-+    expect(assertIntegrationReport(report(), checkout)).toBe(17); // 期待値生成関数 / 結果検証関数 / 架空JSON生成関数 / 件数比較メソッド
-+    const value = report(); // 架空JSONを生成する関数
-+    value.testResults[16].assertionResults[0].ancestorTitles = ["guard only"];
-+    expect( // 期待値を作る関数
-+      /**
-+       * 追加suiteのガードだけ成功した結果を渡す。
-+       */
-+      () => assertIntegrationReport(value, checkout), // 拒否を確認するコールバック / 結果検証関数
-+    ).toThrow(RUN_ERROR); // 固定例外を検証するメソッド
-+  },
-+);
-+
-+it("専用設定は既存aliasを維持し、unitとintegrationを分け、ファイル間を直列にする", // 試験を登録する関数
-+  /**
-+   * 通常コマンドは維持し、明示したPromise.all等のケース内並列は制限しない。
-+   */
-+  () => { // 設定の検証コールバック
-+    boundary.configCheckout = checkout;
-+    for (const [name, value] of Object.entries(environment())) { // 架空設定生成関数 / 変数列挙関数
-+      vi.stubEnv(name, value); // 試験中だけ環境変数を設定する関数
-+    }
-+    if (typeof integrationConfig !== "function") {
-+      throw new Error("Expected config factory"); // 設定型の不一致を検出する例外コンストラクター
-+    }
-+    const config = integrationConfig({ // ガード付き設定を生成する関数
-+      command: "serve",
-+      mode: "test",
-+    });
-+    expect(config).not.toBeInstanceOf(Promise); // 期待値生成関数 / 同期設定であることの検証メソッド / Promiseのコンストラクター
-+    if (config instanceof Promise) { // 非同期設定を除外するPromiseのコンストラクター
-+      throw new Error("Expected synchronous config"); // 設定型の不一致を検出する例外コンストラクター
-+    }
-+    expect(config.resolve).toEqual(baseConfig.resolve); // 期待値生成関数 / alias維持の比較メソッド
-+    expect(config.test?.include).toHaveLength(17); // 期待値生成関数 / suite件数の比較メソッド
-+    expect(config.test?.fileParallelism).toBe(false); // 期待値生成関数 / ファイル間直列の比較メソッド
-+    expect(config.test?.maxWorkers).toBe(1); // 期待値生成関数 / worker件数の比較メソッド
-+    expect(config.test?.pool).toBe("forks"); // 期待値生成関数 / 独立worker設定の比較メソッド
-+    expect(config.test?.passWithNoTests).toBe(false); // 期待値生成関数 / 未発見時失敗の比較メソッド
-+    expect(config.test?.retry).toBe(0); // 期待値生成関数 / 再試行なしの比較メソッド
-+    expect(unitConfig.resolve).toEqual(baseConfig.resolve); // 期待値生成関数 / unitのalias維持の比較メソッド
-+    expect(unitConfig.test?.include).toEqual(baseConfig.test?.include); // 期待値生成関数 / unit対象維持の比較メソッド
-+    expect(unitConfig.test?.exclude).toContain("**/*.integration.{test,spec}.{ts,tsx}"); // 期待値生成関数 / integration除外の検証メソッド
-+    expect(packageJson.scripts.test).toBe("vitest run"); // 期待値生成関数 / 既存testコマンド維持の比較メソッド
-+    expect(packageJson.scripts["test:integration"]).toBe("node --import tsx scripts/test-integration.mjs"); // 期待値生成関数 / 専用コマンドの比較メソッド
-+    vi.stubEnv("RUN_MVP_TESTS", "0"); // 不正flagへ変更する関数
-+    expect( // 拒否の期待値を作る関数
-+      /**
-+       * 設定を直接指定しても、ガードなしで本文が読まれないことを確認する。
-+       */
-+      () => integrationConfig({ // 設定呼出しのコールバック / 設定生成関数
-+        command: "serve",
-+        mode: "test",
-+      }),
-+    ).toThrow(); // ガード拒否を確認するメソッド
-+  },
-+);
-+
-+it.each([0, 1, null])("子プロセスの終了コード%sとsignalを確認する", // 終了状態のパラメーター試験を登録するメソッド
-+  /**
-+   * 実子プロセスを起動せず、Node引数・環境・終了コード伝播を確認する。
-+   */
-+  async (code) => { // 子プロセス終了のコールバック
-+    const child = new EventEmitter(); // 偽の子プロセスイベントを作るコンストラクター
-+    boundary.spawn.mockReturnValue(child); // 起動結果を偽イベントへ置換するメソッド
-+    const pending = launchIntegration({ // 実際の起動・完了待機ロジックを呼ぶ関数
-+      checkoutDirectory: checkout,
-+      outputFile: join(checkout, "results.json"), // 架空の結果パスを作る関数
-+      environment: environment(), // 架空設定生成関数
-+    });
-+    const assertion = code === 0
-+      ? expect(pending).resolves.toBeUndefined() // 期待値生成関数 / 成功完了の検証メソッド
-+      : expect(pending).rejects.toThrow(RUN_ERROR); // 期待値生成関数 / 失敗完了の検証メソッド
-+    child.emit("close", code, code === null ? "SIGTERM" : null); // 子プロセス終了イベントを発行するメソッド
-+    await assertion;
-+    expect(boundary.spawn.mock.calls[0][0]).toBe(process.execPath); // 期待値生成関数 / ローカルNode実行の比較メソッド
-+    expect(boundary.spawn.mock.calls[0][1]).toContain("--reporter=json"); // 期待値生成関数 / JSON reporter指定の検証メソッド
-+    expect(boundary.spawn.mock.calls[0][2].stdio).toBe("ignore"); // 期待値生成関数 / 原文非出力の比較メソッド
-+    expect(boundary.spawn.mock.calls[0][2].shell).toBe(false); // 期待値生成関数 / shell未使用の比較メソッド
-+  },
-+);
-+
-+it.each(["timeout", "SIGINT", "SIGTERM", "error"])( // 停止経路のパラメーター試験を登録するメソッド
-+  "%sは失敗へ伝播し、期限超過・割込みはworker群の停止を待つ",
-+  /**
-+   * fake timerとOS通知のspyを使い、実プロセスへのsignalを送らずに確認する。
-+   */
-+  async (mode) => { // 子プロセス停止のコールバック
-+    vi.useFakeTimers(); // timerを試験用に置換する関数
-+    const child = Object.assign(new EventEmitter(), { // 偽イベント生成コンストラクター / プロセスIDを付ける関数
-+      pid: 12345,
-+    }); // 偽のイベント生成コンストラクター / プロセスIDを付ける関数
-+    boundary.spawn.mockReturnValue(child); // 子プロセスの戻り値を設定するメソッド
-+    const kill = vi.spyOn(process, "kill").mockReturnValue(true); // OS通知を監視する関数 / 本物のsignalを止めるメソッド
-+    const prior = process.listenerCount("SIGTERM"); // 既存の終了監視件数を取得するメソッド
-+    const pending = launchIntegration({ // 起動と終了待機を開始する関数
-+      checkoutDirectory: checkout,
-+      outputFile: join(checkout, "results.json"), // 架空結果のパス結合関数
-+      environment: environment(), // 架空設定生成関数
-+    });
-+    const assertion = expect(pending).rejects.toThrow(RUN_ERROR); // 期待値生成関数 / 停止後の失敗伝播を確認するメソッド
-+    if (mode === "timeout") {
-+      await vi.advanceTimersByTimeAsync(15 * 60_000); // 実行期限まで試験時計を進める関数
-+    } else if (mode === "error") {
-+      child.emit("error", new Error(PRIVATE)); // 起動失敗イベント発行メソッド / 原文非出力用の例外コンストラクター
-+    } else {
-+      process.emit(mode as "SIGINT" | "SIGTERM"); // 割込みイベント発行メソッド / 許可するsignal名の型
-+    }
-+    if (mode !== "error") {
-+      expect(kill).toHaveBeenCalledWith(-12345, "SIGTERM"); // 期待値生成関数 / プロセス群終了要求の検証メソッド
-+      await vi.advanceTimersByTimeAsync(3_000); // 猶予期限まで試験時計を進める関数
-+      expect(kill).toHaveBeenCalledWith(-12345, "SIGKILL"); // 期待値生成関数 / 強制停止要求の検証メソッド
-+    }
-+    child.emit("close", 0, null); // 見かけ上の成功終了イベントを発行するメソッド
-+    await assertion;
-+    expect(vi.getTimerCount()).toBe(0); // 期待値生成関数 / 残存timer取得関数 / 監視解除の比較メソッド
-+    expect(process.listenerCount("SIGTERM")).toBe(prior); // 期待値生成関数 / 監視件数取得メソッド / 監視解除の比較メソッド
-+  },
-+);
-+
-+it("割込み後にleaderが先に終了しても、同じ群のworkerを停止させる", // 試験を登録する関数
-+  /**
-+   * closeが猶予timerより早く届いても、残ったworkerの停止要求を省略しない。
-+   */
-+  async () => { // leader先行終了の検証コールバック
-+    vi.useFakeTimers(); // 実行時計を試験用に置換する関数
-+    const child = Object.assign(new EventEmitter(), { // 偽イベント生成コンストラクター / プロセスIDを付ける関数
-+      pid: 12345,
-+    });
-+    boundary.spawn.mockReturnValue(child); // 起動結果を偽イベントへ向けるメソッド
-+    const kill = vi.spyOn(process, "kill").mockReturnValue(true); // OS通知の監視関数 / 実signalを止めるメソッド
-+    const pending = launchIntegration({ // 子プロセス起動と終了待機を実行する関数
-+      checkoutDirectory: checkout,
-+      outputFile: join(checkout, "results.json"), // 架空結果のパス結合関数
-+      environment: environment(), // 架空設定生成関数
-+    });
-+    const assertion = expect(pending).rejects.toThrow(RUN_ERROR); // 期待値生成関数 / 割込み失敗の検証メソッド
-+    process.emit("SIGTERM"); // 親の終了要求を再現するメソッド
-+    child.emit("close", 0, null); // leaderの早期終了を再現するメソッド
-+    await assertion;
-+    expect(kill).toHaveBeenCalledWith(-12345, "SIGKILL"); // 期待値生成関数 / 残存worker群の停止要求を検証するメソッド
-+    expect(vi.getTimerCount()).toBe(0); // 期待値生成関数 / 残存timer取得関数 / timer解除の比較メソッド
-+  },
-+);
-diff --git a/vitest.integration.config.mts b/vitest.integration.config.mts
-new file mode 100644
-index 0000000000000000000000000000000000000000..5c1aa9702dfa54f78c898b9695e9c21b98829ca0
---- /dev/null
-+++ b/vitest.integration.config.mts
-@@ -0,0 +1,73 @@
-+// vitest.integration.config.mts
-+// 本文の静的importより前に環境を確認し、必須suiteをworker1で直列実行する。
-+
-+import {
-+  randomUUID, // 設定読込時の識別子を作る関数
-+} from "node:crypto";
-+import {
-+  fileURLToPath, // checkoutのパスを解決する関数
-+} from "node:url";
-+import {
-+  configDefaults, // Vitest標準の除外設定
-+  defineConfig, // テスト設定を定義する関数
-+} from "vitest/config";
-+
-+import {
-+  getIntegrationSuites, // 実装済みの必須suite一覧を返す関数
-+} from "./scripts/test-integration.mjs";
-+import {
-+  requireMvpTestEnvironment, // 接続前にflag・URL・checkoutを確認する関数
-+} from "./tests/mvp/environment";
-+import {
-+  assertMvpSuiteManifest, // 既存suiteの実在と重複を確認する関数
-+} from "./tests/mvp/suite-manifest";
-+import base from "./vitest.config.mjs"; // 既存のalias・node環境・除外設定
-+
-+/**
-+ * 専用runnerを経由せず設定を指定した場合も、試験本文を読む前に危険環境を拒否する。
-+ */
-+export default defineConfig( // 遅延評価するテスト設定を定義する関数
-+  /**
-+   * ガードに成功したcheckoutで、実在する必須suiteだけを直列実行する設定を返す。
-+   */
-+  () => { // 環境確認と設定生成のコールバック
-+    const directory = fileURLToPath(new URL("./", import.meta.url)); // checkoutパス変換関数 / URL解析コンストラクター
-+    const configuration = requireMvpTestEnvironment( // 接続前ガード関数
-+      process.env,
-+      directory,
-+      randomUUID().replaceAll("-", ""), // UUID生成関数 / hex識別子への変換メソッド
-+    );
-+    if (
-+      !configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-+      !configuration.variables.SUPABASE_SERVICE_ROLE_KEY
-+    ) {
-+      throw new Error("F12のローカルAuth設定を確認してください。"); // キー原文を含めない例外コンストラクター
-+    }
-+    assertMvpSuiteManifest(configuration.checkoutDirectory); // 既存manifestを検証する関数
-+    return {
-+      ...base,
-+      test: {
-+        ...base.test,
-+        include: getIntegrationSuites().map( // 必須suite一覧取得関数 / 相対パスを抽出するメソッド
-+          /**
-+           * 未実装のF12 suiteや通常unitを追加しない。
-+           */
-+          (suite) => suite.path, // suiteパスを返すコールバック
-+        ),
-+        exclude: [
-+          ...configDefaults.exclude,
-+          ...(base.test?.exclude ?? []),
-+        ],
-+        pool: "forks",
-+        fileParallelism: false,
-+        maxWorkers: 1,
-+        isolate: true,
-+        retry: 0,
-+        passWithNoTests: false,
-+        testTimeout: 60_000,
-+        hookTimeout: 60_000,
-+        teardownTimeout: 10_000,
-+      },
-+    };
-+  },
-+);
-diff --git a/vitest.mvp-unit.config.mts b/vitest.mvp-unit.config.mts
-new file mode 100644
-index 0000000000000000000000000000000000000000..92c3e536baf2bcfeeb861333f6701f0ca4fb1808
---- /dev/null
-+++ b/vitest.mvp-unit.config.mts
-@@ -0,0 +1,24 @@
-+// vitest.mvp-unit.config.mts
-+// 既存設定を再利用し、実DB・実Authを含むファイルはintegration側で一度だけ扱う。
-+
-+import {
-+  configDefaults, // Vitest標準の除外設定
-+  defineConfig, // テスト設定を定義する関数
-+} from "vitest/config";
-+
-+import base from "./vitest.config.mjs"; // 既存のalias・node環境・対象パス設定
-+
-+/**
-+ * 既存のunit対象とaliasを維持し、integration名のファイルだけを除外する。
-+ */
-+export default defineConfig({ // unit専用の設定を定義する関数
-+  ...base,
-+  test: {
-+    ...base.test,
-+    exclude: [
-+      ...configDefaults.exclude,
-+      ...(base.test?.exclude ?? []),
-+      "**/*.integration.{test,spec}.{ts,tsx}",
-+    ],
-+  },
-+});
