@@ -1,55 +1,31 @@
-diff --git a/tests/mvp/content-actions.test.ts b/tests/mvp/content-actions.test.ts
+diff --git a/tests/mvp/attachment-routes.test.ts b/tests/mvp/attachment-routes.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b3060073d5b3d96
+index 0000000000000000000000000000000000000000..6ca07303b0d65df5c6b4731f81d8ad9302b778f9
 --- /dev/null
-+++ b/tests/mvp/content-actions.test.ts
-@@ -0,0 +1,693 @@
-+// tests/mvp/content-actions.test.ts
-+// Auth・Next・DB入出力だけを置換し、実認可・実Action・実Repositoryを通す。
++++ b/tests/mvp/attachment-routes.test.ts
+@@ -0,0 +1,386 @@
++// tests/mvp/attachment-routes.test.ts
++// 4つの実GET・認可・Repositoryを通し、拒否時は署名URLを発行しないことを確認する。
 +
 +import {
-+  beforeEach, // ケースごとの独立した初期状態を登録する関数
 +  afterEach, // ケース終了時の後片付けと検証を登録する関数
++  beforeEach, // ケースごとの独立した初期状態を登録する関数
 +  expect, // 期待値を検証する関数
 +  it, // 試験ケースを登録する関数
 +  vi, // 外部入出力を監視または置換するAPI
 +} from "vitest";
 +import {
-+  createClubEventAction, // 管理権限を再確認してイベントを新規作成するAction
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/new/actions";
++  GET as memberEvent, // 会員用イベント添付の実GETを呼ぶ関数
++} from "@/app/(club-app)/club/[clubSlug]/attachments/event/[attachmentId]/route";
 +import {
-+  updateClubEventAction, // 管理権限と対象クラブを再確認してイベントを編集するAction
-+  retryClubEventLineDeliveryAction, // イベントのLINE通知を再送依頼する管理Action
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/actions";
++  GET as adminEvent, // 管理者用イベント添付の実GETを呼ぶ関数
++} from "@/app/(club-app)/club/[clubSlug]/admin/attachments/event/[attachmentId]/route";
 +import {
-+  deleteClubEventAction, // 管理権限を再確認してイベントを削除するAction
-+} from "@/app/(club-app)/club/[clubSlug]/admin/events/actions";
++  GET as memberNotice, // 会員用お知らせ添付の実GETを呼ぶ関数
++} from "@/app/(club-app)/club/[clubSlug]/attachments/notice/[attachmentId]/route";
 +import {
-+  createClubNoticeAction, // 管理権限を再確認してお知らせを新規作成するAction
-+} from "@/app/(club-app)/club/[clubSlug]/admin/notice/new/actions";
-+import {
-+  updateClubNoticeAction, // 管理権限と対象クラブを再確認してお知らせを編集するAction
-+  retryClubNoticeLineDeliveryAction, // お知らせのLINE通知を再送依頼する管理Action
-+} from "@/app/(club-app)/club/[clubSlug]/admin/notice/[noticeId]/edit/actions";
-+import {
-+  deleteClubNoticeAction, // 管理権限を再確認してお知らせを削除するAction
-+} from "@/app/(club-app)/club/[clubSlug]/admin/notice/actions";
-+import {
-+  markClubEventReadAction, // 公開対象を再取得して本人のイベント既読を更新するAction
-+  saveClubEventMemoAction, // 公開対象を再取得して本人のメモを保存または削除するAction
-+} from "@/app/(club-app)/club/[clubSlug]/events/[eventId]/actions";
-+import type {
-+  ClubEventMemoActionState, // 本人メモの入力・エラー・保存結果を表すAction state型
-+} from "@/app/(club-app)/club/[clubSlug]/events/[eventId]/actions";
-+import {
-+  markClubNoticeReadAction, // 公開対象を再取得して本人のお知らせ既読を更新するAction
-+} from "@/app/(club-app)/club/[clubSlug]/notice/[noticeId]/actions";
-+import {
-+  buildClubEventFormValues, // 送信イベント入力を検証前のフォーム値へ整形する関数
-+} from "@/domain/club/event/event-form";
-+import {
-+  buildClubNoticeFormValues, // 送信お知らせ入力を検証前のフォーム値へ整形する関数
-+} from "@/domain/club/notice/notice-form";
++  GET as adminNotice, // 管理者用お知らせ添付の実GETを呼ぶ関数
++} from "@/app/(club-app)/club/[clubSlug]/admin/attachments/notice/[attachmentId]/route";
 +
 +const boundary = vi.hoisted( // importより前に境界の状態を用意する関数
 +  /**
@@ -58,21 +34,30 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +  () => ({ // 境界の置換またはケース検証のコールバック
 +    auth: vi.fn(), // 呼出しを記録するmockを作る関数
 +    membership: vi.fn(), // 呼出しを記録するmockを作る関数
-+    event: vi.fn(), // 呼出しを記録するmockを作る関数
-+    notice: vi.fn(), // 呼出しを記録するmockを作る関数
-+    eventRead: vi.fn(), // 呼出しを記録するmockを作る関数
-+    noticeRead: vi.fn(), // 呼出しを記録するmockを作る関数
-+    memoSave: vi.fn(), // 呼出しを記録するmockを作る関数
-+    memoDelete: vi.fn(), // 呼出しを記録するmockを作る関数
-+    eventDelete: vi.fn(), // 呼出しを記録するmockを作る関数
-+    noticeDelete: vi.fn(), // 呼出しを記録するmockを作る関数
-+    eventAttachments: vi.fn(), // 呼出しを記録するmockを作る関数
-+    noticeAttachments: vi.fn(), // 呼出しを記録するmockを作る関数
-+    transaction: vi.fn(), // 呼出しを記録するmockを作る関数
-+    revalidate: vi.fn(), // 呼出しを記録するmockを作る関数
-+    after: vi.fn(), // 呼出しを記録するmockを作る関数
-+    external: vi.fn(), // 呼出しを記録するmockを作る関数
++    eventAttachment: vi.fn(), // 呼出しを記録するmockを作る関数
++    noticeAttachment: vi.fn(), // 呼出しを記録するmockを作る関数
++    sign: vi.fn(), // 呼出しを記録するmockを作る関数
++    forbidden: vi.fn(), // 呼出しを記録するmockを作る関数
 +    notFound: new Error("NEXT_NOT_FOUND"), // 例外を作るコンストラクター
++    redirect: new Error("NEXT_LOGIN_REDIRECT"), // 例外を作るコンストラクター
++  }),
++);
++vi.mock("@/src/infrastructure/prisma/client", // 外部入出力のモジュールを置き換える関数
++  /**
++   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
++   */
++  () => ({ // 境界の置換またはケース検証のコールバック
++    prisma: {
++      clubMembership: {
++        findFirst: boundary.membership, // 外部入出力を記録するmock関数を参照する
++      },
++      clubEventAttachment: {
++        findFirst: boundary.eventAttachment, // 外部入出力を記録するmock関数を参照する
++      },
++      clubNoticeAttachment: {
++        findFirst: boundary.noticeAttachment, // 外部入出力を記録するmock関数を参照する
++      },
++    },
 +  }),
 +);
 +vi.mock("@/src/infrastructure/supabase/server", // 外部入出力のモジュールを置き換える関数
@@ -90,41 +75,12 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +    }),
 +  }),
 +);
-+vi.mock("@/src/infrastructure/prisma/client", // 外部入出力のモジュールを置き換える関数
++vi.mock("@/src/infrastructure/storage/club-content-attachment-storage", // 外部入出力のモジュールを置き換える関数
 +  /**
 +   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
 +   */
 +  () => ({ // 境界の置換またはケース検証のコールバック
-+    prisma: {
-+      clubMembership: {
-+        findFirst: boundary.membership, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubEvent: {
-+        findFirst: boundary.event, // 外部入出力を記録するmock関数を参照する
-+        deleteMany: boundary.eventDelete, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubNotice: {
-+        findFirst: boundary.notice, // 外部入出力を記録するmock関数を参照する
-+        deleteMany: boundary.noticeDelete, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubEventRead: {
-+        upsert: boundary.eventRead, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubNoticeRead: {
-+        upsert: boundary.noticeRead, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubEventMemo: {
-+        upsert: boundary.memoSave, // 外部入出力を記録するmock関数を参照する
-+        deleteMany: boundary.memoDelete, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubEventAttachment: {
-+        findMany: boundary.eventAttachments, // 外部入出力を記録するmock関数を参照する
-+      },
-+      clubNoticeAttachment: {
-+        findMany: boundary.noticeAttachments, // 外部入出力を記録するmock関数を参照する
-+      },
-+      $transaction: boundary.transaction, // 外部入出力を記録するmock関数を参照する
-+    },
++    createClubAttachmentSignedUrl: boundary.sign, // 外部入出力を記録するmock関数を参照する
 +  }),
 +);
 +vi.mock("next/navigation", // 外部入出力のモジュールを置き換える関数
@@ -141,25 +97,9 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +    /**
 +     * 遷移先を含むNextのredirect制御例外を再現する。
 +     */
-+    redirect: (url: string) => { // 境界の置換またはケース検証のコールバック / 文字列型
-+      throw new Error(`NEXT_REDIRECT:${url}`); // 例外を作るコンストラクター
++    redirect: () => { // 境界の置換またはケース検証のコールバック
++      throw boundary.redirect;
 +    },
-+  }),
-+);
-+vi.mock("next/cache", // 外部入出力のモジュールを置き換える関数
-+  /**
-+   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
-+   */
-+  () => ({ // 境界の置換またはケース検証のコールバック
-+    revalidatePath: boundary.revalidate, // 外部入出力を記録するmock関数を参照する
-+  }),
-+);
-+vi.mock("next/server", // 外部入出力のモジュールを置き換える関数
-+  /**
-+   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
-+   */
-+  () => ({ // 境界の置換またはケース検証のコールバック
-+    after: boundary.after, // 外部入出力を記録するmock関数を参照する
 +  }),
 +);
 +vi.mock("dotenv/config", // 外部入出力のモジュールを置き換える関数
@@ -167,118 +107,54 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
 +   */
 +  () => { // 境界の置換またはケース検証のコールバック
-+    boundary.external(); // 外部入出力の呼出しを記録するmock関数 / 外部入出力を記録するmock関数を参照する
++    boundary.forbidden(); // 外部入出力の呼出しを記録するmock関数 / 外部入出力を記録するmock関数を参照する
 +    throw new Error("Unexpected dotenv initialization"); // 例外を作るコンストラクター
 +  },
 +);
-+vi.mock("@supabase/supabase-js", // 外部入出力のモジュールを置き換える関数
-+  /**
-+   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
-+   */
-+  () => ({ // 境界の置換またはケース検証のコールバック
-+    /**
-+     * 予期しない外部SDKの初期化を、通信する前に拒否する。
-+     */
-+    createClient: () => { // 境界の置換またはケース検証のコールバック
-+      boundary.external(); // 外部入出力の呼出しを記録するmock関数 / 外部入出力を記録するmock関数を参照する
-+      throw new Error("Unexpected external SDK initialization"); // 例外を作るコンストラクター
-+    },
-+  }),
-+);
 +
-+const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 +const CLUB_A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-+const CLUB_B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-+const MEMBERSHIP_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
-+const MEMBERSHIP_B = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
-+const USER_A = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
-+const EVENT_A = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-+const NOTICE_A = "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
-+const FOREIGN_ID = "33333333-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-+const PRIVATE = "FAKE_PRIVATE_CONTENT_NEVER_LOG";
-+const OLD = new Date("2026-03-01T00:00:00.000Z"); // 日時を表す組込み型・コンストラクター
-+const CURRENT = new Date("2026-03-02T00:00:00.000Z"); // 日時を表す組込み型・コンストラクター
++const MEMBER_A = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
++const USER_A = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
++const ATTACHMENT_A = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
++const ATTACHMENT_B = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
++const PRIVATE = "FAKE_B_CONTENT_NEVER_RETURN";
++const PATH = `clubs/${CLUB_A}/events/${PRIVATE}/fixture.pdf`;
++const SIGNED = `http://127.0.0.1:54321/storage/v1/object/sign/${PRIVATE}?token=FAKE_SIGNATURE`;
++const ROUTES = ["member-event", "admin-event", "member-notice", "admin-notice"] as const; // リテラル型を保持するconstアサーション
 +
 +/**
-+ * 実認可が読むクラブ所属の戻り値を、ロールごとに用意する。
++ * 存在する4つのGETから、ケースが指定するRouteを選ぶ。
 + */
-+function membership(role: "MEMBER" | "OWNER" = "MEMBER") { // 実認可へ返すロール別の所属情報を作る関数
-+  return {
-+    id: MEMBERSHIP_A,
-+    role,
-+    club: {
-+      id: CLUB_A,
-+      name: "架空のAクラブ",
-+      slug: "fixture-a",
-+      timezone: "Asia/Tokyo",
-+      planType: "STANDARD" as const, // リテラル型を保持するconstアサーション
-+    },
-+  };
-+}
-+
-+/**
-+ * membershipId・clubIdを改ざんしたフォームでも、認可contextが優先されるか調べる。
-+ */
-+function form(content = PRIVATE): FormData { // 他クラブと他人のhidden IDを含むフォームを作る関数 / 送信フォームを表す組込み型・コンストラクター
-+  const data = new FormData(); // 送信フォームを表す組込み型・コンストラクター
-+  data.set("requestId", REQUEST_ID); // 送信フォームに値を設定するメソッド
-+  data.set("clubId", CLUB_B); // 送信フォームに値を設定するメソッド
-+  data.set("membershipId", MEMBERSHIP_B); // 送信フォームに値を設定するメソッド
-+  data.set("content", content); // 送信フォームに値を設定するメソッド
-+  return data;
-+}
-+
-+/**
-+ * 保存対象の本人メモだけを持つ初期stateを作る。
-+ */
-+function memoState(): ClubEventMemoActionState { // 本人メモの初期Action stateを作る関数 / 本人メモの入力・エラー・保存結果を表すAction state型
-+  return {
-+    status: "idle",
-+    values: {
-+      content: "",
-+    },
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: REQUEST_ID,
-+  };
-+}
-+
-+/**
-+ * 実詳細Repositoryが返す公開対象の既読情報をDB境界へ設定する。
-+ */
-+function visible(readRequiredAt: Date | null = CURRENT, readAt: Date | null = null) { // 公開対象の既読情報をDB境界へ返す関数 / 日時を表す組込み型・コンストラクター
-+  return {
-+    id: EVENT_A,
-+    readRequiredAt,
-+    reads: readAt ? [{
-+      readAt,
-+    }] : [],
-+  };
-+}
-+
-+/**
-+ * contentへの書込みやtransaction開始が一切なかったことを確認する。
-+ */
-+function noWrites(): void { // content書込み・再検証・後続処理がないことを確認する関数 / 戻り値を使わない型
-+  for (const write of [
-+    boundary.eventRead, // 外部入出力を記録するmock関数を参照する
-+    boundary.noticeRead, // 外部入出力を記録するmock関数を参照する
-+    boundary.memoSave, // 外部入出力を記録するmock関数を参照する
-+    boundary.memoDelete, // 外部入出力を記録するmock関数を参照する
-+    boundary.eventDelete, // 外部入出力を記録するmock関数を参照する
-+    boundary.noticeDelete, // 外部入出力を記録するmock関数を参照する
-+    boundary.transaction, // 外部入出力を記録するmock関数を参照する
-+  ]) {
-+    expect(write).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 書込み境界のmock関数
++function route(name: typeof ROUTES[number]) { // 指定された4つの実GETから対象Routeを選ぶ関数 / 値の宣言から型を取得する型 / 数値型
++  switch (name) {
++    case "member-event":
++      return memberEvent; // 会員用イベント添付の実GET関数
++    case "admin-event":
++      return adminEvent; // 管理者用イベント添付の実GET関数
++    case "member-notice":
++      return memberNotice; // 会員用お知らせ添付の実GET関数
++    case "admin-notice":
++      return adminNotice; // 管理者用お知らせ添付の実GET関数
 +  }
-+  expect(boundary.revalidate).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+  expect(boundary.after).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +}
 +
 +/**
-+ * 認証本人とACTIVE・slug付き所属を毎回再取得したことを確認する。
++ * hidden値やqueryに関係なく、Promise paramsを受け取る実GETを呼ぶ。
 + */
-+function checkedIdentity(): void { // 認証本人とACTIVE所属の再取得を照合する関数 / 戻り値を使わない型
++function invoke(name: typeof ROUTES[number], attachmentId = ATTACHMENT_A, clubSlug = "fixture-a") { // Promise paramsと改ざんqueryで実GETを直接呼ぶ関数 / 値の宣言から型を取得する型 / 数値型
++  const request = new Request(`http://127.0.0.1:3000/fixture?clubId=forged-b&storagePath=${PRIVATE}`); // HTTP要求を表す組込み型・コンストラクター
++  return route(name)(request, { // 指定された4つの実GETから対象Routeを選ぶ関数 / 選択した実GETを呼び出す
++    params: Promise.resolve({ // Promise paramsを生成する標準関数
++      clubSlug,
++      attachmentId,
++    }),
++  });
++}
++
++/**
++ * 実認可が読む本人・ACTIVE所属・対象slugの絞込みを検証する。
++ */
++function checkedIdentity(slug = "fixture-a"): void { // Auth本人とACTIVE所属・clubSlugの再取得を照合する関数 / 戻り値を使わない型
 +  expect(boundary.auth).toHaveBeenCalledTimes(1); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +  expect(boundary.membership).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +    where: {
@@ -286,12 +162,22 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +      status: "ACTIVE",
 +      club: {
 +        is: {
-+          slug: "fixture-a",
++          slug,
 +        },
 +      },
 +    },
 +    select: expect.any(Object), // コンストラクターに対応する値を照合するmatcher / 標準オブジェクトのコンストラクター
 +  });
++}
++
++/**
++ * 拒否応答には保存先・署名・他クラブ本文を含めず、署名呼出しもないことを確認する。
++ */
++async function denied(response: Response): Promise<void> { // 404応答が保存先や署名を返さず、署名呼出しもないことを確認する関数 / HTTP応答を表す組込み型 / 非同期結果の型・標準API / 戻り値を使わない型
++  expect(response.status).toBe(404); // 値の一致を検証するメソッド / 期待値を検証する関数
++  expect(response.headers.get("location")).toBeNull(); // nullかどうかを検証するメソッド / 期待値を検証する関数 / HTTP headerまたはフォームの値を取得するメソッド
++  expect(await response.text()).toBe("Not Found"); // 値の一致を検証するメソッド / 期待値を検証する関数 / HTTP応答本文を文字列で取得するメソッド
++  expect(boundary.sign).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +}
 +
 +beforeEach( // ケースごとの独立した初期状態を登録する関数
@@ -308,40 +194,24 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +      },
 +      error: null,
 +    });
-+    boundary.membership.mockResolvedValue(membership()); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する / 実認可へ返すロール別の所属情報を作る関数
-+    boundary.event.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.notice.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.eventRead.mockResolvedValue({}); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.noticeRead.mockResolvedValue({}); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.memoSave.mockResolvedValue({}); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.memoDelete.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+      count: 1,
-+    });
-+    boundary.eventAttachments.mockResolvedValue([]); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.noticeAttachments.mockResolvedValue([]); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    boundary.eventDelete.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+      count: 0,
-+    });
-+    boundary.noticeDelete.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+      count: 0,
-+    });
-+    boundary.transaction.mockImplementation( // 境界の動作を置き換えるメソッド / 外部入出力を記録するmock関数を参照する
-+      /**
-+       * 外部入出力を試験用に置き換え、実通信や実出力を行わない。
-+       */
-+      async (operation: (client: unknown) => Promise<unknown>) => { // 境界の置換またはケース検証のコールバック / 未確定値の型 / 非同期結果の型・標準API
-+        const { prisma } = await import("@/src/infrastructure/prisma/client"); // ガード後に対象モジュールを遅延読込みする関数
-+        return operation(prisma); // 受け取った検証処理を実行する関数
++    boundary.membership.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++      id: MEMBER_A,
++      role: "OWNER",
++      club: {
++        id: CLUB_A,
++        name: "架空のAクラブ",
++        slug: "fixture-a",
++        timezone: "Asia/Tokyo",
++        planType: "STANDARD",
 +      },
-+    );
-+    for (const name of ["log", "warn", "error"] as const) { // リテラル型を保持するconstアサーション
-+      vi.spyOn(console, name).mockImplementation( // 境界の動作を置き換えるメソッド / 外部出力の呼出しを監視する関数
-+        /**
-+         * 外部入出力を試験用に置き換え、実通信や実出力を行わない。
-+         */
-+        () => undefined, // 境界の置換またはケース検証のコールバック
-+      );
-+    }
++    });
++    boundary.eventAttachment.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++      storagePath: PATH,
++    });
++    boundary.noticeAttachment.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++      storagePath: PATH,
++    });
++    boundary.sign.mockResolvedValue(SIGNED); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
 +    vi.spyOn(globalThis, "fetch").mockImplementation( // 境界の動作を置き換えるメソッド / 外部出力の呼出しを監視する関数
 +      /**
 +       * 外部入出力を試験用に置き換え、実通信や実出力を行わない。
@@ -350,6 +220,14 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +        throw new Error("Unexpected network request"); // 例外を作るコンストラクター
 +      },
 +    );
++    for (const method of ["log", "warn", "error"] as const) { // リテラル型を保持するconstアサーション
++      vi.spyOn(console, method).mockImplementation( // 境界の動作を置き換えるメソッド / 外部出力の呼出しを監視する関数
++        /**
++         * 外部入出力を試験用に置き換え、実通信や実出力を行わない。
++         */
++        () => undefined, // 境界の置換またはケース検証のコールバック
++      );
++    }
 +  },
 +);
 +afterEach( // ケース終了時の後片付けと検証を登録する関数
@@ -358,353 +236,168 @@ index 0000000000000000000000000000000000000000..585c905e7068a394662598df2b306007
 +   */
 +  () => { // 境界の置換またはケース検証のコールバック
 +    try {
-+      expect(boundary.external).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+      expect(globalThis.fetch).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数
-+      expect(console.log).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数
-+      expect(console.warn).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数
-+      expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数
-+      expect(boundary.after).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++      expect(boundary.forbidden).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++      expect(globalThis.fetch).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / HTTP通信関数の参照
++      expect(console.log).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
++      expect(console.warn).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
++      expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
 +    } finally {
 +      vi.restoreAllMocks(); // consoleとfetchの監視を元に戻す関数
 +    }
 +  },
 +);
 +
-+/**
-+ * 作成・編集・削除・通知再送Actionを同じMEMBER認可で直接呼ぶ。
-+ */
-+async function adminAction(name: string, data: FormData): Promise<unknown> { // 指定した実管理Actionを直接呼び出す関数 / 文字列型 / 送信フォームを表す組込み型・コンストラクター / 非同期結果の型・標準API / 未確定値の型
-+  const eventState = {
-+    status: "idle" as const, // リテラル型を保持するconstアサーション
-+    values: buildClubEventFormValues(data), // 送信イベント入力を検証前のフォーム値へ整形する関数
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: REQUEST_ID,
-+  };
-+  const noticeState = {
-+    status: "idle" as const, // リテラル型を保持するconstアサーション
-+    values: buildClubNoticeFormValues(data), // 送信お知らせ入力を検証前のフォーム値へ整形する関数
-+    fieldErrors: {},
-+    formError: null,
-+    requestId: REQUEST_ID,
-+  };
-+  switch (name) {
-+    case "event.create":
-+      return createClubEventAction("fixture-a", eventState, data); // 管理権限を再確認してイベントを新規作成するAction
-+    case "event.update":
-+      return updateClubEventAction("fixture-a", FOREIGN_ID, eventState, data); // 管理権限と対象クラブを再確認してイベントを編集するAction
-+    case "event.delete":
-+      return deleteClubEventAction("fixture-a", FOREIGN_ID, REQUEST_ID, data); // 管理権限を再確認してイベントを削除するAction
-+    case "event.retry":
-+      return retryClubEventLineDeliveryAction("fixture-a", FOREIGN_ID, FOREIGN_ID, REQUEST_ID, data); // イベントのLINE通知を再送依頼する管理Action
-+    case "notice.create":
-+      return createClubNoticeAction("fixture-a", noticeState, data); // 管理権限を再確認してお知らせを新規作成するAction
-+    case "notice.update":
-+      return updateClubNoticeAction("fixture-a", FOREIGN_ID, noticeState, data); // 管理権限と対象クラブを再確認してお知らせを編集するAction
-+    case "notice.delete":
-+      return deleteClubNoticeAction("fixture-a", FOREIGN_ID, REQUEST_ID, data); // 管理権限を再確認してお知らせを削除するAction
-+    case "notice.retry":
-+      return retryClubNoticeLineDeliveryAction("fixture-a", FOREIGN_ID, FOREIGN_ID, REQUEST_ID, data); // お知らせのLINE通知を再送依頼する管理Action
-+    default:
-+      throw new Error("Unknown test case"); // 例外を作るコンストラクター
-+  }
-+}
-+
-+it.each([ // 入力別にケースを登録するメソッド
-+  "event.create",
-+  "event.update",
-+  "event.delete",
-+  "event.retry",
-+  "notice.create",
-+  "notice.update",
-+  "notice.delete",
-+  "notice.retry",
-+])("MEMBERが管理Action %sを直接呼んでも実認可が拒否する",
++it.each(ROUTES)("%sの許可GETはA scopeを再取得し、保存先を本文へ出さず署名先へ遷移する", // 入力別にケースを登録するメソッド
 +  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++   * このケースの境界処理または検証処理を実行する。
 +   */
 +  async (name) => { // 境界の置換またはケース検証のコールバック
-+    await expect(adminAction(name, form())).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / 指定した実管理Actionを直接呼び出す関数 / 他クラブと他人のhidden IDを含むフォームを作る関数
-+    checkedIdentity(); // 認証本人とACTIVE所属の再取得を照合する関数
-+    expect(boundary.event).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    expect(boundary.notice).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    noWrites(); // content書込み・再検証・後続処理がないことを確認する関数
++    const response = await invoke(name); // Promise paramsと改ざんqueryで実GETを直接呼ぶ関数
++    checkedIdentity(); // Auth本人とACTIVE所属・clubSlugの再取得を照合する関数
++    const query = name.endsWith("event") ? boundary.eventAttachment : boundary.noticeAttachment; // Routeがイベント側か確認するメソッド / 外部入出力を記録するmock関数を参照する
++    const parent = name.endsWith("event") ? "event" : "notice"; // Routeがイベント側か確認するメソッド
++    expect(query).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数
++      where: {
++        id: ATTACHMENT_A,
++        clubId: CLUB_A,
++        ...(name.startsWith("member") ? { // 名前または所有prefixの一致を検証するメソッド
++          [parent]: {
++            clubId: CLUB_A,
++            status: "PUBLISHED",
++            firstPublishedAt: {
++              not: null,
++            },
++            targetRoles: {
++              has: "OWNER",
++            },
++          },
++        } : {}),
++      },
++      select: {
++        storagePath: true,
++      },
++    });
++    expect(boundary.sign).toHaveBeenCalledExactlyOnceWith(PATH); // 呼出し1回と引数の完全一致を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(query.mock.invocationCallOrder[0]).toBeLessThan(boundary.sign.mock.invocationCallOrder[0]); // 添付取得が署名より先であることを検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(response.status).toBe(307); // 値の一致を検証するメソッド / 期待値を検証する関数
++    expect(response.headers.get("location")).toBe(SIGNED); // 値の一致を検証するメソッド / 期待値を検証する関数 / HTTP headerまたはフォームの値を取得するメソッド
++    expect(await response.text()).toBe(""); // 値の一致を検証するメソッド / 期待値を検証する関数 / HTTP応答本文を文字列で取得するメソッド
 +  },
 +);
 +
-+it.each(["event", "notice"] as const)("%sの既読更新は公開対象の再取得後に本人scopeだけを書き込む", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
++it.each(ROUTES)("%sで他クラブattachmentIdが取得できなければ404で署名しない", // 入力別にケースを登録するメソッド
 +  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++   * このケースの境界処理または検証処理を実行する。
 +   */
-+  async (kind) => { // 境界の置換またはケース検証のコールバック
-+    const isEvent = kind === "event";
-+    const id = isEvent ? EVENT_A : NOTICE_A;
-+    const find = isEvent ? boundary.event : boundary.notice; // 外部入出力を記録するmock関数を参照する
-+    const write = isEvent ? boundary.eventRead : boundary.noticeRead; // 外部入出力を記録するmock関数を参照する
-+    find.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 対象contentの取得関数・mock関数
-+      ...visible(), // 公開対象の既読情報をDB境界へ返す関数
-+      id,
-+    });
-+    if (isEvent) {
-+      expect(await markClubEventReadAction("fixture-a", id)).toEqual({ // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のイベント既読を更新するAction
-+        status: "MARKED",
-+      });
-+    } else {
-+      await markClubNoticeReadAction("fixture-a", id); // 公開対象を再取得して本人のお知らせ既読を更新するAction
-+    }
-+    checkedIdentity(); // 認証本人とACTIVE所属の再取得を照合する関数
-+    expect(find).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 対象contentの取得関数・mock関数
-+      where: {
-+        id,
++  async (name) => { // 境界の置換またはケース検証のコールバック
++    boundary.eventAttachment.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++    boundary.noticeAttachment.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++    await denied(await invoke(name, ATTACHMENT_B)); // 404応答が保存先や署名を返さず、署名呼出しもないことを確認する関数 / Promise paramsと改ざんqueryで実GETを直接呼ぶ関数
++    checkedIdentity(); // Auth本人とACTIVE所属・clubSlugの再取得を照合する関数
++    const query = name.endsWith("event") ? boundary.eventAttachment : boundary.noticeAttachment; // Routeがイベント側か確認するメソッド / 外部入出力を記録するmock関数を参照する
++    expect(query).toHaveBeenCalledWith(expect.objectContaining({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 指定した安全条件を含むか照合するmatcher
++      where: expect.objectContaining({ // 指定した安全条件を含むか照合するmatcher
++        id: ATTACHMENT_B,
 +        clubId: CLUB_A,
-+        status: "PUBLISHED",
-+        ...(isEvent ? {} : {
++      }),
++    }));
++  },
++);
++
++it.each(["member-event", "member-notice"] as const)("%sでDRAFT・対象外role・初回公開前は公開条件で拒否する", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
++  /**
++   * このケースの境界処理または検証処理を実行する。
++   */
++  async (name) => { // 境界の置換またはケース検証のコールバック
++    boundary.eventAttachment.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++    boundary.noticeAttachment.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++    await denied(await invoke(name)); // 404応答が保存先や署名を返さず、署名呼出しもないことを確認する関数 / Promise paramsと改ざんqueryで実GETを直接呼ぶ関数
++    const query = name === "member-event" ? boundary.eventAttachment : boundary.noticeAttachment; // 外部入出力を記録するmock関数を参照する
++    const parent = name === "member-event" ? "event" : "notice";
++    expect(query).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数
++      where: {
++        id: ATTACHMENT_A,
++        clubId: CLUB_A,
++        [parent]: {
++          clubId: CLUB_A,
++          status: "PUBLISHED",
 +          firstPublishedAt: {
 +            not: null,
 +          },
-+        }),
-+        targetRoles: {
-+          has: "MEMBER",
++          targetRoles: {
++            has: "OWNER",
++          },
 +        },
 +      },
-+      select: expect.objectContaining({ // 指定した安全条件を含むか照合するmatcher
-+        reads: {
-+          where: {
-+            clubId: CLUB_A,
-+            membershipId: MEMBERSHIP_A,
-+          },
-+          select: {
-+            readAt: true,
-+          },
-+          take: 1,
-+        },
-+      }),
-+    });
-+    expect(write).toHaveBeenCalledTimes(1); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 書込み境界のmock関数
-+    expect(write).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 書込み境界のmock関数
-+      where: {
-+        [isEvent ? "clubId_eventId_membershipId" : "clubId_noticeId_membershipId"]: {
-+          clubId: CLUB_A,
-+          [isEvent ? "eventId" : "noticeId"]: id,
-+          membershipId: MEMBERSHIP_A,
-+        },
-+      },
-+      create: {
-+        clubId: CLUB_A,
-+        [isEvent ? "eventId" : "noticeId"]: id,
-+        membershipId: MEMBERSHIP_A,
-+        readAt: expect.any(Date), // コンストラクターに対応する値を照合するmatcher / 日時を表す組込み型・コンストラクター
-+      },
-+      update: {
-+        readAt: expect.any(Date), // コンストラクターに対応する値を照合するmatcher / 日時を表す組込み型・コンストラクター
++      select: {
++        storagePath: true,
 +      },
 +    });
-+    expect(find.mock.invocationCallOrder[0]).toBeLessThan(write.mock.invocationCallOrder[0]); // 取得が書込みより先であることを検証するメソッド / 期待値を検証する関数 / 対象contentの取得関数・mock関数 / 書込み境界のmock関数
-+    expect(boundary.revalidate).toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +  },
 +);
 +
-+it.each(["event", "notice"] as const)("%sで不存在・他クラブ・下書き・対象外を再取得できなければ既読を更新しない", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
++it.each(["admin-event", "admin-notice"] as const)("MEMBERが%sを直接呼ぶと添付取得と署名より先に実認可が拒否する", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
 +  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+   */
-+  async (kind) => { // 境界の置換またはケース検証のコールバック
-+    if (kind === "event") {
-+      expect(await markClubEventReadAction("fixture-a", FOREIGN_ID)).toEqual({ // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のイベント既読を更新するAction
-+        status: "SKIPPED",
-+      });
-+    } else {
-+      await markClubNoticeReadAction("fixture-a", FOREIGN_ID); // 公開対象を再取得して本人のお知らせ既読を更新するAction
-+    }
-+    checkedIdentity(); // 認証本人とACTIVE所属の再取得を照合する関数
-+    const find = kind === "event" ? boundary.event : boundary.notice; // 外部入出力を記録するmock関数を参照する
-+    expect(find).toHaveBeenCalledWith(expect.objectContaining({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 対象contentの取得関数・mock関数 / 指定した安全条件を含むか照合するmatcher
-+      where: expect.objectContaining({ // 指定した安全条件を含むか照合するmatcher
-+        id: FOREIGN_ID,
-+        clubId: CLUB_A,
-+        status: "PUBLISHED",
-+        targetRoles: {
-+          has: "MEMBER",
-+        },
-+      }),
-+    }));
-+    noWrites(); // content書込み・再検証・後続処理がないことを確認する関数
-+  },
-+);
-+
-+it.each([ // 入力別にケースを登録するメソッド
-+  ["OFF", null, null],
-+  ["同時刻で既読", CURRENT, CURRENT],
-+  ["基準より後の既読", OLD, CURRENT],
-+] as const)("未読%sではevent・noticeの既読時刻と再検証を変更しない", // リテラル型を保持するconstアサーション
-+  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+   */
-+  async (_label, required, read) => { // 境界の置換またはケース検証のコールバック
-+    boundary.event.mockResolvedValue(visible(required, read)); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する / 公開対象の既読情報をDB境界へ返す関数
-+    boundary.notice.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+      ...visible(required, read), // 公開対象の既読情報をDB境界へ返す関数
-+      id: NOTICE_A,
-+    });
-+    expect(await markClubEventReadAction("fixture-a", EVENT_A)).toEqual({ // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のイベント既読を更新するAction
-+      status: "SKIPPED",
-+    });
-+    await markClubNoticeReadAction("fixture-a", NOTICE_A); // 公開対象を再取得して本人のお知らせ既読を更新するAction
-+    noWrites(); // content書込み・再検証・後続処理がないことを確認する関数
-+  },
-+);
-+
-+it.each(["event", "notice"] as const)("%sの基準日時が既読より新しくなれば再度既読を保存する", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
-+  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+   */
-+  async (kind) => { // 境界の置換またはケース検証のコールバック
-+    if (kind === "event") {
-+      boundary.event.mockResolvedValue(visible(CURRENT, OLD)); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する / 公開対象の既読情報をDB境界へ返す関数
-+      expect(await markClubEventReadAction("fixture-a", EVENT_A)).toEqual({ // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のイベント既読を更新するAction
-+        status: "MARKED",
-+      });
-+      expect(boundary.eventRead).toHaveBeenCalledTimes(1); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    } else {
-+      boundary.notice.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+        ...visible(CURRENT, OLD), // 公開対象の既読情報をDB境界へ返す関数
-+        id: NOTICE_A,
-+      });
-+      await markClubNoticeReadAction("fixture-a", NOTICE_A); // 公開対象を再取得して本人のお知らせ既読を更新するAction
-+      expect(boundary.noticeRead).toHaveBeenCalledTimes(1); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    }
-+  },
-+);
-+
-+it.each([PRIVATE, "   "])("hidden clubId・membershipIdに関係なく本人メモの保存・削除だけを行う（ケース%#）", // 入力別にケースを登録するメソッド
-+  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+   */
-+  async (content) => { // 境界の置換またはケース検証のコールバック
-+    boundary.event.mockResolvedValue(visible()); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する / 公開対象の既読情報をDB境界へ返す関数
-+    const result = await saveClubEventMemoAction("fixture-a", EVENT_A, memoState(), form(content)); // 公開対象を再取得して本人のメモを保存または削除するAction / 本人メモの初期Action stateを作る関数 / 他クラブと他人のhidden IDを含むフォームを作る関数
-+    expect(result.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    checkedIdentity(); // 認証本人とACTIVE所属の再取得を照合する関数
-+    expect(boundary.event).toHaveBeenCalledWith(expect.objectContaining({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する / 指定した安全条件を含むか照合するmatcher
-+      where: expect.objectContaining({ // 指定した安全条件を含むか照合するmatcher
-+        id: EVENT_A,
-+        clubId: CLUB_A,
-+        targetRoles: {
-+          has: "MEMBER",
-+        },
-+      }),
-+      select: expect.objectContaining({ // 指定した安全条件を含むか照合するmatcher
-+        personalMemos: {
-+          where: {
-+            clubId: CLUB_A,
-+            membershipId: MEMBERSHIP_A,
-+          },
-+          select: {
-+            content: true,
-+          },
-+          take: 1,
-+        },
-+      }),
-+    }));
-+    const identity = {
-+      clubId: CLUB_A,
-+      eventId: EVENT_A,
-+      membershipId: MEMBERSHIP_A,
-+    };
-+    if (content.trim()) { // メモ本文の前後空白を除くメソッド
-+      expect(boundary.memoSave).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+        where: {
-+          clubId_eventId_membershipId: identity,
-+        },
-+        create: {
-+          ...identity,
-+          content: PRIVATE,
-+        },
-+        update: {
-+          content: PRIVATE,
-+        },
-+      });
-+      expect(boundary.memoDelete).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    } else {
-+      expect(boundary.memoDelete).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+        where: identity,
-+      });
-+      expect(boundary.memoSave).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    }
-+    expect(boundary.revalidate).toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+  },
-+);
-+
-+it("公開対象を再取得できないメモ保存はrequestId検証より先にnotFoundとなり、本文を返さない", // 試験ケースを登録する関数
-+  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+   */
-+  async () => { // 境界の置換またはケース検証のコールバック
-+    await expect(saveClubEventMemoAction("fixture-a", FOREIGN_ID, memoState(), form())) // 期待値を検証する関数 / 公開対象を再取得して本人のメモを保存または削除するAction / 本人メモの初期Action stateを作る関数 / 他クラブと他人のhidden IDを含むフォームを作る関数
-+      .rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド
-+    checkedIdentity(); // 認証本人とACTIVE所属の再取得を照合する関数
-+    noWrites(); // content書込み・再検証・後続処理がないことを確認する関数
-+  },
-+);
-+
-+it.each(["event.update", "notice.update", "event.delete", "notice.delete"])("OWNERの%sでもhidden clubIdでBを操作せず、A scopeを使う", // 入力別にケースを登録するメソッド
-+  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++   * このケースの境界処理または検証処理を実行する。
 +   */
 +  async (name) => { // 境界の置換またはケース検証のコールバック
-+    boundary.membership.mockResolvedValue(membership("OWNER")); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する / 実認可へ返すロール別の所属情報を作る関数
-+    await expect(adminAction(name, form())).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / 指定した実管理Actionを直接呼び出す関数 / 他クラブと他人のhidden IDを含むフォームを作る関数
-+    checkedIdentity(); // 認証本人とACTIVE所属の再取得を照合する関数
-+    if (name.endsWith("update")) { // Actionが編集か判定するメソッド
-+      const find = name.startsWith("event") ? boundary.event : boundary.notice; // Actionがevent側か判定するメソッド / 外部入出力を記録するmock関数を参照する
-+      expect(find).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 対象contentの取得関数・mock関数
-+        where: {
-+          id: FOREIGN_ID,
-+          clubId: CLUB_A,
-+        },
-+        select: expect.any(Object), // コンストラクターに対応する値を照合するmatcher / 標準オブジェクトのコンストラクター
-+      });
-+      noWrites(); // content書込み・再検証・後続処理がないことを確認する関数
-+    } else {
-+      const remove = name.startsWith("event") ? boundary.eventDelete : boundary.noticeDelete; // Actionがevent側か判定するメソッド / 外部入出力を記録するmock関数を参照する
-+      expect(remove).toHaveBeenCalledWith({ // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数 / 削除境界のmock関数
-+        where: {
-+          id: FOREIGN_ID,
-+          clubId: CLUB_A,
-+        },
-+      });
-+      expect(boundary.revalidate).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+      expect(boundary.after).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    }
++    boundary.membership.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++      id: MEMBER_A,
++      role: "MEMBER",
++      club: {
++        id: CLUB_A,
++        slug: "fixture-a",
++        planType: "STANDARD",
++      },
++    });
++    await expect(invoke(name)).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / Promise paramsと改ざんqueryで実GETを直接呼ぶ関数
++    checkedIdentity(); // Auth本人とACTIVE所属・clubSlugの再取得を照合する関数
++    expect(boundary.eventAttachment).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.noticeAttachment).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.sign).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +  },
 +);
 +
-+it.each(["event", "notice", "memo"] as const)("未所属のclubSlugでは%s Actionもcontentの取得前に実認可が拒否する", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
++it.each(ROUTES)("%sのclubSlugを未所属Bへ差し替えても添付取得・署名を行わない", // 入力別にケースを登録するメソッド
 +  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++   * このケースの境界処理または検証処理を実行する。
 +   */
-+  async (kind) => { // 境界の置換またはケース検証のコールバック
++  async (name) => { // 境界の置換またはケース検証のコールバック
 +    boundary.membership.mockResolvedValue(null); // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
-+    if (kind === "event") {
-+      await expect(markClubEventReadAction("fixture-a", EVENT_A)).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のイベント既読を更新するAction
-+    } else if (kind === "notice") {
-+      await expect(markClubNoticeReadAction("fixture-a", NOTICE_A)).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のお知らせ既読を更新するAction
-+    } else {
-+      await expect(saveClubEventMemoAction("fixture-a", EVENT_A, memoState(), form())).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / 公開対象を再取得して本人のメモを保存または削除するAction / 本人メモの初期Action stateを作る関数 / 他クラブと他人のhidden IDを含むフォームを作る関数
-+    }
-+    expect(boundary.event).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    expect(boundary.notice).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+    noWrites(); // content書込み・再検証・後続処理がないことを確認する関数
++    await expect(invoke(name, ATTACHMENT_B, "fixture-b")).rejects.toBe(boundary.notFound); // 値の一致を検証するメソッド / 期待値を検証する関数 / Promise paramsと改ざんqueryで実GETを直接呼ぶ関数
++    checkedIdentity("fixture-b"); // Auth本人とACTIVE所属・clubSlugの再取得を照合する関数
++    expect(boundary.eventAttachment).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.noticeAttachment).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.sign).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
 +  },
 +);
-diff --git a/tests/mvp/content-tenancy.integration.test.ts b/tests/mvp/content-tenancy.integration.test.ts
++
++it.each(ROUTES)("未認証の%sは添付取得・署名前にログインへ移動する", // 入力別にケースを登録するメソッド
++  /**
++   * このケースの境界処理または検証処理を実行する。
++   */
++  async (name) => { // 境界の置換またはケース検証のコールバック
++    boundary.auth.mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++      data: {
++        user: null,
++      },
++      error: null,
++    });
++    await expect(invoke(name)).rejects.toBe(boundary.redirect); // 値の一致を検証するメソッド / 期待値を検証する関数 / Promise paramsと改ざんqueryで実GETを直接呼ぶ関数
++    expect(boundary.membership).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.eventAttachment).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.noticeAttachment).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++    expect(boundary.sign).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++  },
++);
+diff --git a/tests/mvp/attachment-storage.integration.test.ts b/tests/mvp/attachment-storage.integration.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa8689693a74
+index 0000000000000000000000000000000000000000..4dd3346ba7f2ec1ffe5fe2d657f65bc0174df58e
 --- /dev/null
-+++ b/tests/mvp/content-tenancy.integration.test.ts
-@@ -0,0 +1,961 @@
-+// tests/mvp/content-tenancy.integration.test.ts
-+// 接続前ガード後だけ実Repositoryを使い、ケース専用二クラブの全行を照合する。
++++ b/tests/mvp/attachment-storage.integration.test.ts
+@@ -0,0 +1,1268 @@
++// tests/mvp/attachment-storage.integration.test.ts
++// 通常実行はSDK境界の失敗だけ。実Storage・DB・Actionは専用ガード後だけ使う。
 +
 +import {
 +  randomUUID, // fixtureと操作のUUIDを生成する関数
@@ -715,6 +408,9 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +import type {
 +  PrismaClient, // ガード後に生成する専用Prisma client型
 +} from "@prisma/client";
++import type {
++  SupabaseClient, // ローカルAuth・Storage SDK client型
++} from "@supabase/supabase-js";
 +import {
 +  afterAll, // suite終了時の接続解放を登録する関数
 +  afterEach, // ケース終了時の後片付けと検証を登録する関数
@@ -726,35 +422,50 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +  vi, // 外部入出力を監視または置換するAPI
 +} from "vitest";
 +import {
-+  isEventUnread, // 未読イベントがあるかどうかの判定関数
-+} from "@/domain/club/event/event-policy";
++  createClubAttachmentSignedUrl, // private PDFの閲覧URLを5分間の期限で発行する関数
++  deleteClubContentStorageObjects, // 指定したPDFを補償削除し、失敗pathと件数を返す関数
++  deleteClubStorageObject, // 固定bucketのPDFを1件削除し、固定コードで結果を返す関数
++  uploadClubContentAttachments, // PDFをStorageへ保存し、途中失敗時は保存済み分を補償する関数
++} from "@/src/infrastructure/storage/club-content-attachment-storage";
 +import {
-+  isNoticeUnread, // お知らせに未読があるかどうかの判定関数
-+} from "@/domain/club/notice/notice-policy";
++  CLUB_ATTACHMENT_BUCKET, // クラブ添付PDF用の固定bucket名
++} from "@/src/infrastructure/storage/club-attachment-storage-constants";
 +import {
-+  cleanupMvpDatabaseFixture, // 所有台帳の範囲だけを削除する関数
-+  planMvpDatabaseFixture, // DB接続前にUUIDと保存行を計画する関数
-+  seedMvpDatabaseFixture, // 計画した行を一体保存する関数
-+} from "./database-fixture";
-+import type {
-+  MvpDatabaseFixture, // 認可と関連行のfixture ID型
-+} from "./database-fixture";
++  buildClubEventFormValues, // 送信イベント入力を検証前のフォーム値へ整形する関数
++} from "@/domain/club/event/event-form";
++import {
++  buildClubNoticeFormValues, // 送信お知らせ入力を検証前のフォーム値へ整形する関数
++} from "@/domain/club/notice/notice-form";
 +import {
 +  requireMvpTestEnvironment, // 接続前にflag・URL・checkoutを検証する関数
 +} from "./environment";
 +import type {
 +  MvpTestEnvironment, // ガード済みの実行環境型
 +} from "./environment";
++import {
++  cleanupMvpLocalServicesFixture, // 所有するStorage・DB・Auth資源を補償し残存件数を返す関数
++  createMvpFixturePdf, // 小さなPDFをメモリ上で生成する関数
++  planMvpLocalServicesFixture, // 接続前にAuth・DB・Storage資源の所有ハンドルを計画する関数
++  seedMvpLocalServicesFixture, // ローカルAuth・DB・private PDFを順に作成する関数
++} from "./local-services-fixture";
++import type {
++  MvpLocalServicesFixture, // DBとローカルAuth・Storage資源の所有ハンドル型
++} from "./local-services-fixture";
 +
-+const FAILURE = "F12 contentの接続条件・対象ケース・所有fixtureを確認してください。";
 +const bridge = vi.hoisted( // importより前に境界の状態を用意する関数
 +  /**
 +   * import前にDB・Auth・Next境界の監視状態を用意する。
 +   */
 +  () => ({ // 境界の置換またはケース検証のコールバック
-+    client: undefined as PrismaClient | undefined, // 境界値の型アサーション / ガード後に生成する専用Prisma client型 / 未生成の型
 +    allowed: false,
++    client: undefined as PrismaClient | undefined, // 境界値の型アサーション / ガード後に生成する専用Prisma client型 / 未生成の型
++    admin: vi.fn(), // 呼出しを記録するmockを作る関数
++    sign: vi.fn(), // 呼出しを記録するmockを作る関数
++    userId: "",
++    revalidate: vi.fn(), // 呼出しを記録するmockを作る関数
++    after: vi.fn(), // 呼出しを記録するmockを作る関数
 +    external: vi.fn(), // 呼出しを記録するmockを作る関数
++    notFound: new Error("NEXT_NOT_FOUND"), // 例外を作るコンストラクター
 +  }),
 +);
 +vi.mock("@/src/infrastructure/prisma/client", // 外部入出力のモジュールを置き換える関数
@@ -767,10 +478,79 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +     */
 +    get prisma() { // 値の取得を制御するgetter関数
 +      if (!bridge.client) {
-+        throw new Error(FAILURE); // 例外を作るコンストラクター
++        throw new Error("F12 dedicated client required"); // 例外を作るコンストラクター
 +      }
 +      return bridge.client;
 +    },
++  }),
++);
++vi.mock("@/src/infrastructure/supabase/admin", // 外部入出力のモジュールを置き換える関数
++  /**
++   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
++   */
++  () => ({ // 境界の置換またはケース検証のコールバック
++    createSupabaseAdminClient: bridge.admin, // 外部入出力を記録するmock関数を参照する
++  }),
++);
++vi.mock("@/src/infrastructure/supabase/server", // 外部入出力のモジュールを置き換える関数
++  /**
++   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
++   */
++  () => ({ // 境界の置換またはケース検証のコールバック
++    /**
++     * 実Auth SDKを初期化せず、認証結果の境界を返す。
++     */
++    createClient: async () => ({ // 境界の置換またはケース検証のコールバック
++      auth: {
++        /**
++         * ケースで指定したfixture本人のAuth結果を返す。
++         */
++        getUser: async () => ({ // 境界の置換またはケース検証のコールバック
++          data: {
++            user: {
++              id: bridge.userId,
++            },
++          },
++          error: null,
++        }),
++      },
++    }),
++  }),
++);
++vi.mock("next/cache", // 外部入出力のモジュールを置き換える関数
++  /**
++   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
++   */
++  () => ({ // 境界の置換またはケース検証のコールバック
++    revalidatePath: bridge.revalidate, // 外部入出力を記録するmock関数を参照する
++  }),
++);
++vi.mock("next/navigation", // 外部入出力のモジュールを置き換える関数
++  /**
++   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
++   */
++  () => ({ // 境界の置換またはケース検証のコールバック
++    /**
++     * NextのnotFoundを固定の制御例外として再現する。
++     */
++    notFound: () => { // 境界の置換またはケース検証のコールバック
++      throw bridge.notFound;
++    },
++    /**
++     * 遷移先を含むNextのredirect制御例外を再現する。
++     */
++    redirect: () => { // 境界の置換またはケース検証のコールバック
++      throw new Error("NEXT_REDIRECT"); // 例外を作るコンストラクター
++    },
++  }),
++);
++vi.mock("next/server", // 外部入出力のモジュールを置き換える関数
++  /**
++   * 接続前ガードに成功した場合だけ、実DBアダプターを評価する。
++   */
++  async (original) => ({ // 境界の置換またはケース検証のコールバック
++    ...await original<typeof import("next/server")>(), // 実NextResponseを維持するためNextモジュールを読み込む関数
++    after: bridge.after, // 外部入出力を記録するmock関数を参照する
 +  }),
 +);
 +vi.mock("dotenv/config", // 外部入出力のモジュールを置き換える関数
@@ -779,32 +559,44 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +   */
 +  () => { // 境界の置換またはケース検証のコールバック
 +    bridge.external(); // 外部入出力の呼出しを記録するmock関数 / 外部入出力を記録するmock関数を参照する
-+    throw new Error(FAILURE); // 例外を作るコンストラクター
++    throw new Error("Unexpected dotenv initialization"); // 例外を作るコンストラクター
 +  },
 +);
 +vi.mock("@prisma/adapter-pg", // 外部入出力のモジュールを置き換える関数
 +  /**
-+   * 接続前ガードに成功した場合だけ、実DBアダプターを評価する。
++   * 本番clientや外部通信を初期化せず、試験用の入出力境界を返す。
 +   */
 +  async (original) => { // 境界の置換またはケース検証のコールバック
 +    if (!bridge.allowed) {
-+      throw new Error(FAILURE); // 例外を作るコンストラクター
++      throw new Error("F12 guard required"); // 例外を作るコンストラクター
 +    }
 +    return original(); // ガード後に実SDKを読み込む関数
 +  },
 +);
 +
-+/**
-+ * 実イベントRepositoryのモジュール型。
-+ */
-+type EventRepository = typeof import("@/src/infrastructure/prisma/repositories/club-event-repository"); // 実イベントRepositoryのモジュール型
-+/**
-+ * 実お知らせRepositoryのモジュール型。
-+ */
-+type NoticeRepository = typeof import("@/src/infrastructure/prisma/repositories/club-notice-repository"); // 実お知らせRepositoryのモジュール型
++const FAILURE = "F12添付試験の接続条件・対象ケース・所有資源を確認してください。";
++const PRIVATE = "FAKE_SDK_TOKEN_BODY_NEVER_LOG";
++const KINDS = ["events", "notices"] as const; // リテラル型を保持するconstアサーション
 +
 +/**
-+ * assertionやSQLの実値・SDK例外をrunnerへ渡さず、固定文で失敗させる。
++ * event・noticeの実在する添付処理を切り替えるための種別。
++ */
++type Kind = typeof KINDS[number]; // イベント・お知らせ添付を切り替える種別型 / 値の宣言から型を取得する型 / 配列要素を参照する数値インデックス型
++/**
++ * guard後にだけ遅延評価する実Actionのモジュール群。
++ */
++type Applications = { // ガード後に読み込む実Action・Repository・workerのモジュール型
++  eventNew: typeof import("@/app/(club-app)/club/[clubSlug]/admin/events/new/actions"); // 実イベント作成Actionモジュール型
++  eventEdit: typeof import("@/app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/actions"); // 実イベント編集Actionモジュール型
++  noticeNew: typeof import("@/app/(club-app)/club/[clubSlug]/admin/notice/new/actions"); // 実お知らせ作成Actionモジュール型
++  noticeEdit: typeof import("@/app/(club-app)/club/[clubSlug]/admin/notice/[noticeId]/edit/actions"); // 実お知らせ編集Actionモジュール型
++  events: typeof import("@/src/infrastructure/prisma/repositories/club-event-repository"); // 実イベントRepositoryモジュール型
++  notices: typeof import("@/src/infrastructure/prisma/repositories/club-notice-repository"); // 実お知らせRepositoryモジュール型
++  worker: typeof import("@/src/application/club/storage/run-storage-deletion-worker"); // 実Storage削除workerモジュール型
++};
++
++/**
++ * SQL・SDK・assertionの実値を出さず、失敗したケース名と固定文だけを残す。
 + */
 +async function safeCheck(operation: () => Promise<void>): Promise<void> { // SQL・assertionの実値を固定例外へ置き換える関数 / 非同期結果の型・標準API / 戻り値を使わない型
 +  try {
@@ -814,56 +606,204 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +  }
 +}
 +
-+it("F12 flag不足ではURL getter・専用client・外部境界を評価しない", // 試験ケースを登録する関数
++/**
++ * メモリ上の小さなPDFを、実アップロード関数へ渡すFileへ変換する。
++ */
++function pdf(name = "fixture.pdf"): File { // メモリ上の小さなPDFを実アップロード用Fileへ変換する関数 / 送信するPDFファイルの組込み型・コンストラクター
++  return new File([Uint8Array.from(createMvpFixturePdf())], name, { // 送信するPDFファイルの組込み型・コンストラクター / PDF用のバイト配列を複製する関数 / 小さなPDFをメモリ上で生成する関数
++    type: "application/pdf",
++  });
++}
++
++beforeEach( // ケースごとの独立した初期状態を登録する関数
 +  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++   * 他ケースの状態を引き継がず、このケースの入力と監視を用意する。
 +   */
 +  () => { // 境界の置換またはケース検証のコールバック
-+    const getter = vi.fn(); // 呼出しを記録するmockを作る関数
-+    const variables = {
-+      RUN_MVP_TESTS: "0",
-+      MVP_TEST_DISPOSABLE: "1",
-+      NODE_ENV: "test",
++    for (const method of ["log", "warn", "error"] as const) { // リテラル型を保持するconstアサーション
++      vi.spyOn(console, method).mockImplementation( // 境界の動作を置き換えるメソッド / 外部出力の呼出しを監視する関数
++        /**
++         * 外部入出力を試験用に置き換え、実通信や実出力を行わない。
++         */
++        () => undefined, // 境界の置換またはケース検証のコールバック
++      );
++    }
++  },
++);
++afterEach( // ケース終了時の後片付けと検証を登録する関数
++  /**
++   * ケース所有の資源と外部出力の状態を確認する。
++   */
++  () => { // 境界の置換またはケース検証のコールバック
++    try {
++      expect(bridge.external).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++      const logs = JSON.stringify([ // 記録したログを漏洩検査用文字列へ変換する関数
++        vi.mocked(console.log).mock.calls, // 監視中の関数の型をmockとして扱う関数 / ログ出力関数の参照
++        vi.mocked(console.warn).mock.calls, // 監視中の関数の型をmockとして扱う関数 / ログ出力関数の参照
++        vi.mocked(console.error).mock.calls, // 監視中の関数の型をmockとして扱う関数 / ログ出力関数の参照
++      ]);
++      expect(logs).not.toContain(PRIVATE); // 期待する値が含まれるか検証するメソッド / 期待値を検証する関数
++      expect(logs).not.toContain("storagePath"); // 期待する値が含まれるか検証するメソッド / 期待値を検証する関数
++      expect(logs).not.toContain("signedUrl"); // 期待する値が含まれるか検証するメソッド / 期待値を検証する関数
++      expect(logs).not.toContain("claimToken"); // 期待する値が含まれるか検証するメソッド / 期待値を検証する関数
++    } catch {
++      throw new Error(FAILURE); // ログの実値をrunnerへ表示しない固定例外コンストラクター
++    } finally {
++      vi.restoreAllMocks(); // consoleとfetchの監視を元に戻す関数
++    }
++  },
++);
++
++describe("F12 添付SDK境界の失敗（DB・通信なし）", // 試験群を登録する関数
++  /**
++   * このケースの境界処理または検証処理を実行する。
++   */
++  () => { // 境界の置換またはケース検証のコールバック
++    beforeEach( // ケースごとの独立した初期状態を登録する関数
 +      /**
-+       * flag不足時のURL getter評価を検出する。
++       * 他ケースの状態を引き継がず、このケースの入力と監視を用意する。
 +       */
-+      get DATABASE_URL(): string { // 値の取得を制御するgetter関数 / 文字列型
-+        getter(); // URL評価を記録するmock関数
-+        throw new Error("FAKE_PRIVATE_NEVER_LOG"); // 例外を作るコンストラクター
++      () => { // 境界の置換またはケース検証のコールバック
++        bridge.admin.mockReset(); // 境界の記録と戻り値を初期化するメソッド / 外部入出力を記録するmock関数を参照する
++        vi.spyOn(globalThis, "fetch").mockImplementation( // 境界の動作を置き換えるメソッド / 外部出力の呼出しを監視する関数
++          /**
++           * 外部入出力を試験用に置き換え、実通信や実出力を行わない。
++           */
++          async () => { // 境界の置換またはケース検証のコールバック
++            throw new Error("Unexpected network request"); // 例外を作るコンストラクター
++          },
++        );
 +      },
-+    };
-+    expect( // 期待値を検証する関数
++    );
++    afterEach( // ケース終了時の後片付けと検証を登録する関数
 +      /**
-+       * flag不足の設定を渡し、URL getterより前の拒否を確認する。
++       * ケース所有の資源と外部出力の状態を確認する。
 +       */
-+      () => requireMvpTestEnvironment( // 接続前ガードを実行するコールバック / flag・URL・checkoutを検証する関数
-+        variables,
-+        resolve(import.meta.dirname, "../.."), // 専用checkoutの絶対パスを求める関数
-+        "a".repeat(32), // ガード試験用の識別子を作るメソッド
-+      ),
-+    ).toThrow("F12専用の使い捨て環境・flag・checkoutを確認してください。"); // 例外による拒否を検証するメソッド
-+    expect(getter).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / URL評価を記録するmock関数
-+    expect(bridge.client).toBeUndefined(); // 未生成であることを検証するメソッド / 期待値を検証する関数
-+    expect(bridge.allowed).toBe(false); // 値の一致を検証するメソッド / 期待値を検証する関数
-+    expect(bridge.external).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++      () => { // 境界の置換またはケース検証のコールバック
++        expect(globalThis.fetch).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / HTTP通信関数の参照
++      },
++    );
++
++    it.each(["error", "throw"] as const)("2枚目uploadの%sでは保存済みの1枚だけを補償する", // 入力別にケースを登録するメソッド / リテラル型を保持するconstアサーション
++      /**
++       * このケースの境界処理または検証処理を実行する。
++       */
++      async (mode) => { // 境界の置換またはケース検証のコールバック
++        const upload = vi.fn().mockResolvedValueOnce({ // 次の境界呼出しの戻り値を設定するメソッド / 呼出しを記録するmockを作る関数
++          data: {},
++          error: null,
++        });
++        if (mode === "error") {
++          upload.mockResolvedValueOnce({ // 次の境界呼出しの戻り値を設定するメソッド
++            data: null,
++            error: {
++              message: PRIVATE,
++            },
++          });
++        } else {
++          upload.mockRejectedValueOnce(new Error(PRIVATE)); // 次の境界呼出しの非同期例外を設定するメソッド / 例外を作るコンストラクター
++        }
++        const remove = vi.fn().mockResolvedValue({ // DB・Auth境界へ返す値を設定するメソッド / 呼出しを記録するmockを作る関数
++          data: [],
++          error: null,
++        });
++        const from = vi.fn().mockReturnValue({ // 境界へ返す同期値を設定するメソッド / 呼出しを記録するmockを作る関数
++          upload,
++          remove, // 削除境界のmock関数
++        });
++        bridge.admin.mockReturnValue({ // 境界へ返す同期値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++          storage: {
++            from,
++          },
++        });
++        await expect(uploadClubContentAttachments({ // 期待値を検証する関数 / PDFをStorageへ保存し、途中失敗時は保存済み分を補償する関数
++          clubId: "fixture-a",
++          contentId: "fixture-event",
++          contentDirectory: "events",
++          files: [pdf("first.pdf"), pdf("second.pdf")], // メモリ上の小さなPDFを実アップロード用Fileへ変換する関数
++          startDisplayOrder: 0,
++        })).rejects.toThrow(); // 例外による拒否を検証するメソッド
++        expect(upload).toHaveBeenCalledTimes(2); // 呼出し件数を検証するメソッド / 期待値を検証する関数
++        expect(remove).toHaveBeenCalledExactlyOnceWith([upload.mock.calls[0][0]]); // 呼出し1回と引数の完全一致を検証するメソッド / 期待値を検証する関数 / 削除境界のmock関数
++        expect(remove.mock.calls[0][0]).not.toContain(upload.mock.calls[1][0]); // 期待する値が含まれるか検証するメソッド / 期待値を検証する関数 / 削除境界のmock関数
++        expect(from).toHaveBeenCalledWith(CLUB_ATTACHMENT_BUCKET); // 実境界へ渡した引数を検証するメソッド / 期待値を検証する関数
++      },
++    );
++
++    it("補償削除失敗は固定コードと失敗pathを返し、SDK原文を結果・ログへ混ぜない", // 試験ケースを登録する関数
++      /**
++       * このケースの境界処理または検証処理を実行する。
++       */
++      async () => { // 境界の置換またはケース検証のコールバック
++        const path = "clubs/fixture-a/events/fixture-event/owned.pdf";
++        const remove = vi.fn().mockRejectedValue(new Error(PRIVATE)); // 境界が投げる非同期例外を設定するメソッド / 呼出しを記録するmockを作る関数 / 例外を作るコンストラクター
++        bridge.admin.mockReturnValue({ // 境界へ返す同期値を設定するメソッド / 外部入出力を記録するmock関数を参照する
++          storage: {
++            from: vi.fn().mockReturnValue({ // 境界へ返す同期値を設定するメソッド / 呼出しを記録するmockを作る関数
++              remove, // 削除境界のmock関数
++            }),
++          },
++        });
++        expect(await deleteClubStorageObject({ // 期待値を検証する関数 / 固定bucketのPDFを1件削除し、固定コードで結果を返す関数
++          bucket: CLUB_ATTACHMENT_BUCKET,
++          storagePath: path,
++        }))
++          .toEqual({ // 期待する値と全列を比較するメソッド
++            success: false,
++            errorCode: "STORAGE_DELETE_FAILED",
++          });
++        expect(await deleteClubContentStorageObjects({ // 期待値を検証する関数 / 指定したPDFを補償削除し、失敗pathと件数を返す関数
++          storagePaths: [path, path],
++        }))
++          .toEqual({ // 期待する値と全列を比較するメソッド
++            failedStoragePaths: [path],
++            failedCount: 1,
++          });
++        expect(remove).toHaveBeenCalledTimes(2); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 削除境界のmock関数
++      },
++    );
++
++    it("flag不足では実DB clientとStorage SDKを初期化しない", // 試験ケースを登録する関数
++      /**
++       * このケースの境界処理または検証処理を実行する。
++       */
++      () => { // 境界の置換またはケース検証のコールバック
++        expect( // 期待値を検証する関数
++          /**
++           * このケースの境界処理または検証処理を実行する。
++           */
++          () => requireMvpTestEnvironment({ // 境界の置換またはケース検証のコールバック / 接続前にflag・URL・checkoutを検証する関数
++            RUN_MVP_TESTS: "0",
++          }, resolve(import.meta.dirname, "../.."), "a".repeat(32)), // 専用checkoutの絶対パスを求める関数 / ガード試験用の識別子を作るメソッド
++        ).toThrow("F12専用の使い捨て環境・flag・checkoutを確認してください。"); // 例外による拒否を検証するメソッド
++        expect(bridge.client).toBeUndefined(); // 未生成であることを検証するメソッド / 期待値を検証する関数
++        expect(bridge.allowed).toBe(false); // 値の一致を検証するメソッド / 期待値を検証する関数
++        expect(bridge.admin).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++      },
++    );
 +  },
 +);
 +
 +const enabled = process.env.RUN_MVP_TESTS === "1" &&
 +  process.env.RUN_DB_INTEGRATION_TESTS === "1";
-+const databaseSuite = enabled ? describe : describe.skip; // 試験群を登録する関数 / 実DB群を未実行として登録する関数
-+databaseSuite("F12 content Repositoryの実DB越境（専用flag未指定時はskip）", // 明示flagに応じて実DB群を実行またはskipする関数
++const liveSuite = enabled ? describe : describe.skip; // 試験群を登録する関数 / 実DB群を未実行として登録する関数
++liveSuite("F12 添付の実Storage・DB・途中失敗（専用flag未指定時はskip）", // 明示flagに応じて実Storage・DB試験群を実行またはskipする関数
 +  /**
-+   * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++   * このケースの境界処理または検証処理を実行する。
 +   */
 +  () => { // 境界の置換またはケース検証のコールバック
 +    let configuration: MvpTestEnvironment; // ガード済みの実行環境型
-+    let fixture: MvpDatabaseFixture | undefined; // 認可と関連行のfixture ID型 / 未生成の型
-+    let events: EventRepository; // 実イベントRepositoryのモジュール型
-+    let notices: NoticeRepository; // 実お知らせRepositoryのモジュール型
++    let fixture: MvpLocalServicesFixture | undefined; // DBとローカルAuth・Storage資源の所有ハンドル型 / 未生成の型
++    let admin: SupabaseClient | undefined; // ローカルAuth・Storage SDK client型 / 未生成の型
++    let applications: Applications; // ガード後に読み込む実Action・Repository・workerのモジュール型
++    const extraPaths = new Set<string>(); // 所有pathを重複なく保持する集合型・コンストラクター / 文字列型
++    const uploads: string[] = []; // 文字列型
++    const removeFailures = new Set<string>(); // 所有pathを重複なく保持する集合型・コンストラクター / 文字列型
++    let failSecondUpload = false;
++    let collision: Kind | undefined; // イベント・お知らせ添付を切り替える種別型 / 未生成の型
 +
 +    /**
-+     * ガード後に作成したこのsuite専用の接続だけを返す。
++     * guard後の専用clientだけを返し、本番の共有clientへ接続しない。
 +     */
 +    function database(): PrismaClient { // ガード後の専用DB clientを取得する関数 / ガード後に生成する専用Prisma client型
 +      if (!bridge.client) {
@@ -873,9 +813,9 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +    }
 +
 +    /**
-+     * ケースの新規二クラブと、公開状態・添付・既読・メモ・通知履歴を返す。
++     * 作成前に登録した、このケースのローカル資源だけを参照する。
 +     */
-+    function owned(): MvpDatabaseFixture { // ケース所有のfixtureを取得する関数 / 認可と関連行のfixture ID型
++    function owned(): MvpLocalServicesFixture { // ケース所有のfixtureを取得する関数 / DBとローカルAuth・Storage資源の所有ハンドル型
 +      if (!fixture) {
 +        throw new Error(FAILURE); // 例外を作るコンストラクター
 +      }
@@ -883,13 +823,186 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +    }
 +
 +    /**
-+     * 親行・関連行・updatedAtを含む全列を、fixture内だけから一定順で取得する。
++     * 所有prefix以外を受け付けず、生成予定のPDFを通信前に台帳へ登録する。
 +     */
-+    async function snapshot(clubIds: readonly string[]) { // fixture内の親行・関連行・全列を一定順で取得する関数 / 文字列型
-+      const where = {
-+        clubId: {
-+          in: [...clubIds],
++    function ownPath(path: string): void { // 所有するクラブprefixのPDFを通信前に台帳へ登録する関数 / 文字列型 / 戻り値を使わない型
++      const prefix = `clubs/${owned().database.clubs.a.id}/`; // ケース所有のfixtureを取得する関数
++      if (
++        !path.startsWith(prefix) || // 名前または所有prefixの一致を検証するメソッド
++        !/^(?:events|notices)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.pdf$/u.test(path.slice(prefix.length)) // 所有PDF pathの書式を検証する正規表現メソッド / 所有prefixを除いたpathを取り出すメソッド
++      ) { // 名前または所有prefixの一致を検証するメソッド / 所有PDF pathの書式を確認する正規表現メソッド / 所有prefixを除いたpathを取り出すメソッド
++        throw new Error(FAILURE); // 例外を作るコンストラクター
++      }
++      extraPaths.add(path); // 通信前に所有pathを登録するメソッド
++    }
++
++    /**
++     * Auth・Storage・署名取得の通信を同じローカルoriginへ限定し、redirectを拒否する。
++     */
++    async function localFetch(input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]): Promise<Response> { // 同じローカルoriginにだけ通信しredirectを拒否する関数 / 同じローカルoriginへだけ通信する関数 / 関数の引数型を取り出す型 / 値の宣言から型を取得する型 / 非同期結果の型・標準API / HTTP応答を表す組込み型 / HTTP通信関数の引数型
++      const url = new URL(input instanceof Request ? input.url : String(input)); // 接続先・署名URLを解析するURLコンストラクター / HTTP要求を表す組込み型・コンストラクター / 値を文字列へ変換する標準関数
++      if (
++        url.origin !== configuration.supabaseOrigin ||
++        url.username ||
++        url.password ||
++        url.hash
++      ) {
++        throw new Error(FAILURE); // 例外を作るコンストラクター
++      }
++      return fetch(input, { // 検証処理を実行する関数
++        ...init,
++        redirect: "error",
++      });
++    }
++
++    /**
++     * fixtureを作った実SDKのStorage bucket APIだけを返す。
++     */
++    function bucket() { // ガード後に作った実Storage SDKの固定bucket APIを返す関数
++      if (!admin) {
++        throw new Error(FAILURE); // 例外を作るコンストラクター
++      }
++      return admin.storage.from(CLUB_ATTACHMENT_BUCKET); // 固定bucketのStorage APIを取得するメソッド
++    }
++
++    /**
++     * SDK応答直前の別transactionでunique衝突を作り、実更新transactionを失敗させる。
++     * RepositoryやPrisma transaction自体はmockしない。
++     */
++    async function insertCollision(kind: Kind, path: string): Promise<void> { // SDK応答直前の別transactionで添付unique衝突を作る関数 / イベント・お知らせ添付を切り替える種別型 / 文字列型 / 非同期結果の型・標準API / 戻り値を使わない型
++      const f = owned().database; // ケース所有のfixtureを取得する関数
++      const data = {
++        clubId: f.clubs.a.id,
++        storagePath: path,
++        fileName: "collision.pdf",
++        mimeType: "application/pdf",
++        sizeBytes: 1,
++      };
++      if (kind === "events") {
++        await database().clubEventAttachment.create({ // ケース所有の添付衝突行を作るDBメソッド / ガード後の専用DB clientを取得する関数
++          data: {
++            ...data,
++            eventId: f.related.a.events!.draft,
++          },
++        });
++      } else {
++        await database().clubNoticeAttachment.create({ // ケース所有の添付衝突行を作るDBメソッド / ガード後の専用DB clientを取得する関数
++          data: {
++            ...data,
++            noticeId: f.related.a.notices!.draft,
++          },
++        });
++      }
++    }
++
++    /**
++     * 実Storage SDKへの転送を維持し、指定したupload・remove境界だけへ失敗を注入する。
++     */
++    function storageBoundary() { // 実SDK転送を維持し指定したupload・removeだけへ失敗を注入する関数 / SDK境界を実転送と失敗注入へ切り替える関数
++      return {
++        storage: {
++          /**
++           * 固定bucketだけを許可し、実SDK転送用の操作を返す。
++           */
++          from: (name: string) => { // 境界の置換またはケース検証のコールバック / 文字列型
++            if (name !== CLUB_ATTACHMENT_BUCKET) {
++              throw new Error(FAILURE); // 例外を作るコンストラクター
++            }
++            return {
++              /**
++               * 通信前にpathを所有台帳へ登録し、指定時だけ失敗またはunique衝突を注入する。
++               */
++              upload: async (...args: Parameters<ReturnType<typeof bucket>["upload"]>) => { // 境界の置換またはケース検証のコールバック / 関数の引数型を取り出す型 / 関数の戻り値型を取り出す型 / 値の宣言から型を取得する型 / 固定bucket APIを返す関数の型参照
++                const [path] = args;
++                ownPath(path); // 所有するクラブprefixのPDFを通信前に台帳へ登録する関数
++                uploads.push(path); // アップロード試行順を記録するメソッド
++                if (
++                  failSecondUpload &&
++                  uploads.length === 2
++                ) {
++                  return {
++                    data: null,
++                    error: new Error(PRIVATE), // 例外を作るコンストラクター
++                  };
++                }
++                const result = await bucket().upload(...args); // PDFを実Storage SDKへ保存するメソッド / ガード後に作った実Storage SDKの固定bucket APIを返す関数
++                if (
++                  !result.error &&
++                  collision
++                ) {
++                  const kind = collision;
++                  collision = undefined;
++                  await insertCollision(kind, path); // SDK応答直前の別transactionで添付unique衝突を作る関数
++                }
++                return result;
++              },
++              /**
++               * 所有prefixを確認し、指定した削除失敗以外は実Storageへ転送する。
++               */
++              remove: async (paths: string[]) => { // 境界の置換またはケース検証のコールバック / 文字列型
++                for (const path of paths) {
++                  if (!path.startsWith(`clubs/${owned().database.clubs.a.id}/`)) { // 名前または所有prefixの一致を検証するメソッド / ケース所有のfixtureを取得する関数
++                    throw new Error(FAILURE); // 例外を作るコンストラクター
++                  }
++                }
++                if (paths.some( // 指定されたpathが失敗注入対象に含まれるか調べるメソッド
++                  /**
++                   * このケースの境界処理または検証処理を実行する。
++                   */
++                  (path) => removeFailures.has(path), // 境界の置換またはケース検証のコールバック / 失敗注入対象または署名tokenの有無を検証するメソッド
++                )) {
++                  return {
++                    data: null,
++                    error: new Error(PRIVATE), // 例外を作るコンストラクター
++                  };
++                }
++                return bucket().remove(paths); // 指定した所有PDFだけを実Storage SDKで削除するメソッド / ガード後に作った実Storage SDKの固定bucket APIを返す関数
++              },
++              /**
++               * 署名呼出しの対象と期限を記録してから実Storageへ転送する。
++               */
++              createSignedUrl: (...args: Parameters<ReturnType<typeof bucket>["createSignedUrl"]>) => { // 境界の置換またはケース検証のコールバック / 関数の引数型を取り出す型 / 関数の戻り値型を取り出す型 / 値の宣言から型を取得する型 / 固定bucket APIを返す関数の型参照
++                bridge.sign(...args); // 外部入出力の呼出しを記録するmock関数 / 外部入出力を記録するmock関数を参照する
++                return bucket().createSignedUrl(...args); // 指定したPDFと期限で実署名URLを発行するメソッド / ガード後に作った実Storage SDKの固定bucket APIを返す関数
++              },
++            };
++          },
 +        },
++      };
++    }
++
++    /**
++     * APIから取得できるPDFが、送信した小さなPDFと同一かを照合する。
++     */
++    async function matchesPdf(response: Response): Promise<void> { // HTTP応答が送信したPDFの全バイトと一致するか照合する関数 / HTTP応答を表す組込み型 / 非同期結果の型・標準API / 戻り値を使わない型
++      expect(response.ok).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
++      expect(new Uint8Array(await response.arrayBuffer())).toEqual(createMvpFixturePdf()); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / バイト配列の型・コンストラクター / PDF応答の全バイトを取得するメソッド / 小さなPDFをメモリ上で生成する関数
++    }
++
++    /**
++     * 取得エラーだけで削除成功とせず、所有PDFが一覧にないことを実APIで確認する。
++     */
++    async function absent(path: string): Promise<void> { // 所有PDFの削除後不存在を検証する関数 / 文字列型 / 非同期結果型 / 戻り値を使わない型
++      if (!extraPaths.has(path)) { // 通信前に登録した所有pathの集合を照合するメソッド
++        throw new Error(FAILURE); // 所有範囲外の照会を拒否する例外コンストラクター
++      }
++      const slash = path.lastIndexOf("/"); // 所有PDFの親ディレクトリを区切るメソッド
++      const listed = await bucket().list( // 実Storageの一覧を取得するメソッド / 固定bucket API取得関数
++        path.slice(0, slash), // 親ディレクトリを取り出すメソッド
++        {
++          search: path.slice(slash + 1), // 所有するPDFのファイル名を取り出すメソッド
++        },
++      );
++      expect(listed.error).toBeNull(); // 一覧取得成功を照合する期待値と比較メソッド
++      expect(listed.data).toEqual([]); // 所有PDFが存在しないことを照合する期待値と比較メソッド
++    }
++
++    /**
++     * 失敗後も元クラブBの親行・添付・削除予約を全列比較できるよう取得する。
++     */
++    async function snapshotB() { // Bの親行・添付・削除予約を全列・一定順で取得する関数
++      const where = {
++        clubId: owned().database.clubs.b.id, // ケース所有のfixtureを取得する関数
 +      };
 +      const orderBy = {
 +        id: "asc" as const, // リテラル型を保持するconstアサーション
@@ -911,30 +1024,6 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +          where,
 +          orderBy,
 +        }),
-+        database().clubEventRead.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+          where,
-+          orderBy,
-+        }),
-+        database().clubNoticeRead.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+          where,
-+          orderBy,
-+        }),
-+        database().clubEventMemo.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+          where,
-+          orderBy,
-+        }),
-+        database().clubLineDelivery.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+          where,
-+          orderBy,
-+        }),
-+        database().clubLineTarget.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+          where,
-+          orderBy,
-+        }),
-+        database().clubLineSetting.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+          where,
-+          orderBy,
-+        }),
 +        database().storageDeletionJob.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
 +          where,
 +          orderBy,
@@ -943,66 +1032,96 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +    }
 +
 +    /**
-+     * 拒否された操作の前後で二クラブの全content行が変わらないことを確認する。
++     * Actionへ有効なPDFと本文を渡し、hidden clubIdは別クラブの値へ差し替える。
 +     */
-+    async function unchanged(operation: () => Promise<void>): Promise<void> { // 拒否操作の前後で二クラブの全content行を比較する関数 / 非同期結果の型・標準API / 戻り値を使わない型
-+      const ids = [owned().clubs.a.id, owned().clubs.b.id]; // ケース所有のfixtureを取得する関数
-+      const before = await snapshot(ids); // fixture内の親行・関連行・全列を一定順で取得する関数
-+      await operation(); // 受け取った検証処理を実行する関数
-+      expect(await snapshot(ids)).toEqual(before); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / fixture内の親行・関連行・全列を一定順で取得する関数
++    function actionForm(kind: Kind, count: number): FormData { // 実Actionへ渡すPDFと別クラブhidden IDを含むフォームを作る関数 / イベント・お知らせ添付を切り替える種別型 / 送信フォームを表す組込み型・コンストラクター / 数値型
++      const data = new FormData(); // 送信フォームを表す組込み型・コンストラクター
++      data.set("requestId", randomUUID()); // 送信フォームに値を設定するメソッド / fixtureと操作のUUIDを生成する関数
++      data.set("clubId", owned().database.clubs.b.id); // 送信フォームに値を設定するメソッド / ケース所有のfixtureを取得する関数
++      data.set("title", "F12 保存失敗の確認"); // 送信フォームに値を設定するメソッド
++      data.set("content", "架空の本文"); // 送信フォームに値を設定するメソッド
++      data.set("status", "DRAFT"); // 送信フォームに値を設定するメソッド
++      data.set("genre", kind === "events" ? "PRACTICE" : "GENERAL"); // 送信フォームに値を設定するメソッド
++      data.append("targetRoles", "MEMBER"); // 送信フォームへPDFまたは削除対象IDを追加するメソッド
++      data.set("startDate", "2026-03-10"); // 送信フォームに値を設定するメソッド
++      data.set("startTime", "09:00"); // 送信フォームに値を設定するメソッド
++      data.set("endDate", "2026-03-10"); // 送信フォームに値を設定するメソッド
++      data.set("endTime", "11:00"); // 送信フォームに値を設定するメソッド
++      data.set("attachmentFilesCount", String(count)); // 送信フォームに値を設定するメソッド / 値を文字列へ変換する標準関数
++      for (let index = 0;index < count;index += 1) {
++        data.append("attachmentFiles", pdf(`fixture-${index}.pdf`)); // 送信フォームへPDFまたは削除対象IDを追加するメソッド / メモリ上の小さなPDFを実アップロード用Fileへ変換する関数
++      }
++      return data;
 +    }
 +
 +    /**
-+     * fixture所有IDで通常Repositoryへ渡すイベント入力を作る。
++     * 実認可・入力検証・添付差分解決・Storage・Repositoryを通してActionを呼ぶ。
 +     */
-+    function eventInput(eventId = owned().related.a.events!.member) { // 実イベントRepositoryへ渡すfixture所有入力を作る関数 / ケース所有のfixtureを取得する関数
-+      return {
-+        eventId,
-+        clubId: owned().clubs.a.id, // ケース所有のfixtureを取得する関数
-+        membershipId: owned().actors.aOwner.membershipId, // ケース所有のfixtureを取得する関数
-+        title: "F12 正常なイベント更新",
-+        content: "F12 架空の本文",
-+        genre: "PRACTICE" as const, // リテラル型を保持するconstアサーション
-+        targetRoles: ["OWNER", "MEMBER"] as ("OWNER" | "MEMBER")[], // 境界値の型アサーション
-+        startAt: new Date("2026-03-10T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+        endAt: new Date("2026-03-10T02:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+        isAllDay: false,
-+        location: null,
-+        meetingAt: null,
-+        meetingLocation: null,
-+        belongings: null,
-+        notes: null,
-+        status: "PUBLISHED" as const, // リテラル型を保持するconstアサーション
-+        firstPublishedAt: new Date("2026-03-01T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+        readRequiredAt: new Date("2026-03-02T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+        attachments: [],
-+        createAttachments: [],
-+        deleteAttachmentIds: [] as string[], // 境界値の型アサーション / 文字列型
-+        lineDeliveries: [],
++    async function action(kind: Kind, editing: boolean, data: FormData) { // 実認可・入力検証・添付処理・Repositoryを通してActionを呼ぶ関数 / イベント・お知らせ添付を切り替える種別型 / 真偽値型 / 送信フォームを表す組込み型・コンストラクター
++      const f = owned().database; // ケース所有のfixtureを取得する関数
++      const base = {
++        status: "idle" as const, // リテラル型を保持するconstアサーション
++        fieldErrors: {},
++        formError: null,
++        requestId: String(data.get("requestId")), // 値を文字列へ変換する標準関数 / HTTP headerまたはフォームの値を取得するメソッド
 +      };
++      if (kind === "events") {
++        const state = {
++          ...base,
++          values: buildClubEventFormValues(data), // 送信イベント入力を検証前のフォーム値へ整形する関数
++        };
++        return editing
++          ? applications.eventEdit.updateClubEventAction(f.clubs.a.slug, f.related.a.events!.member, state, data) // 外部入出力の呼出しを記録するmock関数
++          : applications.eventNew.createClubEventAction(f.clubs.a.slug, state, data); // 外部入出力の呼出しを記録するmock関数
++      }
++      const state = {
++        ...base,
++        values: buildClubNoticeFormValues(data), // 送信お知らせ入力を検証前のフォーム値へ整形する関数
++      };
++      return editing
++        ? applications.noticeEdit.updateClubNoticeAction(f.clubs.a.slug, f.related.a.notices!.member, state, data) // 外部入出力の呼出しを記録するmock関数
++        : applications.noticeNew.createClubNoticeAction(f.clubs.a.slug, state, data); // 外部入出力の呼出しを記録するmock関数
 +    }
 +
 +    /**
-+     * fixture所有IDで通常Repositoryへ渡すお知らせ入力を作る。
++     * 追加PDFとfixtureの全資源を削除し、失敗時は台帳を保持して再試行可能にする。
 +     */
-+    function noticeInput(noticeId = owned().related.a.notices!.member) { // 実お知らせRepositoryへ渡すfixture所有入力を作る関数 / ケース所有のfixtureを取得する関数
-+      return {
-+        noticeId,
-+        clubId: owned().clubs.a.id, // ケース所有のfixtureを取得する関数
-+        membershipId: owned().actors.aOwner.membershipId, // ケース所有のfixtureを取得する関数
-+        title: "F12 正常なお知らせ更新",
-+        content: "F12 架空の本文",
-+        genre: "GENERAL" as const, // リテラル型を保持するconstアサーション
-+        isPinned: false,
-+        targetRoles: ["OWNER", "MEMBER"] as ("OWNER" | "MEMBER")[], // 境界値の型アサーション
-+        status: "PUBLISHED" as const, // リテラル型を保持するconstアサーション
-+        firstPublishedAt: new Date("2026-03-01T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+        readRequiredAt: new Date("2026-03-02T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+        attachments: [],
-+        createAttachments: [],
-+        deleteAttachmentIds: [] as string[], // 境界値の型アサーション / 文字列型
-+        lineDeliveries: [],
-+      };
++    async function cleanup(): Promise<void> { // 追加PDFとfixtureの所有資源だけを削除し、失敗時は台帳を保持する関数 / 非同期結果の型・標準API / 戻り値を使わない型
++      failSecondUpload = false;
++      collision = undefined;
++      removeFailures.clear(); // 失敗注入の設定を解除するメソッド
++      let failed = false;
++      for (const path of [...extraPaths]) {
++        try {
++          const removed = await bucket().remove([path]); // 指定した所有PDFだけを実Storage SDKで削除するメソッド / ガード後に作った実Storage SDKの固定bucket APIを返す関数
++          if (removed.error) {
++            failed = true;
++          } else {
++            extraPaths.delete(path); // 削除済みの所有pathを台帳から外すメソッド
++          }
++        } catch {
++          failed = true;
++        }
++      }
++      if (fixture) {
++        const report = await cleanupMvpLocalServicesFixture(fixture); // 所有するStorage・DB・Auth資源を補償し残存件数を返す関数
++        if (
++          report.remaining.authUsers ||
++          report.remaining.storageObjects ||
++          report.remaining.buckets ||
++          report.remaining.database
++        ) {
++          failed = true;
++        } else if (!failed) {
++          fixture = undefined;
++        }
++      }
++      if (
++        failed ||
++        extraPaths.size
++      ) {
++        throw new Error(FAILURE); // 例外を作るコンストラクター
++      }
 +    }
 +
 +    beforeAll( // ガード後の初期化を登録する関数
@@ -1014,11 +1133,13 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
 +         */
 +        async () => { // 境界の置換またはケース検証のコールバック
-+          configuration = requireMvpTestEnvironment( // 接続前にflag・URL・checkoutを検証する関数
-+            process.env,
-+            resolve(import.meta.dirname, "../.."), // 専用checkoutの絶対パスを求める関数
-+            randomUUID().replaceAll("-", ""), // UUIDの区切りを除くメソッド / fixtureと操作のUUIDを生成する関数
-+          );
++          configuration = requireMvpTestEnvironment(process.env, resolve(import.meta.dirname, "../.."), randomUUID().replaceAll("-", "")); // 接続前にflag・URL・checkoutを検証する関数 / 専用checkoutの絶対パスを求める関数 / UUIDの区切りを除くメソッド / fixtureと操作のUUIDを生成する関数
++          if (
++            !configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
++            !configuration.variables.SUPABASE_SERVICE_ROLE_KEY
++          ) {
++            throw new Error(FAILURE); // 例外を作るコンストラクター
++          }
 +          bridge.allowed = true;
 +          const { PrismaClient: Client } = await import("@prisma/client"); // ガード後に対象モジュールを遅延読込みする関数
 +          const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後に対象モジュールを遅延読込みする関数
@@ -1031,11 +1152,29 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +            log: [],
 +          });
 +          await database().$connect(); // 専用DB接続を開始するメソッド / ガード後の専用DB clientを取得する関数
-+          events = await import("@/src/infrastructure/prisma/repositories/club-event-repository"); // ガード後に対象モジュールを遅延読込みする関数
-+          notices = await import("@/src/infrastructure/prisma/repositories/club-notice-repository"); // ガード後に対象モジュールを遅延読込みする関数
++          const { createClient } = await import("@supabase/supabase-js"); // ガード後に対象モジュールを遅延読込みする関数
++          admin = createClient(configuration.supabaseOrigin, configuration.variables.SUPABASE_SERVICE_ROLE_KEY, { // ローカルAuth・Storage SDK clientを作る関数
++            auth: {
++              autoRefreshToken: false,
++              persistSession: false,
++              detectSessionInUrl: false,
++            },
++            global: {
++              fetch: localFetch, // 同じローカルoriginへだけ通信する関数
++            },
++          });
++          applications = {
++            eventNew: await import("@/app/(club-app)/club/[clubSlug]/admin/events/new/actions"), // ガード後に対象モジュールを遅延読込みする関数
++            eventEdit: await import("@/app/(club-app)/club/[clubSlug]/admin/events/[eventId]/edit/actions"), // ガード後に対象モジュールを遅延読込みする関数
++            noticeNew: await import("@/app/(club-app)/club/[clubSlug]/admin/notice/new/actions"), // ガード後に対象モジュールを遅延読込みする関数
++            noticeEdit: await import("@/app/(club-app)/club/[clubSlug]/admin/notice/[noticeId]/edit/actions"), // ガード後に対象モジュールを遅延読込みする関数
++            events: await import("@/src/infrastructure/prisma/repositories/club-event-repository"), // ガード後に対象モジュールを遅延読込みする関数
++            notices: await import("@/src/infrastructure/prisma/repositories/club-notice-repository"), // ガード後に対象モジュールを遅延読込みする関数
++            worker: await import("@/src/application/club/storage/run-storage-deletion-worker"), // ガード後に対象モジュールを遅延読込みする関数
++          };
 +        },
 +      ),
-+      20_000,
++      30_000,
 +    );
 +    beforeEach( // ケースごとの独立した初期状態を登録する関数
 +      /**
@@ -1046,34 +1185,31 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
 +         */
 +        async () => { // 境界の置換またはケース検証のコールバック
-+          if (fixture) {
-+            throw new Error(FAILURE); // 前ケースの未解放fixtureを上書きさせない例外コンストラクター
++          if (
++            fixture ||
++            extraPaths.size
++          ) {
++            throw new Error(FAILURE); // 例外を作るコンストラクター
 +          }
-+          fixture = planMvpDatabaseFixture(configuration, { // DB接続前にUUIDと保存行を計画する関数
-+            features: ["content", "attachments", "activity", "line"],
-+          });
-+          await seedMvpDatabaseFixture(database(), fixture); // 計画した行を一体保存する関数 / ガード後の専用DB clientを取得する関数
++          uploads.length = 0;
++          bridge.admin.mockReset(); // 境界の記録と戻り値を初期化するメソッド / 外部入出力を記録するmock関数を参照する
++          bridge.sign.mockReset(); // 境界の記録と戻り値を初期化するメソッド / 外部入出力を記録するmock関数を参照する
++          bridge.revalidate.mockReset(); // 境界の記録と戻り値を初期化するメソッド / 外部入出力を記録するmock関数を参照する
++          bridge.after.mockReset(); // 境界の記録と戻り値を初期化するメソッド / 外部入出力を記録するmock関数を参照する
++          fixture = planMvpLocalServicesFixture(configuration); // 接続前にAuth・DB・Storage資源の所有ハンドルを計画する関数
++          await seedMvpLocalServicesFixture(database(), fixture); // ローカルAuth・DB・private PDFを順に作成する関数 / ガード後の専用DB clientを取得する関数
++          bridge.userId = fixture.database.actors.aOwner.userId;
++          bridge.admin.mockImplementation(storageBoundary); // 境界の動作を置き換えるメソッド / 外部入出力を記録するmock関数を参照する / SDK境界を実転送と失敗注入へ切り替える関数
 +        },
 +      ),
-+      20_000,
++      60_000,
 +    );
 +    afterEach( // ケース終了時の後片付けと検証を登録する関数
 +      /**
 +       * ケース所有の資源と外部出力の状態を確認する。
 +       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
-+        /**
-+         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
-+         */
-+        async () => { // 境界の置換またはケース検証のコールバック
-+          if (fixture) {
-+            await cleanupMvpDatabaseFixture(database(), fixture); // 所有台帳の範囲だけを削除する関数 / ガード後の専用DB clientを取得する関数
-+            fixture = undefined;
-+          }
-+          expect(bridge.external).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
-+        },
-+      ),
-+      20_000,
++      async () => safeCheck(cleanup), // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
++      60_000,
 +    );
 +    afterAll( // suite終了時の接続解放を登録する関数
 +      /**
@@ -1085,579 +1221,443 @@ index 0000000000000000000000000000000000000000..65aba88d5d0c4b544e3e1f5df984fa86
 +         */
 +        async () => { // 境界の置換またはケース検証のコールバック
 +          try {
-+            if (fixture && bridge.client) {
-+              await cleanupMvpDatabaseFixture(bridge.client, fixture); // 所有台帳の範囲だけを削除する関数
-+            }
-+          } finally {
++            await cleanup(); // 追加PDFとfixtureの所有資源だけを削除し、失敗時は台帳を保持する関数
++          }
++          finally {
 +            await bridge.client?.$disconnect(); // 専用DB接続を解放するメソッド
 +            bridge.client = undefined;
 +            bridge.allowed = false;
++            admin = undefined;
 +          }
 +        },
 +      ),
-+      20_000,
++      60_000,
 +    );
 +
-+    it("A scopeではBの詳細・添付・一覧・件数を取得せず、Aの通常取得は成功する", // 試験ケースを登録する関数
++    it.each(KINDS)("%sの実アップロード・5分署名・private公開拒否・実削除を確認する", // 入力別にケースを登録するメソッド
 +      /**
-+       * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++       * このケースの境界処理または検証処理を実行する。
 +       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
++      async (kind) => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
 +        /**
 +         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
 +         */
 +        async () => { // 境界の置換またはケース検証のコールバック
-+          const f = owned(); // ケース所有のfixtureを取得する関数
-+          const scope = {
++          const f = owned().database; // ケース所有のfixtureを取得する関数
++          const beforeB = await snapshotB(); // Bの親行・添付・削除予約を全列・一定順で取得する関数
++          const contentId = kind === "events" ? f.related.a.events!.draft : f.related.a.notices!.draft;
++          const uploaded = await uploadClubContentAttachments({ // PDFをStorageへ保存し、途中失敗時は保存済み分を補償する関数
 +            clubId: f.clubs.a.id,
-+            membershipId: f.actors.aMember.membershipId,
-+            role: "MEMBER" as const, // リテラル型を保持するconstアサーション
-+          };
-+          expect(await events.findClubEventForAdmin({ // 期待値を検証する関数 / クラブscope付きの管理用イベント取得関数
-+            ...scope,
-+            eventId: f.related.b.events!.member,
-+          })).toBeNull(); // nullかどうかを検証するメソッド
-+          expect(await events.findPublishedClubEventDetail({ // 期待値を検証する関数 / 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId: f.related.b.events!.member,
-+          })).toBeNull(); // nullかどうかを検証するメソッド
-+          expect(await notices.findClubNoticeForAdmin({ // 期待値を検証する関数 / クラブscope付きの管理用お知らせ取得関数
-+            ...scope,
-+            noticeId: f.related.b.notices!.member,
-+          })).toBeNull(); // nullかどうかを検証するメソッド
-+          expect(await notices.findClubNoticeForMember({ // 期待値を検証する関数 / 公開対象・本人の既読付きのお知らせ取得関数
-+            ...scope,
-+            noticeId: f.related.b.notices!.member,
-+          })).toBeNull(); // nullかどうかを検証するメソッド
-+          for (const find of [events.findClubEventAttachmentForAdmin, events.findClubEventAttachmentForMember]) { // 同クラブの管理用添付保存先を取得する関数 / 同クラブの公開対象添付保存先を取得する関数
-+            expect(await find({ // 期待値を検証する関数 / 対象contentの取得関数・mock関数
-+              ...scope,
-+              attachmentId: f.related.b.eventAttachmentId!,
-+            })).toBeNull(); // nullかどうかを検証するメソッド
-+            expect(await find({ // 期待値を検証する関数 / 対象contentの取得関数・mock関数
-+              ...scope,
-+              attachmentId: f.related.a.eventAttachmentId!,
-+            })).not.toBeNull(); // nullかどうかを検証するメソッド
-+          }
-+          for (const find of [notices.findClubNoticeAttachmentForAdmin, notices.findClubNoticeAttachmentForMember]) { // 同クラブの管理用お知らせ添付保存先を取得する関数 / 同クラブの公開対象お知らせ添付保存先を取得する関数
-+            expect(await find({ // 期待値を検証する関数 / 対象contentの取得関数・mock関数
-+              ...scope,
-+              attachmentId: f.related.b.noticeAttachmentId!,
-+            })).toBeNull(); // nullかどうかを検証するメソッド
-+            expect(await find({ // 期待値を検証する関数 / 対象contentの取得関数・mock関数
-+              ...scope,
-+              attachmentId: f.related.a.noticeAttachmentId!,
-+            })).not.toBeNull(); // nullかどうかを検証するメソッド
-+          }
-+          const range = {
-+            start: new Date("2026-03-01T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+            endExclusive: new Date("2026-04-01T00:00:00.000Z"), // 日時を表す組込み型・コンストラクター
-+          };
-+          const eventList = await events.findPublishedClubEventsInRange({ // 対象期間の会員向け公開イベント一覧を取得する関数
-+            ...scope,
-+            range,
-+            genre: "ALL",
++            contentId,
++            contentDirectory: kind,
++            files: [pdf()], // メモリ上の小さなPDFを実アップロード用Fileへ変換する関数
++            startDisplayOrder: 7,
 +          });
-+          expect(eventList.map( // 期待値を検証する関数 / 取得結果から比較用のIDを取り出すメソッド
-+            /**
-+             * 取得した行から比較対象のIDを取り出す。
-+             */
-+            (row) => row.id, // 境界の置換またはケース検証のコールバック
-+          )).toEqual([f.related.a.events!.member]); // 期待する値と全列を比較するメソッド
-+          const noticeList = await notices.findClubNoticesForMember({ // 公開対象のお知らせ一覧を取得する関数
-+            ...scope,
-+            query: "",
-+            genre: "ALL",
-+            limit: 10,
++          expect(uploaded).toHaveLength(1); // 取得・保存件数を検証するメソッド / 期待値を検証する関数
++          expect(uploaded[0].displayOrder).toBe(7); // 値の一致を検証するメソッド / 期待値を検証する関数
++          const path = uploaded[0].storagePath;
++          const signed = new URL(await createClubAttachmentSignedUrl(path)); // 接続先・署名URLを解析するURLコンストラクター / private PDFの閲覧URLを5分間の期限で発行する関数
++          expect(bridge.sign).toHaveBeenCalledExactlyOnceWith(path, 300); // 呼出し1回と引数の完全一致を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          expect(signed.origin).toBe(configuration.supabaseOrigin); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(signed.pathname).toBe(`/storage/v1/object/sign/${CLUB_ATTACHMENT_BUCKET}/${path}`); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(signed.searchParams.has("token")).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数 / 失敗注入対象または署名tokenの有無を検証するメソッド
++          await matchesPdf(await localFetch(signed)); // HTTP応答が送信したPDFの全バイトと一致するか照合する関数 / 同じローカルoriginにだけ通信しredirectを拒否する関数
++          const publicUrl = new URL(`/storage/v1/object/public/${CLUB_ATTACHMENT_BUCKET}/${path}`, configuration.supabaseOrigin); // 接続先・署名URLを解析するURLコンストラクター
++          expect([400, 401, 403, 404]).toContain((await localFetch(publicUrl)).status); // 期待する値が含まれるか検証するメソッド / 期待値を検証する関数 / 同じローカルoriginにだけ通信しredirectを拒否する関数
++          const { createClient } = await import("@supabase/supabase-js"); // ガード後に対象モジュールを遅延読込みする関数
++          const anonymous = createClient(configuration.supabaseOrigin, configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY!, { // ローカルAuth・Storage SDK clientを作る関数
++            auth: {
++              autoRefreshToken: false,
++              persistSession: false,
++              detectSessionInUrl: false,
++            },
++            global: {
++              fetch: localFetch, // 同じローカルoriginへだけ通信する関数
++            },
 +          });
-+          expect(noticeList.map( // 期待値を検証する関数 / 取得結果から比較用のIDを取り出すメソッド
-+            /**
-+             * 取得した行から比較対象のIDを取り出す。
-+             */
-+            (row) => row.id, // 境界の置換またはケース検証のコールバック
-+          )).toEqual([f.related.a.notices!.member]); // 期待する値と全列を比較するメソッド
-+          expect(await events.countAdminClubEventsInRangeByStatus({ // 期待値を検証する関数 / 対象クラブのイベント状態別件数を取得する関数
-+            ...scope,
-+            range,
-+            genre: "ALL",
-+          }))
-+            .toEqual({ // 期待する値と全列を比較するメソッド
-+              ALL: 3,
-+              PUBLISHED: 2,
-+              DRAFT: 1,
-+            });
-+          expect(await notices.countClubNoticesForAdmin({ // 期待値を検証する関数 / 対象クラブのお知らせ状態別件数を取得する関数
-+            ...scope,
-+            query: "",
-+            genre: "ALL",
-+          }))
-+            .toEqual({ // 期待する値と全列を比較するメソッド
-+              ALL: 3,
-+              PUBLISHED: 2,
-+              DRAFT: 1,
-+            });
-+          expect(await events.findClubEventForAdmin({ // 期待値を検証する関数 / クラブscope付きの管理用イベント取得関数
-+            ...scope,
-+            eventId: f.related.a.events!.draft,
-+          })).not.toBeNull(); // nullかどうかを検証するメソッド
-+          expect(await notices.findClubNoticeForAdmin({ // 期待値を検証する関数 / クラブscope付きの管理用お知らせ取得関数
-+            ...scope,
-+            noticeId: f.related.a.notices!.draft,
-+          })).not.toBeNull(); // nullかどうかを検証するメソッド
++          expect((await anonymous.storage.from(CLUB_ATTACHMENT_BUCKET).download(path)).error).not.toBeNull(); // nullかどうかを検証するメソッド / 期待値を検証する関数 / 実Storage上のPDFの取得可否を確認するメソッド / 固定bucketのStorage APIを取得するメソッド
++          expect(await deleteClubStorageObject({ // 期待値を検証する関数 / 固定bucketのPDFを1件削除し、固定コードで結果を返す関数
++            bucket: CLUB_ATTACHMENT_BUCKET,
++            storagePath: path,
++          })).toEqual({ // 期待する値と全列を比較するメソッド
++            success: true,
++          });
++          await absent(path); // 所有PDFが実Storageの一覧に残らないことを確認する関数
++          expect(await snapshotB()).toEqual(beforeB); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / Bの親行・添付・削除予約を全列・一定順で取得する関数
 +        },
 +      ),
 +      60_000,
 +    );
 +
-+    it("Bの編集・削除・既読・メモをA scopeで試みても全行とupdatedAtを変更しない", // 試験ケースを登録する関数
++    it.each(KINDS)("%sの実DB付きGETはA添付だけを署名し、B・DRAFT・対象外・MEMBER管理URLを拒否する", // 入力別にケースを登録するメソッド
 +      /**
-+       * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++       * このケースの境界処理または検証処理を実行する。
 +       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
-+        /**
-+         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
-+         */
-+        async () => unchanged( // 境界の置換またはケース検証のコールバック / 拒否操作の前後で二クラブの全content行を比較する関数
-+          /**
-+           * 別クラブ参照を試み、拒否と全content行の不変性を検証する。
-+           */
-+          async () => { // 境界の置換またはケース検証のコールバック
-+            const f = owned(); // ケース所有のfixtureを取得する関数
-+            const eventId = f.related.b.events!.member;
-+            const noticeId = f.related.b.notices!.member;
-+            expect(await events.updateClubEvent(eventInput(eventId))) // 期待値を検証する関数 / 同クラブのイベントと関連行を一体更新する関数 / 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+              .toEqual({ // 期待する値と全列を比較するメソッド
-+                updated: false,
-+                deliveryIds: [],
-+                storageDeletionJobIds: [],
-+              });
-+            expect(await notices.updateClubNotice(noticeInput(noticeId))) // 期待値を検証する関数 / 同クラブのお知らせと関連行を一体更新する関数 / 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+              .toEqual({ // 期待する値と全列を比較するメソッド
-+                updated: false,
-+                deliveryIds: [],
-+                storageDeletionJobIds: [],
-+              });
-+            expect(await events.deleteClubEvent({ // 期待値を検証する関数 / 同クラブのイベントを削除し添付削除を予約する関数
-+              clubId: f.clubs.a.id,
-+              eventId,
-+            }))
-+              .toEqual({ // 期待する値と全列を比較するメソッド
-+                deleted: false,
-+                storageDeletionJobIds: [],
-+              });
-+            expect(await notices.deleteClubNotice({ // 期待値を検証する関数 / 同クラブのお知らせを削除し添付削除を予約する関数
-+              clubId: f.clubs.a.id,
-+              noticeId,
-+            }))
-+              .toEqual({ // 期待する値と全列を比較するメソッド
-+                deleted: false,
-+                storageDeletionJobIds: [],
-+              });
-+            const identity = {
-+              clubId: f.clubs.a.id,
-+              membershipId: f.actors.aMember.membershipId,
-+            };
-+            await expect(events.markClubEventRead({ // 期待値を検証する関数 / 所属・イベントの複合scopeで既読を保存する関数
-+              ...identity,
-+              eventId,
-+              readAt: new Date(), // 日時を表す組込み型・コンストラクター
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await expect(notices.markClubNoticeRead({ // 期待値を検証する関数 / 所属・お知らせの複合scopeで既読を保存する関数
-+              ...identity,
-+              noticeId,
-+              readAt: new Date(), // 日時を表す組込み型・コンストラクター
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await expect(events.saveClubEventMemo({ // 期待値を検証する関数 / 所属・イベントの複合scopeで本人メモを保存する関数
-+              ...identity,
-+              eventId,
-+              content: "越境保存を拒否",
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await events.deleteClubEventMemo({ // 所属・イベントの複合scopeで本人メモを削除する関数
-+              ...identity,
-+              eventId,
-+            });
-+          },
-+        ),
-+      ),
-+      60_000,
-+    );
-+
-+    it("AのcontentへB所属・添付・通知先IDを混ぜるとtransaction全体を拒否する", // 試験ケースを登録する関数
-+      /**
-+       * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
-+        /**
-+         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
-+         */
-+        async () => unchanged( // 境界の置換またはケース検証のコールバック / 拒否操作の前後で二クラブの全content行を比較する関数
-+          /**
-+           * 別クラブ参照を試み、拒否と全content行の不変性を検証する。
-+           */
-+          async () => { // 境界の置換またはケース検証のコールバック
-+            const f = owned(); // ケース所有のfixtureを取得する関数
-+            const membershipId = f.actors.bOwner.membershipId;
-+            await expect(events.createClubEvent({ // 期待値を検証する関数 / 同クラブ参照を確認してイベントを一体保存する関数
-+              ...eventInput(f.related.a.events!.draft), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+              membershipId,
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(notices.createClubNotice({ // 期待値を検証する関数 / 同クラブ参照を確認してお知らせを一体保存する関数
-+              ...noticeInput(f.related.a.notices!.draft), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+              membershipId,
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(events.updateClubEvent({ // 期待値を検証する関数 / 同クラブのイベントと関連行を一体更新する関数
-+              ...eventInput(), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+              membershipId,
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(notices.updateClubNotice({ // 期待値を検証する関数 / 同クラブのお知らせと関連行を一体更新する関数
-+              ...noticeInput(), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+              membershipId,
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(events.updateClubEvent({ // 期待値を検証する関数 / 同クラブのイベントと関連行を一体更新する関数
-+              ...eventInput(), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+              deleteAttachmentIds: [f.related.b.eventAttachmentId!],
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await expect(notices.updateClubNotice({ // 期待値を検証する関数 / 同クラブのお知らせと関連行を一体更新する関数
-+              ...noticeInput(), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+              deleteAttachmentIds: [f.related.b.noticeAttachmentId!],
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            const delivery = {
-+              id: f.related.a.deliveryId!,
-+              targetId: f.related.b.targetId!,
-+              targetNameSnapshot: "架空の通知先",
-+              contentTitle: "架空の通知",
-+              messageSnapshot: "送信しない架空本文",
-+              requestId: randomUUID(), // fixtureと操作のUUIDを生成する関数
-+              idempotencyKey: `f12-${f.scopeId}`,
-+            };
-+            await expect(events.updateClubEvent({ // 期待値を検証する関数 / 同クラブのイベントと関連行を一体更新する関数
-+              ...eventInput(), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+              lineDeliveries: [delivery],
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(notices.updateClubNotice({ // 期待値を検証する関数 / 同クラブのお知らせと関連行を一体更新する関数
-+              ...noticeInput(), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+              lineDeliveries: [delivery],
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(events.createClubEvent({ // 期待値を検証する関数 / 同クラブ参照を確認してイベントを一体保存する関数
-+              ...eventInput(f.related.a.events!.draft), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+              lineDeliveries: [delivery],
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            await expect(notices.createClubNotice({ // 期待値を検証する関数 / 同クラブ参照を確認してお知らせを一体保存する関数
-+              ...noticeInput(f.related.a.notices!.draft), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+              lineDeliveries: [delivery],
-+            })).rejects.toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド
-+              code: "INVALID_REFERENCE",
-+            });
-+            const identity = {
-+              clubId: f.clubs.a.id,
-+              membershipId,
-+            };
-+            await expect(events.markClubEventRead({ // 期待値を検証する関数 / 所属・イベントの複合scopeで既読を保存する関数
-+              ...identity,
-+              eventId: f.related.a.events!.member,
-+              readAt: new Date(), // 日時を表す組込み型・コンストラクター
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await expect(notices.markClubNoticeRead({ // 期待値を検証する関数 / 所属・お知らせの複合scopeで既読を保存する関数
-+              ...identity,
-+              noticeId: f.related.a.notices!.member,
-+              readAt: new Date(), // 日時を表す組込み型・コンストラクター
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await expect(events.saveClubEventMemo({ // 期待値を検証する関数 / 所属・イベントの複合scopeで本人メモを保存する関数
-+              ...identity,
-+              eventId: f.related.a.events!.member,
-+              content: "拒否",
-+            })).rejects.toThrow(); // 例外による拒否を検証するメソッド
-+            await events.deleteClubEventMemo({ // 所属・イベントの複合scopeで本人メモを削除する関数
-+              ...identity,
-+              eventId: f.related.a.events!.member,
-+            });
-+          },
-+        ),
-+      ),
-+      60_000,
-+    );
-+
-+    it("DRAFT・公開対象外を隠し、会員詳細のメモと既読は指定本人だけを返す", // 試験ケースを登録する関数
-+      /**
-+       * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
++      async (kind) => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
 +        /**
 +         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
 +         */
 +        async () => { // 境界の置換またはケース検証のコールバック
-+          const f = owned(); // ケース所有のfixtureを取得する関数
-+          const scope = {
-+            clubId: f.clubs.a.id,
-+            membershipId: f.actors.aMember.membershipId,
-+            role: "MEMBER" as const, // リテラル型を保持するconstアサーション
-+          };
-+          for (const key of ["draft", "coach"] as const) { // リテラル型を保持するconstアサーション
-+            expect(await events.findPublishedClubEventDetail({ // 期待値を検証する関数 / 公開対象・本人の既読・メモを取得する関数
-+              ...scope,
-+              eventId: f.related.a.events![key],
-+            })).toBeNull(); // nullかどうかを検証するメソッド
-+            expect(await notices.findClubNoticeForMember({ // 期待値を検証する関数 / 公開対象・本人の既読付きのお知らせ取得関数
-+              ...scope,
-+              noticeId: f.related.a.notices![key],
-+            })).toBeNull(); // nullかどうかを検証するメソッド
-+          }
-+          const eventId = f.related.a.events!.member;
-+          const noticeId = f.related.a.notices!.member;
-+          const ownEvent = await events.findPublishedClubEventDetail({ // 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId,
++          const f = owned().database; // ケース所有のfixtureを取得する関数
++          const beforeB = await snapshotB(); // Bの親行・添付・削除予約を全列・一定順で取得する関数
++          const member = kind === "events"
++            ? await import("@/app/(club-app)/club/[clubSlug]/attachments/event/[attachmentId]/route") // ガード後に対象モジュールを遅延読込みする関数
++            : await import("@/app/(club-app)/club/[clubSlug]/attachments/notice/[attachmentId]/route"); // ガード後に対象モジュールを遅延読込みする関数
++          const manager = kind === "events"
++            ? await import("@/app/(club-app)/club/[clubSlug]/admin/attachments/event/[attachmentId]/route") // ガード後に対象モジュールを遅延読込みする関数
++            : await import("@/app/(club-app)/club/[clubSlug]/admin/attachments/notice/[attachmentId]/route"); // ガード後に対象モジュールを遅延読込みする関数
++          const attachmentId = kind === "events" ? f.related.a.eventAttachmentId! : f.related.a.noticeAttachmentId!;
++          const foreignId = kind === "events" ? f.related.b.eventAttachmentId! : f.related.b.noticeAttachmentId!;
++          const request = new Request(`${configuration.appOrigin}/fixture`); // HTTP要求を表す組込み型・コンストラクター
++          const params = Promise.resolve({ // Promise paramsを生成する標準関数
++            clubSlug: f.clubs.a.slug,
++            attachmentId,
 +          });
-+          expect(ownEvent?.personalMemos).toEqual([{ // 期待する値と全列を比較するメソッド / 期待値を検証する関数
-+            content: "架空の個人メモ",
-+          }]);
-+          expect(ownEvent?.reads).toHaveLength(1); // 取得・保存件数を検証するメソッド / 期待値を検証する関数
-+          expect((await notices.findClubNoticeForMember({ // 期待値を検証する関数 / 公開対象・本人の既読付きのお知らせ取得関数
-+            ...scope,
-+            noticeId,
-+          }))?.reads).toHaveLength(1); // 取得・保存件数を検証するメソッド
-+          const owner = {
-+            ...scope,
-+            membershipId: f.actors.aOwner.membershipId,
-+            role: "OWNER" as const, // リテラル型を保持するconstアサーション
-+          };
-+          const other = await events.findPublishedClubEventDetail({ // 公開対象・本人の既読・メモを取得する関数
-+            ...owner,
-+            eventId,
++          bridge.userId = f.actors.aMember.userId;
++          const allowed = await member.GET(request, { // 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params,
 +          });
-+          expect(other?.personalMemos).toEqual([]); // 期待する値と全列を比較するメソッド / 期待値を検証する関数
-+          expect(other?.reads).toEqual([]); // 期待する値と全列を比較するメソッド / 期待値を検証する関数
-+          expect((await notices.findClubNoticeForMember({ // 期待値を検証する関数 / 公開対象・本人の既読付きのお知らせ取得関数
-+            ...owner,
-+            noticeId,
-+          }))?.reads).toEqual([]); // 期待する値と全列を比較するメソッド
-+          await events.saveClubEventMemo({ // 所属・イベントの複合scopeで本人メモを保存する関数
-+            ...owner,
-+            eventId,
-+            content: "OWNERだけのメモ",
++          expect(allowed.status).toBe(307); // 値の一致を検証するメソッド / 期待値を検証する関数
++          await matchesPdf(await localFetch(allowed.headers.get("location")!)); // HTTP応答が送信したPDFの全バイトと一致するか照合する関数 / 同じローカルoriginにだけ通信しredirectを拒否する関数 / HTTP headerまたはフォームの値を取得するメソッド
++          const signedCalls = bridge.sign.mock.calls.length; // 外部入出力を記録するmock関数を参照する
++          const denied = await member.GET(request, { // 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params: Promise.resolve({ // Promise paramsを生成する標準関数
++              clubSlug: f.clubs.a.slug,
++              attachmentId: foreignId,
++            }),
 +          });
-+          expect((await events.findPublishedClubEventDetail({ // 期待値を検証する関数 / 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId,
-+          }))?.personalMemos)
-+            .toEqual([{ // 期待する値と全列を比較するメソッド
-+              content: "架空の個人メモ",
-+            }]);
-+          await events.deleteClubEventMemo({ // 所属・イベントの複合scopeで本人メモを削除する関数
-+            ...owner,
-+            eventId,
-+          });
-+          expect((await events.findPublishedClubEventDetail({ // 期待値を検証する関数 / 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId,
-+          }))?.personalMemos)
-+            .toEqual([{ // 期待する値と全列を比較するメソッド
-+              content: "架空の個人メモ",
-+            }]);
-+        },
-+      ),
-+      60_000,
-+    );
-+
-+    it("Aの作成・更新・削除は成功し、B全行は不変で添付削除予約もAだけになる", // 試験ケースを登録する関数
-+      /**
-+       * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
-+       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
-+        /**
-+         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
-+         */
-+        async () => { // 境界の置換またはケース検証のコールバック
-+          const f = owned(); // ケース所有のfixtureを取得する関数
-+          const beforeB = await snapshot([f.clubs.b.id]); // fixture内の親行・関連行・全列を一定順で取得する関数
-+          await events.deleteClubEvent({ // 同クラブのイベントを削除し添付削除を予約する関数
-+            clubId: f.clubs.a.id,
-+            eventId: f.related.a.events!.draft,
-+          });
-+          await notices.deleteClubNotice({ // 同クラブのお知らせを削除し添付削除を予約する関数
-+            clubId: f.clubs.a.id,
-+            noticeId: f.related.a.notices!.draft,
-+          });
-+          const createdEvent = await events.createClubEvent(eventInput(f.related.a.events!.draft)); // 同クラブ参照を確認してイベントを一体保存する関数 / 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+          const createdNotice = await notices.createClubNotice(noticeInput(f.related.a.notices!.draft)); // 同クラブ参照を確認してお知らせを一体保存する関数 / 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+          expect(createdEvent.id).toBe(f.related.a.events!.draft); // 値の一致を検証するメソッド / 期待値を検証する関数
-+          expect(createdNotice.id).toBe(f.related.a.notices!.draft); // 値の一致を検証するメソッド / 期待値を検証する関数
-+          expect((await events.updateClubEvent(eventInput())).updated).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数 / 同クラブのイベントと関連行を一体更新する関数 / 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+          expect((await notices.updateClubNotice(noticeInput())).updated).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数 / 同クラブのお知らせと関連行を一体更新する関数 / 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+          const eventResult = await events.deleteClubEvent({ // 同クラブのイベントを削除し添付削除を予約する関数
-+            clubId: f.clubs.a.id,
-+            eventId: f.related.a.events!.member,
-+          });
-+          const noticeResult = await notices.deleteClubNotice({ // 同クラブのお知らせを削除し添付削除を予約する関数
-+            clubId: f.clubs.a.id,
-+            noticeId: f.related.a.notices!.member,
-+          });
-+          expect(eventResult.deleted).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
-+          expect(noticeResult.deleted).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
-+          const jobs = await database().storageDeletionJob.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+            where: {
-+              id: {
-+                in: [...eventResult.storageDeletionJobIds, ...noticeResult.storageDeletionJobIds],
++          expect(denied.status).toBe(404); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(denied.headers.get("location")).toBeNull(); // nullかどうかを検証するメソッド / 期待値を検証する関数 / HTTP headerまたはフォームの値を取得するメソッド
++          expect(await denied.text()).toBe("Not Found"); // 値の一致を検証するメソッド / 期待値を検証する関数 / HTTP応答本文を文字列で取得するメソッド
++          await expect(manager.GET(request, { // 期待値を検証する関数 / 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params,
++          })).rejects.toBe(bridge.notFound); // 値の一致を検証するメソッド
++          expect(bridge.sign).toHaveBeenCalledTimes(signedCalls); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          if (kind === "events") {
++            await database().clubEvent.update({ // ケース所有の公開状態を変更するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                id: f.related.a.events!.member,
 +              },
-+            },
-+          });
-+          expect(jobs).toHaveLength(2); // 取得・保存件数を検証するメソッド / 期待値を検証する関数
-+          for (const job of jobs) {
-+            expect(job.clubId).toBe(f.clubs.a.id); // 値の一致を検証するメソッド / 期待値を検証する関数
-+            expect(job.status).toBe("PENDING"); // 値の一致を検証するメソッド / 期待値を検証する関数
++              data: {
++                status: "DRAFT",
++              },
++            });
++          } else {
++            await database().clubNotice.update({ // ケース所有の公開状態を変更するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                id: f.related.a.notices!.member,
++              },
++              data: {
++                status: "DRAFT",
++              },
++            });
 +          }
-+          expect(await database().clubEventRead.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+            where: {
-+              clubId: f.clubs.a.id,
-+            },
-+          })).toBe(0); // 値の一致を検証するメソッド
-+          expect(await database().clubNoticeRead.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+            where: {
-+              clubId: f.clubs.a.id,
-+            },
-+          })).toBe(0); // 値の一致を検証するメソッド
-+          expect(await database().clubEventMemo.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+            where: {
-+              clubId: f.clubs.a.id,
-+            },
-+          })).toBe(0); // 値の一致を検証するメソッド
-+          expect(await snapshot([f.clubs.b.id])).toEqual(beforeB); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / fixture内の親行・関連行・全列を一定順で取得する関数
++          expect((await member.GET(request, { // 期待値を検証する関数 / 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params,
++          })).status).toBe(404); // 値の一致を検証するメソッド
++          expect(bridge.sign).toHaveBeenCalledTimes(signedCalls); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          bridge.userId = f.actors.aOwner.userId;
++          expect((await manager.GET(request, { // 期待値を検証する関数 / 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params,
++          })).status).toBe(307); // 値の一致を検証するメソッド
++          const beforeForeign = bridge.sign.mock.calls.length; // 外部入出力を記録するmock関数を参照する
++          expect((await manager.GET(request, { // 期待値を検証する関数 / 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params: Promise.resolve({ // Promise paramsを生成する標準関数
++              clubSlug: f.clubs.a.slug,
++              attachmentId: foreignId,
++            }),
++          })).status).toBe(404); // 値の一致を検証するメソッド
++          expect(bridge.sign).toHaveBeenCalledTimes(beforeForeign); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          if (kind === "events") {
++            await database().clubEvent.update({ // ケース所有の公開状態を変更するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                id: f.related.a.events!.member,
++              },
++              data: {
++                status: "PUBLISHED",
++                targetRoles: ["OWNER", "COACH"],
++              },
++            });
++          } else {
++            await database().clubNotice.update({ // ケース所有の公開状態を変更するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                id: f.related.a.notices!.member,
++              },
++              data: {
++                status: "PUBLISHED",
++                targetRoles: ["OWNER", "COACH"],
++              },
++            });
++          }
++          bridge.userId = f.actors.aMember.userId;
++          expect((await member.GET(request, { // 期待値を検証する関数 / 認可とクラブscopeを確認して署名URLへ遷移する実GET関数
++            params,
++          })).status).toBe(404); // 値の一致を検証するメソッド
++          expect(bridge.sign).toHaveBeenCalledTimes(beforeForeign); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          if (kind === "events") {
++            await database().clubEvent.update({ // 所有する公開メタデータを変更するDBメソッド / 専用DB client取得関数
++              where: {
++                id: f.related.a.events!.member,
++              },
++              data: {
++                firstPublishedAt: null,
++                targetRoles: ["OWNER", "MEMBER"],
++              },
++            });
++          } else {
++            await database().clubNotice.update({ // 所有する公開メタデータを変更するDBメソッド / 専用DB client取得関数
++              where: {
++                id: f.related.a.notices!.member,
++              },
++              data: {
++                firstPublishedAt: null,
++                targetRoles: ["OWNER", "MEMBER"],
++              },
++            });
++          }
++          expect((await member.GET(request, { params })).status).toBe(404); // 実会員GET関数 / 応答statusを照合する期待値と比較メソッド
++          expect(bridge.sign).toHaveBeenCalledTimes(beforeForeign); // 署名mock参照 / 呼出し件数を照合する期待値と検証メソッド
++          expect(await snapshotB()).toEqual(beforeB); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / Bの親行・添付・削除予約を全列・一定順で取得する関数
++          expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
 +        },
 +      ),
 +      60_000,
 +    );
 +
-+    it("未読OFF・ON・基準更新・再既読をeventとnoticeそれぞれの実データで確認する", // 試験ケースを登録する関数
++    it.each(KINDS)("%sの作成中に2枚目uploadが失敗してもDBを作らず、1枚目を実補償する", // 入力別にケースを登録するメソッド
 +      /**
-+       * 対象ケースの入力を使い、認可・scope・保存結果を検証する。
++       * このケースの境界処理または検証処理を実行する。
 +       */
-+      async () => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
++      async (kind) => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
 +        /**
 +         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
 +         */
 +        async () => { // 境界の置換またはケース検証のコールバック
-+          const f = owned(); // ケース所有のfixtureを取得する関数
-+          const scope = {
-+            clubId: f.clubs.a.id,
-+            membershipId: f.actors.aMember.membershipId,
-+            role: "MEMBER" as const, // リテラル型を保持するconstアサーション
-+          };
++          const f = owned().database; // ケース所有のfixtureを取得する関数
++          const beforeB = await snapshotB(); // Bの親行・添付・削除予約を全列・一定順で取得する関数
++          const beforeJobs = await database().storageDeletionJob.findMany({ // 所有クラブの削除予約全列を取得するDBメソッド / 専用DB client取得関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          });
++          const beforeEvents = await database().clubEvent.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          });
++          const beforeNotices = await database().clubNotice.findMany({ // scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          });
++          failSecondUpload = true;
++          const result = await action(kind, false, actionForm(kind, 2)); // 実認可・入力検証・添付処理・Repositoryを通してActionを呼ぶ関数 / 実Actionへ渡すPDFと別クラブhidden IDを含むフォームを作る関数
++          expect(result.status).toBe("error"); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(uploads).toHaveLength(2); // 取得・保存件数を検証するメソッド / 期待値を検証する関数
++          for (const path of uploads) {
++            await absent(path); // 試行した所有PDFが一覧に存在しないことを確認する関数
++          }
++          expect(await database().clubEvent.findMany({ // 期待値を検証する関数 / scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          })).toEqual(beforeEvents); // 期待する値と全列を比較するメソッド
++          expect(await database().clubNotice.findMany({ // 期待値を検証する関数 / scope内の行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          })).toEqual(beforeNotices); // 期待する値と全列を比較するメソッド
++          expect(await database().storageDeletionJob.findMany({ // 所有クラブの削除予約を再取得するDBメソッド / 専用DB client取得関数 / 期待値生成関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          })).toEqual(beforeJobs); // 削除予約の全列が不変であることを照合するメソッド
++          expect(await snapshotB()).toEqual(beforeB); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / Bの親行・添付・削除予約を全列・一定順で取得する関数
++          expect(bridge.revalidate).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          expect(bridge.after).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          expect(console.error).toHaveBeenCalledTimes(1); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
++        },
++      ),
++      60_000,
++    );
++
++    it.each(KINDS)("%sの添付unique衝突で実transactionをrollbackし、新PDFだけを補償する", // 入力別にケースを登録するメソッド
++      /**
++       * このケースの境界処理または検証処理を実行する。
++       */
++      async (kind) => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
++        /**
++         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
++         */
++        async () => { // 境界の置換またはケース検証のコールバック
++          const f = owned().database; // ケース所有のfixtureを取得する関数
++          const beforeB = await snapshotB(); // Bの親行・添付・削除予約を全列・一定順で取得する関数
++          const beforeJobs = await database().storageDeletionJob.findMany({ // 所有クラブの削除予約全列を取得するDBメソッド / 専用DB client取得関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          });
++          const event = await database().clubEvent.findUniqueOrThrow({ // 所有する既存行の全列を必須で取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              id: f.related.a.events!.member,
++            },
++            include: {
++              attachments: true,
++            },
++          });
++          const notice = await database().clubNotice.findUniqueOrThrow({ // 所有する既存行の全列を必須で取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              id: f.related.a.notices!.member,
++            },
++            include: {
++              attachments: true,
++            },
++          });
++          const data = actionForm(kind, 1); // 実Actionへ渡すPDFと別クラブhidden IDを含むフォームを作る関数
++          data.append("deleteAttachmentIds", kind === "events" ? f.related.a.eventAttachmentId! : f.related.a.noticeAttachmentId!); // 送信フォームへPDFまたは削除対象IDを追加するメソッド
++          collision = kind;
++          const result = await action(kind, true, data); // 実認可・入力検証・添付処理・Repositoryを通してActionを呼ぶ関数
++          expect(result.status).toBe("error"); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(result.formError).toBe("同じデータがすでに登録されています。"); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(uploads).toHaveLength(1); // 取得・保存件数を検証するメソッド / 期待値を検証する関数
++          expect(await database().clubEvent.findUniqueOrThrow({ // 期待値を検証する関数 / 所有する既存行の全列を必須で取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              id: event.id,
++            },
++            include: {
++              attachments: true,
++            },
++          })).toEqual(event); // 期待する値と全列を比較するメソッド
++          expect(await database().clubNotice.findUniqueOrThrow({ // 期待値を検証する関数 / 所有する既存行の全列を必須で取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              id: notice.id,
++            },
++            include: {
++              attachments: true,
++            },
++          })).toEqual(notice); // 期待する値と全列を比較するメソッド
++          await absent(uploads[0]); // rollback後の新PDFが一覧に存在しないことを確認する関数
++          expect(await database().storageDeletionJob.findMany({ // 所有クラブの削除予約を再取得するDBメソッド / 専用DB client取得関数 / 期待値生成関数
++            where: {
++              clubId: f.clubs.a.id,
++            },
++            orderBy: {
++              id: "asc",
++            },
++          })).toEqual(beforeJobs); // 削除予約の全列が不変であることを照合するメソッド
++          expect(await snapshotB()).toEqual(beforeB); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / Bの親行・添付・削除予約を全列・一定順で取得する関数
++          expect(bridge.revalidate).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          expect(bridge.after).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / 外部入出力を記録するmock関数を参照する
++          expect(console.error).toHaveBeenCalledTimes(1); // 呼出し件数を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
++        },
++      ),
++      60_000,
++    );
++
++    it.each(KINDS)("%s親削除後のStorage失敗は元DB削除を維持し、所有JobだけをFAILEDにする", // 入力別にケースを登録するメソッド
++      /**
++       * このケースの境界処理または検証処理を実行する。
++       */
++      async (kind) => safeCheck( // 境界の置換またはケース検証のコールバック / SQL・assertionの実値を固定例外へ置き換える関数
++        /**
++         * 実DBの検証処理を実行し、失敗時は外側で実値を隠す。
++         */
++        async () => { // 境界の置換またはケース検証のコールバック
++          const f = owned().database; // ケース所有のfixtureを取得する関数
++          const beforeB = await snapshotB(); // Bの親行・添付・削除予約を全列・一定順で取得する関数
 +          const eventId = f.related.a.events!.member;
 +          const noticeId = f.related.a.notices!.member;
-+          await events.updateClubEvent({ // 同クラブのイベントと関連行を一体更新する関数
-+            ...eventInput(), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+            readRequiredAt: null,
-+          });
-+          await notices.updateClubNotice({ // 同クラブのお知らせと関連行を一体更新する関数
-+            ...noticeInput(), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+            readRequiredAt: null,
-+          });
-+          const offEvent = await events.findPublishedClubEventDetail({ // 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId,
-+          });
-+          const offNotice = await notices.findClubNoticeForMember({ // 公開対象・本人の既読付きのお知らせ取得関数
-+            ...scope,
-+            noticeId,
-+          });
-+          expect(isEventUnread({ // 期待値を検証する関数 / 未読イベントがあるかどうかの判定関数
-+            readRequiredAt: offEvent!.readRequiredAt,
-+            readAt: offEvent!.reads[0].readAt,
-+          })).toBe(false); // 値の一致を検証するメソッド
-+          expect(isNoticeUnread({ // 期待値を検証する関数 / お知らせに未読があるかどうかの判定関数
-+            readRequiredAt: offNotice!.readRequiredAt,
-+            readAt: offNotice!.reads[0].readAt,
-+          })).toBe(false); // 値の一致を検証するメソッド
-+          const baseline = new Date("2026-03-02T00:00:00.000Z"); // 日時を表す組込み型・コンストラクター
-+          await events.markClubEventRead({ // 所属・イベントの複合scopeで既読を保存する関数
-+            ...scope,
-+            eventId,
-+            readAt: baseline,
-+          });
-+          await notices.markClubNoticeRead({ // 所属・お知らせの複合scopeで既読を保存する関数
-+            ...scope,
-+            noticeId,
-+            readAt: baseline,
-+          });
-+          await events.updateClubEvent(eventInput()); // 同クラブのイベントと関連行を一体更新する関数 / 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+          await notices.updateClubNotice(noticeInput()); // 同クラブのお知らせと関連行を一体更新する関数 / 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+          const equalEvent = await events.findPublishedClubEventDetail({ // 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId,
-+          });
-+          const equalNotice = await notices.findClubNoticeForMember({ // 公開対象・本人の既読付きのお知らせ取得関数
-+            ...scope,
-+            noticeId,
-+          });
-+          expect(isEventUnread({ // 期待値を検証する関数 / 未読イベントがあるかどうかの判定関数
-+            readRequiredAt: equalEvent!.readRequiredAt,
-+            readAt: baseline,
-+          })).toBe(false); // 値の一致を検証するメソッド
-+          expect(isNoticeUnread({ // 期待値を検証する関数 / お知らせに未読があるかどうかの判定関数
-+            readRequiredAt: equalNotice!.readRequiredAt,
-+            readAt: baseline,
-+          })).toBe(false); // 値の一致を検証するメソッド
-+          const next = new Date("2026-03-03T00:00:00.000Z"); // 日時を表す組込み型・コンストラクター
-+          await events.updateClubEvent({ // 同クラブのイベントと関連行を一体更新する関数
-+            ...eventInput(), // 実イベントRepositoryへ渡すfixture所有入力を作る関数
-+            readRequiredAt: next,
-+          });
-+          await notices.updateClubNotice({ // 同クラブのお知らせと関連行を一体更新する関数
-+            ...noticeInput(), // 実お知らせRepositoryへ渡すfixture所有入力を作る関数
-+            readRequiredAt: next,
-+          });
-+          const unreadEvent = await events.findPublishedClubEventDetail({ // 公開対象・本人の既読・メモを取得する関数
-+            ...scope,
-+            eventId,
-+          });
-+          const unreadNotice = await notices.findClubNoticeForMember({ // 公開対象・本人の既読付きのお知らせ取得関数
-+            ...scope,
-+            noticeId,
-+          });
-+          expect(isEventUnread({ // 期待値を検証する関数 / 未読イベントがあるかどうかの判定関数
-+            readRequiredAt: unreadEvent!.readRequiredAt,
-+            readAt: unreadEvent!.reads[0].readAt,
-+          })).toBe(true); // 値の一致を検証するメソッド
-+          expect(isNoticeUnread({ // 期待値を検証する関数 / お知らせに未読があるかどうかの判定関数
-+            readRequiredAt: unreadNotice!.readRequiredAt,
-+            readAt: unreadNotice!.reads[0].readAt,
-+          })).toBe(true); // 値の一致を検証するメソッド
-+          expect(await notices.countUnreadClubNoticesForMember(scope)).toBe(1); // 値の一致を検証するメソッド / 期待値を検証する関数 / 本人が閲覧できるお知らせの未読件数を取得する関数
-+          await events.markClubEventRead({ // 所属・イベントの複合scopeで既読を保存する関数
-+            ...scope,
-+            eventId,
-+            readAt: next,
-+          });
-+          await notices.markClubNoticeRead({ // 所属・お知らせの複合scopeで既読を保存する関数
-+            ...scope,
-+            noticeId,
-+            readAt: next,
-+          });
-+          expect(await database().clubEventRead.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+            where: {
++          const path = kind === "events"
++            ? `clubs/${f.clubs.a.id}/events/${eventId}/${f.related.a.eventAttachmentId}.pdf`
++            : `clubs/${f.clubs.a.id}/notices/${noticeId}/${f.related.a.noticeAttachmentId}.pdf`;
++          const result = kind === "events"
++            ? await applications.events.deleteClubEvent({ // 同クラブのイベントを削除し添付削除を予約する関数
 +              clubId: f.clubs.a.id,
-+            },
-+          })).toBe(1); // 値の一致を検証するメソッド
-+          expect(await database().clubNoticeRead.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
-+            where: {
++              eventId,
++            })
++            : await applications.notices.deleteClubNotice({ // 同クラブのお知らせを削除し添付削除を予約する関数
 +              clubId: f.clubs.a.id,
++              noticeId,
++            });
++          expect(result.deleted).toBe(true); // 値の一致を検証するメソッド / 期待値を検証する関数
++          expect(result.storageDeletionJobIds).toHaveLength(1); // 取得・保存件数を検証するメソッド / 期待値を検証する関数
++          const jobId = result.storageDeletionJobIds[0];
++          expect((await database().storageDeletionJob.findUniqueOrThrow({ // 期待値を検証する関数 / 所有する既存行の全列を必須で取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              id: jobId,
 +            },
-+          })).toBe(1); // 値の一致を検証するメソッド
-+          expect(await notices.countUnreadClubNoticesForMember(scope)).toBe(0); // 値の一致を検証するメソッド / 期待値を検証する関数 / 本人が閲覧できるお知らせの未読件数を取得する関数
++          })).status).toBe("PENDING"); // 値の一致を検証するメソッド
++          removeFailures.add(path); // 通信前に所有pathを登録するメソッド
++          expect(await applications.worker.runStorageDeletionJobs({ // 期待値を検証する関数 / 指定した所有Jobだけを処理し削除結果をDBへ記録する関数
++            jobIds: [jobId],
++          }))
++            .toEqual({ // 期待する値と全列を比較するメソッド
++              claimedCount: 1,
++              completedCount: 0,
++              failedCount: 1,
++            });
++          const job = await database().storageDeletionJob.findUniqueOrThrow({ // 所有する既存行の全列を必須で取得するDBメソッド / ガード後の専用DB clientを取得する関数
++            where: {
++              id: jobId,
++            },
++          });
++          expect(job).toMatchObject({ // 拒否したDomainErrorのコードを検証するメソッド / 期待値を検証する関数
++            clubId: f.clubs.a.id,
++            status: "FAILED",
++            attemptCount: 1,
++            lastError: "STORAGE_DELETE_FAILED",
++            claimToken: null,
++            claimedAt: null,
++            leaseExpiresAt: null,
++          });
++          expect(job.nextAttemptAt).not.toBeNull(); // nullかどうかを検証するメソッド / 期待値を検証する関数
++          expect((await bucket().download(path)).error).toBeNull(); // nullかどうかを検証するメソッド / 期待値を検証する関数 / 実Storage上のPDFの取得可否を確認するメソッド / ガード後に作った実Storage SDKの固定bucket APIを返す関数
++          if (kind === "events") {
++            expect(await database().clubEvent.findUnique({ // 期待値を検証する関数 / 対象IDの既存行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                id: eventId,
++              },
++            })).toBeNull(); // nullかどうかを検証するメソッド
++            expect(await database().clubEventAttachment.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                eventId,
++              },
++            })).toBe(0); // 値の一致を検証するメソッド
++          } else {
++            expect(await database().clubNotice.findUnique({ // 期待値を検証する関数 / 対象IDの既存行を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                id: noticeId,
++              },
++            })).toBeNull(); // nullかどうかを検証するメソッド
++            expect(await database().clubNoticeAttachment.count({ // 期待値を検証する関数 / scope内の行数を取得するDBメソッド / ガード後の専用DB clientを取得する関数
++              where: {
++                noticeId,
++              },
++            })).toBe(0); // 値の一致を検証するメソッド
++          }
++          expect(await snapshotB()).toEqual(beforeB); // 期待する値と全列を比較するメソッド / 期待値を検証する関数 / Bの親行・添付・削除予約を全列・一定順で取得する関数
++          expect(console.error).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を検証する関数 / ログ出力関数の参照
 +        },
 +      ),
 +      60_000,
