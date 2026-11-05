@@ -1,1145 +1,224 @@
-diff --git a/tests/mvp/mail-failures.integration.test.ts b/tests/mvp/mail-failures.integration.test.ts
+diff --git a/.gitignore b/.gitignore
+index bf8d09458d6e08f3d069434272e4ba63e3c9b861..8e6981ab5a063fccb3d9f99f5ce3498aa4de8df4 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -42,3 +42,14 @@ yarn-error.log*
+ next-env.d.ts
+ 
+ /app/generated/prisma
++
++# 【追加：F12粒度11】認証状態と機密を含み得るE2E成果物を追跡しない
++/.auth/
++/e2e/.auth/
++/playwright/.auth/
++/test-results/
++/playwright-report/
++/blob-report/
++/playwright/.cache/
++*.har
++**/trace.zip
+diff --git a/e2e/smoke.spec.ts b/e2e/smoke.spec.ts
 new file mode 100644
-index 0000000..3f4ae62
+index 0000000000000000000000000000000000000000..5791de212edc95a22c4ba64e7d44a069d47340c1
 --- /dev/null
-+++ b/tests/mvp/mail-failures.integration.test.ts
-@@ -0,0 +1,1139 @@
-+// tests/mvp/mail-failures.integration.test.ts
-+// 実メール構築・Resend SDK・実DBとローカルAuthを接続し、ResendへのHTTP要求は送信しない。
-+// 結果不明の招待はREADY_TO_SENDとclaimを保持する現行仕様を確認する。
++++ b/e2e/smoke.spec.ts
+@@ -0,0 +1,42 @@
++// e2e/smoke.spec.ts
++// 公開ログイン入口の最小定義。粒度11は一覧取得のみで、実ブラウザー試験は粒度12以降。
 +
 +import {
-+  randomUUID,
-+} from "node:crypto";
-+import {
-+  resolve,
-+} from "node:path";
-+import type {
-+  ClubInvitation,
-+  PrismaClient,
-+  SupportReport,
-+} from "@prisma/client";
-+import type {
-+  SupabaseClient,
-+  User,
-+} from "@supabase/supabase-js";
-+import {
-+  afterAll,
-+  afterEach,
-+  beforeAll,
-+  beforeEach,
-+  describe,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
++  expect, // 画面と応答の期待値を検証する関数
++  test, // E2Eケースと分離したbrowser fixtureを提供する関数
++} from "@playwright/test";
 +
-+import type {
-+  ClubAccessContext, // 認可成功時の本人・クラブ・所属を保持する型
-+} from "@/app/(club-app)/club/club-membership-authorization";
-+import type {
-+  SupportReportReceipt, // サポート報告の受付完了データの型
-+} from "@/domain/club/support/support-report-types";
-+import {
-+  hashToken, // 生トークンをSHA-256でハッシュ化する関数
-+} from "@/src/infrastructure/security/token";
-+import {
-+  cleanupMvpDatabaseFixture, // 所有台帳の範囲だけを削除する関数
-+  planMvpDatabaseFixture, // DB接続前にUUIDと保存行を計画する関数
-+  seedMvpDatabaseFixture, // 計画した行を一体保存する関数
-+} from "./database-fixture";
-+import type {
-+  MvpDatabaseFixture, // 認可・関連行のfixture ID型
-+} from "./database-fixture";
-+import {
-+  requireMvpTestEnvironment, // 接続やdotenvの初期化前に使い捨て環境を確認する関数
-+} from "./environment";
-+import type {
-+  MvpTestEnvironment, // ガード済み接続先と生成予定資源を表す型
-+} from "./environment";
-+
-+/**
-+ * 実招待メールadapterのモジュール型。
-+ */
-+type InvitationMail = typeof import("@/lib/mail/club-invitation-mail"); // 実招待メールadapterのモジュール型
-+/**
-+ * 実サポートメールadapterのモジュール型。
-+ */
-+type SupportMail = typeof import("@/lib/mail/support-report-mail"); // 実サポートメールadapterのモジュール型
-+/**
-+ * Auth・メール・DB記録を統括する実招待Serviceのモジュール型。
-+ */
-+type InvitationService = typeof import("@/src/application/club/invitation/send-club-invitation"); // 実招待Serviceのモジュール型
-+/**
-+ * 受付保存・通知・結果記録を統括する実サポートServiceのモジュール型。
-+ */
-+type SupportService = typeof import("@/src/application/club/support/create-support-report"); // 実サポートServiceのモジュール型
-+/**
-+ * SDK境界へ注入する成功・拒否・結果不明の種別。
-+ */
-+type Mode = // 通信境界の結果選択型
-+  | "accepted" // 受付成功を表すリテラル型
-+  | "rejected" // 明確な拒否を表すリテラル型
-+  | "http-timeout" // HTTP 408を表すリテラル型
-+  | "conflict" // HTTP 409を表すリテラル型
-+  | "server" // HTTP 503を表すリテラル型
-+  | "network" // 通信例外を表すリテラル型
-+  | "timeout" // TimeoutErrorを表すリテラル型
-+  | "malformed"; // 不正なエラー本文を表すリテラル型
-+/**
-+ * Resend SDKが生成した送信要求を、外部へ送らず記録するデータ。
-+ */
-+type MailRequest = { // 送信要求の記録型
-+  headers: Headers; // HTTP headerの組込み型
-+  payload: Record<string, unknown>; // メールpayloadの辞書型 / 文字列キー型 / 未確定値型
-+};
-+/**
-+ * 実SDKへ転送するAuth管理APIの型。
-+ */
-+type AuthAdmin = SupabaseClient["auth"]["admin"]; // Auth管理API型 / Supabase client型
-+
-+const FAILURE = "F12メールの接続条件・受付結果・所有資源を確認してください。";
-+const PRIVATE = "FAKE_MAIL_PRIVATE_TOKEN_URL_COOKIE_NEVER_LOG";
-+const API_KEY = "re_F12_FAKE_KEY_NEVER_SEND";
-+const ENDPOINT = "https://api.resend.com/emails";
-+const MODES: readonly Mode[] = [ // 通信結果の読取専用配列型 / 通信結果選択型
-+  "accepted",
-+  "rejected",
-+  "http-timeout",
-+  "conflict",
-+  "server",
-+  "network",
-+  "timeout",
-+  "malformed",
-+];
-+const nativeFetch = globalThis.fetch; // ローカルAuthへの限定通信に使う標準HTTP関数の参照
-+const bridge = vi.hoisted( // importより前に外部境界の状態を用意する関数
++test( // 公開ログイン入口を確認するE2Eケースの登録関数
++  "未ログインでクラブ運営アプリのログイン入口を表示する",
 +  /**
-+   * 実接続を作らず、SDK初期化許可と送信・故障の状態を保持する。
++   * 新しい未認証pageでログイン画面を開き、見出しと入力欄・ログインボタンを確認する。
++   * 入力・送信は行わず、会員・招待・メール・DBの変更を発生させない。
 +   */
-+  () => ({ // 試験の境界状態を作るコールバック
-+    allowed: false,
-+    sdkAllowed: false,
-+    client: undefined as PrismaClient | undefined, // 専用Prisma client型 / 未生成の型
-+    mode: "accepted" as Mode, // 通信結果選択型のアサーション
-+    origin: "",
-+    mails: [] as MailRequest[], // 送信要求の記録配列型
-+    hookFailed: false,
-+    mailHook: undefined as (() => Promise<void>) | undefined, // メール受付前の非同期検証関数型 / 戻り値を使わない型 / 未設定の型
-+    admin: vi.fn(), // 実Auth管理clientを返す境界のmock関数
-+    external: vi.fn(), // 禁止した初期化・外向き通信を記録する関数
-+  }),
++  async ({ page }) => { // Playwrightが分離したpageを受け取る非同期テスト関数
++    const response = await page.goto("/club-login"); // ローカルの公開ログイン入口へ遷移するメソッド
++    expect(response?.status()).toBe(200); // 期待値生成関数 / HTTP状態取得メソッド / 正常応答の比較メソッド
++    await expect(page).toHaveURL("http://127.0.0.1:3000/club-login"); // 期待値生成関数 / 遷移先を照合する非同期メソッド
++    await expect( // 期待値を生成する関数
++      page.getByRole("heading", { // アクセシブルな見出しを特定するメソッド
++        name: "クラブ運営アプリ",
++        exact: true,
++      }),
++    ).toBeVisible(); // 見出しの表示を待って確認するメソッド
++    await expect( // 期待値を生成する関数
++      page.getByLabel("メールアドレス", { // ラベルでメール入力欄を特定するメソッド
++        exact: true,
++      }),
++    ).toBeVisible(); // メール入力欄の表示を確認するメソッド
++    await expect( // 期待値を生成する関数
++      page.getByLabel("パスワード", { // ラベルでパスワード入力欄を特定するメソッド
++        exact: true,
++      }),
++    ).toHaveAttribute("type", "password"); // 入力値を伏せる属性を確認するメソッド
++    await expect( // 期待値を生成する関数
++      page.getByRole("button", { // アクセシブルなログインボタンを特定するメソッド
++        name: "ログイン",
++        exact: true,
++      }),
++    ).toBeEnabled(); // ログインボタンが操作可能か確認するメソッド
++  },
 +);
-+vi.mock("@/src/infrastructure/prisma/client", // 共有DB clientの初期化を置き換える関数
-+  /**
-+   * 実Repositoryへガード後の専用clientだけを渡す。
-+   */
-+  () => ({ // 専用DB境界を返すコールバック
-+    /**
-+     * 未初期化なら共有接続へフォールバックせず拒否する。
-+     */
-+    get prisma() { // 専用client取得getter関数
-+      if (!bridge.client) {
-+        throw new Error("F12_CLIENT_NOT_READY"); // 固定例外コンストラクター
+diff --git a/package-lock.json b/package-lock.json
+index becac8d79814a8e554aec519aa9bd4bf5a01597b..abcc1376cc8d54a5318b69a4f281039505e8ce1a 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -34,6 +34,7 @@
+         "zod": "^4.4.3"
+       },
+       "devDependencies": {
++        "@playwright/test": "1.64.1",
+         "@prisma/adapter-pg": "^7.8.0",
+         "@tailwindcss/postcss": "^4",
+         "@types/node": "^20",
+@@ -2688,6 +2689,22 @@
+         "url": "https://github.com/sponsors/Boshen"
+       }
+     },
++    "node_modules/@playwright/test": {
++      "version": "1.64.1",
++      "resolved": "https://registry.npmjs.org/@playwright/test/-/test-1.64.1.tgz",
++      "integrity": "sha512-IaYGml/nSOiZWROfPtuIL7neuu9qDOZ3TNvNljUIrhDMxiGTgPjzj/g9p9RxpS2tSepPDRY+UwAaEeiKtUvIAg==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "playwright": "1.64.1"
++      },
++      "bin": {
++        "playwright": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
 +      }
-+      return bridge.client;
 +    },
-+  }),
-+);
-+vi.mock("@prisma/adapter-pg", // 実DBアダプターの評価を制御する関数
-+  /**
-+   * 接続前ガードに成功した場合だけ実アダプターを評価する。
-+   */
-+  async (original) => { // 実モジュールの遅延読込コールバック
-+    if (!bridge.allowed) {
-+      bridge.external(); // 禁止した初期化を記録するmock関数
-+      throw new Error("F12_ADAPTER_NOT_ALLOWED"); // 固定例外コンストラクター
-+    }
-+    return original(); // 実DBアダプターの読込関数
-+  },
-+);
-+vi.mock("@supabase/supabase-js", // Auth SDKの評価をガード後に限定する関数
-+  /**
-+   * ローカル環境の確認前にはAuth SDKを評価しない。
-+   */
-+  async (original) => { // Auth SDK読込のコールバック
-+    if (!bridge.allowed) {
-+      bridge.external(); // 禁止したSDK評価を記録するmock関数
-+      throw new Error("F12_AUTH_NOT_ALLOWED"); // 固定例外コンストラクター
-+    }
-+    return original(); // 実Auth SDKを読み込む関数
-+  },
-+);
-+vi.mock("@/src/infrastructure/supabase/admin", // 管理clientの取得境界を置き換える関数
-+  /**
-+   * ローカルAuthへ転送し、作成したユーザーの所有台帳だけを補う。
-+   */
-+  () => ({ // 管理client取得境界を返すコールバック
-+    createSupabaseAdminClient: bridge.admin, // 実ローカルAuthへ転送するclient取得用mock関数
-+  }),
-+);
-+vi.mock("resend", // 実Resend SDKの初期化を制御する関数
-+  /**
-+   * 架空の設定とHTTP遮断を用意した場合だけ実SDKを評価する。
-+   */
-+  async (original) => { // SDK読込のコールバック
-+    if (!bridge.sdkAllowed) {
-+      bridge.external(); // 禁止したSDK評価を記録するmock関数
-+      throw new Error("F12_RESEND_NOT_ALLOWED"); // 固定例外コンストラクター
-+    }
-+    return original(); // 実Resend SDKを読み込む関数
-+  },
-+);
-+vi.mock("dotenv/config", // 環境ファイルの自動読込を拒否する関数
-+  /**
-+   * 環境ファイルを暗黙に読もうとした場合は記録して拒否する。
-+   */
-+  () => { // 禁止した読込を検出するコールバック
-+    bridge.external(); // 禁止した初期化を記録するmock関数
-+    throw new Error("F12_DOTENV_NOT_ALLOWED"); // 固定例外コンストラクター
-+  },
-+);
-+
-+let invitationMail: InvitationMail; // 実招待メールadapterのモジュール型
-+let supportMail: SupportMail; // 実サポートメールadapterのモジュール型
-+
-+/**
-+ * SQL・SDK・assertionの原文を出さず、固定文だけで試験を失敗させる。
-+ */
-+async function safeCheck(operation: () => Promise<void>): Promise<void> { // 固定例外へ変換する関数 / 非同期処理の関数型 / 非同期結果型 / 戻り値を使わない型
-+  try {
-+    await operation(); // 検証処理を実行する関数
-+  } catch {
-+    throw new Error(FAILURE); // 原文とcauseを含めない例外コンストラクター
-+  }
-+}
-+
-+/**
-+ * 実Resend要求を架空の応答へ変換し、明示したローカルAuth以外へ通信しない。
-+ */
-+async function networkFetch( // 接続先を制限するHTTP関数
-+  input: Parameters<typeof fetch>[0], // HTTP要求の引数型 / 値から型を取得する型 / HTTP関数型
-+  init?: Parameters<typeof fetch>[1], // HTTP設定の引数型 / 値から型を取得する型 / HTTP関数型
-+): Promise<Response> { // 非同期のHTTP応答型
-+  const url = new URL(input instanceof Request ? input.url : String(input)); // URL解析コンストラクター / HTTP要求の組込み型 / 文字列化関数
-+  if (
-+    url.href === ENDPOINT &&
-+    bridge.sdkAllowed &&
-+    init?.method === "POST"
-+  ) {
-+    const payload = JSON.parse(String(init.body)) as Record<string, unknown>; // JSON解析関数 / 文字列化関数 / payload辞書型 / 文字列キー型 / 未確定値型
-+    bridge.mails.push({ // 外部送信せず要求を記録するメソッド
-+      headers: new Headers(init.headers), // HTTP headerのコンストラクター
-+      payload,
-+    });
-+    try {
-+      await bridge.mailHook?.(); // 受付直前の非同期DB検証関数
-+    } catch {
-+      bridge.hookFailed = true;
-+      throw new Error("F12_MAIL_PRECHECK_FAILED"); // SDKが例外を正規化しても後処理で検出する固定例外コンストラクター
-+    }
-+    if (bridge.mode === "network") {
-+      throw new Error(PRIVATE); // 架空の通信例外コンストラクター
-+    }
-+    if (bridge.mode === "timeout") {
-+      throw new DOMException(PRIVATE, "TimeoutError"); // 架空のtimeout例外コンストラクター
-+    }
-+    const rejected = bridge.mode === "rejected" ||
-+      bridge.mode === "malformed";
-+    const status = bridge.mode === "accepted"
-+      ? 200
-+      : rejected
-+        ? 422
-+        : bridge.mode === "http-timeout"
-+          ? 408
-+          : bridge.mode === "conflict"
-+            ? 409
-+            : 503;
-+    const errorName = bridge.mode === "rejected"
-+      ? "validation_error"
-+      : bridge.mode === "conflict"
-+        ? "invalid_idempotency_key"
-+        : "internal_server_error";
-+    const body = bridge.mode === "accepted"
-+      ? JSON.stringify({ id: "f12-email-accepted" }) // 架空の受付IDをJSON化する関数
-+      : bridge.mode === "malformed"
-+        ? PRIVATE
-+        : JSON.stringify({ // SDKが読む架空のエラーをJSON化する関数
-+            name: errorName,
-+            statusCode: status,
-+            message: `${PRIVATE} private@example.test https://private.invalid/?token=${PRIVATE} Cookie=${PRIVATE}`,
-+          });
-+    return new Response(body, { // 架空のHTTP応答コンストラクター
-+      status,
-+      headers: {
-+        "content-type": "application/json",
-+        "set-cookie": `${PRIVATE}=fake`,
+     "node_modules/@prisma/adapter-pg": {
+       "version": "7.8.0",
+       "resolved": "https://registry.npmjs.org/@prisma/adapter-pg/-/adapter-pg-7.8.0.tgz",
+@@ -9103,6 +9120,35 @@
+         "pathe": "^2.0.3"
+       }
+     },
++    "node_modules/playwright": {
++      "version": "1.64.1",
++      "resolved": "https://registry.npmjs.org/playwright/-/playwright-1.64.1.tgz",
++      "integrity": "sha512-HCrVhHr5QQuwYoswEUGTb7gGp522yflbv/ST8nF4sFWGuLjQCt17Q/EubpGGSNKYn1tsTCPZxqHhHCfVURu7UA==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "dependencies": {
++        "playwright-core": "1.64.1"
 +      },
-+    });
-+  }
-+  if (
-+    bridge.allowed &&
-+    url.origin === bridge.origin &&
-+    url.pathname.startsWith("/auth/v1/admin/") && // Auth管理APIのpathだけを許可するメソッド
-+    !url.username &&
-+    !url.password &&
-+    !url.hash
-+  ) {
-+    return nativeFetch(input, { // 指定したローカルAuthへだけ転送するHTTP関数
-+      ...init,
-+      redirect: "error",
-+    });
-+  }
-+  bridge.external(); // 禁止したHTTP要求を記録するmock関数
-+  throw new Error("F12_HTTP_NOT_ALLOWED"); // URLを含まない固定例外コンストラクター
-+}
-+
-+/**
-+ * 架空の送信設定を明示し、実メールadapterと実Resend SDKを読み込む。
-+ */
-+async function configureMail(): Promise<void> { // 安全なSDK準備関数 / 非同期結果型 / 戻り値を使わない型
-+  vi.stubEnv("RESEND_API_KEY", API_KEY); // 架空のAPI keyへ置き換える関数
-+  vi.stubEnv("RESEND_BASE_URL", "https://api.resend.com"); // SDKの送信先を固定する環境変数置換関数
-+  vi.stubEnv("MAIL_FROM_ADDRESS", "from@example.test"); // 架空の送信元へ置き換える関数
-+  vi.stubEnv("ADMIN_EMAIL", "platform@example.test"); // 架空のサポート通知先へ置き換える関数
-+  bridge.sdkAllowed = true;
-+  invitationMail = await import("@/lib/mail/club-invitation-mail"); // 実招待メールadapterを読み込む関数
-+  supportMail = await import("@/lib/mail/support-report-mail"); // 実サポートメールadapterを読み込む関数
-+}
-+
-+/**
-+ * レスポンス・DTOへ許可する結果を、通信故障の種別から決める。
-+ */
-+function outcome(mode: Mode): "accepted" | "rejected" | "unknown" { // 結果分類関数 / 通信結果選択型 / 固定結果のリテラル型
-+  return mode === "accepted"
-+    ? "accepted"
-+    : mode === "rejected"
-+      ? "rejected"
-+      : "unknown";
-+}
-+
-+/**
-+ * DBを使わないSDK試験用の受付完了DTOを作る。
-+ */
-+function receipt(): SupportReportReceipt { // 架空の受付DTO生成関数 / 受付完了データ型
-+  return {
-+    id: randomUUID(), // 架空の受付UUID生成関数
-+    clubId: randomUUID(), // 架空のクラブUUID生成関数
-+    membershipId: randomUUID(), // 架空の所属UUID生成関数
-+    clubName: PRIVATE,
-+    category: "BUG",
-+    message: PRIVATE,
-+    reporterName: PRIVATE,
-+    reporterEmail: "private@example.test",
-+    reporterRole: "MEMBER",
-+    pageUrl: `/club/fixture/account?token=${PRIVATE}`,
-+    userAgent: PRIVATE,
-+    createdAt: new Date("2026-11-01T00:00:00Z"), // 架空の受付日時コンストラクター
-+  };
-+}
-+
-+beforeEach( // 全ケースの通信・出力監視を登録する関数
-+  /**
-+   * 前回の記録を消し、実Resend要求を外部送信前に置換する。
-+   */
-+  () => { // 監視の準備を行うコールバック
-+    vi.clearAllMocks(); // 呼出し記録を消す関数
-+    bridge.mode = "accepted";
-+    bridge.mails = [];
-+    bridge.mailHook = undefined;
-+    bridge.hookFailed = false;
-+    vi.spyOn(globalThis, "fetch").mockImplementation(networkFetch); // HTTP監視関数 / 送信境界の置換メソッド / 接続先制限関数の参照
-+    for (const method of ["log", "warn", "error"] as const) { // 監視対象のリテラル型アサーション
-+      vi.spyOn(console, method).mockImplementation( // 出力監視関数 / 実出力を抑止するメソッド
-+        /**
-+         * エラー原文が試験失敗時にもコンソールへ流れないようにする。
-+         */
-+        () => undefined, // 出力を抑止するコールバック
-+      );
-+    }
-+  },
-+);
-+afterEach( // 全ケースの外部入出力検証を登録する関数
-+  /**
-+   * ログは固定の通知失敗項目だけを許可し、監視を解除する。
-+   */
-+  async () => { // 出力を検証・解除する非同期コールバック
-+    try {
-+      await safeCheck( // 実値を固定例外へ変換する関数
-+        /**
-+         * 本文・メール・token・Cookie・credentialをログへ出していないことを確認する。
-+         */
-+        async () => { // 出力を確認する非同期関数
-+          expect(bridge.external).not.toHaveBeenCalled(); // 期待値生成関数 / 禁止境界の非評価検証メソッド / 記録用mock関数
-+          expect(bridge.hookFailed).toBe(false); // 期待値生成関数 / SDKに吸収された送信前DB検証エラーがないことを確認する比較メソッド
-+          expect(console.log).not.toHaveBeenCalled(); // 期待値生成関数 / 非出力検証メソッド / ログ出力関数
-+          expect(console.warn).not.toHaveBeenCalled(); // 期待値生成関数 / 非出力検証メソッド / 警告出力関数
-+          for (const [message, context] of vi.mocked(console.error).mock.calls) { // ログ監視の型を復元する関数 / エラー出力関数の参照
-+            expect(message).toBe("support_report_operation_failed"); // 期待値生成関数 / 固定ログ名の比較メソッド
-+            expect(Object.keys(context).sort()).toEqual([ // 期待値生成関数 / キー列挙関数 / 並替えメソッド / 許可列の比較メソッド
-+              "errorCode",
-+              "operation",
-+              "requestId",
-+              "result",
-+            ]);
-+            expect(context.operation).toBe("supportReport.notify"); // 期待値生成関数 / 固定操作名の比較メソッド
-+            expect(context.errorCode).toBe("EXTERNAL_SERVICE"); // 期待値生成関数 / 固定error codeの比較メソッド
-+            expect(context.requestId).toMatch(/^[0-9a-f-]{36}$/u); // 期待値生成関数 / 操作UUID書式の検証メソッド
-+            expect(["EMAIL_SEND_FAILED", "EMAIL_SEND_RESULT_UNKNOWN"]).toContain(context.result); // 期待値生成関数 / 固定結果名の包含検証メソッド
-+          }
-+        },
-+      );
-+    } finally {
-+      vi.restoreAllMocks(); // このケースの監視を解除する関数
-+    }
-+  },
-+);
-+afterAll( // ファイル全体の環境復元を登録する関数
-+  /**
-+   * 架空のメール設定を元へ戻し、SDK初期化許可を解除する。
-+   */
-+  () => { // 環境復元のコールバック
-+    vi.unstubAllEnvs(); // 試験用の環境変数置換を解除する関数
-+    bridge.sdkAllowed = false;
-+  },
-+);
-+
-+it("flag不足ではURL・DB・Auth・Resend SDKを初期化しない", // 接続前ガード試験を登録する関数
-+  /**
-+   * SDKを読み込む前に、URL getterすら評価せずに拒否することを確認する。
-+   */
-+  () => { // ガードを確認するコールバック
-+    const getter = vi.fn(); // URL評価の記録用mock生成関数
-+    const variables = {
-+      RUN_MVP_TESTS: "0",
-+      /**
-+       * flag不足なのにURLを読む場合を検出する。
-+       */
-+      get DATABASE_URL(): string { // URL取得getter関数 / 文字列型
-+        getter(); // URL評価を記録するmock関数
-+        throw new Error(PRIVATE); // 架空の秘密を持つ例外コンストラクター
++      "bin": {
++        "playwright": "cli.js"
 +      },
-+    };
-+    expect( // 期待値生成関数
-+      /**
-+       * 接続を許可していない設定で環境ガードを実行する。
-+       */
-+      () => requireMvpTestEnvironment( // ガード呼出しのコールバック / 接続前ガード関数
-+        variables,
-+        resolve(import.meta.dirname, "../.."), // checkout絶対パスを求める関数
-+        "a".repeat(32), // 架空の実行識別子を作るメソッド
-+      ),
-+    ).toThrow("F12専用の使い捨て環境・flag・checkoutを確認してください。"); // 固定例外の検証メソッド
-+    expect(getter).not.toHaveBeenCalled(); // 期待値生成関数 / URL非評価検証メソッド
-+    expect(bridge.allowed).toBe(false); // 期待値生成関数 / DB・Auth許可の比較メソッド
-+    expect(bridge.sdkAllowed).toBe(false); // 期待値生成関数 / Resend許可の比較メソッド
-+    expect(bridge.client).toBeUndefined(); // 期待値生成関数 / client未生成の検証メソッド
++      "engines": {
++        "node": ">=20"
++      }
++    },
++    "node_modules/playwright-core": {
++      "version": "1.64.1",
++      "resolved": "https://registry.npmjs.org/playwright-core/-/playwright-core-1.64.1.tgz",
++      "integrity": "sha512-BC4s8y6SEVA6Q1rSxZTto8hI1KUI3xXlHGZgvGqP4IqPdI/a6FX9H29IDNz7vKo9l21b6LfYosScPL6M3xxyDQ==",
++      "devOptional": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "playwright-core": "cli.js"
++      },
++      "engines": {
++        "node": ">=20"
++      }
++    },
+     "node_modules/possible-typed-array-names": {
+       "version": "1.1.0",
+       "resolved": "https://registry.npmjs.org/possible-typed-array-names/-/possible-typed-array-names-1.1.0.tgz",
+diff --git a/package.json b/package.json
+index bb06ac4c681d245d5007ad35ebeab8932834f0fe..8468536851ffd62649d20a2c2bca82b341fe4644 100644
+--- a/package.json
++++ b/package.json
+@@ -31,7 +31,8 @@
+     "test:support-report:local": "RUN_SUPPORT_REPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/support-report.flow.integration.test.ts",
+     "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts",
+     "test:event-month-copy:local": "RUN_EVENT_MONTH_COPY_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-month-copy.flow.integration.test.ts",
+-    "test:event-practice-batch:local": "RUN_EVENT_PRACTICE_BATCH_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-practice-batch.flow.integration.test.ts"
++    "test:event-practice-batch:local": "RUN_EVENT_PRACTICE_BATCH_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-practice-batch.flow.integration.test.ts",
++    "test:e2e:list": "playwright test --list"
+   },
+   "dependencies": {
+     "@axiomhq/js": "^1.8.0",
+@@ -60,6 +61,7 @@
+     "zod": "^4.4.3"
+   },
+   "devDependencies": {
++    "@playwright/test": "1.64.1",
+     "@prisma/adapter-pg": "^7.8.0",
+     "@tailwindcss/postcss": "^4",
+     "@types/node": "^20",
+diff --git a/playwright.config.ts b/playwright.config.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..90e07aafc12ed7695fe84a168f3ec1c97b09dfdf
+--- /dev/null
++++ b/playwright.config.ts
+@@ -0,0 +1,58 @@
++// playwright.config.ts
++// F12粒度11では一覧取得だけを許可し、実起動は粒度12のguard付きrunnerへ接続する。
++
++import {
++  defineConfig, // 型付きのPlaywright設定を定義する関数
++} from "@playwright/test";
++
++// 既存のローカルserverへ誤接続せず、browser取得や起動もこの粒度では行わない。
++if (!process.argv.includes("--list")) { // CLI引数に一覧取得指定があるか確認するメソッド
++  throw new Error( // 実起動を固定文で拒否する例外コンストラクター
++    "F12粒度12のguard付きrunner適用前は、npm run test:e2e:listだけを実行してください。",
++  );
++}
++
++/**
++ * Chromium一系統のE2E設定を公開し、自動記録と認証状態の使い回しを無効にする。
++ * webServerの起動・所有確認・既存serverの再利用拒否は粒度12で接続する。
++ */
++export default defineConfig({ // 型を検証しながらPlaywright設定を定義する関数
++  testDir: "./e2e",
++  testMatch: "**/*.spec.ts",
++  fullyParallel: false,
++  forbidOnly: true,
++  retries: 0,
++  workers: 1,
++  timeout: 30_000,
++  expect: {
++    timeout: 5_000,
 +  },
-+);
-+
-+describe.each(["invitation", "support"] as const)( // adapter別の試験群登録メソッド / adapterキーのリテラル型アサーション
-+  "%sの実Resend SDK境界（DB・通信なし）",
-+  /**
-+   * 上位メール関数やSDKをmockせず、HTTP境界だけで結果を注入する。
-+   */
-+  (kind) => { // adapter別の試験群を定義するコールバック
-+    beforeAll( // 架空のメール設定の準備を登録する関数
-+      /**
-+       * 実送信をせず、実adapterとSDKを読み込む。
-+       */
-+      async () => safeCheck(configureMail), // SDK準備のコールバック / 固定例外へ変換する関数 / 安全なSDK準備関数の参照
-+    );
-+    it.each(MODES)("%sを固定DTOへ分類し、SDK要求の宛先・本文・idempotency keyを確認する", // 通信結果別の試験登録メソッド
-+      /**
-+       * 実SDKがJSON化した要求と、adapterが返す限定DTOを照合する。
-+       */
-+      async (mode) => safeCheck( // 結果別試験の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * SDKのerror・例外・応答headerを、公開結果やログへ反射しないことを検証する。
-+         */
-+        async () => { // SDK契約を検証する非同期関数
-+          bridge.mode = mode;
-+          const id = randomUUID(); // メールまたは報告のUUID生成関数
-+          let expectedKey: string; // SDK要求の期待keyの文字列型
-+          if (kind === "invitation") {
-+            const result = await invitationMail.sendClubInvitationEmail({ // 実招待メール構築とSDK受付を行う関数
-+              kind: "NEW_USER",
-+              email: "private@example.test",
-+              name: PRIVATE,
-+              clubName: PRIVATE,
-+              role: "MEMBER",
-+              expiresAt: new Date("2099-01-01T00:00:00Z"), // 架空の招待期限コンストラクター
-+              authLink: `https://auth.example.test/verify?token=${PRIVATE}`,
-+              invitationId: id,
-+              attemptCount: 2,
-+            });
-+            const expected = outcome(mode) === "accepted" // 通信結果を分類する関数
-+              ? {
-+                outcome: "ACCEPTED",
-+                emailId: "f12-email-accepted",
-+              }
-+              : outcome(mode) === "rejected" // 通信結果を分類する関数
-+                ? {
-+                  outcome: "REJECTED",
-+                  errorCode: "EMAIL_SEND_FAILED",
-+                }
-+                : {
-+                  outcome: "UNKNOWN",
-+                  errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
-+                };
-+            expect(result).toEqual(expected); // 期待値生成関数 / 固定DTOの比較メソッド
-+            expectedKey = `club-invitation/${id}/2`;
-+          } else {
-+            const report = {
-+              ...receipt(), // 架空の受付DTO生成関数
-+              id,
-+            }; // 架空の受付DTO生成関数
-+            const result = await supportMail.sendSupportReportEmail(report); // 実サポートメール構築とSDK受付を行う関数
-+            const expected = outcome(mode) === "accepted" // 通信結果を分類する関数
-+              ? { outcome: "ACCEPTED" }
-+              : outcome(mode) === "rejected" // 通信結果を分類する関数
-+                ? {
-+                  outcome: "FAILED",
-+                  errorCode: "EMAIL_SEND_FAILED",
-+                }
-+                : {
-+                  outcome: "UNKNOWN",
-+                  errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
-+                };
-+            expect(result).toEqual(expected); // 期待値生成関数 / 固定DTOの比較メソッド
-+            expectedKey = `support-report/${id}`;
-+          }
-+          expect(bridge.mails).toHaveLength(1); // 期待値生成関数 / SDKの試行件数検証メソッド
-+          const mail = bridge.mails[0];
-+          expect(mail.headers.get("authorization")).toBe(`Bearer ${API_KEY}`); // 期待値生成関数 / header取得メソッド / 架空credentialの比較メソッド
-+          expect(mail.headers.get("idempotency-key")).toBe(expectedKey); // 期待値生成関数 / header取得メソッド / 固定keyの比較メソッド
-+          expect(mail.payload.from).toBe(`${PRIVATE} <from@example.test>`); // 期待値生成関数 / 実送信元構築の比較メソッド
-+          expect(mail.payload.to).toBe(kind === "invitation" ? "private@example.test" : "platform@example.test"); // 期待値生成関数 / 宛先の比較メソッド
-+          expect(mail.payload.text).toEqual(expect.stringContaining(PRIVATE)); // 期待値生成関数 / 実本文の比較メソッド / 文字列包含の期待値生成メソッド
-+          if (kind === "support") {
-+            expect(mail.payload.reply_to).toBe("private@example.test"); // 期待値生成関数 / SDKのreplyTo変換を確認する比較メソッド
-+          } else {
-+            expect(mail.payload.html).toEqual(expect.stringContaining(PRIVATE)); // 期待値生成関数 / 実HTML本文の比較メソッド / 文字列包含の期待値生成メソッド
-+          }
-+          expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / 非出力検証メソッド / エラー出力関数
-+        },
-+      ),
-+    );
++  outputDir: "./test-results",
++  preserveOutput: "never",
++  reporter: "list",
++  captureGitInfo: {
++    commit: false,
++    diff: false,
 +  },
-+);
-+
-+const enabled = process.env.RUN_MVP_TESTS === "1" &&
-+  process.env.RUN_DB_INTEGRATION_TESTS === "1";
-+const databaseSuite = enabled ? describe : describe.skip; // 実DB群の登録関数 / 実DB群をskipする関数
-+
-+databaseSuite("F12 Resend障害と実DB・ローカルAuth（専用flag未指定時はskip）", // flagに応じて実DB群を登録する関数
-+  /**
-+   * メール受付直前の実保存状態と、受付後の状態・所有資源保持を検証する。
-+   */
-+  () => { // 実DB試験群を定義するコールバック
-+    let configuration: MvpTestEnvironment; // ガード済み実行環境型
-+    let fixture: MvpDatabaseFixture | undefined; // 所有fixture型 / 未作成の型
-+    let admin: SupabaseClient | undefined; // 実ローカルAuth管理client型 / 未生成の型
-+    let invitations: InvitationService; // 実招待Serviceのモジュール型
-+    let support: SupportService; // 実サポートServiceのモジュール型
-+    const emails = new Set<string>(); // 招待前に所有メールを登録する集合コンストラクター / 文字列型
-+    const pending = new Set<string>(); // Auth結果未確認の所有メールを記録する集合コンストラクター / 文字列型
-+    const authUsers = new Map<string, string>(); // 作成結果のIDと所有メールを結ぶMapコンストラクター / 文字列型
-+    const appUsers = new Set<string>(); // 作成前に追加AppUserを登録する集合コンストラクター / 文字列型
-+    let afterAuth: ((user: User) => Promise<void>) | undefined; // Auth作成直後の故障注入関数型 / Auth本人型 / 非同期結果型 / 戻り値を使わない型 / 未設定の型
-+    let rawTokens: string[] = []; // 生成された生トークンをメモリだけに保持する文字列配列型
-+
-+    /**
-+     * ガード後に作成した専用DB clientだけを返す。
-+     */
-+    function database(): PrismaClient { // 専用client取得関数 / Prisma client型
-+      if (!bridge.client) {
-+        throw new Error(FAILURE); // 固定例外コンストラクター
-+      }
-+      return bridge.client;
-+    }
-+
-+    /**
-+     * 現在のケースで所有するfixtureだけを返す。
-+     */
-+    function owned(): MvpDatabaseFixture { // 所有fixture取得関数 / fixture型
-+      if (!fixture) {
-+        throw new Error(FAILURE); // 固定例外コンストラクター
-+      }
-+      return fixture;
-+    }
-+
-+    /**
-+     * 固定されたローカルAuthへだけ通信する管理clientを返す。
-+     */
-+    function auth(): SupabaseClient { // ローカルAuth client取得関数 / Supabase client型
-+      if (!admin) {
-+        throw new Error(FAILURE); // 固定例外コンストラクター
-+      }
-+      return admin;
-+    }
-+
-+    /**
-+     * productionのAuth操作を実SDKへ転送し、作成された本人IDを所有台帳へ登録する。
-+     */
-+    function trackedAdmin() { // 所有台帳付きの実Auth管理API取得関数
-+      return {
-+        auth: {
-+          admin: {
-+            /**
-+             * 先に登録した架空メールだけを処理し、生成結果をcleanup前まで保持する。
-+             */
-+            async generateLink(...args: Parameters<AuthAdmin["generateLink"]>) { // 実リンク生成の転送関数 / 引数型取得型 / Auth管理API型
-+              const input = args[0];
-+              if (
-+                !emails.has(input.email) || // 所有メールの照合メソッド
-+                input.type !== "invite"
-+              ) {
-+                throw new Error(FAILURE); // 固定例外コンストラクター
-+              }
-+              pending.add(input.email); // 呼出し前に未確定資源を登録するメソッド
-+              const result = await auth().auth.admin.generateLink(...args); // 実ローカルAuthへリンク生成を依頼するメソッド / Auth client取得関数
-+              const user = result.data.user;
-+              if (user) {
-+                if (user.email !== input.email || user.email_confirmed_at) {
-+                  throw new Error(FAILURE); // 予定外・確認済みユーザーを所有扱いしない固定例外コンストラクター
-+                }
-+                const prior = authUsers.get(user.id); // 既存の所有記録を取得するメソッド
-+                if (prior && prior !== input.email) {
-+                  throw new Error(FAILURE); // 所有記録の衝突を拒否する固定例外コンストラクター
-+                }
-+                authUsers.set(user.id, input.email); // 作成結果の所有IDを記録するメソッド
-+                appUsers.add(user.id); // 後で作成されるAppUserのIDを先に記録するメソッド
-+                pending.delete(input.email); // IDを回収できた未確定メールを解除するメソッド
-+                await afterAuth?.(user); // 明示したDB故障準備を行う非同期関数
-+              }
-+              return result;
-+            },
-+            /**
-+             * この試験が作成したAuth本人だけを、実SDKで照合する。
-+             */
-+            async getUserById(...args: Parameters<AuthAdmin["getUserById"]>) { // 本人照合を転送する関数 / 引数型取得型 / Auth管理API型
-+              if (!authUsers.has(args[0])) { // 所有IDを照合するメソッド
-+                throw new Error(FAILURE); // 所有外のAuth照会を拒否する固定例外コンストラクター
-+              }
-+              return auth().auth.admin.getUserById(...args); // 実Auth本人照合メソッド / ローカルAuth client取得関数
-+            },
-+          },
-+        },
-+      };
-+    }
-+
-+    /**
-+     * メールを送る前に、新規招待対象のメールアドレスを所有台帳へ登録する。
-+     */
-+    function newEmail(): string { // 所有メール生成関数 / 文字列型
-+      const email = `f12-mail-${owned().scopeId}@example.test`; // 所有fixture取得関数
-+      emails.add(email); // Auth操作前に所有メールを登録するメソッド
-+      return email;
-+    }
-+
-+    /**
-+     * 本文や生トークンをDB保存せず、同一originの招待リンクだけを作る。
-+     */
-+    const links: Parameters<InvitationService["inviteClubMember"]>[1] = // 実リンク生成関数の型 / 引数型取得型 / 招待Serviceのモジュール型
-+      /**
-+       * 生トークンは照合のためメモリだけへ記録し、Authへはrootのredirect先を渡す。
-+       */
-+      (input) => { // 招待リンク生成のコールバック
-+        rawTokens.push(input.rawToken); // 生トークンをメモリへ記録するメソッド
-+        const url = new URL(`/club/${input.clubSlug}/invitation`, input.origin); // 同一originのURLコンストラクター
-+        url.searchParams.set("token", input.rawToken); // tokenを招待URLへ設定するメソッド
-+        return {
-+          invitationUrl: url.toString(), // 招待URLの文字列化メソッド
-+          authRedirectTo: `${input.origin}/`,
-+        };
-+      };
-+
-+    /**
-+     * 実DBにあるA OWNERとクラブ情報から、招待Serviceの入力を作る。
-+     */
-+    async function inviteInput() { // 実OWNER context付き入力の生成関数
-+      const f = owned(); // 所有fixture取得関数
-+      const club = await database().club.findUniqueOrThrow({ // 専用client取得関数 / 所有クラブの全列取得メソッド
-+        where: { id: f.clubs.a.id },
-+      });
-+      return {
-+        club,
-+        actorMembershipId: f.actors.aOwner.membershipId,
-+        email: newEmail(), // 作成前に所有メールを登録する関数
-+        name: PRIVATE,
-+        role: "MEMBER" as const, // 招待roleを固定するリテラル型アサーション
-+      };
-+    }
-+
-+    /**
-+     * このケースの対象メールに一致する招待の全列を、A scopeから取得する。
-+     */
-+    async function invitationRow(): Promise<ClubInvitation> { // 所有招待取得関数 / 非同期の招待モデル型
-+      return database().clubInvitation.findFirstOrThrow({ // 専用client取得関数 / 所有招待の全列取得メソッド
-+        where: {
-+          clubId: owned().clubs.a.id, // 所有fixture取得関数
-+          email: newEmail(), // 所有メール取得・登録関数
-+        },
-+      });
-+    }
-+
-+    /**
-+     * Bの本人・所属・招待・サポート報告を、全列と一定順で照合する。
-+     */
-+    async function snapshotB() { // Bの全列取得関数
-+      const f = owned(); // 所有fixture取得関数
-+      const where = { clubId: f.clubs.b.id };
-+      const orderBy = { id: "asc" as const }; // 並び順を固定するリテラル型アサーション
-+      return Promise.all([ // DB取得結果をまとめて待つ関数
-+        database().club.findUniqueOrThrow({ where: { id: f.clubs.b.id } }), // 専用client取得関数 / Bクラブの全列取得メソッド
-+        database().appUser.findUniqueOrThrow({ where: { id: f.actors.bOwner.userId } }), // 専用client取得関数 / B本人の全列取得メソッド
-+        database().clubMembership.findMany({ // 専用client取得関数 / B所属の全列取得メソッド
-+          where,
-+          orderBy,
-+        }),
-+        database().clubInvitation.findMany({ // 専用client取得関数 / B招待の全列取得メソッド
-+          where,
-+          orderBy,
-+        }),
-+        database().supportReport.findMany({ // 専用client取得関数 / B報告の全列取得メソッド
-+          where,
-+          orderBy,
-+        }),
-+      ]);
-+    }
-+
-+    /**
-+     * 実ローカルAuthのユーザーが、メール失敗後も削除されず残ることを確認する。
-+     */
-+    async function retainedUser(): Promise<User> { // Auth資源保持の検証関数 / 非同期のAuth本人型
-+      expect(authUsers.size).toBe(1); // 期待値生成関数 / 作成したAuth本人件数の比較メソッド
-+      const [id, email] = [...authUsers][0];
-+      const result = await auth().auth.admin.getUserById(id); // ローカルAuth client取得関数 / 実Auth本人照合メソッド
-+      expect(result.error).toBeNull(); // 期待値生成関数 / 本人照合成功の検証メソッド
-+      expect(result.data.user?.email).toBe(email); // 期待値生成関数 / 所有メールの比較メソッド
-+      if (!result.data.user) {
-+        throw new Error(FAILURE); // 固定例外コンストラクター
-+      }
-+      return result.data.user;
-+    }
-+
-+    /**
-+     * 自分のクラブ・AppUser・Authユーザーだけを回収し、不明な作成結果は成功扱いしない。
-+     */
-+    async function cleanup(): Promise<void> { // 所有資源の後片付け関数 / 非同期結果型 / 戻り値を使わない型
-+      if (fixture) {
-+        await cleanupMvpDatabaseFixture(database(), fixture); // 所有fixtureだけを削除する関数 / 専用client取得関数
-+        fixture = undefined;
-+      }
-+      if (appUsers.size > 0) {
-+        await database().appUser.deleteMany({ // 専用client取得関数 / 登録済みの追加AppUserだけを削除するDBメソッド
-+          where: {
-+            id: { in: [...appUsers] },
-+            memberships: { none: {} },
-+          },
-+        });
-+        const remaining = await database().appUser.count({ // 専用client取得関数 / 未回収の追加AppUser件数を照会するメソッド
-+          where: { id: { in: [...appUsers] } },
-+        });
-+        if (remaining !== 0) {
-+          throw new Error(FAILURE); // 所属が残るユーザーを削除しない固定例外コンストラクター
-+        }
-+        appUsers.clear(); // DB回収成功後に所有AppUser台帳を解除するメソッド
-+      }
-+      for (const [id, email] of authUsers) {
-+        const existing = await auth().auth.admin.getUserById(id); // ローカルAuth client取得関数 / 削除前に本人を照合するメソッド
-+        if (
-+          existing.error ||
-+          existing.data.user?.email !== email ||
-+          existing.data.user.email_confirmed_at
-+        ) {
-+          throw new Error(FAILURE); // 所有外・確認済み本人の削除を拒否する固定例外コンストラクター
-+        }
-+        const removed = await auth().auth.admin.deleteUser(id); // ローカルAuth client取得関数 / 所有Authユーザーの削除メソッド
-+        if (removed.error) {
-+          throw new Error(FAILURE); // Auth回収失敗の固定例外コンストラクター
-+        }
-+        authUsers.delete(id); // 回収成功後だけAuth所有台帳を解除するメソッド
-+      }
-+      if (pending.size > 0) {
-+        throw new Error(FAILURE); // Auth作成結果が不明のケースを成功扱いしない固定例外コンストラクター
-+      }
-+      emails.clear(); // 全資源の回収後に所有メール台帳を解除するメソッド
-+    }
-+
-+    beforeAll( // ガード後の実接続初期化を登録する関数
-+      /**
-+       * ローカル環境を確認してから実Prisma・Auth SDK・Serviceを読み込む。
-+       */
-+      async () => safeCheck( // 初期化の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * 実Resend通信をstubへ固定し、DBとAuthは専用ローカル環境へ接続する。
-+         */
-+        async () => { // 専用環境を初期化する非同期関数
-+          configuration = requireMvpTestEnvironment( // 接続前にflag・URL・checkoutを検証する関数
-+            process.env,
-+            resolve(import.meta.dirname, "../.."), // checkout絶対パスを求める関数
-+            randomUUID().replaceAll("-", ""), // 実行UUID生成関数 / 区切り除去メソッド
-+          );
-+          if (!configuration.variables.SUPABASE_SERVICE_ROLE_KEY) {
-+            throw new Error(FAILURE); // ローカルAuth管理key不足を固定文で拒否する例外コンストラクター
-+          }
-+          bridge.allowed = true;
-+          bridge.origin = configuration.supabaseOrigin;
-+          await configureMail(); // 架空の設定で実メールadapterとSDKを準備する関数
-+          const { PrismaClient: Client } = await import("@prisma/client"); // 専用clientの実モジュールを遅延読込みする関数
-+          const { PrismaPg } = await import("@prisma/adapter-pg"); // 実DBアダプターを遅延読込みする関数
-+          bridge.client = new Client({ // 専用Prisma clientのコンストラクター
-+            adapter: new PrismaPg({ // 専用DBアダプターのコンストラクター
-+              connectionString: configuration.databaseUrl,
-+              max: 4,
-+              connectionTimeoutMillis: 3000,
-+            }),
-+            log: [],
-+          });
-+          await database().$connect(); // 専用client取得関数 / DB接続開始メソッド
-+          const { createClient } = await import("@supabase/supabase-js"); // 実Auth SDKを遅延読込みする関数
-+          admin = createClient( // ローカルAuth管理client生成関数
-+            configuration.supabaseOrigin,
-+            configuration.variables.SUPABASE_SERVICE_ROLE_KEY,
-+            {
-+              auth: {
-+                autoRefreshToken: false,
-+                persistSession: false,
-+                detectSessionInUrl: false,
-+              },
-+              global: {
-+                fetch: networkFetch, // ローカルAuthと架空のResend応答だけを許可するHTTP関数
-+              },
-+            },
-+          );
-+          invitations = await import("@/src/application/club/invitation/send-club-invitation"); // 実招待Serviceを遅延読込みする関数
-+          support = await import("@/src/application/club/support/create-support-report"); // 実サポートServiceを遅延読込みする関数
-+        },
-+      ),
-+      20_000,
-+    );
-+    beforeEach( // ケース所有fixtureの準備を登録する関数
-+      /**
-+       * 前回の未回収資源を上書きせず、新規二クラブとAuth所有台帳を準備する。
-+       */
-+      async () => safeCheck( // 準備の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * 所有fixtureだけをseedし、Auth操作は実SDKへ転送する。
-+         */
-+        async () => { // ケースの資源を準備する非同期関数
-+          if (
-+            fixture ||
-+            authUsers.size ||
-+            appUsers.size ||
-+            pending.size ||
-+            emails.size
-+          ) {
-+            throw new Error(FAILURE); // 未回収資源の上書きを拒否する固定例外コンストラクター
-+          }
-+          afterAuth = undefined;
-+          rawTokens = [];
-+          fixture = planMvpDatabaseFixture(configuration, { features: ["support"] }); // DB接続前にUUIDと保存行を計画する関数
-+          await seedMvpDatabaseFixture(database(), fixture); // 所有行を一体保存する関数 / 専用client取得関数
-+          bridge.admin.mockImplementation(trackedAdmin); // 実Auth管理操作へ転送するstub設定メソッド / 管理API取得関数の参照
-+        },
-+      ),
-+      20_000,
-+    );
-+    afterEach( // ケース所有資源の回収を登録する関数
-+      /**
-+       * 試験中は保持した資源を、検証が終わってから所有範囲だけ削除する。
-+       */
-+      async () => safeCheck(cleanup), // 回収の非同期コールバック / 固定例外へ変換する関数 / 所有資源の回収関数の参照
-+      20_000,
-+    );
-+    afterAll( // 残存資源と専用接続の解放を登録する関数
-+      /**
-+       * 回収を再試行した後に専用DB接続とAuth clientの参照を解放する。
-+       */
-+      async () => safeCheck( // 終了処理の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * 初期化途中の失敗でも、生成済み資源の回収を試みる。
-+         */
-+        async () => { // 資源と接続を解放する非同期関数
-+          try {
-+            await cleanup(); // 所有資源の回収関数
-+          } finally {
-+            try {
-+              await bridge.client?.$disconnect(); // 専用DB接続を解放するメソッド
-+            } finally {
-+              bridge.client = undefined;
-+              bridge.allowed = false;
-+              bridge.origin = "";
-+              admin = undefined;
-+            }
-+          }
-+        },
-+      ),
-+      20_000,
-+    );
-+
-+    it.each(MODES)("招待の%sを実SDKからDBへ記録し、Auth・INVITED所属を保持する", // 招待の故障別試験登録メソッド
-+      /**
-+       * 新規Auth作成後のメール受付を通し、確定結果と結果不明を区別する。
-+       */
-+      async (mode) => safeCheck( // 結果別の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * 実メール送信直前のDB保存を確認し、Bと保持資源・DTOの非漏洩を照合する。
-+         */
-+        async () => { // 招待のSDK・DB境界を検証する非同期関数
-+          bridge.mode = mode;
-+          const input = await inviteInput(); // 実OWNER context付き入力の生成関数
-+          const beforeB = await snapshotB(); // B全列取得関数
-+          let prepared: ClubInvitation | undefined; // 送信直前の招待モデル型 / 未取得の型
-+          bridge.mailHook =
-+            /**
-+             * Resend受付へ進む前に、Auth IDとINVITED所属が保存済みであることを確認する。
-+             */
-+            async () => { // メール受付直前のDB検証関数
-+              prepared = await invitationRow(); // 所有招待の全列取得関数
-+              expect(prepared.status).toBe("READY_TO_SEND"); // 期待値生成関数 / 送信前状態の比較メソッド
-+              expect(prepared.claimToken).not.toBeNull(); // 期待値生成関数 / claim保持の検証メソッド
-+              expect(prepared.leaseExpiresAt).toBeInstanceOf(Date); // 期待値生成関数 / lease日時の型検証メソッド / 日時コンストラクター
-+              const member = await database().clubMembership.findUniqueOrThrow({ // 専用client取得関数 / 準備済み所属の取得メソッド
-+                where: { id: prepared.membershipId! },
-+              });
-+              expect(member.status).toBe("INVITED"); // 期待値生成関数 / 所属状態の比較メソッド
-+              expect(member.userId).toBe(prepared.authUserId); // 期待値生成関数 / 本人IDの比較メソッド
-+            };
-+          const result = await invitations.inviteClubMember(input, links); // 実Auth・実DB・実メールadapterを通す招待Service / 実リンク生成関数の参照
-+          const stored = await invitationRow(); // 処理後の所有招待取得関数
-+          const state = outcome(mode); // 通信結果分類関数
-+          expect(result).toEqual({ // 期待値生成関数 / 公開DTOの完全一致比較メソッド
-+            outcome: state === "accepted" ? "SENT" : state === "rejected" ? "EMAIL_FAILED" : "DELIVERY_UNKNOWN",
-+            invitationId: stored.id,
-+          });
-+          expect(prepared).toBeDefined(); // 期待値生成関数 / 送信前保存確認の検証メソッド
-+          if (!prepared) {
-+            throw new Error(FAILURE); // 固定例外コンストラクター
-+          }
-+          expect(stored.tokenHash).toBe(hashToken(rawTokens[0])); // 期待値生成関数 / 生tokenのハッシュ化関数 / hash保存の比較メソッド
-+          expect(stored.attemptCount).toBe(1); // 期待値生成関数 / 試行回数の比較メソッド
-+          if (state === "unknown") {
-+            expect(stored).toEqual(prepared); // 期待値生成関数 / 結果不明でclaim・leaseを保持する全列比較メソッド
-+          } else {
-+            expect(stored.status).toBe(state === "accepted" ? "SENT" : "EMAIL_FAILED"); // 期待値生成関数 / DB状態の比較メソッド
-+            expect(stored.claimToken).toBeNull(); // 期待値生成関数 / 確定結果でのclaim解除検証メソッド
-+            expect(stored.leaseExpiresAt).toBeNull(); // 期待値生成関数 / 確定結果でのlease解除検証メソッド
-+            expect(stored.emailSendError).toBe(state === "rejected" ? "EMAIL_SEND_FAILED" : null); // 期待値生成関数 / 固定error codeの比較メソッド
-+            if (state === "accepted") {
-+              expect(stored.emailSentAt).toBeInstanceOf(Date); // 期待値生成関数 / 受付成功日時の型検証メソッド / 日時コンストラクター
-+            } else {
-+              expect(stored.emailSentAt).toBeNull(); // 期待値生成関数 / 確定失敗時刻なしの検証メソッド
-+            }
-+            expect({ // 期待値生成関数
-+              ...stored,
-+              status: prepared.status,
-+              claimToken: prepared.claimToken,
-+              leaseExpiresAt: prepared.leaseExpiresAt,
-+              emailSentAt: prepared.emailSentAt,
-+              emailSendError: prepared.emailSendError,
-+              updatedAt: prepared.updatedAt,
-+            }).toEqual(prepared); // 許可列以外が変わらないことを確認する比較メソッド
-+          }
-+          const user = await retainedUser(); // 実Authユーザーの保持確認関数
-+          expect(stored.authUserId).toBe(user.id); // 期待値生成関数 / 保持したAuth IDの比較メソッド
-+          expect(bridge.mails).toHaveLength(1); // 期待値生成関数 / 上位自動再送なしの件数検証メソッド
-+          expect(bridge.mails[0].headers.get("idempotency-key")).toBe(`club-invitation/${stored.id}/1`); // 期待値生成関数 / header取得メソッド / 試行単位keyの比較メソッド
-+          const duplicate = await invitations.inviteClubMember(input, links); // 同じ依頼を実招待Serviceへ再度渡す関数 / リンク生成関数の参照
-+          expect(duplicate).toEqual({ // 期待値生成関数 / 既存の招待済み所属による重複拒否DTOの比較メソッド
-+            outcome: "MEMBERSHIP_EXISTS",
-+            membershipStatus: "INVITED",
-+          });
-+          expect(await invitationRow()).toEqual(stored); // 期待値生成関数 / 所有招待取得関数 / 無条件再送なしの全列比較メソッド
-+          expect(bridge.mails).toHaveLength(1); // 期待値生成関数 / SDK再呼出しなしの件数検証メソッド
-+          expect(await snapshotB()).toEqual(beforeB); // 期待値生成関数 / B全列取得関数 / 全列比較メソッド
-+          expect(console.error).not.toHaveBeenCalled(); // 期待値生成関数 / 非出力検証メソッド / エラー出力関数
-+        },
-+      ),
-+    );
-+
-+    it.each(MODES)("サポート通知の%sでも受付を保持し、同じ報告を再送しない", // サポートの故障別試験登録メソッド
-+      /**
-+       * 受付を実DBへ保存した後で通知し、失敗・不明でも受付成功を維持する。
-+       */
-+      async (mode) => safeCheck( // 結果別の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * 通知結果の許可列だけを更新し、本文やSDK原文を結果・ログへ混ぜないことを確認する。
-+         */
-+        async () => { // サポートのSDK・DB境界を検証する非同期関数
-+          const f = owned(); // 所有fixture取得関数
-+          const club = await database().club.findUniqueOrThrow({ // 専用client取得関数 / 所有クラブの全列取得メソッド
-+            where: { id: f.clubs.a.id },
-+          });
-+          const actor = f.actors.aMember;
-+          const context: ClubAccessContext = { // 認可成功contextの型
-+            userId: actor.userId,
-+            club,
-+            membership: {
-+              id: actor.membershipId,
-+              role: actor.role,
-+            },
-+          };
-+          const id = randomUUID(); // 受付UUID生成関数
-+          const input = {
-+            category: "BUG" as const, // 報告カテゴリを固定するリテラル型アサーション
-+            message: PRIVATE,
-+          };
-+          const metadata = {
-+            pageUrl: `/club/${club.slug}/account?token=${PRIVATE}#${PRIVATE}`,
-+            userAgent: PRIVATE,
-+          };
-+          const beforeB = await snapshotB(); // B全列取得関数
-+          let prepared: SupportReport | undefined; // 送信前の報告モデル型 / 未取得の型
-+          bridge.mode = mode;
-+          bridge.mailHook =
-+            /**
-+             * SDK受付前に、通知と独立して受付保存が完了したことを実DBで確認する。
-+             */
-+            async () => { // 受付保存の検証関数
-+              prepared = await database().supportReport.findUniqueOrThrow({ // 専用client取得関数 / 受付の全列取得メソッド
-+                where: { id },
-+              });
-+              expect(prepared.message).toBe(PRIVATE); // 期待値生成関数 / 受付本文の保存確認メソッド
-+              expect(prepared.notifiedAt).toBeNull(); // 期待値生成関数 / 通知前状態の検証メソッド
-+              expect(prepared.notifyError).toBeNull(); // 期待値生成関数 / 通知前エラーなしの検証メソッド
-+            };
-+          const result = await support.createSupportReport( // 実受付保存・実通知・実結果記録を行うService
-+            context,
-+            id,
-+            input,
-+            metadata,
-+          );
-+          expect(result).toEqual({ outcome: "ACCEPTED" }); // 期待値生成関数 / 受付成功だけの公開DTO比較メソッド
-+          const stored = await database().supportReport.findUniqueOrThrow({ // 専用client取得関数 / 保存済み報告の全列取得メソッド
-+            where: { id },
-+          });
-+          if (!prepared) {
-+            throw new Error(FAILURE); // 通知前保存が未確認なら拒否する固定例外コンストラクター
-+          }
-+          expect(stored.status).toBe("OPEN"); // 期待値生成関数 / 受付状態保持の比較メソッド
-+          expect(stored.pageUrl).toBe(`/club/${club.slug}/account`); // 期待値生成関数 / query・fragment非保存の比較メソッド
-+          const state = outcome(mode); // 通信結果分類関数
-+          if (state === "accepted") {
-+            expect(stored.notifiedAt).toBeInstanceOf(Date); // 期待値生成関数 / 通知受付日時の型検証メソッド / 日時コンストラクター
-+            expect(stored.notifyError).toBeNull(); // 期待値生成関数 / 通知エラーなしの検証メソッド
-+          } else {
-+            expect(stored.notifiedAt).toBeNull(); // 期待値生成関数 / 受付未確認日時の検証メソッド
-+            expect(stored.notifyError).toBe(state === "rejected" ? "EMAIL_SEND_FAILED" : "EMAIL_SEND_RESULT_UNKNOWN"); // 期待値生成関数 / 固定通知エラーの比較メソッド
-+          }
-+          expect({ // 期待値生成関数
-+            ...stored,
-+            notifiedAt: prepared.notifiedAt,
-+            notifyError: prepared.notifyError,
-+            updatedAt: prepared.updatedAt,
-+          }).toEqual(prepared); // 通知の許可列以外が変わらないことを確認する比較メソッド
-+          expect(bridge.mails).toHaveLength(1); // 期待値生成関数 / 通知試行件数の検証メソッド
-+          expect(bridge.mails[0].headers.get("idempotency-key")).toBe(`support-report/${id}`); // 期待値生成関数 / header取得メソッド / 報告単位keyの比較メソッド
-+          expect(bridge.mails[0].payload.text).toEqual(expect.stringContaining(PRIVATE)); // 期待値生成関数 / 実本文の比較メソッド / 文字列包含の期待値生成メソッド
-+          const repeated = await support.createSupportReport( // 同じ受付IDを再度Serviceへ渡す関数
-+            context,
-+            id,
-+            input,
-+            metadata,
-+          );
-+          expect(repeated).toEqual({ outcome: "ACCEPTED" }); // 期待値生成関数 / 同じ受付成功のDTO比較メソッド
-+          expect(bridge.mails).toHaveLength(1); // 期待値生成関数 / 通知再試行なしの件数検証メソッド
-+          expect(await snapshotB()).toEqual(beforeB); // 期待値生成関数 / B全列取得関数 / 全列比較メソッド
-+          expect(console.error).toHaveBeenCalledTimes(state === "accepted" ? 0 : 1); // 期待値生成関数 / 固定失敗ログ件数の検証メソッド / エラー出力関数
-+        },
-+      ),
-+    );
-+
-+    it("明示的な招待再送では同じAuth・招待を保持し、tokenと試行別keyだけを更新する", // 明示的再送の接続試験を登録する関数
-+      /**
-+       * 確定した拒否の後だけ、所有者の明示操作で2回目の実SDK受付へ進む。
-+       */
-+      async () => safeCheck( // 再送試験の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * Authを増やさず、attemptCountに対応したidempotency keyを確認する。
-+         */
-+        async () => { // 明示的な再送を検証する非同期関数
-+          const input = await inviteInput(); // 実OWNER context付き入力の生成関数
-+          const beforeB = await snapshotB(); // B全列取得関数
-+          bridge.mode = "rejected";
-+          await invitations.inviteClubMember(input, links); // 初回の実招待Service / リンク生成関数の参照
-+          const first = await invitationRow(); // 初回の所有招待取得関数
-+          expect(first.status).toBe("EMAIL_FAILED"); // 期待値生成関数 / 確定拒否状態の比較メソッド
-+          await database().clubInvitation.update({ // 専用client取得関数 / 所有招待の再送待機時間をfixture日時で経過させるメソッド
-+            where: { id: first.id },
-+            data: { lastAttemptAt: new Date(0) }, // 過去のfixture日時コンストラクター
-+          });
-+          bridge.mode = "accepted";
-+          const result = await invitations.resendClubInvitation({ // 明示的な再送を行う実Service
-+            club: input.club,
-+            actorMembershipId: input.actorMembershipId,
-+            invitationId: first.id,
-+          }, links); // 実リンク生成関数の参照
-+          expect(result).toEqual({ // 期待値生成関数 / 再送結果DTOの比較メソッド
-+            outcome: "SENT",
-+            invitationId: first.id,
-+          });
-+          const second = await invitationRow(); // 再送後の所有招待取得関数
-+          expect(second.attemptCount).toBe(2); // 期待値生成関数 / 明示的な試行増加の比較メソッド
-+          expect(second.authUserId).toBe(first.authUserId); // 期待値生成関数 / Auth本人保持の比較メソッド
-+          expect(second.membershipId).toBe(first.membershipId); // 期待値生成関数 / 所属保持の比較メソッド
-+          expect(second.tokenHash).not.toBe(first.tokenHash); // 期待値生成関数 / token更新の比較メソッド
-+          expect(second.tokenHash).toBe(hashToken(rawTokens[1])); // 期待値生成関数 / 生tokenのハッシュ化関数 / 新tokenの比較メソッド
-+          expect(authUsers.size).toBe(1); // 期待値生成関数 / Auth新規作成なしの比較メソッド
-+          await retainedUser(); // 実Auth保持の確認関数
-+          expect(bridge.mails).toHaveLength(2); // 期待値生成関数 / 明示操作2回の件数検証メソッド
-+          expect(bridge.mails[0].headers.get("idempotency-key")).toBe(`club-invitation/${first.id}/1`); // 期待値生成関数 / header取得メソッド / 初回keyの比較メソッド
-+          expect(bridge.mails[1].headers.get("idempotency-key")).toBe(`club-invitation/${first.id}/2`); // 期待値生成関数 / header取得メソッド / 再送keyの比較メソッド
-+          expect(await snapshotB()).toEqual(beforeB); // 期待値生成関数 / B全列取得関数 / 全列比較メソッド
-+        },
-+      ),
-+    );
-+
-+    it("Auth作成後にDBの本人照合が失敗しても、実Authを削除せずclaimだけを解除する", // Auth作成後の準備失敗試験を登録する関数
-+      /**
-+       * 実Auth作成後にだけ所有AppUserの衝突を作り、上位mockなしで途中失敗を確認する。
-+       */
-+      async () => safeCheck( // 途中失敗試験の非同期コールバック / 固定例外へ変換する関数
-+        /**
-+         * メールを一度も送らず、手動復旧が必要な準備失敗を固定DTOで返すことを確認する。
-+         */
-+        async () => { // Auth作成後のDB失敗を検証する非同期関数
-+          const input = await inviteInput(); // 実OWNER context付き入力の生成関数
-+          const beforeB = await snapshotB(); // B全列取得関数
-+          afterAuth =
-+            /**
-+             * 対象メールを別の所有AppUserへ結び、実Repositoryの本人照合を失敗させる。
-+             */
-+            async () => { // 実DBへ衝突を準備する非同期関数
-+              const id = randomUUID(); // 衝突用AppUserのUUID生成関数
-+              appUsers.add(id); // DB書込み前に所有IDを登録するメソッド
-+              await database().appUser.create({ // 専用client取得関数 / 所有する衝突行を作るDBメソッド
-+                data: {
-+                  id,
-+                  email: input.email,
-+                  name: PRIVATE,
-+                },
-+              });
-+            };
-+          const result = await invitations.inviteClubMember(input, links); // 実Auth作成後の実DB照合を通す招待Service / リンク生成関数の参照
-+          const stored = await invitationRow(); // 準備失敗後の所有招待取得関数
-+          expect(result).toEqual({ // 期待値生成関数 / 原文を含まない準備失敗DTOの比較メソッド
-+            outcome: "PREPARATION_FAILED",
-+            invitationId: stored.id,
-+            stage: "AUTH_RECORD",
-+            recovery: "MANUAL",
-+          });
-+          expect(stored.status).toBe("PREPARING"); // 期待値生成関数 / 復旧地点を保持する状態比較メソッド
-+          expect(stored.claimToken).toBeNull(); // 期待値生成関数 / claim解除検証メソッド
-+          expect(stored.leaseExpiresAt).toBeNull(); // 期待値生成関数 / lease解除検証メソッド
-+          expect(stored.authUserId).toBeNull(); // 期待値生成関数 / 本人照合未完了の検証メソッド
-+          await retainedUser(); // 途中失敗後も実Authが残ることを確認する関数
-+          expect(bridge.mails).toHaveLength(0); // 期待値生成関数 / メール試行前失敗の件数検証メソッド
-+          expect(await snapshotB()).toEqual(beforeB); // 期待値生成関数 / B全列取得関数 / 全列比較メソッド
-+        },
-+      ),
-+    );
++  use: {
++    baseURL: "http://127.0.0.1:3000",
++    headless: true,
++    trace: "off",
++    video: "off",
++    screenshot: "off",
++    storageState: {
++      cookies: [],
++      origins: [],
++    },
++    serviceWorkers: "block",
++    acceptDownloads: false,
 +  },
-+);
++  projects: [
++    {
++      name: "chromium",
++      use: {
++        browserName: "chromium",
++      },
++    },
++  ],
++});
