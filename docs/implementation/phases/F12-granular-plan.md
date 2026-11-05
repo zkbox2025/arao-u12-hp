@@ -558,7 +558,10 @@ DBやE2Eを実行する必要がある粒度も、patch作成時のAGENTS.mdの�
 **実装内容・境界**
 
 - 同じdeliveryIdを2 workerへ同時に渡し、PROCESSINGへの原子的claimでstub送信が1回だけになることを確認。DB成功だけで配送完了とは呼ばない。
-- 失敗・timeout・LINE 409、無効target・暗号化credential不一致、lease期限切れ再claim、旧claimTokenの終端更新拒否、有限retry上限を照合。5分sleepせずfixture時刻で期限切れを作る。
+- 送信失敗・LINE 409、無効target・暗号化credential不一致、lease期限切れ再claim、旧claimTokenの終端更新拒否を照合する。5分sleepせずfixture時刻で期限切れを作る。
+- TimeoutErrorを注入し、固定エラーへの正規化と失敗後のDB状態を確認する。実通信を一定時間で打ち切る機能は、この試験では確認していない。
+- 通常の送信失敗後はFAILEDとなり、自動再送されない現行仕様を確認する。期限切れPROCESSINGの再claim回数上限は未実装のため、下記の別patch課題として追跡する。
+- 5分sleepせずfixture時刻で期限切れを作る。
 - clubId付き送信APIへB deliveryIdを渡すケースとcronの全club処理を分ける。送信中クラッシュは外部exactly-onceを保証せず、同じdelivery.idのretryKeyを維持する契約を検証。
 
 **この粒度では変更しない**：本番ソース、Prisma schema・過去migration、実環境・配送。
@@ -570,6 +573,17 @@ DBやE2Eを実行する必要がある粒度も、patch作成時のAGENTS.mdの�
 - 共通：新規ソース／テストの型・対象lint、ガード単体、git diff --check。実DB・E2Eは実行許可された使い捨て環境で行い、patch作成時の未実行を明記する。
 
 **完了条件**：同時claim時1回、再claim時key不変、失敗後DB status・attemptCount・nextAttemptAt・claim解除と他club不変を検証。
+**実施結果・別patchへ切り出す課題（2026-11-05）**
+
+現行実装に対する通常検証・実DB確認は完了（ユーザー報告）。
+以下の仕様補強を残課題として記録し、後続粒度へ進む。
+これらを実装済み・検証済みとして扱わない。
+
+- retry回数上限：期限切れPROCESSINGの再claimには数値上限がない。最大試行回数、上限到達時の状態・理由コード、claim・leaseの解除方法を決め、別patchで実装・検証する。
+- 実通信timeout：LINEへのHTTP要求を一定時間で中断する機能は未実装。timeout秒数を決め、中断処理自体の試験を追加する。
+- 結果不明時の再試行：timeout・通信断でもLINE側が受理済みの可能性がある。同じretry key・宛先・本文を維持する条件、再試行期限、手動再送との関係を別patchで整理する。
+
+上限回数・timeout秒数は未確定。本番ソースの補強と関連試験は、粒度9のテスト追加patchとは別patchで対応する。
 
 ### 粒度10：Resend障害とDB状態・機密非出力
 
