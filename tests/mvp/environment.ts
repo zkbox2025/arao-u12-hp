@@ -145,6 +145,14 @@ export function requireMvpTestEnvironment( // F12の実行前ガード関数
     ) {
       throw new Error(GUARD_ERROR); // URLに触れず固定例外を生成するコンストラクター
     }
+    // 【追加：F12粒度12】E2Eだけは所有するHTTPS入口を要求し、既存DB試験のHTTP契約は維持する。
+    const e2e = environment.RUN_MVP_E2E === "1";
+    if (
+      environment.RUN_MVP_E2E !== undefined &&
+      !e2e
+    ) {
+      throw new Error(GUARD_ERROR); // 【追加】曖昧なE2E flagを拒否する例外コンストラクター
+    }
     for (const key of Object.keys(environment)) { // 値を評価せず環境変数名を列挙する関数
       if (
         key.startsWith("PG") || // PostgreSQLの接続上書き変数を検出するメソッド
@@ -160,7 +168,15 @@ export function requireMvpTestEnvironment( // F12の実行前ガード関数
     const checkout = cleanCheckout(checkoutDirectory); // 内容を読まず専用checkoutを確認する関数
     const databaseUrl = localDatabase(environment.DATABASE_URL); // 通常用postgres接続先を検証する関数
     const supabaseOrigin = localOrigin(environment.NEXT_PUBLIC_SUPABASE_URL, "54321"); // Supabase origin検証関数
-    const appOrigin = localOrigin(environment.APP_BASE_URL, "3000"); // アプリorigin検証関数
+    let appOrigin: string; // 【追加】検証したアプリoriginの文字列型
+    if (e2e) {
+      if (environment.APP_BASE_URL !== "https://127.0.0.1:3443") {
+        throw new Error(GUARD_ERROR); // 【追加】所有するTLS入口以外を拒否する例外コンストラクター
+      }
+      appOrigin = "https://127.0.0.1:3443";
+    } else {
+      appOrigin = localOrigin(environment.APP_BASE_URL, "3000"); // 【追加】既存のHTTP origin検証関数
+    }
     const variables: Record<string, string | undefined> = { // 許可する変数辞書型 / 文字列型 / 未設定の型
       RUN_MVP_TESTS: "1",
       MVP_TEST_DISPOSABLE: "1",
@@ -169,6 +185,9 @@ export function requireMvpTestEnvironment( // F12の実行前ガード関数
       NEXT_PUBLIC_SUPABASE_URL: supabaseOrigin,
       APP_BASE_URL: appOrigin,
     };
+    if (e2e) {
+      variables.RUN_MVP_E2E = "1";
+    }
     for (const key of ["NEXT_PUBLIC_SUPABASE_ANON_KEY", "SUPABASE_SERVICE_ROLE_KEY"]) {
       const value = environment[key];
       if (value !== undefined) {

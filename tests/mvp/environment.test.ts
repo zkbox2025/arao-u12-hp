@@ -444,7 +444,7 @@ it("migration例外は同じ実行の予約DBだけに限り、通常DATABASE_UR
         () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 検証コールバック / 接続前ガード関数
       );
     }
-    for (const name of ["postgres", `mvp_f12_${"b".repeat(32)}_fresh`, "other", PRIVATE]) { // 別実行識別子を生成するメソッド
+    for (const name of ["postgres", `mvp_f12_${"b".repeat(32)}_fresh`, "other", PRIVATE]) { // 別実行識別子を生成するメソッド // 【追加】repeatの関数・メソッド
       fixedFailure( // 固定例外検証関数
         /**
          * 他実行や予約外のDB名を拒否する。
@@ -590,5 +590,90 @@ it.each(["suite", "group"])( // 全体と群別の試験を登録するメソッ
         MANIFEST_ERROR,
       );
     }
+  },
+);
+
+// 【追加：F12粒度12】本番HTTPS条件と既存DB試験のHTTP条件を明示flagで分ける。
+it("明示したE2Eだけが所有HTTPS入口を使い、fixtureの再検証でもflagを保持する", // 【追加】ケース登録関数
+  /**
+   * 【追加】E2Eで検証した接続契約を、子やfixtureへ渡しても同じ条件で再検証する。
+   */
+  () => { // 【追加】E2E接続契約を確認するコールバック
+    const variables = environment(); // 【追加】架空設定の生成関数
+    variables.RUN_MVP_E2E = "1";
+    variables.APP_BASE_URL = "https://127.0.0.1:3443";
+    const result = requireMvpTestEnvironment(variables, checkout, RUN_ID); // 【追加】接続前ガード関数
+    expect(result.appOrigin).toBe("https://127.0.0.1:3443"); // 【追加】期待値生成関数 / 所有originの比較メソッド
+    expect(result.variables.RUN_MVP_E2E).toBe("1"); // 【追加】期待値生成関数 / E2E flagの比較メソッド
+    expect(requireMvpTestEnvironment( // 【追加】期待値生成関数 / 接続契約を再検証する関数
+      result.variables,
+      checkout,
+      RUN_ID,
+    ).appOrigin).toBe(result.appOrigin); // 【追加】再検証前後のoriginを比較するメソッド
+  },
+);
+
+it.each([undefined, "", "0", "true", "01", "1 "])( // 【追加】不正flag別の試験登録メソッド
+  "HTTPSは明示した厳密なE2E flagがない場合に拒否する（ケース%#）",
+  /**
+   * 【追加】通常DB試験の接続先を暗黙にHTTPSへ広げない。
+   */
+  (value) => { // 【追加】不正flagを確認するコールバック
+    const variables = environment(); // 【追加】架空設定の生成関数
+    variables.RUN_MVP_E2E = value;
+    variables.APP_BASE_URL = "https://127.0.0.1:3443";
+    fixedFailure( // 【追加】固定例外を検証する関数
+      /**
+       * 【追加】明示されていないHTTPS接続を拒否する。
+       */
+      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 【追加】検証コールバック / 接続前ガード関数
+    );
+  },
+);
+
+it.each([ // 【追加】E2Eの不正origin別の試験登録メソッド
+  "http://127.0.0.1:3000",
+  "http://127.0.0.1:3443",
+  "https://localhost:3443",
+  "https://127.0.0.1:3000",
+  "https://127.0.0.1:3443/",
+  "https://remote.invalid:3443",
+  "https://127.0.0.1:3443?private=1",
+])("E2Eは所有するTLS入口以外を拒否する（ケース%#）",
+  /**
+   * 【追加】本番検証を迂回するHTTP指定や、port・hostの取り違えを防ぐ。
+   */
+  (origin) => { // 【追加】不正originを確認するコールバック
+    const variables = environment(); // 【追加】架空設定の生成関数
+    variables.RUN_MVP_E2E = "1";
+    variables.APP_BASE_URL = origin;
+    fixedFailure( // 【追加】固定例外を検証する関数
+      /**
+       * 【追加】所有していないTLS接続先を拒否する。
+       */
+      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 【追加】検証コールバック / 接続前ガード関数
+    );
+  },
+);
+
+
+it("不正なE2E flagではURL getterを評価する前に拒否する", // 【追加】ケースを登録する関数
+  /**
+   * 【追加】E2E flagの不備を、接続値の取得より先に固定例外で拒否する。
+   */
+  () => { // 【追加】評価順序を確認するコールバック
+    const variables = environment(); // 【追加】架空設定を生成する関数
+    variables.RUN_MVP_E2E = "true";
+    const getter = vi.fn(); // 【追加】URLの評価を記録するmock生成関数
+    Object.defineProperty(variables, "DATABASE_URL", { // 【追加】URLを監視getterへ置き換える関数
+      get: getter, // 【追加】値の評価を記録する関数
+    });
+    fixedFailure( // 【追加】固定例外を検証する関数
+      /**
+       * 【追加】不正flagを持つ架空設定を検証する。
+       */
+      () => requireMvpTestEnvironment(variables, checkout, RUN_ID), // 【追加】検証コールバック / 接続前ガード関数
+    );
+    expect(getter).not.toHaveBeenCalled(); // 【追加】期待値生成関数 / URL非評価を検証するメソッド
   },
 );
