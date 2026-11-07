@@ -346,6 +346,40 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
              * 保存先パスを記録する、同じprivate bucketの操作を返す。
              */
             () => ({ // 初期化・照合・後処理のコールバック
+              list: vi.fn().mockImplementation( // 【追加】所有prefixの一覧境界を置き換えるメソッド / mock生成関数
+                /**
+                 * 【追加】実Storageと同じ一階層のfolder・objectとページ分割を再現する。
+                 */
+                async (prefix: string, options: { // 【追加】文字列型
+                  limit: number; // 【追加】数値型
+                  offset: number // 【追加】数値型
+                }) => { // 【追加】一覧のmockコールバック / 文字列型 / 件数の数値型
+                  const entries = new Map<string, { // 【追加】所有項目の対応を保持するMapコンストラクター / 文字列型
+                    name: string; // 【追加】文字列型
+                    id: string | null // 【追加】文字列型
+                  }>(); // 【追加】直下項目を重複排除する集合型 / 文字列型 / 未設定型
+                  for (const path of objects.keys()) { // 【追加】メモリ上のobject名を列挙するメソッド
+                    if (!path.startsWith(prefix + "/")) { // 【追加】一覧prefixの直下だけを選ぶメソッド
+                      continue;
+                    }
+                    const relative = path.slice(prefix.length + 1); // 【追加】所有prefixを取り除くメソッド
+                    const [name, child] = relative.split("/"); // 【追加】直下名と子階層を分けるメソッド
+                    entries.set(name, { // 【追加】objectかfolderかを登録するメソッド
+                      name,
+                      id: child ? null : "fake-object-id",
+                    });
+                  }
+                  return {
+                    data: [...entries.values()].sort( // 【追加】一覧項目を列挙するメソッド / ページ分割前の整列メソッド
+                      /**
+                       * 【追加】実SDKと同じname昇順へそろえる。
+                       */
+                      (a, b) => a.name.localeCompare(b.name), // 【追加】名前順の比較コールバック / 文字列の比較メソッド
+                    ).slice(options.offset, options.offset + options.limit), // 【追加】指定されたページだけを返すメソッド
+                    error: null,
+                  };
+                },
+              ),
               upload: vi.fn().mockImplementation( // 境界処理を置き換えるメソッド / 呼出し記録用mockを作る関数
                 /**
                  * アップロード済みPDFをメモリに保存する。
@@ -436,7 +470,7 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
               fetch: typeof fetch // 値の宣言から型を取得する型 / HTTP通信関数の型
             }
           }) => { // 初期化・照合・後処理のコールバック
-            transport = options.global.fetch;
+            transport = options.global.fetch; // 【追加】fixtureの実HTTP境界をfakeへ差し替える関数参照
             return admin;
           },
         );
@@ -545,6 +579,55 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
             force: true
           });
         }
+      },
+    );
+
+    it("E2Eが新規保存した所有PDFを発見し、他クラブ・他runのobjectは回収しない", // 【追加】回収範囲の試験を登録する関数
+      /**
+       * 【追加】事前台帳にない200件超の所有PDFと、他クラブのobjectをメモリ境界で区別する。
+       */
+      async () => { // 【追加】発見・ページ分割・回収を検証するコールバック
+        const fixture = planMvpLocalServicesFixture(configuration); // 【追加】ガード済み資源を計画する関数
+        handles.push(fixture); // 【追加】後処理対象を登録するメソッド
+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】fake境界だけで資源を作成する関数
+        const directory = `clubs/${fixture.database.clubs.a.id}/events/${randomUUID()}`; // 【追加】所有content IDを生成する関数
+        for (let count = 0;count < 205;count++) {
+          objects.set(`${directory}/${randomUUID()}.pdf`, new Uint8Array([1])); // 【追加】新規PDFを登録するメソッド / UUID生成関数 / バイト列コンストラクター
+        }
+        const foreign = `clubs/${randomUUID()}/events/${randomUUID()}/${randomUUID()}.pdf`; // 【追加】別クラブ・親・PDFのIDを生成する関数
+        objects.set(foreign, new Uint8Array([2])); // 【追加】削除対象外のobjectを登録するメソッド / バイト列コンストラクター
+        const result = await cleanupMvpLocalServicesFixture(fixture); // 【追加】所有PDFの発見と回収を実行する関数
+        expect(result.remaining.storageObjects).toBe(0); // 【追加】期待値生成関数 / 所有PDFの回収件数を検証するメソッド
+        expect([...objects.keys()]).toEqual([foreign]); // 【追加】期待値生成関数 / 残存path列挙メソッド / 他クラブ非削除を検証するメソッド
+      },
+    );
+
+    it("一覧取得失敗は未回収として報告し、固定pathの補償とAuth・DB回収は続ける", // 【追加】失敗時の回収を検証する試験登録関数
+      /**
+       * 【追加】listだけを故障させても、既知の回収対象を放置せず、成功扱いもしない。
+       */
+      async () => { // 【追加】一覧失敗と既知資源の回収を検証するコールバック
+        const fixture = planMvpLocalServicesFixture(configuration); // 【追加】ガード済みの所有資源を計画する関数
+        handles.push(fixture); // 【追加】回収対象を登録するメソッド
+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】fake境界で資源を作る関数
+        const from = admin.storage.from; // 【追加】fake bucketの操作を取得するmock関数
+        from.mockImplementationOnce( // 【追加】発見時の一覧だけを故障させるメソッド
+          /**
+           * 【追加】SDK原文を保持せずlist失敗を返す。
+           */
+          () => ({ // 【追加】一覧故障を注入するコールバック
+            ...from(), // 【追加】通常のfake操作を保持する関数
+            list: vi.fn().mockResolvedValue({ // 【追加】所有prefixの一覧取得を置き換える関数 / 呼出しを記録するmock生成関数 / mockの非同期結果を設定するメソッド
+              data: null,
+              error: new Error(PRIVATE) // 【追加】秘密を出さない固定例外または架空例外のコンストラクター
+            }), // 【追加】mock生成関数 / 非同期結果の設定メソッド / 架空例外のコンストラクター
+          }),
+        );
+        const result = await cleanupMvpLocalServicesFixture(fixture); // 【追加】一覧失敗でも既知資源を回収する関数
+        expect(result.remaining.storageObjects).toBe(1); // 【追加】期待値生成関数 / 未確認を成功扱いしない検証メソッド
+        expect(objects.size).toBe(0); // 【追加】期待値生成関数 / 既知PDF回収の検証メソッド
+        expect(users.size).toBe(0); // 【追加】期待値生成関数 / Auth回収の検証メソッド
+        expect(bridge.cleanup).toHaveBeenCalled(); // 【追加】期待値生成関数 / DB回収呼出しの検証メソッド
       },
     );
 
@@ -918,7 +1001,7 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
   },
 );
 
-const describeLocal = enabled ? describe : describe.skip;
+const describeLocal = enabled ? describe : describe.skip; // 【追加】flagに応じた試験群の登録関数 / 未許可の実接続群をskipするメソッド
 describeLocal("F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）", // describeLocalを実行する関数
   /**
    * 実password認証・SSR Cookie・同一DB ID・非公開PDFと補償cleanupを専用環境で確認する。

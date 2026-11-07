@@ -286,7 +286,7 @@ export async function createMvpCertificate(directory, signal) { // この処理�
     "distinguished_name=dn",
     "[dn]",
     "[server]",
-    "subjectAltName=IP:127.0.0.1",
+    "subjectAltName=IP:127.0.0.1,DNS:localhost", // 【修正】proxy経由のNode HTTPSも証明書のホスト名検証を維持する
     "basicConstraints=critical,CA:TRUE",
     "keyUsage=critical,digitalSignature,keyEncipherment,keyCertSign",
     "extendedKeyUsage=serverAuth",
@@ -776,6 +776,8 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
         DATABASE_URL: configuration.databaseUrl,
         NEXT_PUBLIC_SUPABASE_URL: configuration.supabaseOrigin,
         APP_BASE_URL: configuration.appOrigin,
+        // 【追加：F12粒度14】同じ実行の架空LINE設定だけを暗号化する。Chromiumへは渡さない。
+        LINE_CREDENTIAL_ENCRYPTION_KEY: environment.LINE_CREDENTIAL_ENCRYPTION_KEY,
         MVP_E2E_SESSION: JSON.stringify(session), // JSONへ直列化するメソッド
         MVP_E2E_PRELOAD: JSON.stringify({ // JSONへ直列化するメソッド
           ...preload,

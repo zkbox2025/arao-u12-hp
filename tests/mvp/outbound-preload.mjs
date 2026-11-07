@@ -266,39 +266,61 @@ globalThis.fetch = async function(input, init) { // HTTP通信を実行する関
   }
   if (localService) {
     if (url.pathname.startsWith("/storage/v1/object/")) { // 文字列の先頭を照合するメソッド
-      const answer = await originalFetch(config.stubOrigin + "/storage", { // 遮断適用前のHTTP通信関数
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-mvp-secret": config.secret,
-        },
-        body: JSON.stringify({ // JSONへ直列化するメソッド
-          method: request.method,
-          path: url.pathname
-        }),
-        signal: request.signal,
-        redirect: "error",
-      });
-      if (!answer.ok) {
-        throw blocked(); // 原文を送らず遮断件数だけを通知し、SDKが例外を吸収してもrunを成功にしない
-      }
-      const decision = await answer.json(); // JSON応答を読み取るメソッド
-      if (decision.mode !== "success") {
-        const headers = new Headers({ // HTTP headerを扱うコンストラクター
-          "Content-Type": "application/json"
-        });
-        if (decision.mode === "timeout" ||
-          decision.mode === "network") {
-          headers.set("x-mvp-fault", decision.mode); // 値を設定するメソッド
+      // 【追加】removeの本文はcloneだけを読み、元のrequestを変更せず転送する。
+      let paths = [url.pathname];
+      if (request.method === "DELETE" &&
+        /^\/storage\/v1\/object\/[a-z0-9-]+$/u.test(url.pathname)) { // 【追加】bucket単位のremove APIだけを判定するメソッド
+        const payload = await request.clone().json(); // 【追加】元の本文を消費せず複製するメソッド / JSONを解析するメソッド
+        if (!Array.isArray(payload.prefixes) || // 【追加】削除対象が配列かを検証する関数
+          payload.prefixes.length === 0 ||
+          payload.prefixes.length > 100) {
+          throw blocked(); // 【追加】対象を照合できない削除要求を遮断する関数
         }
-        return fault(new Response(JSON.stringify({ // stubから返された故障指定をSDKが実際に受け取る通信例外へ変換する / HTTP応答を生成するコンストラクター / JSONへ直列化するメソッド
-          message: "F12_STORAGE_FAILURE"
-        }), {
-          status: decision.mode === "rejected"
-            ? 400
-            : 503,
-          headers,
-        }));
+        paths = [];
+        for (const path of payload.prefixes) {
+          if (typeof path !== "string" ||
+            !/^clubs\/[0-9a-f-]{36}\/(?:events|notices)\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.pdf$/u
+              .test(path)) { // 【追加】正規の添付object pathだけを許すメソッド
+            throw blocked(); // 【追加】照合を迂回する表記を遮断する関数
+          }
+          paths.push(url.pathname + "/" + path); // 【追加】removeの実対象を故障照合へ追加するメソッド
+        }
+      }
+      for (const path of paths) {
+        const answer = await originalFetch(config.stubOrigin + "/storage", { // 遮断適用前のHTTP通信関数
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-mvp-secret": config.secret,
+          },
+          body: JSON.stringify({ // JSONへ直列化するメソッド
+            method: request.method,
+            path
+          }),
+          signal: request.signal,
+          redirect: "error",
+        });
+        if (!answer.ok) {
+          throw blocked(); // 原文を送らず遮断件数だけを通知し、SDKが例外を吸収してもrunを成功にしない
+        }
+        const decision = await answer.json(); // JSON応答を読み取るメソッド
+        if (decision.mode !== "success") {
+          const headers = new Headers({ // HTTP headerを扱うコンストラクター
+            "Content-Type": "application/json"
+          });
+          if (decision.mode === "timeout" ||
+            decision.mode === "network") {
+            headers.set("x-mvp-fault", decision.mode); // 値を設定するメソッド
+          }
+          return fault(new Response(JSON.stringify({ // stubから返された故障指定をSDKが実際に受け取る通信例外へ変換する / HTTP応答を生成するコンストラクター / JSONへ直列化するメソッド
+            message: "F12_STORAGE_FAILURE"
+          }), {
+            status: decision.mode === "rejected"
+              ? 400
+              : 503,
+            headers,
+          }));
+        }
       }
     }
     return await originalFetch(request, { // 遮断適用前のHTTP通信関数

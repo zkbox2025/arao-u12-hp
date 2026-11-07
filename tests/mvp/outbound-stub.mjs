@@ -193,6 +193,9 @@ export function ownMvpServer(server) { // この処理を定義する関数・�
  * @param {{runId: string, secret: string, supabaseOrigin: string}} options 所有契約。
  */
 export async function startMvpOutboundStub(options) { // この処理を定義する関数・コールバック / 実行単位で独立した送信stubを起動する。Auth・Storage・DBは置換しない
+  const { CLUB_ATTACHMENT_BUCKET } = await import( // 【追加】クラブ添付PDFのprivate bucket定数を遅延読込する関数
+    "../../src/infrastructure/storage/club-attachment-storage-constants"
+  );
   if (!/^[0-9a-f]{32}$/u.test(options.runId) || // 正規表現の一致を調べるメソッド
     !/^[0-9a-f]{64}$/u.test(options.secret) || // 正規表現の一致を調べるメソッド
     !/^http:\/\/(?:127\.0\.0\.1|localhost):54321$/u.test(options.supabaseOrigin)) { // 正規表現の一致を調べるメソッド
@@ -204,8 +207,25 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
   const modes = new Map(); // キーと値を対応付けるMap
   /** @type {Map<string, string>} */
   const storage = new Map(); // キーと値を対応付けるMap
+  /** @type {Map<string, {
+   * mode: string,
+   * skip: number,
+   * seen: number
+   * }>} */
+  const storagePrefixes = new Map(); // 【追加】所有prefixごとの故障条件を保持する集合
+
   /** @type {string[]} */
   let prefixes = [];
+  /**
+   * 【追加】SDK操作の照合結果。本文・署名queryを保持しない。
+   * @type {{
+   * method: string,
+   * path: string,
+   * mode: string
+   * }[]}
+   */
+  const storageChecks = []; // 【追加】署名tokenを含まないHTTP操作・path・故障判定だけを記録する配列
+
   /** @type {unknown} */
   let fixture;
   let ready = false;
@@ -322,12 +342,15 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
       } else if (body.action === "read") {
         reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
           records,
+          storageChecks,
           fixture
         });
       } else if (body.action === "reset") {
         records.length = 0;
+        storageChecks.length = 0;
         modes.clear(); // 登録値を消去するメソッド
         storage.clear(); // 登録値を消去するメソッド
+        storagePrefixes.clear(); // 【追加】次のケースへ故障条件を持ち越さないメソッド
         reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
           accepted: true
         });
@@ -345,12 +368,33 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
           !/[?#\\]/u.test(body.path) && // 正規表現の一致を調べるメソッド
           decodeURIComponent(body.path) === body.path && // URLのpercent表記を復号する関数
           new URL(body.path, options.supabaseOrigin).pathname === body.path && // URLを解析・構築するコンストラクター
-          prefixes.some( // 一致する要素の有無を調べるメソッド
+          (body.match === undefined ||
+            body.match === "exact" ||
+            body.match === "prefix") &&
+          Number.isSafeInteger(body.skip ?? 0) && // 【追加】故障までの成功回数を整数で検証する関数
+          Number(body.skip ?? 0) >= 0 && // 【追加】負の回数を拒否する数値変換関数
+          Number(body.skip ?? 0) <= 100 && // 【追加】故障設定の待機回数を制限する数値変換関数
+          prefixes.some( // 【追加】登録された所有prefixからの先頭一致を検証するメソッド
             /**
-             * 各要素が、この処理の照合条件に一致するかを判定するコールバック。
+             * 【追加】固定bucket内の所有クラブだけを故障対象とする。
              */
-            (prefix) => String(body.path).includes("/" + prefix))) { // この処理を定義する関数・コールバック / 文字列へ変換する関数 / 値が含まれるか調べるメソッド
-          storage.set(body.method + " " + body.path, body.mode); // 値を設定するメソッド
+            (prefix) => new RegExp( // 【追加】所有prefixの後ろにcontent種別だけを許す判定コールバック / 正規表現コンストラクター
+              "^/storage/v1/object/(?:sign/)?" + CLUB_ATTACHMENT_BUCKET + "/" + prefix + "(?:events|notices)/"
+            ).test(String(body.path))) && // 【追加】正規の所有pathを検証するメソッド / 文字列変換関数
+          (body.match !== "prefix" ||
+            new RegExp( // 【修正】実bucketの所有content直下だけを許す正規表現コンストラクター
+              "^/storage/v1/object/" + CLUB_ATTACHMENT_BUCKET + "/clubs/[0-9a-f-]{36}/(?:events|notices)/$",
+              "u",
+            ).test(body.path))) { // 【追加】prefix設定は所有するcontent種別の直下だけへ限定するメソッド
+          if (body.match === "prefix") {
+            storagePrefixes.set(body.method + " " + body.path, { // 【追加】故障条件と経過回数を登録するメソッド
+              mode: body.mode,
+              skip: Number(body.skip ?? 0), // 【追加】検証済み待機回数を数値へ変換する関数
+              seen: 0,
+            });
+          } else {
+            storage.set(body.method + " " + body.path, body.mode); // 【追加】完全一致の既存故障条件を登録するメソッド
+          }
         } else {
           reply(response, 400, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
             code: FAILURE
@@ -368,8 +412,23 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
       return;
     }
     if (request.url === "/storage") {
-      reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
-        mode: storage.get(body.method + " " + body.path) ?? "success" // 取得する関数・メソッド
+      const key = body.method + " " + body.path;
+      let mode = storage.get(key) ?? "success"; // 【追加】完全一致の設定を優先するメソッド
+      if (!storage.has(key)) { // 【追加】完全一致で指定された正常応答も優先するメソッド
+        for (const [prefix, rule] of storagePrefixes) {
+          if (key.startsWith(prefix)) { // 【追加】HTTP操作と所有prefixを同時に照合するメソッド
+            mode = rule.seen++ < rule.skip ? "success" : rule.mode;
+            break;
+          }
+        }
+      }
+      storageChecks.push({ // 【追加】SDKで実際に照合された操作を一時メモリに記録するメソッド
+        method: String(body.method), // 【追加】HTTP操作を文字列に限定する関数
+        path: String(body.path), // 【追加】queryを含まない照合pathを文字列に限定する関数
+        mode,
+      });
+      reply(response, 200, { // 【追加】秘密や対象pathを含めず故障条件だけを返す関数
+        mode,
       });
       return;
     }

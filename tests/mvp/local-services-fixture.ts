@@ -569,6 +569,71 @@ export async function verifyMvpFixturePdf( // 所有PDFの署名取得と公開�
 }
 
 /**
+ * 【追加】所有クラブの二種類のcontent直下だけを列挙し、新規PDFを回収台帳へ登録する。
+ * 一覧取得に失敗した場合は未確認を残し、親runnerを成功扱いしない。
+ */
+async function discoverMvpContentObjects( // 【追加】所有prefixの新規添付を発見する関数
+  state: LocalState, // 【追加】秘密を公開しない所有台帳型
+  fixture: MvpLocalServicesFixture, // 【追加】同じ実行の資源ハンドル型
+): Promise<void> { // 【追加】列挙完了を表す非同期結果型
+  if (
+    !state.admin ||
+    !state.databaseReady
+  ) {
+    return;
+  }
+  const storage = state.admin.storage.from(CLUB_ATTACHMENT_BUCKET); // 【追加】固定private bucketのSDK操作を取得するメソッド
+  const queue = [];
+  for (const club of [fixture.database.clubs.a, fixture.database.clubs.b]) {
+    for (const kind of ["events", "notices"]) {
+      queue.push({ // 【追加】所有クラブの固定prefixだけを列挙開始点へ登録するメソッド
+        path: `clubs/${club.id}/${kind}`,
+        depth: 0,
+      });
+    }
+  }
+  for (const directory of queue) {
+    for (let offset = 0; ; offset += 100) {
+      if (offset >= 10000) {
+        throw new Error(SERVICE_ERROR); // 【追加】列挙が終わらない場合を固定例外で拒否するコンストラクター
+      }
+      const result = await storage.list(directory.path, { // 【追加】固定深度の所有prefixだけをページ単位で列挙するメソッド
+        limit: 100,
+        offset,
+        sortBy: {
+          column: "name",
+          order: "asc",
+        },
+      });
+      if (result.error || !result.data) {
+        throw new Error(SERVICE_ERROR); // 【追加】一覧の取得失敗を固定文で通知するコンストラクター
+      }
+      for (const entry of result.data) {
+        const folder = directory.depth === 0 &&
+          /^[0-9a-f-]{36}$/u.test(entry.name) && // 【追加】content直下のID形式を確認するメソッド
+          !entry.id;
+        const pdf = directory.depth === 1 &&
+          /^[0-9a-f-]{36}\.pdf$/u.test(entry.name) && // 【追加】PDF名の書式を確認するメソッド
+          !!entry.id;
+        if (folder) {
+          queue.push({ // 【追加】所有content直下だけを次の列挙先へ追加するメソッド
+            path: `${directory.path}/${entry.name}`,
+            depth: 1,
+          });
+        } else if (pdf) {
+          state.objects.add(`${directory.path}/${entry.name}`); // 【追加】所有PDFの完全なpathを回収台帳へ登録するメソッド
+        } else {
+          throw new Error(SERVICE_ERROR); // 【追加】想定外の構造を勝手に削除せず未確認とするコンストラクター
+        }
+      }
+      if (result.data.length < 100) {
+        break;
+      }
+    }
+  }
+}
+
+/**
  * 登録物→DB→所有確認したAuth→新規作成した空bucketの順に補償する。
  * 一件の失敗で他の後片付けを止めず、残存・未確認はrunIdと件数だけで返す。
  */
@@ -583,6 +648,12 @@ export async function cleanupMvpLocalServicesFixture( // 登録した資源だ�
     throw new Error(SERVICE_ERROR); // 例外を生成するコンストラクター
   }
   state.phase = "cleaning";
+  let undiscoveredObjects = false;
+  try {
+    await discoverMvpContentObjects(state, fixture); // 【追加】E2Eが保存した所有PDFを削除前に発見する関数
+  } catch {
+    undiscoveredObjects = true;
+  }
   if (state.admin) {
     for (const path of [...state.objects]) {
       try {
@@ -674,6 +745,7 @@ export async function cleanupMvpLocalServicesFixture( // 登録した資源だ�
     state.admin &&
     state.bucketPending &&
     state.objects.size === 0 &&
+    !undiscoveredObjects &&
     state.bucketCreatedAt
   ) {
     try {
@@ -697,7 +769,7 @@ export async function cleanupMvpLocalServicesFixture( // 登録した資源だ�
     runId: fixture.runId,
     remaining: Object.freeze({ // 設定の変更を防ぐ関数
       authUsers: state.pendingUsers.size,
-      storageObjects: state.objects.size,
+      storageObjects: state.objects.size + (undiscoveredObjects ? 1 : 0), // 【追加】列挙できない場合も未回収として報告する
       buckets: state.bucketPending ? 1 : 0,
       database: databaseRemaining,
     }),

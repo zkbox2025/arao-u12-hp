@@ -1,9 +1,13 @@
 // tests/mvp/outbound-harness.test.ts
 // 架空の設定と所有loopbackだけでSDK送信・非fetch遮断・TLS・子停止を確認する。
 import {
+  CLUB_ATTACHMENT_BUCKET, // 【追加】クラブ添付PDFのprivate bucket名
+} from "../../src/infrastructure/storage/club-attachment-storage-constants";
+import {
   spawn,
 } from "node:child_process";
 import {
+  X509Certificate, // 【追加】一時証明書の許可hostを検証するクラス
   randomBytes,
 } from "node:crypto";
 import {
@@ -59,7 +63,7 @@ const ROOT = resolve(import.meta.dirname, "../.."); // 絶対パスを解決す�
 const RUN_ID = "a".repeat(32); // 文字列を指定回数繰り返すメソッド
 const PRIVATE = "F12_FAKE_PRIVATE_NEVER_LOG";
 const CLUB = "11111111-1111-4111-8111-111111111111";
-const STORAGE_PATH = "/storage/v1/object/club-attachments/clubs/" + CLUB + "/events/example.pdf";
+const STORAGE_PATH = `/storage/v1/object/${CLUB_ATTACHMENT_BUCKET}/clubs/${CLUB}/events/example.pdf`; // 【修正】実bucketの所有pathで故障条件を確認する
 let directory: string; // 文字列型
 let secret: string; // 文字列型
 let workerPreload: string; // 文字列型
@@ -370,8 +374,8 @@ it("実Supabase Storage SDKの故障注入は所有path・HTTP操作へ限定す
     const result = await probe([ // SDKを本物のNodeプロセスで読み込み、preloader適用後の結果だけをメモリへ回収する
       'import {createClient} from "@supabase/supabase-js";',
       'const client=createClient("http://127.0.0.1:54321","F12_FAKE_INVALID_KEY");',
-      "const result=await client.storage.from('club-attachments').upload(" +
-      JSON.stringify(STORAGE_PATH.split("/club-attachments/")[1]) + // JSONへ直列化するメソッド / 文字列を分割するメソッド
+      "const result=await client.storage.from(" + JSON.stringify(CLUB_ATTACHMENT_BUCKET) + ").upload(" + // 【修正】実bucket名をSDKコードのJSON文字列へ変換する関数
+      JSON.stringify(STORAGE_PATH.split(`/${CLUB_ATTACHMENT_BUCKET}/`)[1]) + // JSONへ直列化するメソッド / 文字列を分割するメソッド
       ",new Uint8Array([1]),{contentType:'application/pdf'});",
       "console.log(result.error?.message);",
     ].join("\n")); // 値を連結するメソッド
@@ -379,6 +383,104 @@ it("実Supabase Storage SDKの故障注入は所有path・HTTP操作へ限定す
     expect(result.output.trim()).toBe("F12_STORAGE_FAILURE"); // 期待値を生成する関数 / 前後の空白を除くメソッド / 値の一致を検証するメソッド
     expect(stub.status().violations).toBe(0); // 期待値を生成する関数 / 実行全体の遮断件数はresetで消さず、集計だけを返す / 値の一致を検証するメソッド
   });
+it("所有prefixの2件目だけを故障させ、別クラブ・別操作・resetを区別する", // 【追加】prefix故障設定の試験を登録する関数
+  /**
+   * 【追加】先行1件の成功を許し、境界外のpathと操作へ故障を広げない。
+   */
+  async () => { // 【追加】prefixの境界と待機回数を検証するコールバック
+    stub.registerFixture({}, ["clubs/" + CLUB + "/"]); // 【追加】所有クラブのprefixを登録する関数
+    const prefix = `/storage/v1/object/${CLUB_ATTACHMENT_BUCKET}/clubs/${CLUB}/events/`;
+    for (const path of [
+      `/storage/v1/object/${CLUB_ATTACHMENT_BUCKET}/`,
+      prefix.replace(CLUB, "22222222-2222-4222-8222-222222222222"), // 【追加】別クラブへ置換するメソッド
+      prefix + "../",
+      prefix.replace("/events/", "/events-evil/"), // 【追加】別の種別名へ置換するメソッド
+      prefix + "%2f",
+    ]) {
+      const result = await control({ // 【追加】同じrunの認証済み制御要求を送る関数
+        action: "configure",
+        channel: "storage",
+        mode: "server-error",
+        method: "POST",
+        match: "prefix",
+        path,
+      });
+      expect(result.status).toBe(400); // 【追加】期待値生成関数 / 広すぎる故障設定の拒否を検証するメソッド
+    }
+    const configured = await control({ // 【追加】認証済み制御要求を送る関数
+      action: "configure",
+      channel: "storage",
+      mode: "server-error",
+      method: "POST",
+      match: "prefix",
+      skip: 1,
+      path: prefix,
+    });
+    expect(configured.ok).toBe(true); // 【追加】期待値生成関数 / 故障設定の受付を検証するメソッド
+    /**
+     * 【追加】SDKの通信直前と同じ故障照合を、Supabaseへ接続せず行う。
+     */
+    async function decision(method: string, path: string) { // 【追加】故障照合関数 / HTTP操作・pathの文字列型
+      const response = await fetch(stub.origin + "/storage", { // 【追加】所有loopbackへだけ要求する関数
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-mvp-secret": secret
+        },
+        body: JSON.stringify({ // 【追加】制御入力をJSONへ変換するメソッド
+          method,
+          path
+        }), // 【追加】照合入力をJSON化する関数
+      });
+      return (await response.json()).mode; // 【追加】制御応答をJSONとして取得するメソッド
+    }
+    expect(await decision("POST", prefix + "first.pdf")).toBe("success"); // 【追加】期待値生成関数 / 故障照合関数 / 最初の成功を検証するメソッド
+    expect(await decision("DELETE", prefix + "first.pdf")).toBe("success"); // 【追加】期待値生成関数 / 故障照合関数 / 別操作の正常応答を検証するメソッド
+    expect(await decision("POST", prefix + "second.pdf")).toBe("server-error"); // 【追加】期待値生成関数 / 故障照合関数 / 2件目の故障を検証するメソッド
+    expect(await decision("POST", prefix.replace(CLUB, "22222222-2222-4222-8222-222222222222") + "third.pdf")).toBe("success"); // 【追加】期待値生成関数 / 故障照合関数 / 別クラブへ置換するメソッド / 境界外の正常応答を検証するメソッド
+    await control({ // 【追加】同じrunのsecretで所有stubを制御する関数
+      action: "reset"
+    }); // 【追加】故障設定を回収する関数
+    expect(await decision("POST", prefix + "after.pdf")).toBe("success"); // 【追加】期待値生成関数 / 故障照合関数 / reset後の正常応答を検証するメソッド
+  },
+);
+
+it("実SDK removeはbucket URLでなく本文中の正確なobject pathに故障を適用する", // 【追加】削除対象照合の試験を登録する関数
+  /**
+   * 【追加】Storage SDKの実際のJSON形式をpreloaderへ通し、DB・Storage接続の前に失敗させる。
+   */
+  async () => { // 【追加】削除故障のSDK境界を確認するコールバック
+    stub.registerFixture({}, ["clubs/" + CLUB + "/"]); // 【追加】当該runの所有prefixを登録する関数
+    const path = `clubs/${CLUB}/events/${CLUB}/${CLUB}.pdf`;
+    expect((await control({ // 【追加】期待値生成関数 / 認証済み制御要求を送る関数
+      action: "configure",
+      channel: "storage",
+      mode: "server-error",
+      method: "DELETE",
+      path: `/storage/v1/object/${CLUB_ATTACHMENT_BUCKET}/` + path,
+    })).ok).toBe(true); // 【追加】故障設定の受付を検証するメソッド
+    const result = await probe([ // 【追加】実SDKを所有子プロセスで評価する関数
+      'import {createClient} from "@supabase/supabase-js";',
+      'const client=createClient("http://127.0.0.1:54321","F12_FAKE_INVALID_KEY");',
+      "const result=await client.storage.from(" + JSON.stringify(CLUB_ATTACHMENT_BUCKET) + ").remove([" + JSON.stringify(path) + "]);", // 【追加】削除pathをJSONへ変換する関数
+      "console.log(result.error?.message);",
+    ].join("\n")); // 【追加】子プロセスのコードを組み立てるメソッド
+    expect(result.code).toBe(0); // 【追加】期待値生成関数 / SDKが故障を通常の失敗結果へ変換したことを検証するメソッド
+    expect(result.output.trim()).toBe("F12_STORAGE_FAILURE"); // 【追加】期待値生成関数 / 前後空白を除くメソッド / 固定失敗文の照合メソッド
+    const snapshot = await (await control({ // 【追加】所有stubの制御要求を送る関数
+      action: "read",
+    })).json(); // 【追加】制御応答をJSONとして取得するメソッド
+    expect(snapshot.storageChecks).toEqual([ // 【追加】期待値生成関数 / 実SDKの照合対象を検証するメソッド
+      {
+        method: "DELETE",
+        path: `/storage/v1/object/${CLUB_ATTACHMENT_BUCKET}/` + path,
+        mode: "server-error",
+      },
+    ]);
+    expect(stub.status().violations).toBe(0); // 【追加】期待値生成関数 / 違反件数取得関数 / 未許可通信がない検証メソッド
+  },
+);
+
 it("Node子とeval型workerが環境を作り直しても同じ遮断を解除できない",  // 試験ケースを登録する関数
   /**
    * 架空設定と所有資源だけで、このケースの準備・検証・後片付けを実行する。
@@ -493,11 +595,12 @@ it("global setupは所有secretを照合し、準備未完了や違反済みのs
       Reflect.deleteProperty(globalThis, marker); // プロパティを削除するメソッド
     }
   });
-it("未知のCONNECT先をbrowser proxyが拒否し、URL原文を応答へ返さない",  // 試験ケースを登録する関数
+it.each(["remote.invalid:443", "127.0.0.1:54321"])( // 【修正】外部宛とSupabaseへの無制限tunnelを区別して試験登録するメソッド
+  "CONNECT先%sをbrowser proxyが拒否し、URL原文を応答へ返さない",
   /**
-   * 架空設定と所有資源だけで、このケースの準備・検証・後片付けを実行する。
+   * 【修正】許可されたTLS入口以外へのCONNECTは、Supabase宛であっても拒否する。
    */
-  async () => { // この処理を定義する関数・コールバック
+  async (destination) => { // 【修正】禁止された接続先を検証するコールバック
     const port = Number(new URL(stub.origin).port); // 数値へ変換する関数 / URLを解析・構築するコンストラクター
     const received = await new Promise<string>( // 非同期結果を扱うPromise / 文字列型
       /**
@@ -511,8 +614,8 @@ it("未知のCONNECT先をbrowser proxyが拒否し、URL原文を応答へ返�
           () => { // この処理を定義する関数・コールバック
             const authorization = Buffer.from(RUN_ID + ":" + secret).toString("base64"); // バイト列を扱うBuffer API / 値からバイト列を作る関数・対象を選ぶメソッド / 文字列へ変換するメソッド
             socket.write([ // データを書き込むメソッド
-              "CONNECT remote.invalid:443 HTTP/1.1",
-              "Host: remote.invalid:443",
+              `CONNECT ${destination} HTTP/1.1`,
+              `Host: ${destination}`,
               "Proxy-Authorization: Basic " + authorization,
               "",
               "",
@@ -532,7 +635,7 @@ it("未知のCONNECT先をbrowser proxyが拒否し、URL原文を応答へ返�
         socket.once("error", reject); // イベントを一度だけ監視するメソッド / 失敗を通知する関数
       });
     expect(received).toContain("403 Forbidden"); // 期待値を生成する関数 / 含まれる値を検証するメソッド
-    expect(received).not.toContain("remote.invalid"); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
+    expect(received).not.toContain(destination); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
     expect(stub.status().violations).toBe(1); // 期待値を生成する関数 / 実行全体の遮断件数はresetで消さず、集計だけを返す / 値の一致を検証するメソッド
   });
 it("CONNECT中のECONNRESETでもstubの制御と後片付けを継続できる", // 【追加】接続切断の回帰試験を登録する関数
@@ -605,6 +708,10 @@ it("TLSは所有証明書を検証し、所有runの応答だけを中継する"
    */
   async () => { // この処理を定義する関数・コールバック
     const certificate = await createMvpCertificate(directory); // 所有一時領域でTLS証明書を生成する関数
+    const parsed = new X509Certificate(certificate.cert); // 【追加】一時証明書を解析するコンストラクター
+    expect(parsed.checkIP("127.0.0.1")).toBe("127.0.0.1"); // 【追加】期待値生成関数 / IPの証明書検証メソッド / 一致検証メソッド
+    expect(parsed.checkHost("localhost")).toBe("localhost"); // 【追加】期待値生成関数 / proxyが使用するhostの証明書検証メソッド / 一致検証メソッド
+    expect(parsed.checkHost("remote.invalid")).toBeUndefined(); // 【追加】期待値生成関数 / hostの証明書検証メソッド / 外部hostを許さない検証メソッド
     expect(statSync(join(directory, "key.pem")).mode & 0o777).toBe(0o600); // 期待値を生成する関数 / 所有ファイルの属性を調べる関数 / パスを結合する関数 / 値の一致を検証するメソッド
     const backend = http.createServer( // serverを生成する関数
       /**
