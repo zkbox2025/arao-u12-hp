@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
   ADMIN_MEMO_MAX_LENGTH,
@@ -54,7 +54,7 @@ export async function updateSessionApplicationStatus(
   state: SessionApplicationStatusActionState,
   formData: FormData
 ): Promise<SessionApplicationStatusActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const values = buildSessionApplicationStatusActionValues(
     formData,
@@ -113,7 +113,7 @@ export async function updateSessionApplicationMemo(
   state: SessionApplicationMemoActionState,
   formData: FormData
 ): Promise<SessionApplicationMemoActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const values = buildSessionApplicationMemoActionValues(
     formData,

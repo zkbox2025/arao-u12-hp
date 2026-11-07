@@ -1,0 +1,125 @@
+diff --git a/docs/implementation/phases/F05-granular-plan.md b/docs/implementation/phases/F05-granular-plan.md
+index 6a9981eb93f7432adb46d424ccefb1d4e43c9e52..d74a3b6b365cf9cbec981346125dfe773cadbabd 100644
+--- a/docs/implementation/phases/F05-granular-plan.md
++++ b/docs/implementation/phases/F05-granular-plan.md
+@@ -164,6 +164,58 @@ F04の権限・状態変更用actions.tsへ、招待処理を大量に追加し
+ inviteClubMemberAction()
+ resendClubInvitationAction()
+ cancelClubInvitationAction()
++## 【追加：粒度7】招待URLの確定契約
++
++この節でURLのパス・クエリ名を確定する。既存の画面が存在するという意味ではない。
++受入画面・承諾処理は、後続の招待受入フェーズ（F06として計画する）で実装する。
++
++| 用途 | ClubInvitationLinksの項目 | 確定パス | クエリ |
++| --- | --- | --- | --- |
++| 既存AppUserの参加リンク | invitationUrl | /club-invitations/accept | clubSlug、token |
++| 新規Authユーザーの認証後の移動先 | authRedirectTo | /welcome | clubSlug、token |
++
++- clubSlugはDBから取得したクラブのslug。
++- tokenはServiceがcreateSecureToken()で生成したアプリ側のrawToken。
++- tokenはSupabaseのtoken_hash、Auth user ID、DBのInvitation IDとは別の値。
++- originは既存ServiceのprepareAttempt()がClub.appBaseUrlを優先し、未設定ならAPP_BASE_URLから決定・検証する。
++- クライアントのorigin、Host、送信先URL、clubIdをURL生成の根拠にしない。
++- URLSearchParamsでクエリを組み立てる。SupabaseのAuth認証リンクは既存アダプターが生成する。
++- /auth/confirmはパスワード再設定専用のため、今回invite対応へ変更しない。
++- /club/[clubSlug]配下はACTIVE Membershipが必要なlayoutのため、INVITEDの受入画面はその配下へ置かない。
++
++F06の新規作成予定ファイルは、app/(club-app)/welcome/page.tsxと
++app/(club-app)/club-invitations/accept/page.tsxを入口とする。
++この2画面・承諾Actionは粒度7のpatchへ含めない。
++
++新規ユーザーへ届くメールは、authRedirectTo自体ではなく、既存generateClubInvitationAuthLink()が
++返すSupabaseのactionLinkを使用する。Auth確認後の遷移先が/welcomeとなる。
++
++F06ではAuthから戻った認証結果を安全なセッションCookieへ接続し、サーバーで本人確認する。
++そのうえで、clubSlugから解決したclubId、hashToken(token)、認証済みuser ID、
++招待状態・期限・INVITED Membershipを照合する。URLのtokenだけでACTIVEへ変更しない。
++必要な認証情報を失わずにログインを挟める導線もF06で実装する。
++
++F06の受入画面はno-storeとReferrer-Policy: no-referrerを使用し、tokenを表示・ログ・分析情報へ出さない。
++受入れ後はtokenを含むURLを履歴に残さない遷移を行う。インフラのリクエストログもクエリの機密値を記録しない設定を確認する。
++ローカル・本番のSupabase Redirect URLsには、それぞれのoriginと/welcomeの契約に対応する許可設定を行う。
++実際の認証方式・Redirect許可の詳細確認は後続の実サービス検証で行う。
++
++【追加ここまで】
++
++### 【追加】粒度7のコードへ接続する方法
++
++- buildClubInvitationLinksはinvitation-actions.ts内の非公開関数にする。
++- inviteClubMember(input, buildClubInvitationLinks)とresendClubInvitation(input, buildClubInvitationLinks)の第2引数へ渡す。
++- use serverファイルで同期URL生成関数を公開しない。実行可能なexportは3つのasync Actionだけ。
++- OWNER認可DTOにはappBaseUrlがないため、認可済みaccess.club.idでClubのid/name/slug/timezone/appBaseUrlだけをDBから読む。
++- Clubの更新、共通認可DTOの拡張、Repository・既存Serviceの修正はこの粒度では行わない。
++- SENTは新規/再送の固定toast、EMAIL_FAILEDは保存済み招待の送信失敗toast、PREPARATION_FAILEDは復旧確認toastへredirectする。
++- DELIVERY_UNKNOWN/DELIVERY_RECORDING_FAILEDは一覧を再検証して固定formErrorを返す。送信成功や単純な再送可能という表示にしない。
++- 再送・取消の状態型ClubInvitationOperationActionStateは当該Actionファイルのtype exportに置く。実行可能な関数exportを増やさない。
++- 不正なrequestIdでは入力値を保持してエラーを返す。requestIdは認証・認可・DBの重複制約の代わりにならない。
++
++【追加ここまで】
++
+ 全Actionの共通ルール
+ 1. 最初にrequireClubAppOwnerAccess(clubSlug)。
+ 2. requestId検証。
+@@ -205,12 +257,12 @@ package.json	Next.js、test、typecheck	実装・検証の対応版を確認す
+ vitest.config.mts	environment: node、include、@ alias、server-only alias	対象テストの検出・モック条件を確認する。
+ 
+ 
+-着手時に確認する前提粒度の成果物（最新添付に未収録・実際の定義は未確認）
++【修正】着手時に確認する前提粒度の成果物（今回の最新添付では既存）
+ 予定パス	確認する予定の関数・型・テスト	前提	理由・現在の確認状態
+-src/application/club/invitation/send-club-invitation.ts	予定: inviteClubMember()・resendClubInvitation()、結果型	粒度5	実際のService結果を固定文言へ変換する。最新添付に未収録・実際の定義は未確認。
+-src/application/club/invitation/send-club-invitation.test.ts	予定: 途中失敗・DB保存済み/送信不明のテスト	粒度5	Actionの結果を障害後のDB状態に一致させる。最新添付に未収録・実際の定義は未確認。
+-src/application/club/invitation/cancel-club-invitation.ts	予定: cancelClubMemberInvitation()、結果型	粒度6	取消のID・認可情報・結果契約を確認する。最新添付に未収録・実際の定義は未確認。
+-src/application/club/invitation/cancel-club-invitation.test.ts	予定: 拒否・競合・取消結果のテスト	粒度6	Serviceの拒否をActionが正しく扱う。最新添付に未収録・実際の定義は未確認。
++src/application/club/invitation/send-club-invitation.ts	【修正】既存: inviteClubMember()/resendClubInvitation()、ClubInvitationLinkBuilder、SendClubInvitationResult	粒度5	現コードの第2引数とSENT/EMAIL_FAILED/UNKNOWN系等の結果を確認する。
++src/application/club/invitation/send-club-invitation.test.ts	【修正】既存: 途中失敗・DB保存済み/送信不明のテスト	粒度5	Actionの結果を障害後のDB状態に一致させる。
++src/application/club/invitation/cancel-club-invitation.ts	【修正】既存: cancelClubMemberInvitation()、CancelClubMemberInvitationResult	粒度6	取消のID・認可情報・結果契約を確認する。
++src/application/club/invitation/cancel-club-invitation.test.ts	【修正】既存: 拒否・競合・取消結果のテスト	粒度6	Serviceの拒否をActionが正しく扱う。
+ 
+ 
+ 該当の前提粒度を適用した後に実ファイルを読む。まだ存在しない場合は依存条件を報告し、前提機能をこの粒度へ混ぜて実装しない。
+diff --git a/docs/implementation/phases/F05.md b/docs/implementation/phases/F05.md
+--- a/docs/implementation/phases/F05.md
++++ b/docs/implementation/phases/F05.md
+@@ -33,2 +33,40 @@
+ * Invitation状態とMembership状態を分ける理由
+ * 外部AuthとDBを1つのtransactionにできないため復旧処理が必要なこと
++
++## 【追加：粒度7】招待URLの確定契約
++
++この節でURLのパス・クエリ名を確定する。既存の画面が存在するという意味ではない。
++受入画面・承諾処理は、後続の招待受入フェーズ（F06として計画する）で実装する。
++
++| 用途 | ClubInvitationLinksの項目 | 確定パス | クエリ |
++| --- | --- | --- | --- |
++| 既存AppUserの参加リンク | invitationUrl | /club-invitations/accept | clubSlug、token |
++| 新規Authユーザーの認証後の移動先 | authRedirectTo | /welcome | clubSlug、token |
++
++- clubSlugはDBから取得したクラブのslug。
++- tokenはServiceがcreateSecureToken()で生成したアプリ側のrawToken。
++- tokenはSupabaseのtoken_hash、Auth user ID、DBのInvitation IDとは別の値。
++- originは既存ServiceのprepareAttempt()がClub.appBaseUrlを優先し、未設定ならAPP_BASE_URLから決定・検証する。
++- クライアントのorigin、Host、送信先URL、clubIdをURL生成の根拠にしない。
++- URLSearchParamsでクエリを組み立てる。SupabaseのAuth認証リンクは既存アダプターが生成する。
++- /auth/confirmはパスワード再設定専用のため、今回invite対応へ変更しない。
++- /club/[clubSlug]配下はACTIVE Membershipが必要なlayoutのため、INVITEDの受入画面はその配下へ置かない。
++
++F06の新規作成予定ファイルは、app/(club-app)/welcome/page.tsxと
++app/(club-app)/club-invitations/accept/page.tsxを入口とする。
++この2画面・承諾Actionは粒度7のpatchへ含めない。
++
++新規ユーザーへ届くメールは、authRedirectTo自体ではなく、既存generateClubInvitationAuthLink()が
++返すSupabaseのactionLinkを使用する。Auth確認後の遷移先が/welcomeとなる。
++
++F06ではAuthから戻った認証結果を安全なセッションCookieへ接続し、サーバーで本人確認する。
++そのうえで、clubSlugから解決したclubId、hashToken(token)、認証済みuser ID、
++招待状態・期限・INVITED Membershipを照合する。URLのtokenだけでACTIVEへ変更しない。
++必要な認証情報を失わずにログインを挟める導線もF06で実装する。
++
++F06の受入画面はno-storeとReferrer-Policy: no-referrerを使用し、tokenを表示・ログ・分析情報へ出さない。
++受入れ後はtokenを含むURLを履歴に残さない遷移を行う。インフラのリクエストログもクエリの機密値を記録しない設定を確認する。
++ローカル・本番のSupabase Redirect URLsには、それぞれのoriginと/welcomeの契約に対応する許可設定を行う。
++実際の認証方式・Redirect許可の詳細確認は後続の実サービス検証で行う。
++
++【追加ここまで】

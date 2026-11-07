@@ -1,0 +1,1263 @@
+// tests/platform-support.flow.integration.test.ts
+// 接続ガード後だけ専用clientを生成し、Platform認可・管理更新とF08受付の共存を実DBで照合する。
+
+import { AsyncLocalStorage } from "node:async_hooks";
+import { randomUUID } from "node:crypto";
+import type { PrismaClient } from "@prisma/client";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import type {
+  PlatformAdminAccessContext, // Auth本人IDと有効なPlatform管理者情報をまとめた認可背景データの型
+} from "@/app/(club-app)/platform/require-platform-admin";
+import type {
+  PlatformSupportActionState, // 更新日時と最小成功情報だけのAction state型
+} from "@/app/(club-app)/platform/support/actions";
+import type {
+  SupportReport, // サポート報告のPrismaモデル型
+} from "@/types/prisma";
+
+const mail = vi.hoisted( // import前にモックを用意するメソッド
+  /**
+   * import評価前にメールSDKと再検証のモックを準備する。
+   */
+  () => ({ // 対象ケースまたは外部境界のコールバック関数
+    send: vi.fn(), // モック関数を生成するメソッド
+    revalidate: vi.fn(), // モック関数を生成するメソッド
+  }));
+const requests = new AsyncLocalStorage<string>(); // 本人IDを分離する非同期contextのコンストラクター / 文字列型
+let client: PrismaClient | undefined; // 専用DBクライアントの型
+const GUARD_ERROR = "F09専用の使い捨てローカルDB設定と明示flagを確認してください。";
+const CHECK_ERROR = "F09統合確認に失敗しました。対象ケースと実行条件を確認してください。";
+const BASE_TIME = "2020-01-01T00:00:00.000Z";
+
+/**
+ * flagと接続設定だけを評価する、テスト用環境辞書の型。
+ */
+type Environment = Record<string, string | undefined>; // 接続ガード用の環境辞書型 / 文字列キーの環境辞書型 / 文字列型
+
+/**
+ * 書込み前に登録したUUIDと、一般会員の所属IDを保持するcleanup用の型。
+ */
+type Fixture = { // 作成前に登録したUUIDと会員識別子の型
+  clubs: string[]; // 文字列型
+  admins: string[]; // 文字列型
+  member: string; // 文字列型
+  membership: string; // 文字列型
+  reports: Set<string>; // 重複しないcleanup対象IDの集合型 / 文字列型
+};
+
+/**
+ * 両方の専用flagが揃うまで、DB設定の評価と専用client生成へ進ませない。
+ */
+function enabled(environment: Environment): boolean { // 専用flagが両方揃っているか調べる関数 / 接続ガード用の環境辞書型 / 真偽値型
+  return (
+    environment.RUN_PLATFORM_SUPPORT_TESTS === "1" &&
+    environment.RUN_DB_INTEGRATION_TESTS === "1"
+  );
+}
+
+/**
+ * 非production・使い捨て確認・固定loopbackの全条件を確認し、接続URLは例外へ残さない。
+ */
+function localConfiguration(environment: Environment): string { // 使い捨てloopback設定の全条件を確認する関数 / 接続ガード用の環境辞書型 / 文字列型
+  try {
+    if (!enabled(environment)) { // 専用flagが両方揃っているか調べる関数
+      throw new Error(GUARD_ERROR); // Errorコンストラクター
+    }
+    const source = environment.DATABASE_URL ?? "";
+    const url = new URL(source); // 接続先を検証するURLコンストラクター
+    if (
+      environment.PLATFORM_SUPPORT_DISPOSABLE !== "1" ||
+      environment.NODE_ENV === "production" ||
+      source !== source.trim() || // 前後の空白を除くメソッド
+      source.includes("?") || // 許可値との一致や禁止文字の有無を調べるメソッド
+      source.includes("#") || // 許可値との一致や禁止文字の有無を調べるメソッド
+      !["postgres:", "postgresql:"].includes(url.protocol) || // 許可値との一致や禁止文字の有無を調べるメソッド
+      !["localhost", "127.0.0.1"].includes(url.hostname) || // 許可値との一致や禁止文字の有無を調べるメソッド
+      url.port !== "54322" ||
+      url.pathname !== "/postgres" ||
+      url.search !== "" ||
+      url.hash !== "" ||
+      !url.username ||
+      !url.password
+    ) {
+      throw new Error(GUARD_ERROR); // Errorコンストラクター
+    }
+    return url.toString(); // 検証済みURLを文字列へ変換するメソッド
+  } catch {
+    throw new Error(GUARD_ERROR); // Errorコンストラクター
+  }
+}
+
+/**
+ * SQL・fixture・接続設定・assertionの原文とcauseを、固定の失敗文へ置き換える。
+ */
+async function safeCheck(operation: () => Promise<void>): Promise<void> { // 失敗の原文を固定エラーへ限定する関数 / 非同期結果の型 / 戻り値を使わない型
+  try {
+    await operation(); // 受け取ったケースの検証処理を実行する関数
+  } catch {
+    throw new Error(CHECK_ERROR); // Errorコンストラクター
+  }
+}
+
+/**
+ * 実環境を参照せず、接続ガードの単体試験用に架空の設定を返す。
+ */
+function sampleEnvironment(): Environment { // 架空の接続ガード設定を作る関数 / 接続ガード用の環境辞書型
+  return {
+    RUN_PLATFORM_SUPPORT_TESTS: "1",
+    RUN_DB_INTEGRATION_TESTS: "1",
+    PLATFORM_SUPPORT_DISPOSABLE: "1",
+    NODE_ENV: "test",
+    DATABASE_URL: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
+  };
+}
+
+// dotenvを初期化する共有clientを置換し、ガード後に作った専用clientだけを注入する。
+vi.mock("@/src/infrastructure/prisma/client",  // モジュールを置き換えるメソッド
+  /**
+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
+   */
+  () => ({ // 対象ケースまたは外部境界のコールバック関数
+    prisma: new Proxy({} as PrismaClient, { // 共有clientへのアクセスを専用clientへ転送するコンストラクター / 専用DBクライアントの型
+      /**
+       * 初期化前のDBアクセスを拒否し、専用clientのメソッドはthisを保って返す。
+       */
+      get(_target, property) { // 専用clientへ転送するメソッド
+        if (!client) {
+          throw new Error("F09専用clientは未初期化です。"); // Errorコンストラクター
+        }
+        const value = Reflect.get(client, property); // プロパティを取得するメソッド
+        return typeof value === "function" ? value.bind(client) : value; // メソッドのthisを専用clientへ固定するメソッド
+      },
+    }),
+  }));
+
+// Authだけを本人IDの境界で置換し、PlatformAdmin・Membershipの照合は実DBへ通す。
+vi.mock("@/src/infrastructure/supabase/server",  // モジュールを置き換えるメソッド
+  /**
+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
+   */
+  () => ({ // 対象ケースまたは外部境界のコールバック関数
+    createClient:
+      /**
+       * 本人確認のモックだけを持つサーバーclientを返す。
+       */
+      async () => ({ // 対象ケースまたは外部境界のコールバック関数
+        auth: {
+          getUser:
+            /**
+             * リクエスト単位の本人IDをAuth応答の形で返す。
+             */
+            async () => ({ // 対象ケースまたは外部境界のコールバック関数
+              data: {
+                user: requests.getStore() ? { // リクエストごとの本人IDを取得するメソッド
+                  id: requests.getStore(), // リクエストごとの本人IDを取得するメソッド
+                } : null,
+              }, // リクエストごとの本人IDを取得するメソッド
+              error: null,
+            }),
+        },
+      }),
+  }));
+
+/**
+ * redirect・404を普通のDB失敗から区別するテスト用の制御例外クラス。
+ */
+class NextControl extends Error { } // Next制御例外のクラス / Error基底クラス
+vi.mock("next/navigation",  // モジュールを置き換えるメソッド
+  /**
+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
+   */
+  () => ({ // 対象ケースまたは外部境界のコールバック関数
+    redirect:
+      /**
+       * 専用ログインへのredirectを制御例外として再現する。
+       */
+      () => { // 対象ケースまたは外部境界のコールバック関数
+        throw new NextControl("F09 test redirect"); // Next制御例外を模すコンストラクター
+      },
+    notFound:
+      /**
+       * 権限非開示の404を制御例外として再現する。
+       */
+      () => { // 対象ケースまたは外部境界のコールバック関数
+        throw new NextControl("F09 test not found"); // Next制御例外を模すコンストラクター
+      },
+    unstable_rethrow:
+      /**
+       * 試験用のNext制御例外だけを再送出する。
+       */
+      (error: unknown) => { // 対象ケースまたは外部境界のコールバック関数 / 検証前の未知値型
+        if (error instanceof NextControl) {
+          throw error;
+        }
+      },
+  }));
+vi.mock("next/cache",  // モジュールを置き換えるメソッド
+  /**
+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
+   */
+  () => ({ // 対象ケースまたは外部境界のコールバック関数
+    revalidatePath: mail.revalidate, // 再検証の呼出しだけを観測するモック関数参照
+  })); // 対象ケースまたは外部境界のコールバック関数
+
+// F08の実adapter・Serviceを通すケースでもSDK・実メールは呼び出さない。
+vi.mock("@/lib/mail/resend",  // モジュールを置き換えるメソッド
+  /**
+   * 指定した外部境界を置き換え、実Auth・共有client・実配送を使用しない。
+   */
+  () => ({ // 対象ケースまたは外部境界のコールバック関数
+    resend: {
+      emails: {
+        send: mail.send, // 実配送せずSDK受付応答だけを返すモック関数参照
+      },
+    },
+    adminEmail: "operator@example.test",
+    buildMailFrom:
+      /**
+       * 実設定を参照せず、fixture専用の送信元表示を返す。
+       */
+      () => "F09 fixture <from@example.test>", // 対象ケースまたは外部境界のコールバック関数
+  }));
+
+describe("F09接続ガード（DB・Auth・SDK・dotenvなし）",  // ガード試験を登録する関数
+  /**
+   * 架空の設定だけを使う接続ガードの試験を登録する。
+   */
+  () => { // 対象ケースまたは外部境界のコールバック関数
+    it.each(["RUN_PLATFORM_SUPPORT_TESTS", "RUN_DB_INTEGRATION_TESTS"])( // 入力別の接続ガード試験を登録するメソッド
+      "%sがなければ接続設定へ進まない",
+
+      /**
+       * 架空の入力を差し替えて接続ガードの許可・拒否を検証する。
+       */
+      (flag) => { // 対象ケースまたは外部境界のコールバック関数
+        const environment = sampleEnvironment(); // 架空の接続ガード設定を作る関数
+        delete environment[flag];
+        expect(enabled(environment)).toBe(false); // 値の一致を検証するメソッド / 期待値を生成する関数 / 専用flagが両方揃っているか調べる関数
+        expect( // 期待値を生成する関数
+          /**
+           * 接続ガードを呼び出し、固定エラーで拒否されることを確認する。
+           */
+          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // 固定エラーで拒否されることを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 使い捨てloopback設定の全条件を確認する関数
+      },
+    );
+    it.each([ // 入力別の接続ガード試験を登録するメソッド
+      ["PLATFORM_SUPPORT_DISPOSABLE", undefined],
+      ["PLATFORM_SUPPORT_DISPOSABLE", "0"],
+      ["NODE_ENV", "production"],
+      ["DATABASE_URL", undefined],
+      ["DATABASE_URL", "private-fixture-invalid-url"],
+      ["DATABASE_URL", "https://fixture:fixture@localhost:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@remote.test:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@localhost.remote.test:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:5432/postgres"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/other"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?host=remote.test"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres?"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#secret"],
+      ["DATABASE_URL", "postgresql://fixture:fixture@127.0.0.1:54322/postgres#"],
+      ["DATABASE_URL", "postgresql://127.0.0.1:54322/postgres"],
+      ["DATABASE_URL", "postgresql://fixture@127.0.0.1:54322/postgres"],
+    ])("不許可設定は接続情報を含まない固定エラーにする：%s（%#）",
+      /**
+       * 架空の入力を差し替えて接続ガードの許可・拒否を検証する。
+       */
+      (key, value) => { // 対象ケースまたは外部境界のコールバック関数
+        const environment = sampleEnvironment(); // 架空の接続ガード設定を作る関数
+        environment[key!] = value;
+        expect( // 期待値を生成する関数
+          /**
+           * 接続ガードを呼び出し、固定エラーで拒否されることを確認する。
+           */
+          () => localConfiguration(environment)).toThrow(GUARD_ERROR); // 固定エラーで拒否されることを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 使い捨てloopback設定の全条件を確認する関数
+        expect(client).toBeUndefined(); // 値が設定されていないことを検証するメソッド / 期待値を生成する関数
+        expect(mail.send).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
+      });
+    it.each(["localhost", "127.0.0.1"])("許可したloopback %sだけを使う",  // ホスト別の接続ガード試験を登録するメソッド
+      /**
+       * 架空の入力を差し替えて接続ガードの許可・拒否を検証する。
+       */
+      (host) => { // 対象ケースまたは外部境界のコールバック関数
+        const environment = sampleEnvironment(); // 架空の接続ガード設定を作る関数
+        environment.DATABASE_URL = `postgresql://fixture:fixture@${host}:54322/postgres`;
+        expect(localConfiguration(environment)).toBe(environment.DATABASE_URL); // 値の一致を検証するメソッド / 期待値を生成する関数 / 使い捨てloopback設定の全条件を確認する関数
+      });
+    it("失敗の原文・causeを固定エラーへ残さない",  // 試験を登録する関数
+      /**
+       * ラップしたDBケース、または接続ガードの結果を検証する。
+       */
+      async () => { // 対象ケースまたは外部境界のコールバック関数
+        try {
+          await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+            /**
+             * fixtureの例外原文が外へ漏れないことを調べるために例外を発生させる。
+             */
+            async () => { // 対象ケースまたは外部境界のコールバック関数
+              throw new Error("private-fixture-db-error"); // Errorコンストラクター
+            });
+          expect.fail("固定エラーが必要です。"); // 期待する例外がない場合に試験を失敗させるメソッド
+        } catch (error) {
+          expect(error).toBeInstanceOf(Error); // 値のクラスを検証するメソッド / 期待値を生成する関数
+          expect((error as Error).message).toBe(CHECK_ERROR); // 値の一致を検証するメソッド / 期待値を生成する関数 / 標準のError型
+          expect((error as Error).cause).toBeUndefined(); // 値が設定されていないことを検証するメソッド / 期待値を生成する関数 / 標準のError型
+        }
+      });
+  });
+
+const describeDatabase = enabled(process.env) ? describe : describe.skip; // 専用flagの判定関数 / 試験登録関数 / DB試験をskipする関数
+
+describeDatabase("F09実DB統合（専用flag未指定時はskip）",  // flagに応じてDB試験を登録またはskipする関数
+  /**
+   * flagが揃う場合だけ動く専用DBのfixture・フロー試験を登録する。
+   */
+  () => { // 対象ケースまたは外部境界のコールバック関数
+    let db: PrismaClient | undefined; // 専用DBクライアントの型
+    let fixture: Fixture | undefined; // 作成前に登録したUUIDと会員識別子の型
+    let authorization: typeof import("@/app/(club-app)/platform/require-platform-admin"); // ガード後に取得するモジュールの型
+    let clubAuthorization: typeof import("@/app/(club-app)/club/club-membership-authorization"); // ガード後に取得するモジュールの型
+    let actions: typeof import("@/app/(club-app)/platform/support/actions"); // ガード後に取得するモジュールの型
+    let readService: typeof import("@/src/application/platform/support/get-platform-support"); // ガード後に取得するモジュールの型
+    let updateService: typeof import("@/src/application/platform/support/update-platform-support"); // ガード後に取得するモジュールの型
+    let readRepository: typeof import("@/src/infrastructure/prisma/repositories/platform-support-report-repository"); // ガード後に取得するモジュールの型
+    let mutation: typeof import( // ガード後に取得するモジュールの型
+      "@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository"
+    );
+    let f08Repository: typeof import("@/src/infrastructure/prisma/repositories/support-report-repository"); // ガード後に取得するモジュールの型
+    let f08Service: typeof import("@/src/application/club/support/create-support-report"); // ガード後に取得するモジュールの型
+
+    /**
+     * 専用clientを使用できるケースだけに、初期化済みの参照を渡す。
+     */
+    function database(): PrismaClient { // 初期化済みの専用clientを返す関数 / 専用DBクライアントの型
+      if (!db) {
+        throw new Error("F09専用clientは未初期化です。"); // Errorコンストラクター
+      }
+      return db;
+    }
+
+    beforeAll( // 接続前の準備処理を登録する関数
+      /**
+       * 全接続条件の確認後だけ専用clientと実装モジュールを初期化する。
+       */
+      async () => { // 対象ケースまたは外部境界のコールバック関数
+        await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+          /**
+           * 接続ガードを確認し、専用clientと必要な実装だけを初期化する。
+           */
+          async () => { // 対象ケースまたは外部境界のコールバック関数
+            const connectionString = localConfiguration(process.env); // 使い捨てloopback設定の全条件を確認する関数
+            const { PrismaClient: Client } = await import("@prisma/client"); // ガード後に専用clientのコンストラクターを読み込む動的import
+            const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後にDBアダプターのコンストラクターを読み込む動的import
+            db = new Client({ // ガード後だけ生成するPrismaClientコンストラクター
+              adapter: new PrismaPg({ // 固定接続先を渡すPostgreSQLアダプターのコンストラクター
+                connectionString,
+              }), // 固定接続先を渡すPostgreSQLアダプターのコンストラクター
+              log: [],
+            });
+            client = db;
+            await db.$connect(); // ガード後の専用DBへ接続するメソッド
+            authorization = await import("@/app/(club-app)/platform/require-platform-admin"); // 必要な実装だけをガード後に読み込む動的import
+            clubAuthorization = await import("@/app/(club-app)/club/club-membership-authorization"); // 必要な実装だけをガード後に読み込む動的import
+            actions = await import("@/app/(club-app)/platform/support/actions"); // 必要な実装だけをガード後に読み込む動的import
+            readService = await import("@/src/application/platform/support/get-platform-support"); // 必要な実装だけをガード後に読み込む動的import
+            updateService = await import("@/src/application/platform/support/update-platform-support"); // 必要な実装だけをガード後に読み込む動的import
+            readRepository = await import("@/src/infrastructure/prisma/repositories/platform-support-report-repository"); // 必要な実装だけをガード後に読み込む動的import
+            mutation = await import("@/src/infrastructure/prisma/repositories/platform-support-report-mutation-repository"); // 必要な実装だけをガード後に読み込む動的import
+            f08Repository = await import("@/src/infrastructure/prisma/repositories/support-report-repository"); // 必要な実装だけをガード後に読み込む動的import
+            f08Service = await import("@/src/application/club/support/create-support-report"); // 必要な実装だけをガード後に読み込む動的import
+          });
+      }, 20_000);
+
+    beforeEach( // ケースごとの準備を登録する関数
+      /**
+       * 各ケースのモックとUUIDを準備し、独立したfixtureを作る。
+       */
+      async () => { // 対象ケースまたは外部境界のコールバック関数
+        fixture = undefined;
+        vi.spyOn(console, "error").mockImplementation( // 実処理をモックへ置き換えるメソッド / ログ呼出しを監視するメソッド
+          /**
+           * ログの原文を表示せず、後で呼出し有無だけを検査できるようにする。
+           */
+          () => undefined); // 対象ケースまたは外部境界のコールバック関数
+        vi.spyOn(console, "warn").mockImplementation( // 実処理をモックへ置き換えるメソッド / ログ呼出しを監視するメソッド
+          /**
+           * ログの原文を表示せず、後で呼出し有無だけを検査できるようにする。
+           */
+          () => undefined); // 対象ケースまたは外部境界のコールバック関数
+        vi.spyOn(console, "log").mockImplementation( // 実処理をモックへ置き換えるメソッド / ログ呼出しを監視するメソッド
+          /**
+           * ログの原文を表示せず、後で呼出し有無だけを検査できるようにする。
+           */
+          () => undefined); // 対象ケースまたは外部境界のコールバック関数
+        mail.send.mockReset(); // ケース前にモックを初期化するメソッド
+        mail.revalidate.mockReset(); // ケース前にモックを初期化するメソッド
+        mail.send.mockResolvedValue({ // SDK受付の架空応答を設定するメソッド
+          data: {
+            id: "f09-provider-id",
+          },
+          error: null,
+        });
+        await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+          /**
+           * UUIDを作成前に登録して、必要最小限のDB fixtureを保存する。
+           */
+          async () => { // 対象ケースまたは外部境界のコールバック関数
+            fixture = {
+              clubs: [randomUUID(), randomUUID(), randomUUID()], // UUID v4を生成する関数
+              admins: [randomUUID(), randomUUID(), randomUUID()], // UUID v4を生成する関数
+              member: randomUUID(), // UUID v4を生成する関数
+              membership: randomUUID(), // UUID v4を生成する関数
+              reports: new Set(), // cleanup対象UUIDの集合コンストラクター
+            };
+            const f = fixture;
+            await database().club.createMany({ // 登録済みUUIDのfixtureをまとめて保存するメソッド / 初期化済みの専用clientを返す関数
+              data: f.clubs.map( // 識別子または固定結果の配列へ変換するメソッド
+                /**
+                 * 登録済みUUIDから全プランのクラブfixtureを作る。
+                 */
+                (id, index) => ({ // 対象ケースまたは外部境界のコールバック関数
+                  id,
+                  slug: `f09-${id}`,
+                  name: "F09 fixture",
+                  planType: (["STANDARD", "STARTER", "PRO"] as const)[index], // 読取専用リテラル型
+                })),
+            });
+            await database().platformAdmin.createMany({ // 登録済みUUIDのfixtureをまとめて保存するメソッド / 初期化済みの専用clientを返す関数
+              data: f.admins.map( // 識別子または固定結果の配列へ変換するメソッド
+                /**
+                 * 登録済みUUIDから有効・無効のPlatform管理者fixtureを作る。
+                 */
+                (id, index) => ({ // 対象ケースまたは外部境界のコールバック関数
+                  id,
+                  email: `${id}@fixture.example.test`,
+                  name: "F09 operator",
+                  role: index === 0 ? "DEVELOPER" : "SUPPORT",
+                  isActive: index !== 2,
+                })),
+            });
+            await database().appUser.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
+              data: { // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
+                id: f.member,
+                name: "F09 reporter",
+              }
+            });
+            await database().clubMembership.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
+              data: {
+                id: f.membership,
+                userId: f.member,
+                clubId: f.clubs[0],
+                role: "MEMBER",
+                status: "ACTIVE",
+              },
+            });
+          });
+      }, 20_000);
+
+    // 途中で作成に失敗しても、登録済みUUIDだけを子→親の順序でcleanupする。
+    afterEach( // ケースごとのcleanupを登録する関数
+      /**
+       * 安全なログだけであることを確認し、途中失敗時も登録済みUUIDだけをcleanupする。
+       */
+      async () => { // 対象ケースまたは外部境界のコールバック関数
+        const f = fixture;
+        fixture = undefined;
+        try {
+          await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+            /**
+             * 本文・例外原文を含む不要なログがないことを確認する。
+             */
+            async () => { // 対象ケースまたは外部境界のコールバック関数
+              expect(console.error).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
+              expect(console.warn).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
+              expect(console.log).not.toHaveBeenCalled(); // 呼出し有無を検証するメソッド / 期待値を生成する関数
+            });
+        } finally {
+          vi.restoreAllMocks(); // ログの監視を解除するメソッド
+          if (f) {
+            await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+              /**
+               * このケースに登録したUUIDだけを、子から親の順で削除する。
+               */
+              async () => { // 対象ケースまたは外部境界のコールバック関数
+                const db = database(); // 初期化済みの専用clientを返す関数
+                try {
+                  await db.supportReport.deleteMany({ // 登録済みUUIDだけを削除するメソッド
+                    where: {
+                      id: {
+                        in: [...f.reports],
+                      },
+                    },
+                  }); // 登録済みUUIDだけを削除するメソッド
+                } finally {
+                  try {
+                    await db.club.deleteMany({ // 登録済みUUIDだけを削除するメソッド
+                      where: {
+                        id: {
+                          in: f.clubs,
+                        },
+                      },
+                    }); // 登録済みUUIDだけを削除するメソッド
+                  } finally {
+                    try {
+                      await db.appUser.deleteMany({ // 登録済みUUIDだけを削除するメソッド
+                        where: {
+                          id: f.member,
+                        },
+                      }); // 登録済みUUIDだけを削除するメソッド
+                    } finally {
+                      await db.platformAdmin.deleteMany({ // 登録済みUUIDだけを削除するメソッド
+                        where: {
+                          id: {
+                            in: f.admins,
+                          },
+                        },
+                      }); // 登録済みUUIDだけを削除するメソッド
+                    }
+                  }
+                }
+              });
+          }
+        }
+      }, 20_000);
+    afterAll( // 専用接続の解放処理を登録する関数
+      /**
+       * 接続に失敗した場合も生成済みの専用clientを解放する。
+       */
+      async () => { // 対象ケースまたは外部境界のコールバック関数
+        await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+          /**
+           * 専用clientを切断し、注入用の参照を必ず解除する。
+           */
+          async () => { // 対象ケースまたは外部境界のコールバック関数
+            try {
+              await db?.$disconnect(); // 専用DB接続を解放するメソッド
+            } finally {
+              client = undefined;
+            }
+          });
+      }, 20_000);
+
+    /**
+     * DBケースとhookの例外を固定文へ包み、ケース名だけを失敗調査の手掛かりにする。
+     */
+    function databaseCase(label: string, operation: (f: Fixture) => Promise<void>): void { // fixtureと固定失敗文でDBケースを登録する関数 / 文字列型 / 作成前に登録したUUIDと会員識別子の型 / 非同期結果の型 / 戻り値を使わない型
+      it(label,  // 試験を登録する関数
+        /**
+         * ラップしたDBケース、または接続ガードの結果を検証する。
+         */
+        async () => { // 対象ケースまたは外部境界のコールバック関数
+          await safeCheck( // 失敗の原文を固定エラーへ限定する関数
+            /**
+             * 登録済みfixtureで対象ケースを実行し、失敗を固定文へ包む。
+             */
+            async () => { // 対象ケースまたは外部境界のコールバック関数
+              if (!fixture) {
+                throw new Error("F09 fixtureがありません。"); // Errorコンストラクター
+              }
+              await operation(fixture); // 受け取ったケースの検証処理を実行する関数
+            });
+        }, 20_000);
+    }
+
+    /**
+     * Authだけをfixtureの本人IDにし、実DBのPlatformAdmin認可contextを取得する。
+     */
+    async function access(id: string): Promise<PlatformAdminAccessContext> { // 実DBで本人のPlatform権限を確認する関数 / 文字列型 / 非同期結果の型 / 本人IDと有効なPlatform管理者情報の型
+      return requests.run(id,  // 本人IDの非同期contextで処理を実行するメソッド
+        /**
+         * Auth本人IDだけを指定し、実DBからPlatform権限を確認する。
+         */
+        () => authorization.requirePlatformAdmin()); // 対象ケースまたは外部境界のコールバック関数 / 本人の有効なPlatform権限を実DBで確認するメソッド
+    }
+
+    /**
+     * 書込み前に報告UUIDを登録し、全プランの既存報告を模したDB行を作成する。
+     */
+    async function report(f: Fixture, club = 0): Promise<SupportReport> { // UUIDを登録して報告fixtureを保存する関数 / 作成前に登録したUUIDと会員識別子の型 / 非同期結果の型 / 保存されたサポート報告モデル型
+      const id = randomUUID(); // UUID v4を生成する関数
+      f.reports.add(id); // 作成前にcleanup用UUIDを登録するメソッド
+      return database().supportReport.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
+        data: {
+          id,
+          clubId: f.clubs[club],
+          membershipId: club === 0 ? f.membership : null,
+          message: "F09 fixture本文",
+          category: "BUG",
+          status: "OPEN",
+          reporterName: "保存時氏名",
+          reporterEmail: "snapshot@example.test",
+          reporterRole: "MEMBER",
+          pageUrl: `/club/f09-${f.clubs[club]}/account`,
+          userAgent: "F09 fixture browser",
+          updatedAt: new Date(BASE_TIME), // 検証用の日時を作るDateコンストラクター
+          createdAt: new Date(Date.parse(BASE_TIME) + f.reports.size * 1000), // 検証用の日時を作るDateコンストラクター / fixture日時をミリ秒へ変換するメソッド
+        },
+      });
+    }
+
+    /**
+     * 管理操作で更新してはいけないF08の本文・所属・snapshot・通知列だけを抽出する。
+     */
+    function immutable(row: SupportReport) { // 管理操作で不変にするF08列を抽出する関数 / 保存されたサポート報告モデル型
+      return {
+        id: row.id,
+        clubId: row.clubId,
+        membershipId: row.membershipId,
+        createdAt: row.createdAt,
+        message: row.message,
+        category: row.category,
+        reporterName: row.reporterName,
+        reporterEmail: row.reporterEmail,
+        reporterRole: row.reporterRole,
+        pageUrl: row.pageUrl,
+        userAgent: row.userAgent,
+        notifiedAt: row.notifiedAt,
+        notifyError: row.notifyError,
+      };
+    }
+
+    /**
+     * 最新versionと独立requestIdを持つAction入力だけを作る。
+     */
+    function submission(row: SupportReport, kind: "STATUS" | "NOTE", value: string) { // 独立requestIdとversionを持つAction入力を作る関数 / 保存されたサポート報告モデル型 / 文字列型
+      const state: PlatformSupportActionState = { // versionと最小成功情報だけのAction state型
+        status: "idle",
+        values: {
+          expectedUpdatedAt: row.updatedAt.toISOString(), // 競合検出のUTC ISO versionへ変換するメソッド
+        }, // 競合検出のUTC ISO versionへ変換するメソッド
+        fieldErrors: {},
+        formError: null,
+        requestId: randomUUID(), // UUID v4を生成する関数
+      };
+      const data = new FormData(); // Action送信値のFormDataコンストラクター
+      data.set("requestId", state.requestId); // 限定した送信項目を設定するメソッド
+      data.set("reportId", row.id); // 限定した送信項目を設定するメソッド
+      data.set("expectedUpdatedAt", state.values.expectedUpdatedAt); // 限定した送信項目を設定するメソッド
+      data.set(kind === "STATUS" ? "status" : "internalNote", value); // 限定した送信項目を設定するメソッド
+      return {
+        state,
+        data,
+      };
+    }
+
+    /**
+     * 実Actionから認可・検証・Service・DB更新まで通し、Auth本人だけを置換する。
+     */
+    async function invoke(id: string, row: SupportReport, kind: "STATUS" | "NOTE", value: string) { // Auth本人だけを置換して実Actionを実行する関数 / 文字列型 / 保存されたサポート報告モデル型
+      const input = submission(row, kind, value); // 独立requestIdとversionを持つAction入力を作る関数
+      return requests.run(id,  // 本人IDの非同期contextで処理を実行するメソッド
+        /**
+         * Auth本人IDだけを指定し、実Actionから保存までを実行する。
+         */
+        () => kind === "STATUS" // 対象ケースまたは外部境界のコールバック関数
+          ? actions.updateSupportReportStatusAction(row.id, input.state, input.data) // 毎回再認可してstatusを更新するAction関数
+          : actions.updateSupportReportNoteAction(row.id, input.state, input.data)); // 毎回再認可して内部メモを更新するAction関数
+    }
+
+    /**
+     * 実Serviceの再検証へ渡す、本人context由来の入力を作る。
+     */
+    function identity(actor: PlatformAdminAccessContext, row: SupportReport) { // 認可contextと保存済みversionから更新入力を作る関数 / 本人IDと有効なPlatform管理者情報の型 / 保存されたサポート報告モデル型
+      return {
+        userId: actor.userId,
+        platformAdminId: actor.platformAdmin.id,
+        reportId: row.id,
+        requestId: randomUUID(), // UUID v4を生成する関数
+        expectedUpdatedAt: row.updatedAt.toISOString(), // 競合検出のUTC ISO versionへ変換するメソッド
+      };
+    }
+
+    for (const role of ["DEVELOPER", "SUPPORT"] as const) { // 読取専用リテラル型
+      databaseCase(`${role}はAppUser・所属なしで全プランの報告を横断読取する`,  // fixtureと固定失敗文でDBケースを登録する関数
+        /**
+         * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+         */
+        async (f) => { // 対象ケースまたは外部境界のコールバック関数
+          const id = role === "DEVELOPER" ? f.admins[0] : f.admins[1];
+          const actor = await access(id); // 実DBで本人のPlatform権限を確認する関数
+          expect(actor.platformAdmin.role).toBe(role); // 値の一致を検証するメソッド / 期待値を生成する関数
+          expect(await database().appUser.count({ // 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
+            where: {
+              id,
+            },
+          })).toBe(0); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
+          expect(await database().clubMembership.count({ // 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
+            where: {
+              userId: id,
+            },
+          })).toBe(0); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
+          for (const index of [0, 1, 2]) {
+            const stored = await report(f, index); // UUIDを登録して報告fixtureを保存する関数
+            const result = await readService.getPlatformSupport(actor, { // 検証済み条件で横断一覧を取得するService関数
+              clubId: f.clubs[index],
+            }); // 検証済み条件で横断一覧を取得するService関数
+            expect(result.outcome).toBe("FOUND"); // 値の一致を検証するメソッド / 期待値を生成する関数
+            if (result.outcome !== "FOUND") {
+              throw new Error("一覧取得失敗"); // Errorコンストラクター
+            }
+            expect(result.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
+              /**
+               * 限定DTOから識別子だけを抽出して期待する並びと照合する。
+               */
+              (item) => item.id)).toEqual([stored.id]); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数
+            expect(result.reports[0].message).toBe(stored.message); // 値の一致を検証するメソッド / 期待値を生成する関数
+            expect((await invoke(id, stored, "STATUS", "IN_PROGRESS")).status).toBe("success"); // 両ロールが所属・プランによらず管理更新できることを確認するAction呼出し / 成功の期待値生成・検証メソッド // 値の一致を検証するメソッド / 期待値を生成する関数
+          }
+          const all = await readService.getPlatformSupport(actor, {}); // 検証済み条件で横断一覧を取得するService関数
+          expect(all.outcome).toBe("FOUND"); // 値の一致を検証するメソッド / 期待値を生成する関数
+          if (all.outcome !== "FOUND") {
+            throw new Error("横断取得失敗"); // Errorコンストラクター
+          }
+          expect(all.clubs.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
+            /**
+             * 限定DTOから識別子だけを抽出して期待する並びと照合する。
+             */
+            (club) => club.id)).toEqual(expect.arrayContaining(f.clubs)); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 指定したクラブ候補を含むことを検証するメソッド
+          expect(all.totalCount).toBe(await database().supportReport.count()); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
+          expect(all.reports.length).toBeLessThanOrEqual(50); // 件数の上限を検証するメソッド / 期待値を生成する関数
+        });
+    }
+
+    databaseCase("club・status・categoryのAND絞り込みと50件ページ送り・新着順を実DBで確認する",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const ids: string[] = []; // 文字列型
+        for (let index = 0;index < 61;index++) {
+          ids.push((await report(f)).id); // 検証用の識別子を配列へ登録するメソッド / UUIDを登録して報告fixtureを保存する関数
+        }
+        await database().supportReport.update({ // 対象fixtureの検証用状態を更新するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: ids[60],
+          },
+          data: {
+            category: "QUESTION",
+            status: "ON_HOLD",
+          },
+        });
+        await report(f, 1); // UUIDを登録して報告fixtureを保存する関数
+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        const query = {
+          clubId: f.clubs[0],
+          category: "BUG",
+          status: "OPEN",
+        };
+        const first = await readService.getPlatformSupport(actor, query); // 検証済み条件で横断一覧を取得するService関数
+        const second = await readService.getPlatformSupport(actor, { // 検証済み条件で横断一覧を取得するService関数
+          ...query,
+          page: "2",
+        });
+        if (first.outcome !== "FOUND" ||
+          second.outcome !== "FOUND") {
+          throw new Error("絞り込み失敗"); // Errorコンストラクター
+        }
+        expect(first.totalCount).toBe(60); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(first.pageSize).toBe(50); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(first.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
+          /**
+           * 限定DTOから識別子だけを抽出して期待する並びと照合する。
+           */
+          (row) => row.id)).toEqual(ids.slice(0, 60).reverse().slice(0, 50)); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 対象の範囲だけを取り出すメソッド / 期待する新着順へ並べるメソッド
+        expect(second.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
+          /**
+           * 限定DTOから識別子だけを抽出して期待する並びと照合する。
+           */
+          (row) => row.id)).toEqual(ids.slice(0, 60).reverse().slice(50)); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 対象の範囲だけを取り出すメソッド / 期待する新着順へ並べるメソッド
+        const filtered = await readService.getPlatformSupport(actor, { // 検証済み条件で横断一覧を取得するService関数
+          clubId: f.clubs[0],
+          category: "QUESTION",
+          status: "ON_HOLD",
+        });
+        if (filtered.outcome !== "FOUND") {
+          throw new Error("絞り込み失敗"); // Errorコンストラクター
+        }
+        expect(filtered.reports.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
+          /**
+           * 限定DTOから識別子だけを抽出して期待する並びと照合する。
+           */
+          (row) => row.id)).toEqual([ids[60]]); // 保存値の構造と内容を検証するメソッド / 対象ケースまたは外部境界のコールバック関数
+        expect((await readService.getPlatformSupport(actor, { // 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
+          status: "INVALID",
+        })).outcome).toBe("INVALID_QUERY"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
+      });
+
+    for (const actorKind of ["inactive", "member"] as const) { // 読取専用リテラル型
+      databaseCase(`${actorKind}は実認可とAction直呼び・偽装contextのServiceで拒否される`,  // fixtureと固定失敗文でDBケースを登録する関数
+        /**
+         * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+         */
+        async (f) => { // 対象ケースまたは外部境界のコールバック関数
+          const id = actorKind === "inactive" ? f.admins[2] : f.member;
+          const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+          await expect(access(id)).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 期待値を生成する関数 / 実DBで本人のPlatform権限を確認する関数
+          await expect(invoke(id, stored, "NOTE", "非許可メモ")).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 期待値を生成する関数 / Auth本人だけを置換して実Actionを実行する関数
+          const forged: PlatformAdminAccessContext = { // 本人IDと有効なPlatform管理者情報の型
+            userId: id,
+            platformAdmin: {
+              id,
+              role: "SUPPORT",
+            },
+          };
+          expect(await readService.getPlatformSupport(forged, {})).toEqual({ // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
+            outcome: "FORBIDDEN",
+          }); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 検証済み条件で横断一覧を取得するService関数
+          expect(await updateService.updatePlatformSupportNote(forged, { // 期待値を生成する関数 / 再検証してメモを更新するService関数
+            ...identity(forged, stored), // 認可contextと保存済みversionから更新入力を作る関数
+            internalNote: "非許可メモ",
+          })).toEqual({ // 保存値の構造と内容を検証するメソッド
+            outcome: "FORBIDDEN",
+          }); // 保存値の構造と内容を検証するメソッド
+          expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+            where: {
+              id: stored.id,
+            },
+          })).toEqual(stored); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        });
+    }
+
+    databaseCase("認可後に権限を失った古いcontextも、読取・status・同status・メモ更新で拒否する",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        await database().platformAdmin.update({ // 対象fixtureの検証用状態を更新するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: actor.userId,
+          },
+          data: {
+            isActive: false,
+          },
+        });
+        const scope = identity(actor, stored); // 認可contextと保存済みversionから更新入力を作る関数
+        const query = {
+          clubId: null,
+          category: null,
+          status: null,
+          page: 1,
+          pageSize: 50 as const, // 読取専用リテラル型
+          skip: 0,
+        };
+        expect(await readRepository.findSupportReportsForPlatform({ // 期待値を生成する関数 / 最新Platform権限を照合して一覧を取得するRepository関数
+          userId: actor.userId,
+          platformAdminId: actor.userId,
+          query,
+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
+          outcome: "FORBIDDEN",
+        }); // 保存値の構造と内容を検証するメソッド
+        for (const status of ["OPEN", "RESOLVED"] as const) { // 読取専用リテラル型
+          expect(await mutation.updateSupportReportStatusForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してstatusを更新するRepository関数
+            ...scope,
+            status,
+          })).toEqual({ // 保存値の構造と内容を検証するメソッド
+            outcome: "FORBIDDEN",
+          }); // 保存値の構造と内容を検証するメソッド
+        }
+        expect(await mutation.updateSupportReportNoteForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してメモを更新するRepository関数
+          ...scope,
+          internalNote: "非許可メモ",
+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
+          outcome: "FORBIDDEN",
+        }); // 保存値の構造と内容を検証するメソッド
+        expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        })).toEqual(stored); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+      });
+
+    databaseCase("statusの実変更だけ日時を更新し、同status再送では全管理列を維持する",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        let current = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        const before = immutable(current); // 管理操作で不変にするF08列を抽出する関数
+        for (const status of ["IN_PROGRESS", "ON_HOLD", "RESOLVED", "OPEN"] as const) { // 読取専用リテラル型
+          const actorId = status === "ON_HOLD" ||
+            status === "OPEN" ? f.admins[1] : f.admins[0];
+          const result = await invoke(actorId, current, "STATUS", status); // Auth本人だけを置換して実Actionを実行する関数
+          expect(result.data?.outcome).toBe("UPDATED"); // 値の一致を検証するメソッド / 期待値を生成する関数
+          const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+            where: {
+              id: current.id,
+            },
+          }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          expect(updated.status).toBe(status); // 値の一致を検証するメソッド / 期待値を生成する関数
+          expect(updated.handledByPlatformAdminId).toBe(actorId); // 値の一致を検証するメソッド / 期待値を生成する関数
+          expect(updated.statusChangedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
+          expect(updated.updatedAt.getTime()).toBeGreaterThan(current.updatedAt.getTime()); // versionが進んだことを検証するメソッド / 期待値を生成する関数 / 保存日時をミリ秒で比較するメソッド
+          expect(updated.resolvedAt).toEqual(status === "RESOLVED" ? updated.statusChangedAt : null); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
+          expect(immutable(updated)).toEqual(before); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
+          expect(result.data?.updatedAt).toBe(updated.updatedAt.toISOString()); // 値の一致を検証するメソッド / 期待値を生成する関数 / 競合検出のUTC ISO versionへ変換するメソッド
+          current = updated;
+        }
+        const count = mail.revalidate.mock.calls.length; // 再検証モック関数の呼出し履歴を参照する
+        const unchanged = await invoke(f.admins[1], current, "STATUS", "OPEN"); // Auth本人だけを置換して実Actionを実行する関数
+        expect(unchanged.data?.outcome).toBe("UNCHANGED"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(mail.revalidate).toHaveBeenCalledTimes(count); // 呼出し回数を検証するメソッド / 期待値を生成する関数
+        expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: current.id,
+          },
+        })).toEqual(current); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        expect(await mutation.updateSupportReportStatusForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してstatusを更新するRepository関数
+          ...identity(actor, { // 認可contextと保存済みversionから更新入力を作る関数
+            ...current,
+            updatedAt: new Date(BASE_TIME), // 検証用の日時を作るDateコンストラクター
+          }),
+          status: "OPEN",
+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
+          outcome: "CONFLICT",
+        }); // 保存値の構造と内容を検証するメソッド
+      });
+
+    databaseCase("メモ保存は対応者を更新し、status日時・F08列を維持して空欄をnullにする",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        let stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        await f08Repository.recordSupportReportNotification({ // F08の通知受付結果を保存するRepository関数
+          reportId: stored.id,
+          clubId: stored.clubId,
+          notification: {
+            outcome: "FAILED",
+            errorCode: "EMAIL_SEND_FAILED",
+          },
+        });
+        stored = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        await invoke(f.admins[0], stored, "STATUS", "RESOLVED"); // Auth本人だけを置換して実Actionを実行する関数
+        const before = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        const result = await invoke(f.admins[1], before, "NOTE", "  内部メモ  "); // Auth本人だけを置換して実Actionを実行する関数
+        expect(result.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(JSON.stringify(result)).not.toContain("内部メモ"); // 期待する値の包含を検証するメソッド / 期待値を生成する関数 / 結果にメモ原文がないか検証するため文字列化するメソッド
+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(updated.internalNote).toBe("内部メモ"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(updated.notifyError).toBe("EMAIL_SEND_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(updated.handledByPlatformAdminId).toBe(f.admins[1]); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(updated.statusChangedAt).toEqual(before.statusChangedAt); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
+        expect(updated.resolvedAt).toEqual(before.resolvedAt); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
+        expect(immutable(updated)).toEqual(immutable(before)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
+        await invoke(f.admins[0], updated, "NOTE", " \n "); // Auth本人だけを置換して実Actionを実行する関数
+        expect((await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        })).internalNote).toBeNull(); // nullであることを検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+      });
+
+    databaseCase("Actionの改ざんhiddenは管理対象列や対応者にならず、bindしたID不一致も保存しない",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        const request = submission(stored, "NOTE", "許可メモ"); // 独立requestIdとversionを持つAction入力を作る関数
+        for (const key of [
+          "clubId",
+          "membershipId",
+          "reporterName",
+          "reporterEmail",
+          "status",
+          "handledByPlatformAdminId",
+          "statusChangedAt",
+          "resolvedAt",
+          "notifiedAt",
+          "notifyError",
+        ]) {
+          request.data.set(key, f.clubs[1]); // 限定した送信項目を設定するメソッド
+        }
+        const result = await requests.run(f.admins[0],  // 本人IDの非同期contextで処理を実行するメソッド
+          /**
+           * Auth本人IDだけを指定し、実Actionから保存までを実行する。
+           */
+          () => actions.updateSupportReportNoteAction(stored.id, request.state, request.data)); // 対象ケースまたは外部境界のコールバック関数 / 毎回再認可して内部メモを更新するAction関数
+        expect(result.status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(updated.handledByPlatformAdminId).toBe(f.admins[0]); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(immutable(updated)).toEqual(immutable(stored)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
+        const mismatch = submission(updated, "NOTE", "不一致メモ"); // 独立requestIdとversionを持つAction入力を作る関数
+        mismatch.data.set("reportId", randomUUID()); // 限定した送信項目を設定するメソッド / UUID v4を生成する関数
+        expect((await requests.run(f.admins[0],  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
+          /**
+           * Auth本人IDだけを指定し、実Actionから保存までを実行する。
+           */
+          () => actions.updateSupportReportNoteAction(stored.id, mismatch.state, mismatch.data))).status).toBe("error"); // 値の一致を検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / 毎回再認可して内部メモを更新するAction関数
+        expect(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        })).toEqual(updated); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+      });
+
+    databaseCase("同じversionの同時管理更新は1件だけ成功し、他方をCONFLICTにする",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        const results = await Promise.all([ // 複数の実更新を同時に待機するメソッド
+          mutation.updateSupportReportStatusForPlatform({ // 最新権限とversionを照合してstatusを更新するRepository関数
+            ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
+            status: "IN_PROGRESS",
+          }),
+          mutation.updateSupportReportNoteForPlatform({ // 最新権限とversionを照合してメモを更新するRepository関数
+            ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
+            internalNote: "同時メモ",
+          }),
+        ]);
+        expect(results.map( // 期待値を生成する関数 / 識別子または固定結果の配列へ変換するメソッド
+          /**
+           * 並列処理の固定結果分類だけを取り出す。
+           */
+          (result) => result.outcome).sort()).toEqual(["CONFLICT", "UPDATED"]); // 保存値の構造と内容を検証するメソッド / 比較用に結果分類を並べるメソッド / 対象ケースまたは外部境界のコールバック関数
+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(immutable(updated)).toEqual(immutable(stored)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
+        expect(updated.handledByPlatformAdminId).toBe(actor.userId); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(updated.updatedAt.getTime()).toBeGreaterThan(stored.updatedAt.getTime()); // versionが進んだことを検証するメソッド / 期待値を生成する関数 / 保存日時をミリ秒で比較するメソッド
+      });
+
+    databaseCase("通知結果保存で進んだversionを古い管理操作で上書きせず、通知後の管理更新でもF08列を維持する",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        const notification = {
+          reportId: stored.id,
+          clubId: stored.clubId,
+          notification: {
+            outcome: "ACCEPTED" as const, // constの型
+          }, // 読取専用リテラル型
+        };
+        expect((await f08Repository.recordSupportReportNotification(notification)).outcome).toBe("RECORDED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / F08の通知受付結果を保存するRepository関数
+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        expect(await mutation.updateSupportReportNoteForPlatform({ // 期待値を生成する関数 / 最新権限とversionを照合してメモを更新するRepository関数
+          ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
+          internalNote: "古いメモ",
+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
+          outcome: "CONFLICT",
+        }); // 保存値の構造と内容を検証するメソッド
+        const notified = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(notified.updatedAt.getTime()).toBeGreaterThan(stored.updatedAt.getTime()); // versionが進んだことを検証するメソッド / 期待値を生成する関数 / 保存日時をミリ秒で比較するメソッド
+        expect(notified.notifiedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
+        expect((await invoke(actor.userId, notified, "NOTE", "通知後のメモ")).status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数 / Auth本人だけを置換して実Actionを実行する関数
+        expect(immutable(await database().supportReport.findUniqueOrThrow({ // 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }))).toEqual(immutable(notified)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数 / 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+      });
+
+    databaseCase("通知保存と管理更新を同時に実行しても、通知を失わず競合を無条件再試行しない",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        const actor = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        const [notification, update] = await Promise.all([ // 複数の実更新を同時に待機するメソッド
+          f08Repository.recordSupportReportNotification({ // F08の通知受付結果を保存するRepository関数
+            reportId: stored.id,
+            clubId: stored.clubId,
+            notification: {
+              outcome: "ACCEPTED",
+            },
+          }),
+          mutation.updateSupportReportNoteForPlatform({ // 最新権限とversionを照合してメモを更新するRepository関数
+            ...identity(actor, stored), // 認可contextと保存済みversionから更新入力を作る関数
+            internalNote: "同時管理メモ",
+          }),
+        ]);
+        expect(notification.outcome).toBe("RECORDED"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(["UPDATED", "CONFLICT"]).toContain(update.outcome); // 期待する値の包含を検証するメソッド / 期待値を生成する関数
+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(updated.notifiedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
+        expect(updated.internalNote).toBe(update.outcome === "UPDATED" ? "同時管理メモ" : null); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(updated.message).toBe(stored.message); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(updated.reporterEmail).toBe(stored.reporterEmail); // 値の一致を検証するメソッド / 期待値を生成する関数
+      });
+
+    databaseCase("F08の実Service受付・mock通知後のsnapshotを管理更新でも保持する",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const id = randomUUID(); // UUID v4を生成する関数
+        f.reports.add(id); // 作成前にcleanup用UUIDを登録するメソッド
+        expect(await f08Service.createSupportReport({ // 期待値を生成する関数 / F08の受付保存と運営者通知を実行するService関数
+          userId: f.member,
+          club: {
+            id: f.clubs[0],
+            slug: `f09-${f.clubs[0]}`,
+            name: "F09 fixture",
+            timezone: "Asia/Tokyo",
+            planType: "STANDARD",
+          },
+          membership: {
+            id: f.membership,
+            role: "MEMBER",
+          },
+        }, id, {
+          category: "QUESTION",
+          message: "F08共存確認",
+        }, {
+          pageUrl: `/club/f09-${f.clubs[0]}/account`,
+          userAgent: "F09 fixture browser",
+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
+          outcome: "ACCEPTED",
+        }); // 保存値の構造と内容を検証するメソッド
+        expect(mail.send).toHaveBeenCalledOnce(); // 1回だけの呼出しを検証するメソッド / 期待値を生成する関数
+        const stored = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(stored.notifiedAt).toBeInstanceOf(Date); // 値のクラスを検証するメソッド / 期待値を生成する関数
+        expect((await invoke(f.admins[0], stored, "NOTE", "管理メモ")).status).toBe("success"); // 値の一致を検証するメソッド / 期待値を生成する関数 / Auth本人だけを置換して実Actionを実行する関数
+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(immutable(updated)).toEqual(immutable(stored)); // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数 / 管理操作で不変にするF08列を抽出する関数
+        expect(mail.send).toHaveBeenCalledOnce(); // 1回だけの呼出しを検証するメソッド / 期待値を生成する関数
+      });
+
+    databaseCase("PlatformAdminを削除すると担当者だけSetNullになり報告と日時・メモは残る",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        const stored = await report(f); // UUIDを登録して報告fixtureを保存する関数
+        await invoke(f.admins[0], stored, "STATUS", "RESOLVED"); // Auth本人だけを置換して実Actionを実行する関数
+        const before = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        const stale = await access(f.admins[0]); // 実DBで本人のPlatform権限を確認する関数
+        await database().platformAdmin.delete({ // 検証対象の管理者fixtureを削除するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: f.admins[0],
+          },
+        }); // 検証対象の管理者fixtureを削除するメソッド / 初期化済みの専用clientを返す関数
+        const updated = await database().supportReport.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: stored.id,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(updated).toEqual({ // 保存値の構造と内容を検証するメソッド / 期待値を生成する関数
+          ...before,
+          handledByPlatformAdminId: null,
+        });
+        expect(await updateService.updatePlatformSupportNote(stale, { // 期待値を生成する関数 / 再検証してメモを更新するService関数
+          ...identity(stale, updated), // 認可contextと保存済みversionから更新入力を作る関数
+          internalNote: "削除後メモ",
+        })).toEqual({ // 保存値の構造と内容を検証するメソッド
+          outcome: "FORBIDDEN",
+        }); // 保存値の構造と内容を検証するメソッド
+        const result = await readService.getPlatformSupport(await access(f.admins[1]), { // 検証済み条件で横断一覧を取得するService関数 / 実DBで本人のPlatform権限を確認する関数
+          clubId: stored.clubId,
+        }); // 検証済み条件で横断一覧を取得するService関数 / 実DBで本人のPlatform権限を確認する関数
+        if (result.outcome !== "FOUND") {
+          throw new Error("削除後一覧失敗"); // Errorコンストラクター
+        }
+        expect(result.reports[0].handler).toBeNull(); // nullであることを検証するメソッド / 期待値を生成する関数
+      });
+
+    databaseCase("Platform管理者はクラブOWNERへ昇格せず、一般MEMBER兼任でも管理権限を得ない",  // fixtureと固定失敗文でDBケースを登録する関数
+      /**
+       * 登録済みfixtureと専用clientで、対象ケースの認可・保存結果・不変列を照合する。
+       */
+      async (f) => { // 対象ケースまたは外部境界のコールバック関数
+        for (const id of f.admins.slice(0, 2)) { // 対象の範囲だけを取り出すメソッド
+          await expect(requests.run(id,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
+            /**
+             * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
+             */
+            () => clubAuthorization.requireClubOwner(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブOWNERの実DB認可を確認するメソッド
+          await expect(requests.run(id,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
+            /**
+             * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
+             */
+            () => clubAuthorization.requireClubAdminMembership(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブ管理者の実DB認可を確認するメソッド
+        }
+        f.admins.push(f.member); // 検証用の識別子を配列へ登録するメソッド
+        await database().platformAdmin.create({ // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
+          data: { // 登録済みUUIDのfixtureを保存するメソッド / 初期化済みの専用clientを返す関数
+            id: f.member,
+            email: `${f.member}@fixture.example.test`,
+            role: "SUPPORT",
+          }
+        });
+        expect((await access(f.member)).platformAdmin.role).toBe("SUPPORT"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 実DBで本人のPlatform権限を確認する関数
+        await expect(requests.run(f.member,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
+          /**
+           * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
+           */
+          () => clubAuthorization.requireClubOwner(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブOWNERの実DB認可を確認するメソッド
+        await expect(requests.run(f.member,  // 期待値を生成する関数 / 本人IDの非同期contextで処理を実行するメソッド
+          /**
+           * Authの本人IDだけを指定し、実DBのクラブ認可で拒否されることを確認する。
+           */
+          () => clubAuthorization.requireClubAdminMembership(`f09-${f.clubs[0]}`))).rejects.toBeInstanceOf(NextControl); // 値のクラスを検証するメソッド / 対象ケースまたは外部境界のコールバック関数 / クラブ管理者の実DB認可を確認するメソッド
+        const membership = await database().clubMembership.findUniqueOrThrow({ // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            id: f.membership,
+          },
+        }); // 対象fixtureの保存結果を取得するメソッド / 初期化済みの専用clientを返す関数
+        expect(membership.role).toBe("MEMBER"); // 値の一致を検証するメソッド / 期待値を生成する関数
+        expect(await database().clubMembership.count({ // 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数
+          where: {
+            userId: {
+              in: f.admins.slice(0, 2), // 対象の範囲だけを取り出すメソッド
+            },
+          },
+        })).toBe(0); // 値の一致を検証するメソッド / 期待値を生成する関数 / 条件に合う行の件数を取得するメソッド / 初期化済みの専用clientを返す関数 / 対象の範囲だけを取り出すメソッド
+      });
+  });

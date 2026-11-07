@@ -2,27 +2,22 @@
 // 古いフォーム送信ログと古いログイン申請を定期削除するCron用API
 // 「CRON_SECRET」を設定して誰でもAPIを叩けないように保護する
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { deleteOldSecurityLogs } from "@/lib/security/submission-log-cleanup";
+import {
+  isAuthorizedCronRequest,//定期実行されるプログラム（Cronジョブ）からのリクエストが、本物（許可されたもの）かどうかを安全に確認する共通関数
+} from "@/src/application/cron/cron-authorization";
 
 export const dynamic = "force-dynamic";
 
 // 外部サービスからGETアクセスが来たら自動で実行する関数
-export async function GET(request: NextRequest) {
-  const authHeader = request.headers.get("authorization");//リクエストを送ってきた相手から合言葉（認証トークン）を取り出す
-  const cronSecret = process.env.CRON_SECRET;
+export async function GET(request: Request) {
+  
 
-  if (!cronSecret) {
-    return NextResponse.json(
-      { ok: false, message: "CRON_SECRET is not set" },
-      { status: 500 }
-    );
-  }
-
-  if (authHeader !== `Bearer ${cronSecret}`) {//認証トークンと環境変数があってるかを確認し、あっていなければ以下を投げる
+  if (!isAuthorizedCronRequest(request)) {
     return NextResponse.json(
       { ok: false, message: "Unauthorized" },
-      { status: 401 }
+      { status: 401 },
     );
   }
 

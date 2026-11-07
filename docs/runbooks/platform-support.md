@@ -1,0 +1,297 @@
+<!-- docs/runbooks/platform-support.md -->
+
+# F09 Platformサポート管理の運用と統合受入
+
+F09粒度12の手順書です。実装の接続、単体・mock、接続ガード、実DB、実Auth、
+ブラウザー、HTTPの結果を分けて記録します。patch適用や単体成功だけでF09受入完了にしません。
+本patch作成では実DB・実Auth・本番設定を変更せず、実メールも送信しません。
+
+根拠は [F09仕様](../implementation/phases/F09.md) と現在のコードです。
+受付・snapshot・通知の正本と障害対応は [F08運用](support-report.md)、
+クラブ認可との境界は [F07運用](club-account.md) も参照します。既存手順を変更しません。
+
+## 権限と対象範囲
+
+- Authの本人IDと同じ `PlatformAdmin.id` があり、isActive=true、roleがDEVELOPERまたは
+  SUPPORTの場合だけ管理できます。両roleとも同じサポート管理機能を使います。
+- AppUserやClubMembershipが0件でもPlatform管理者としてログインできます。
+  ログイン・閲覧・管理操作でAppUserや所属を自動作成しません。
+- 横断例外はSupportReportの閲覧・限定管理列の更新だけです。
+  STANDARD・STARTER・PROの既存報告を対象とし、現在のクラブ所属・プランを条件にしません。
+  F08の受付条件を全プランへ広げる意味ではありません。
+- PlatformAdminだけでクラブOWNER・COACH等の権限は得ません。
+  イベント・お知らせ・会員管理・LINE設定等は既存のクラブ認可が別途必要です。
+- layoutに加えてPage・Actionで再認可し、Repositoryもtransaction内で最新のPlatform権限を照合します。
+  Proxyのセッション更新や画面にリンクがあることを、認可の代わりにしません。
+
+根拠：`app/(club-app)/platform/require-platform-admin.ts / requirePlatformAdmin`、
+`src/infrastructure/prisma/repositories/platform-admin-repository.ts / findActivePlatformAdminByUserId`、
+各Platform Repository、`app/(club-app)/club/club-membership-authorization.ts`。
+
+## 運用開始前の準備と責任
+
+| 担当 | 確認すること |
+| --- | --- |
+| アカウント・権限管理担当 | 既存の承認済み運用でAuthアカウントと対応するPlatformAdminを準備し、本人ID・role・有効状態を確認する |
+| 実行環境管理担当 | 対象環境、既存migration、DB接続権限、Auth設定、セッション更新経路、ログイン試行ログ用設定を確認する |
+| サポート担当 | 必要な報告だけを閲覧し、内部メモへPW・token等を記載しない。競合時は最新情報と下書きを照合する |
+| 受入担当 | 使い捨てデータ・アカウントと実施範囲を確認し、区分ごとの結果・理由・未実施事項を記録する |
+
+担当者名、PlatformAdminの作成・無効化に使う具体的な承認済み手段は、この調査では未確認です。
+この文書では公開登録画面、権限付与API、登録SQL、Auth登録や無効化の自動化を提供しません。
+承認済み手段や担当が未確定なら、その状態を受入の保留事項に残します。
+
+- 使い捨てAuthアカウントは実DB試験のfixtureとは別に用意します。
+  fixtureはAuthユーザーを作成しないため、そのままログイン用に使えません。
+- `lib/security/hash.ts / hashValue` は `FORM_LOG_HASH_SALT` を必要とします。
+  値は保護された既存の設定方法で管理し、文書・チャット・コマンド引数へ載せません。
+- `checkLoginRateLimit` は共通LoginSubmissionLogを使います。
+  現行コードはIPで3分内5回以上の試行、emailで3分内3回以上の失敗を制限します。
+  Platform専用の別カウンターではなく、共通ログイン処理との試行数共有を考慮します。
+- `platformLoginAction` は試行制限やログ保存の失敗を公開用の固定エラーにします。
+  Auth成功後の試行ログ保存失敗でも成功扱いにせず、localセッション終了を試みます。
+- PlatformAdminの無効化はAuthアカウント削除・全端末のlogoutとは別です。
+  DBへの反映後に開始する認可・更新を拒否することを確認します。
+  表示済み情報の即時消去や、失効と交差した進行中transactionの取消しは保証済みとしません。
+
+## ユーザー操作からDBまで
+
+以下のパスはリポジトリルートからの相対パスです。
+UIの基点は `app/(club-app)/platform-login/` と `app/(club-app)/platform/support/`、
+Serviceは `src/application/platform/support/`、Repositoryは
+`src/infrastructure/prisma/repositories/` です。
+
+| 段階 | ファイル・関数、受け取る値と返す値 | DB・Authの変更 |
+| --- | --- | --- |
+| 専用入口 | `platform-login/page.tsx / PlatformLoginPage` がAuth本人と有効な管理者を確認。有効なら固定 `/platform/support`、それ以外はログイン画面 | 権限読取のみ。既存の一般会員sessionをPage表示だけでlogoutしない |
+| ログイン | `PlatformLoginForm` → `platform-login/actions.ts / platformLoginAction`。単一email・password・requestIdと前stateの一致を検証し、試行制限、signInWithPassword、最新PlatformAdminを照合 | LoginSubmissionLogへハッシュ化したIP・emailと結果を記録。Authの本人sessionを更新。クラブ所属は作らない |
+| Proxy・画面 | `proxy.ts / proxy` → `updateSession`、`platform/layout.tsx / PlatformLayout`、`support/page.tsx / PlatformSupportPage` → `requirePlatformAdmin` | ProxyはCookieの更新を引き継ぐ。layout・Pageは権限読取。Proxy単独で認可しない |
+| 一覧 | `parseSupportReportQuery` → `get-platform-support.ts / getPlatformSupport` → `platform-support-report-repository.ts / findSupportReportsForPlatform`。本人contextと検索条件から限定DTO・件数・クラブ候補を返す | 最新管理者、SupportReport、Club、担当者の必要列を読取。書込みなし |
+| 全文 | `SupportReportTable` がDTOの本文・メモ・snapshot・保存済みURL・UAをReactテキストとdetailsで表示 | なし。既読や監査レコードを追加しない |
+| status | `SupportReportOperations / changeStatus` → `actions.ts / updateSupportReportStatusAction` → `update-platform-support.ts / updatePlatformSupportStatus` → `platform-support-report-mutation-repository.ts / updateSupportReportStatusForPlatform`。ID・requestId・expectedUpdatedAt・許可statusを渡す | 実変更時だけstatus・担当者・状態日時・解決日時・updatedAtを更新。競合は非更新 |
+| メモ | `SupportReportOperations / submitForm` → `updateSupportReportNoteAction` → `updatePlatformSupportNote` → `updateSupportReportNoteForPlatform`。ID・requestId・expectedUpdatedAt・メモを渡す | internalNote・担当者・updatedAtを更新。status日時は維持 |
+| 完了 | ActionがUPDATED/UNCHANGED、報告ID・version・固定案内等の最小stateを返す。UPDATED時に固定 `/platform/support` をrevalidatePathで再検証 | 再検証自体は再保存ではない。成功ごとに次回requestIdを用意する |
+| logout | `PlatformLogoutButton / submitLogout` → `platformLogoutAction` がlocal signOut後、固定 `/platform-login` へ遷移 | 現在のAuth sessionを終了。PlatformAdmin・ClubMembershipは不変 |
+
+本体の接続に後続粒度待ちはありません。以下の実環境受入は未完了です。
+F08の受付・通知経路をこの粒度で再実装しません。
+
+## 表示・更新の契約
+
+- 一覧はclubId・status・categoryのAND検索、1ページ50件、pageは1〜10000です。
+  不正・配列・重複queryを無条件の全件取得へ丸めません。
+  作成日時降順・ID降順のoffset方式で、新規報告によるページ間移動は保証しません。
+- 一覧の時刻は日本時間です。DBと競合検出にはミリ秒付きUTC ISOのupdatedAtを使います。
+- statusはOPEN・IN_PROGRESS・ON_HOLD・RESOLVEDの4択。選択変更で即送信します。
+  内部メモは別フォームの保存ボタンから送信します。
+- メモはtrim後5000 UTF-16コード単位以内、空欄はnullです。
+  超過を切り捨てず拒否します。表示済みの長い既存値を保存前に黙って短縮しません。
+- status実変更では担当者とstatusChangedAtを更新し、RESOLVEDに入るとresolvedAtも同じ時刻にします。
+  他のstatusへ移るとresolvedAtはnullです。同statusでは日時・担当者・updatedAtを維持します。
+- メモ保存では担当者を更新しますが、status・statusChangedAt・resolvedAtは維持します。
+- 担当者は認可context、管理日時はサーバー由来です。
+  本文・snapshot・クラブ・元所属・通知列を管理フォームから変更しません。
+- PlatformAdmin削除時、担当者FKはSetNullです。報告・状態日時・メモは残ります。
+  SQL制約の実適用はschema確認だけで証明せず、専用DB試験で別途確認します。
+
+根拠：`domain/platform/support/support-report-query.ts`、
+`support-report-management-form.ts`、`support-report-management-policy.ts`、
+`prisma/schema.prisma` のSupportReport・PlatformAdmin。
+
+## 競合・下書き・保存後障害の扱い
+
+| 状況 | 現在の扱いと運用上の確認 |
+| --- | --- |
+| 同じ行の送信中 | statusとメモの両方を無効化し、refでも連打を抑える。他行は操作できる |
+| 自分のstatus更新成功 | 同じ行の最新versionを共有する。メモの基準versionが送信時と整合する場合だけ進める |
+| 他者の更新・CONFLICT | 未保存メモとその基準versionを維持する。古い内容を無条件に再送しない |
+| 最新情報を取得 | 下書きを残してrouter.refreshする。取得済み情報と下書きを照合する |
+| 取得済みの内容で再編集 | dirtyなら破棄確認後に、取得済み内容とversionを採用する。破棄してよい場合だけ選ぶ |
+| 同じ検索条件での再検証 | reportIdのkeyで行を保持。更新で条件外へ移った操作行も残す場合がある |
+| 条件外の保持行 | 表示情報は更新前の場合があるという案内を確認する。取得済みsnapshotを最新DB値と断定しない |
+| フィルター・ページ移動 | 検証済みqueryのtableKeyが変わると編集領域を切り替える。離脱確認・キャンセル・移動後の入力の扱いをブラウザーで確認する |
+| 保存済み・再検証失敗 | successとreloadRequiredの固定案内を維持する。保存失敗と読み替えず、再保存を依頼しない |
+| 応答不明・通信失敗 | 最新の保存状態を承認済み読取手段で先に照合する。失敗表示だけで「DBに未保存」と断定しない |
+
+F08の通知結果保存でもupdatedAtが変わります。メモやstatusの変更が見えなくても競合し得ます。
+通知失敗を理由に再送したり、通知列を手動修正して管理更新を通したりしません。
+F09の管理操作から通知メールを再送しません。通知の意味・復旧の限界はF08運用を参照します。
+
+下書きはマウント中のClient stateです。ブラウザーの再読込・終了・logout・認可拒否を越える
+永続保存や復元は保証しません。共通guardはリンククリックとbeforeunloadを扱いますが、
+履歴戻りや実際のNext遷移を含む保護範囲はブラウザーで実測します。
+Platformのlogoutボタンは即時Actionで、F07の確認ダイアログは使いません。
+未保存内容はlogout前に扱い、logoutをキャンセルすれば必ず復元できるとは案内しません。
+
+不具合を確認した場合、この粒度で本体を変更せず、再現条件と対象ファイル・関数を記録し、
+該当粒度の修正案へ切り分けます。
+
+## DBなしの自動回帰
+
+リポジトリルートで、インストール済み依存を使います。実接続flagを0に固定し、
+以下の対象だけを実行します。環境変数ファイル・実接続設定は読み込みません。
+`verify`・`verify:local`・`test:db` はこの確認の代用にせず実行しません。
+
+```sh
+RUN_PLATFORM_SUPPORT_TESTS=0 \
+RUN_SUPPORT_REPORT_TESTS=0 \
+RUN_DB_INTEGRATION_TESTS=0 \
+node node_modules/vitest/vitest.mjs run \
+  domain/platform \
+  src/application/platform \
+  tests/platform-*.test.ts \
+  domain/club/support \
+  src/application/club/support \
+  tests/support-report*.test.ts \
+  lib/mail/support-report-mail.test.ts \
+  src/infrastructure/logging/sanitize-log-context.test.ts \
+  domain/club/plan-features.test.ts \
+  tests/club-membership-authorization.test.ts \
+  tests/club-account-navigation.test.ts \
+  tests/club-account-pages.test.ts \
+  tests/club-account-forms.test.ts \
+  tests/club-invitation-login-resume.test.ts \
+  tests/club-invitation-entry.test.ts
+```
+
+F09の接続ガード21件、F08の接続ガード19件は架空の設定だけで実行します。
+実DBケースはF09が15件、F08が23件で、上記コマンドではskipです。
+`platform-entry.test.ts` は実Nextのmatcher評価器とRequest/Responseを使いますが、
+Auth・セッション更新はmockです。Cookieの実更新や実HTTPのOrigin保護は証明しません。
+フォームのnode試験はhook境界を模しており、実DOM・focus・履歴・離脱確認の実証にはしません。
+
+## 使い捨てDBの専用統合試験
+
+1. 本番・日常開発データを含まない、破棄できる専用ローカルDBを担当者が用意します。
+2. 既存migrationの適用と必要な実行権限を確認します。
+   試験自体はmigration・seed・reset・schema変更を実行しません。
+3. loopback接続がリモートDBへのトンネル・proxyでないことを確認します。
+   URL検査だけで転送先や使い捨て状態を証明するものではありません。
+4. 接続設定は承認された方法でプロセス環境へ渡し、URL・PWを引数・証跡へ記載しません。
+5. 使い捨て確認を行った担当者だけが `PLATFORM_SUPPORT_DISPOSABLE=1` を設定します。
+
+| 条件 | 許可する設定 |
+| --- | --- |
+| DATABASE_URL | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、username・passwordあり |
+| URLの付加要素 | query・fragmentを拒否。末尾だけの `?`・`#` や前後の空白も拒否 |
+| NODE_ENV | production以外 |
+| PLATFORM_SUPPORT_DISPOSABLE | 担当者が使い捨て確認後に設定する1 |
+| RUN_PLATFORM_SUPPORT_TESTS・RUN_DB_INTEGRATION_TESTS | 両方1が必要。専用scriptが設定する |
+
+全条件が揃った環境でのみ、次を実行します。
+
+```sh
+npm run test:platform-support:local
+```
+
+専用scriptは `tests/platform-support.flow.integration.test.ts` だけを実行し、
+dotenvを自動読込しません。共有clientのdotenv初期化はmockし、ガード後に専用clientを注入します。
+不正設定なら接続前に固定エラーで失敗します。失敗回避のためにガードを緩めません。
+
+15ケースは両role・AppUser/所属なし・全プラン横断、一般会員/inactive/失効済みcontext拒否、
+AND検索と50件ページ、status往復と同status、メモと対応者、改ざん入力、同時管理更新、
+F08通知によるversion競合、F08受付とsnapshot保持、担当者SetNull、クラブ越権防止を確認します。
+Action・Service・Repository・DB制約は実物を使い、Auth・Next・Resend SDKはmockです。
+実Auth、実キャッシュ再検証、HTTP、実配送が成功したとは扱いません。
+同時開始は特定SQL順序やP2034発生を強制せず、競合の厳密な順序制御とは区別します。
+
+fixtureの報告・クラブ・AppUser・PlatformAdminのUUIDは書込み前に登録し、その対象だけをcleanupします。
+全件削除・truncateはしません。強制終了時の残存はあり得るため、担当者が専用環境で確認します。
+SQL・SDK・assertionの原文やcauseを証跡へ追加せず、ケース名と固定エラー・理由を記録します。
+
+## 実Auth・ブラウザーの統合受入
+
+事前に対象環境、担当、実施範囲、使い捨てAuthアカウント・クラブA/Bを決めます。
+無所属のDEVELOPER/SUPPORT、inactive管理者、一般MEMBER、別担当者を区別します。
+既存データや実アカウントで代替しません。権限変更は既存の承認済み運用担当が扱います。
+
+| ID | 操作と期待結果 |
+| --- | --- |
+| B01 | 未認証で `/platform/support` へ直打ちし、固定 `/platform-login` へ遷移。存在しない旧ログイン先へ送られない |
+| B02 | 所属・AppUserがない有効なDEVELOPER/SUPPORTで各々ログインし、管理画面へ到達する。所属が自動作成されない |
+| B03 | 一般MEMBERとinactiveでURL直打ち・ログインを試す。管理報告を開示しない。ログインPage表示だけでは既存sessionを勝手にlogoutしない |
+| B04 | 専用layoutに管理見出しとlogoutがあり、クラブ用フッターがない。クラブのイベント・お知らせ・会員/LINE管理へ直接アクセスしても、Platform権限だけでは使えない |
+| B05 | A/Bと全プランの既存報告を横断表示する。本文・内部メモ・snapshot・UA・保存URLの全文と日本時間表示を確認し、架空のXSS文字列や保存URLを実行・外部リンク化しない |
+| B06 | club・status・categoryのAND検索、50件ページ送り、条件変更時のpage=1、0件・不正queryを確認。候補外のクラブIDも他データの開示へ広がらない |
+| B07 | 両roleでOPEN→IN_PROGRESS→ON_HOLD→RESOLVED→OPEN。担当者・statusChangedAt、RESOLVED時のresolvedAtと解除時のnullを読取結果と照合する |
+| B08 | 同statusを正規入力として再送し、変更なし成功、日時・担当者・version維持を確認。実UIの選択変更で同値イベントを発生できない場合はHTTP確認と区別して記録する |
+| B09 | メモだけを保存し、対応者とupdatedAtだけが更新され、状態日時・本文・snapshot・通知列が維持される。空欄null、上限、超過時の非保存・入力保持を確認する |
+| B10 | 通信遅延下でstatusとメモを連打。同じ行だけpendingとなり二重操作せず、他行のstate・入力ID・エラーが混線しない |
+| B11 | 二人の担当者で同じversionから更新。後続操作は競合となり、未保存メモを保持して再読取・明示再編集を選べる。古い内容を自動再送しない |
+| B12 | メモ編集中に自分のstatusを更新し、安全なversion共有を確認。他者更新と遅延RSCでは基準version・最新statusを巻き戻さない |
+| B13 | 他行操作、同じ条件の再検証、0件化、status変更による条件外移動で下書きを失わない。保持行の古い表示には案内がある |
+| B14 | dirtyのままfilter・ページ送り・リンク・戻る・再読込・終了を試す。警告範囲、キャンセル時の入力、移動同意後の破棄を実測。意図せぬ消失はfailとして残す |
+| B15 | 保存後の再検証失敗を安全に用意できる環境だけで確認。保存済み成功と手動再読取の案内を出し、再保存を促さない。用意できなければskip理由を残す |
+| B16 | 表示後にisActive=falseを反映し、以後の再取得・送信を拒否。すでに進行中の処理と失効の交差は別に記録し、未確認を拒否成功へ読み替えない |
+| B17 | 未保存内容を扱ってから専用logoutを実行。local session終了と固定ログイン先への遷移、履歴戻り・再送時の再認可を確認。logout失敗は固定案内、他端末終了やPW失効と混同しない |
+| B18 | ログイン失敗・試行制限・記録不能時の固定エラー、pending、項目エラー、ラベルとfocusを確認。Cookie更新と認証状態が画面遷移後も整合する |
+
+障害注入ができない項目は、mock試験の成功で埋めずskip理由を記録します。
+F08通知との競合はまず専用DBでmock SDKを用いて確認し、受入のために実メールを送信しません。
+
+## HTTPでの直接呼出し・foreign Origin
+
+使い捨て環境の正常リクエストと対象fixtureのDB状態を先に確認します。
+現在のAction ID、Cookie、認証ヘッダー、PW、本文・メモを含むリクエストやHARを
+公開資料・チャット・結果ログへ保存しません。Action IDを文書へ固定しません。
+
+| ID | 操作と期待結果 |
+| --- | --- |
+| H01 | 正常リクエストのOriginだけをforeign Originへ変え、Nextの拒否とDB非変更を照合する。固定のHTTP番号は推測せず実応答を記録する |
+| H02 | 正常Originでも未認証・一般会員・inactive・表示後の失効状態から直接POSTし、報告更新を拒否する |
+| H03 | reportIdの欠損・重複・File・不正UUID・bind先との不一致、requestIdの欠損・重複・File・不正UUID v4・前state不一致を試し、非保存を確認する |
+| H04 | expectedUpdatedAtの欠損・重複・不正形式・古いversionを試す。競合は無条件再試行せず固定案内と非保存を確認する |
+| H05 | status不正値、メモの重複・File・上限超過を拒否する。改ざんしたclubId・所属・担当者・管理日時・本文・snapshot・通知列・returnToを採用せず、固定経路だけを使う |
+| H06 | 実更新後の同status再送では管理列を維持する。保存後の再検証失敗と保存前の拒否をDB値で区別する |
+| H07 | `next.config.ts` のServer Actions bodySizeLimitは現行12mb。リクエスト全体の上限とメモ5000文字検証を分け、上限超過時の非保存を確認する |
+| H08 | 専用ログイン・logoutのHTTP経路も、foreign Origin、直接呼出し、Cookieの扱いを別に確認。foreign Originの拒否でログイン・logout Actionや報告更新が実行されないことを実測し、Proxyのsession更新とは分ける |
+
+allowedDevOriginsとServer Actionsのforeign Origin許可を混同しません。
+この粒度ではbodySizeLimit・Origin設定・Proxy・本番設定を変更しません。
+関数直接試験の成功は、実HTTPの保護やCookieの実更新を証明しません。
+
+## 障害調査と証跡の扱い
+
+1. 対象環境と操作段階を確認し、承認済みの読取手段で保存有無・現在のversionを照合します。
+   応答不明や再検証失敗を根拠に、同じ変更を再保存しません。
+2. 認証段階は `platform.login.rate-limit`、`platform.login.authenticate`、
+   `platform.login.log`、`platform.auth.sign-out`、`platform.logout.client` の固定operationを確認します。
+3. 管理処理は `platform_support_operation_failed` と `platformSupport.read`・
+   `platformSupport.status`・`platformSupport.note`、固定result/errorCodeを確認します。
+   ログ基盤の停止や保存後の再検証失敗まで、必ずこのログが残るとは扱いません。
+4. 証跡はケースID、基準commit、匿名化した環境名、pass/fail/skip、理由、担当と日付に限定します。
+   Cookie・token・PW・Action ID・接続URL・本文・メモ・氏名/email・UA・SDK/SQL例外原文を転記しません。
+   ログインのハッシュ値やsaltも証跡へコピーしません。
+5. 管理者設定・Auth・ログ連携の問題は既存の運用担当へ切り分けます。
+   本体修正、DB手動修復、制約緩和、権限自動付与や通知復旧workerをこの手順へ追加しません。
+
+## 今回の確認結果と受入保留
+
+基準ブランチは `feat/club-app-foundation`、コミットは
+`65046226b6dbc15a8f8ce9c642f4d4791ded4c49` です。
+インストール済みとlockはNext.js 16.2.6、Vitest 4.1.10、Prisma Client 7.8.0で一致しています。
+実行日は2026-10-26（JST）、担当はpatch作成エージェントです。
+一時チェックアウトで実行しました。実環境の受入責任者は未確定です。
+
+| 区分 | 結果 | 根拠・理由 |
+| --- | --- | --- |
+| F09単体/mock・F08・クラブ認可・招待再開・matcher回帰 | pass | 上記コマンドで34ファイル、1096件成功・実DB38件skip。一時環境で実行 |
+| 接続ガード | pass | 上記1096件に含むF09 21件・F08 19件。実設定を使用しない |
+| TypeScript | pass | 一時環境で `node node_modules/typescript/bin/tsc --noEmit --incremental false` が成功 |
+| F09実DB統合 | skip | 15件。実DB変更を行わない条件のため未実行 |
+| F08実DB回帰 | skip | 23件。実DB変更を行わない条件のため未実行 |
+| 実Auth | skip | 使い捨てAuth環境の操作・session更新を未実施 |
+| 実ブラウザー | skip | B01〜B18を未実施。node試験を実DOM・履歴・離脱確認へ読み替えない |
+| HTTP・foreign Origin | skip | H01〜H08を未実施。関数直接呼出しをHTTP成功へ読み替えない |
+| 実メール配送 | skip | 実メール未送信。F09の管理操作は再通知機能を追加しない |
+| F09統合受入 | 保留 | 実DB・実Auth・ブラウザー・HTTP等の未確認が残るため未完了 |
+
+実施時は次の形式で、B/Hの各ケースと実DBケースを個別に追記します。
+
+| ケースID・試験名 | 担当・日付 | 基準commit・匿名環境 | pass/fail/skip | 理由・安全化した根拠 |
+| --- | --- | --- | --- | --- |
+| 未実施ケース | 未割当 | 未確定 | skip | 必要条件と次に確認する内容だけを記載 |
+
+担当者、既存の権限管理手段、実DBのmigration/RLS/実行権限、Auth・ログ設定の実反映、
+失効と処理中更新の交差、実ブラウザーの入力保持・HTTP保護が未確認です。
+上記が残る間はF09受入完了とせず、失敗時は対象の粒度・関数・条件を示して修正案を報告します。

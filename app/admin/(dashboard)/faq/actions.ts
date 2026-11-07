@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { parseFaqFormData } from "@/lib/validations/admin-faq";
 import type {
@@ -53,7 +53,7 @@ export async function createFaq(
   _state: FaqActionState,
   formData: FormData
 ): Promise<FaqActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const values = buildFaqActionValues(formData);
 
@@ -117,7 +117,7 @@ export async function updateFaq(
   _state: FaqActionState,
   formData: FormData
 ): Promise<FaqActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
 const values = buildFaqActionValues(formData);
 
@@ -170,7 +170,7 @@ export async function deleteFaq(
   category: FaqCategoryValue,
   status: FaqStatusFilterValue
 ) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   try {
     await prisma.faq.delete({
@@ -213,7 +213,7 @@ export async function moveFaq(
   category: FaqCategoryValue,
   status: FaqStatusFilterValue
 ) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   let faqs: {
     id: string;

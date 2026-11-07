@@ -1,0 +1,672 @@
+// tests/club-invitation-login-resume.test.ts
+
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import ClubLoginPage from "@/app/(club-app)/club-login/page";
+import {
+  loginAction,
+  type LoginActionState,
+} from "@/app/(club-app)/club-login/actions";
+import type {
+  ClubLoginMembership,
+} from "@/domain/club/club-login-destination";
+import type {
+  ClubInvitationAcceptanceInvitation,
+  ClubInvitationAcceptanceMembership,
+} from "@/domain/club/invitation/acceptance-policy";
+import {
+  CLUB_INVITATION_CONTEXT_COOKIE_NAME,
+  createClubInvitationContext,
+  serializeClubInvitationContext,
+  type ClubInvitationContext,
+} from "@/src/infrastructure/security/club-invitation-context";
+
+// 認証adapter・読取Service・Repository・通常所属判定は実装を残す。
+const mocks = vi.hoisted(() => ({
+  cookies: vi.fn(),
+  cookieGet: vi.fn(),
+  cookieSet: vi.fn(),
+  createClient: vi.fn(),
+  getSession: vi.fn(),
+  getUser: vi.fn(),
+  getClaims: vi.fn(),
+  signIn: vi.fn(),
+  signOut: vi.fn(),
+  updateUser: vi.fn(),
+  findInvitation: vi.fn(),
+  findMemberships: vi.fn(),
+  transaction: vi.fn(),
+  read: vi.fn(),
+  redirect: vi.fn(),
+  form: vi.fn(),
+}));
+
+vi.mock("next/headers", () => ({ cookies: mocks.cookies }));
+vi.mock("next/navigation", async (importOriginal) => ({
+  ...await importOriginal<typeof import("next/navigation")>(),
+  redirect: mocks.redirect,
+}));
+vi.mock("@/app/(club-app)/club-login/LoginForm", () => ({ LoginForm: mocks.form }));
+vi.mock("@/src/infrastructure/supabase/server", () => ({
+  createClient: mocks.createClient,
+}));
+vi.mock("@/src/infrastructure/prisma/client", () => ({
+  prisma: {
+    clubMembership: { findMany: mocks.findMemberships },
+    clubInvitation: { findFirst: mocks.findInvitation },
+    $transaction: mocks.transaction,
+  },
+}));
+vi.mock("@/src/application/club/invitation/get-club-invitation-acceptance", async (original) => ({
+  ...await original<
+    typeof import("@/src/application/club/invitation/get-club-invitation-acceptance")
+  >(),
+  getClubInvitationAcceptance: mocks.read,
+}));
+
+const NOW = new Date("2026-10-19T00:00:00Z");
+const USER_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_ID = "22222222-2222-4222-8222-222222222222";
+const SESSION_ID = "33333333-3333-4333-8333-333333333333";
+const REQUEST_ID = "44444444-4444-4444-8444-444444444444";
+const EMAIL = "recipient@example.test";
+const PASSWORD = "  Existing-password1!  ";
+const PRIVATE_DETAIL = `${PASSWORD} secret-token service-role-secret`;
+const INVITATION_CLUB_NAME = "他人へ開示しない招待先クラブ";
+
+type AuthUser = {
+  id: string;
+  email: string;
+};
+type StoredMembership = {
+  id: string;
+  userId: string;
+  status: "ACTIVE" | "INVITED" | "SUSPENDED";
+  role: ClubLoginMembership["role"];
+  club: ClubLoginMembership["club"];
+};
+type Row = ClubInvitationAcceptanceInvitation & {
+  id: string;
+  club: {
+    name: string;
+    slug: string;
+  };
+  membership: ClubInvitationAcceptanceMembership & {
+    user: {
+      email: string;
+    };
+  };
+};
+
+let currentUser: AuthUser | null;
+let loginTarget: AuthUser;
+let currentAmr: unknown;
+let rawContext: string | undefined;
+let context: ClubInvitationContext;
+let row: Row;
+let memberships: StoredMembership[];
+
+// Authサーバーで検証された本人を模擬する。
+function user(id = USER_ID, email = EMAIL): AuthUser {
+  return {
+    id,
+    email,
+  };
+}
+
+// 通常の所属先を実Domainで0・1・複数とプラン別に判定させる。
+function membership(
+  suffix: string,
+  planType: ClubLoginMembership["club"]["planType"] = "STANDARD",
+  status: StoredMembership["status"] = "ACTIVE",
+  userId = USER_ID,
+): StoredMembership {
+  return {
+    id: `membership-${suffix}`,
+    userId,
+    status,
+    role: "MEMBER",
+    club: {
+      id: `club-${suffix}`,
+      name: `通常クラブ${suffix}`,
+      slug: `normal-${suffix}`,
+      planType,
+    },
+  };
+}
+
+// 実際のCookieを作成し、ログイン後も同じ招待を保持する。
+function makeContext(): ClubInvitationContext {
+  const value = createClubInvitationContext(new URLSearchParams({
+    clubSlug: "invitation-club",
+    token: "a".repeat(43),
+  }));
+  if (!value) {
+    throw new Error("Test context unavailable");
+  }
+  return value;
+}
+
+// LoginFormの既存state契約を使用する。
+function state(): LoginActionState {
+  return {
+    status: "idle",
+    values: { email: "" },
+    fieldErrors: {},
+    formError: null,
+    requestId: REQUEST_ID,
+  };
+}
+
+// パスワードは加工せず、メールだけ既存の正規化を通す。
+function form(): FormData {
+  const values = new FormData();
+  values.set("email", "  RECIPIENT@EXAMPLE.TEST  ");
+  values.set("password", PASSWORD);
+  values.set("requestId", REQUEST_ID);
+  return values;
+}
+
+// ブラウザやLoginFormのpropsを変えず、Server Componentの返却HTMLを確認する。
+async function renderPage(params: Record<string, string | string[]> = {}): Promise<string> {
+  const element = await ClubLoginPage({ searchParams: Promise.resolve(params) });
+  return renderToStaticMarkup(element);
+}
+
+// Next.jsの実unstable_rethrowで識別できる制御例外を作る。
+function navigationError(digest: string): Error & { digest: string } {
+  return Object.assign(new Error("NEXT_NAVIGATION"), { digest });
+}
+
+// 自分の入力email以外に、password・招待情報・外部原文をstateへ出さない。
+function expectSafeState(result: LoginActionState): void {
+  expect(result.values).toEqual({ email: EMAIL });
+  const serialized = JSON.stringify(result);
+  const secrets = [
+    PASSWORD,
+    PRIVATE_DETAIL,
+    context.tokenHash,
+    USER_ID,
+    INVITATION_CLUB_NAME,
+  ];
+  for (const secret of secrets) {
+    expect(serialized).not.toContain(secret);
+  }
+  expect(result.data).toBeUndefined();
+}
+
+beforeEach(async () => {
+  vi.resetAllMocks();
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+  currentUser = null;
+  loginTarget = user();
+  currentAmr = ["password"];
+  context = makeContext();
+  rawContext = serializeClubInvitationContext(context);
+  row = {
+    id: "invitation-a",
+    clubId: "invitation-club-id",
+    tokenHash: context.tokenHash,
+    authUserId: USER_ID,
+    email: EMAIL,
+    membershipId: "invited-membership",
+    status: "SENT",
+    acceptedAt: null,
+    expiresAt: new Date(NOW.getTime() + 60_000),
+    club: {
+      name: INVITATION_CLUB_NAME,
+      slug: context.clubSlug,
+    },
+    membership: {
+      id: "invited-membership",
+      clubId: "invitation-club-id",
+      userId: USER_ID,
+      status: "INVITED",
+      user: { email: EMAIL },
+    },
+  };
+  memberships = [];
+  mocks.cookies.mockResolvedValue({
+    get: mocks.cookieGet,
+    set: mocks.cookieSet,
+  });
+  mocks.cookieGet.mockImplementation((name: string) => (
+    name === CLUB_INVITATION_CONTEXT_COOKIE_NAME && rawContext !== undefined
+      ? { value: rawContext }
+      : undefined
+  ));
+  mocks.getUser.mockImplementation(async () => ({
+    data: { user: currentUser },
+    error: null,
+  }));
+  mocks.getSession.mockImplementation(async () => ({
+    data: {
+      session: currentUser ? { access_token: "test-access-token" } : null,
+    },
+    error: null,
+  }));
+  mocks.getClaims.mockImplementation(async () => ({
+    data: {
+      claims: {
+        sub: currentUser?.id,
+        role: "authenticated",
+        session_id: SESSION_ID,
+        exp: NOW.getTime() / 1_000 + 3_600,
+        amr: currentAmr,
+      },
+    },
+    error: null,
+  }));
+  mocks.signIn.mockImplementation(async () => {
+    currentUser = loginTarget;
+    currentAmr = ["password"];
+    return {
+      data: { user: loginTarget },
+      error: null,
+    };
+  });
+  mocks.createClient.mockResolvedValue({
+    auth: {
+      getSession: mocks.getSession,
+      getUser: mocks.getUser,
+      getClaims: mocks.getClaims,
+      signInWithPassword: mocks.signIn,
+      signOut: mocks.signOut,
+      updateUser: mocks.updateUser,
+    },
+  });
+  mocks.findInvitation.mockImplementation(async (input: {
+    where: {
+      tokenHash: string;
+      authUserId: string;
+      club: {
+        is: {
+          slug: string;
+        };
+      };
+    };
+  }) => (
+    input.where.tokenHash === row.tokenHash &&
+    input.where.authUserId === row.authUserId &&
+    input.where.club.is.slug === row.club.slug
+      ? structuredClone(row)
+      : null
+  ));
+  mocks.findMemberships.mockImplementation(async (input: {
+    where: {
+      userId: string;
+      status: string;
+    };
+  }) => memberships.filter((item) => (
+    item.userId === input.where.userId && item.status === input.where.status
+  )));
+  const original = await vi.importActual<
+    typeof import("@/src/application/club/invitation/get-club-invitation-acceptance")
+  >("@/src/application/club/invitation/get-club-invitation-acceptance");
+  mocks.read.mockImplementation(original.getClubInvitationAcceptance);
+  mocks.form.mockImplementation(() => createElement("form", { "data-login-form": "true" }));
+  mocks.redirect.mockImplementation((path: string) => {
+    throw navigationError(`NEXT_REDIRECT;push;${path};303;`);
+  });
+});
+
+afterEach(() => {
+  expect(mocks.signOut).not.toHaveBeenCalled();
+  expect(mocks.updateUser).not.toHaveBeenCalled();
+  expect(mocks.transaction).not.toHaveBeenCalled();
+  expect(mocks.cookieSet).not.toHaveBeenCalled();
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("未ログインから招待へ戻る", () => {
+  it("ログインフォームを表示し、passwordログイン後に同じ招待へ固定遷移する", async () => {
+    expect(await renderPage()).toContain("data-login-form");
+    expect(mocks.read).not.toHaveBeenCalled();
+    const cookieBefore = rawContext;
+    await expect(loginAction(state(), form())).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
+    });
+    expect(mocks.signIn).toHaveBeenCalledExactlyOnceWith({
+      email: EMAIL,
+      password: PASSWORD,
+    });
+    expect(mocks.read).toHaveBeenCalledExactlyOnceWith({ context: cookieBefore });
+    expect(rawContext).toBe(cookieBefore);
+    expect(mocks.findMemberships).not.toHaveBeenCalled();
+    expect(mocks.findInvitation).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        tokenHash: context.tokenHash,
+        authUserId: USER_ID,
+        club: { is: { slug: context.clubSlug } },
+      },
+    }));
+  });
+
+  it("Authの拒否では招待照会も通常所属取得も実行しない", async () => {
+    mocks.signIn.mockResolvedValue({
+      data: { user: null },
+      error: new Error(PRIVATE_DETAIL),
+    });
+    const result = await loginAction(state(), form());
+    expect(result.status).toBe("error");
+    expectSafeState(result);
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.findMemberships).not.toHaveBeenCalled();
+  });
+
+  it("ログイン成功応答とCookieの本人が違う場合は再開しない", async () => {
+    mocks.signIn.mockImplementation(async () => {
+      currentUser = user(OTHER_ID, "other@example.test");
+      return {
+        data: { user: user() },
+        error: null,
+      };
+    });
+    const result = await loginAction(state(), form());
+    expect(result.formError).toContain("ログインし直し");
+    expectSafeState(result);
+    expect(mocks.read).not.toHaveBeenCalled();
+    expect(mocks.findMemberships).not.toHaveBeenCalled();
+  });
+
+  it("成功後のAMRを確認できなければ自動遷移しない", async () => {
+    mocks.signIn.mockImplementation(async () => {
+      currentUser = user();
+      currentAmr = undefined;
+      return {
+        data: { user: user() },
+        error: null,
+      };
+    });
+    expect((await loginAction(state(), form())).status).toBe("error");
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it("別アカウントでログインしても招待先の情報を返さず切替を案内する", async () => {
+    loginTarget = user(OTHER_ID, "other@example.test");
+    const result = await loginAction(state(), form());
+    expect(result.formError).toContain("招待されたアカウント");
+    expectSafeState(result);
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it("別人の既存sessionは明示的なpasswordログインで本人へ切り替えて再開できる", async () => {
+    currentUser = user(OTHER_ID, "other@example.test");
+    expect(await renderPage()).toContain("data-login-form");
+    await expect(loginAction(state(), form())).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
+    });
+    expect(currentUser?.id).toBe(USER_ID);
+    expect(mocks.signIn).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["email", "password"])("%sのFileを資格情報へ文字列化しない", async (field) => {
+    const values = form();
+    values.set(field, new Blob([PRIVATE_DETAIL]), `${field}.txt`);
+    const result = await loginAction(state(), values);
+    expect(result.status).toBe("error");
+    expect(JSON.stringify(result)).not.toContain(PRIVATE_DETAIL);
+    expect(mocks.signIn).not.toHaveBeenCalled();
+  });
+
+  it("不正requestIdではログインも招待再開もしない", async () => {
+    const values = form();
+    values.set("requestId", "invalid");
+    expect((await loginAction(state(), values)).status).toBe("error");
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    expect(mocks.read).not.toHaveBeenCalled();
+  });
+
+  it("hiddenのnextやID・roleを再開先や所属照会へ使用しない", async () => {
+    const values = form();
+    for (const field of ["next", "redirectTo", "clubId", "role", "userId"]) {
+      values.set(field, "https://attacker.example.test");
+    }
+    await expect(loginAction(state(), values)).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
+    });
+  });
+});
+
+describe("既ログインPageの招待再開", () => {
+  beforeEach(() => {
+    currentUser = user();
+  });
+
+  it.each([
+    ["password"],
+    [{
+      method: "password",
+      timestamp: 1,
+    }],
+  ])("検証済みpassword AMRなら通常所属より先に戻る %#", async (...amr) => {
+    currentAmr = amr;
+    await expect(renderPage()).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
+    });
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    expect(mocks.findMemberships).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [undefined],
+    [["otp"]],
+    [["oauth"]],
+    ["password"],
+    [[]],
+  ])(
+    "passwordの証拠不足ではフォームと通常導線を表示する %#",
+    async (amr) => {
+      currentAmr = amr;
+      memberships = [membership("one")];
+      const html = await renderPage();
+      expect(html).toContain("data-login-form");
+      expect(html).toContain("パスワードログイン");
+      expect(html).toContain('href="/club/normal-one/events"');
+      expect(html).not.toContain(INVITATION_CLUB_NAME);
+      expect(html).not.toContain(context.tokenHash);
+      expect(mocks.redirect).not.toHaveBeenCalled();
+      expect(mocks.form.mock.calls[0][0]).toEqual({
+        initialState: expect.objectContaining({ values: { email: "" } }),
+      });
+    },
+  );
+
+  it("他人の招待では自動置換せず、通常導線付きの切替案内にする", async () => {
+    currentUser = user(OTHER_ID, "other@example.test");
+    row.status = "CANCELLED";
+    memberships = [membership("other", "STANDARD", "ACTIVE", OTHER_ID)];
+    const html = await renderPage();
+    expect(html).toContain("招待されたアカウント");
+    expect(html).toContain("data-login-form");
+    expect(html).toContain('href="/club/normal-other/events"');
+    for (const secret of [EMAIL, INVITATION_CLUB_NAME, context.tokenHash, "CANCELLED"]) {
+      expect(html).not.toContain(secret);
+    }
+    expect(mocks.signIn).not.toHaveBeenCalled();
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it("emailが変わった本人にも招待の詳細を表示しない", async () => {
+    currentUser = user(USER_ID, "changed@example.test");
+    const html = await renderPage();
+    expect(html).toContain("data-login-form");
+    expect(html).not.toContain(INVITATION_CLUB_NAME);
+    expect(html).not.toContain(EMAIL);
+  });
+
+  it("AMR不足のPageを再表示しても自分自身へredirectしない", async () => {
+    currentAmr = undefined;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(await renderPage()).toContain("data-login-form");
+    }
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it("再ログイン後は同じ招待へ戻れる", async () => {
+    currentAmr = ["otp"];
+    expect(await renderPage()).toContain("data-login-form");
+    await expect(loginAction(state(), form())).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club-invitations/accept;303;",
+    });
+  });
+});
+
+describe.each(["page", "action"] as const)("%sの通常導線", (kind) => {
+  beforeEach(() => {
+    rawContext = undefined;
+    if (kind === "page") {
+      currentUser = user();
+    }
+  });
+
+  // 通常のPageとActionを同じ条件で確認する。
+  async function invoke(): Promise<unknown> {
+    return kind === "page" ? renderPage() : loginAction(state(), form());
+  }
+
+  it.each([
+    [[], "/club/select"],
+    [[membership("one")], "/club/normal-one/events"],
+    [[membership("one"), membership("two")], "/club/select"],
+    [[membership("starter", "STARTER")], "/club/select"],
+    [[membership("pro", "PRO")], "/club/select"],
+    [[membership("starter", "STARTER"), membership("one")], "/club/normal-one/events"],
+    [[membership("invited", "STANDARD", "INVITED")], "/club/select"],
+    [[membership("suspended", "STANDARD", "SUSPENDED")], "/club/select"],
+  ] as const)("既存の所属数・プラン・ACTIVE限定を維持する %#", async (stored, path) => {
+    memberships = [...stored];
+    await expect(invoke()).rejects.toMatchObject({
+      digest: `NEXT_REDIRECT;push;${path};303;`,
+    });
+    expect(mocks.findMemberships).toHaveBeenCalledWith(expect.objectContaining({
+      where: {
+        userId: USER_ID,
+        status: "ACTIVE",
+      },
+    }));
+    expect(mocks.read).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "invalid-cookie", ""])("pending欠損・形式改変でも通常導線へ進む %#", async (value) => {
+    rawContext = value;
+    await expect(invoke()).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club/select;303;",
+    });
+    expect(mocks.read).not.toHaveBeenCalled();
+  });
+
+  it("期限切れCookieが通常ログインを繰り返し妨げない", async () => {
+    rawContext = serializeClubInvitationContext({
+      ...context,
+      expiresAt: Date.now(),
+    });
+    await expect(invoke()).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club/select;303;",
+    });
+    expect(mocks.read).not.toHaveBeenCalled();
+  });
+
+  it("Cookie内に戻り先を追加しても信用しない", async () => {
+    rawContext = Buffer.from(JSON.stringify({
+      ...context,
+      returnTo: "https://attacker.example.test",
+    })).toString("base64url");
+    await expect(invoke()).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club/select;303;",
+    });
+  });
+
+  it.each(["CANCELLED", "EXPIRED", "ACCEPTED"] as const)(
+    "本人の招待が%sなら通常の所属判定を妨げない",
+    async (status) => {
+      rawContext = serializeClubInvitationContext(context);
+      row.status = status;
+      await expect(invoke()).rejects.toMatchObject({
+        digest: "NEXT_REDIRECT;push;/club/select;303;",
+      });
+    },
+  );
+
+  it("形式が正しいhash改変でも他人の情報を返さず、通常導線を残す", async () => {
+    rawContext = serializeClubInvitationContext({
+      ...context,
+      tokenHash: "f".repeat(64),
+    });
+    if (kind === "page") {
+      const html = await renderPage();
+      expect(html).toContain('href="/club/select"');
+      expect(html).not.toContain(INVITATION_CLUB_NAME);
+    } else {
+      const result = await loginAction(state(), form());
+      expect(result.formError).toContain("通常のクラブ");
+      expectSafeState(result);
+    }
+  });
+});
+
+describe("安全な案内と制御例外", () => {
+  it("PW再設定成功の通知とLoginFormのprops契約を維持する", async () => {
+    const html = await renderPage({ "password-reset": "success" });
+    expect(html).toContain("パスワードの変更に成功しました。");
+    expect(mocks.form.mock.calls[0][0]).toEqual({
+      initialState: expect.objectContaining({
+        status: "idle",
+        values: { email: "" },
+      }),
+    });
+  });
+
+  it("queryの任意nextをPageの遷移先に使わない", async () => {
+    currentUser = user();
+    rawContext = undefined;
+    await expect(renderPage({ next: "https://attacker.example.test" })).rejects.toMatchObject({
+      digest: "NEXT_REDIRECT;push;/club/select;303;",
+    });
+  });
+
+  it.each(["page", "action"] as const)("%sの照会例外原文を表示・ログへ出さない", async (kind) => {
+    currentUser = user();
+    mocks.read.mockRejectedValue(new Error(PRIVATE_DETAIL));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    if (kind === "page") {
+      const html = await renderPage();
+      expect(html).toContain("招待を確認できませんでした");
+      expect(html).not.toContain(PRIVATE_DETAIL);
+    } else {
+      const result = await loginAction(state(), form());
+      expectSafeState(result);
+    }
+    expect(log).not.toHaveBeenCalled();
+  });
+
+  it.each(["page", "action"] as const)("%sでDB照会が失敗しても固定案内にする", async (kind) => {
+    currentUser = user();
+    mocks.findInvitation.mockRejectedValue(new Error(PRIVATE_DETAIL));
+    if (kind === "page") {
+      const html = await renderPage();
+      expect(html).toContain("data-login-form");
+      expect(html).not.toContain(PRIVATE_DETAIL);
+    } else {
+      expectSafeState(await loginAction(state(), form()));
+    }
+  });
+
+  it.each(["page", "action"] as const)("%sでCookieのNext制御例外を再送出する", async (kind) => {
+    currentUser = user();
+    const error = navigationError("NEXT_HTTP_ERROR_FALLBACK;404");
+    mocks.cookies.mockRejectedValue(error);
+    await expect(kind === "page" ? renderPage() : loginAction(state(), form())).rejects.toBe(error);
+  });
+});

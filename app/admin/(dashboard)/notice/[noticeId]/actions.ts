@@ -5,13 +5,13 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import { parseNoticeFormData } from "@/lib/validations/admin-notice";
 import {
   ADMIN_ACTION_UPDATE_ERROR_MESSAGE,
 } from "@/constants/adminActionError";
-import type { NoticeActionState } from "@/types/action-state";
+import type { WebsiteNoticeActionState } from "@/types/action-state";
 import { buildNoticeActionValues } from "@/app/admin/_utils/form-helpers";//エラー時の入力値表示のための関数
 
 
@@ -41,12 +41,12 @@ function buildAdminNoticeListPath({
   return query ? `/admin/notice?${query}#top` : "/admin/notice#top";
 }
 
-export async function updateNotice(
+export async function updateWebsiteNotice(
   noticeId: string,
-  _state: NoticeActionState,
+  _state: WebsiteNoticeActionState,
   formData: FormData
-): Promise<NoticeActionState> {
-  await requireAdmin();
+): Promise<WebsiteNoticeActionState> {
+  await requireWebsiteAdmin();
 
    const values = buildNoticeActionValues(formData);
 
@@ -91,8 +91,8 @@ export async function updateNotice(
   redirect(`/admin/notice/${noticeId}?updated=1&toastId=${Date.now()}#top`);
 }
 
-export async function deleteNotice(noticeId: string) {
-  await requireAdmin();
+export async function deleteWebsiteNotice(noticeId: string) {
+  await requireWebsiteAdmin();
 
   try {
     await prisma.notice.delete({

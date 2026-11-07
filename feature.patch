@@ -1,0 +1,2131 @@
+diff --git a/app/(club-app)/club/[clubSlug]/_components/ClubFooter.tsx b/app/(club-app)/club/[clubSlug]/_components/ClubFooter.tsx
+index 9b91dcf..876423a 100644
+--- a/app/(club-app)/club/[clubSlug]/_components/ClubFooter.tsx
++++ b/app/(club-app)/club/[clubSlug]/_components/ClubFooter.tsx
+@@ -9,23 +9,32 @@ import {
+   usePathname,
+ } from "next/navigation";
+ 
+-type ClubFooterProps = {
+-  clubSlug: string;
++/**
++ * 【追加】クラブ共通フッターのURLを作るために受け取るクラブslugの型。
++ */
++type ClubFooterProps = { // 【追加】共通フッターへ渡すクラブslugの型
++  clubSlug: string; // 【追加】文字列型
+ };
+ 
+-type FooterItem =
+-  | "events"
+-  | "notice"
+-  | "account";
++/**
++ * 【追加】共通フッターで強調するイベント・お知らせ・マイページの識別子型。
++ */
++type FooterItem = // 【追加】フッターのイベント・お知らせ・マイページの識別子型
++  | "events" // 【追加】フッター項目として許可する文字列のリテラル型
++  | "notice" // 【追加】フッター項目として許可する文字列のリテラル型
++  | "account"; // 【追加】フッター項目として許可する文字列のリテラル型
+ 
+   //正規化関数(URLの後ろの/を消す)
+-function normalizePathname(
+-  pathname: string,
+-): string {
++/**
++ * 【追加】パスを受け取り、ルートを保ったまま末尾のスラッシュを除去する。
++ */
++function normalizePathname( // 【追加】ルート以外のパスから末尾のスラッシュを除く関数
++  pathname: string, // 【追加】文字列型
++): string { // 【追加】文字列型
+   if (
+     pathname.length > 1
+   ) {
+-    return pathname.replace(
++    return pathname.replace( // 【追加】パス末尾のスラッシュを除去するメソッド
+       /\/+$/,
+       "",
+     );
+@@ -35,10 +44,13 @@ function normalizePathname(
+ }
+ 
+ //フッターを隠すページのURLを判定する関数（trueかfalseか）
+-function shouldHideFooter(
+-  pathname: string,
+-  basePath: string,
+-): boolean {
++/**
++ * 【追加】現在のパスとクラブの基準パスから、新規・編集・LINE設定でフッターを隠すか判定する。
++ */
++function shouldHideFooter( // 【追加】新規・編集・LINE設定でフッターを隠すか判定する関数
++  pathname: string, // 【追加】文字列型
++  basePath: string, // 【追加】文字列型
++): boolean { // 【追加】真偽値型
+   const eventAdminPath =
+     `${basePath}/admin/events`;
+ 
+@@ -57,10 +69,10 @@ function shouldHideFooter(
+     `${eventAdminPath}/new`;
+ 
+   const isEventEdit =
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${eventAdminPath}/`,
+     ) &&
+-    pathname.endsWith(
++    pathname.endsWith( // 【追加】指定した末尾で終わるかを確認するメソッド
+       "/edit",
+     );
+ 
+@@ -69,10 +81,10 @@ function shouldHideFooter(
+     `${noticeAdminPath}/new`;
+ 
+   const isNoticeEdit =
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${noticeAdminPath}/`,
+     ) &&
+-    pathname.endsWith(
++    pathname.endsWith( // 【追加】指定した末尾で終わるかを確認するメソッド
+       "/edit",
+     );
+ 
+@@ -90,10 +102,13 @@ function shouldHideFooter(
+ }
+ 
+ //フッターの現在の選択を光らせるための判定
+-function getActiveFooterItem(
+-  pathname: string,
+-  basePath: string,
+-): FooterItem | null {
++/**
++ * 【追加】現在のパスとクラブの基準パスから、強調する項目を返す。対象外はnullを返す。
++ */
++function getActiveFooterItem( // 【追加】会員用・管理用パスから現在のフッター項目を返す関数
++  pathname: string, // 【追加】文字列型
++  basePath: string, // 【追加】文字列型
++): FooterItem | null { // 【追加】フッターのイベント・お知らせ・マイページの識別子型 / 対象がないことを表すnull型
+   const memberEventsPath =
+     `${basePath}/events`;
+ 
+@@ -112,12 +127,12 @@ function getActiveFooterItem(
+   if (
+     pathname ===
+       memberEventsPath ||
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${memberEventsPath}/`,
+     ) ||
+     pathname ===
+       adminEventsPath ||
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${adminEventsPath}/`,
+     )
+   ) {
+@@ -127,12 +142,12 @@ function getActiveFooterItem(
+   if (
+     pathname ===
+       memberNoticePath ||
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${memberNoticePath}/`,
+     ) ||
+     pathname ===
+       adminNoticePath ||
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${adminNoticePath}/`,
+     )
+   ) {
+@@ -142,7 +157,7 @@ function getActiveFooterItem(
+   if (
+     pathname ===
+       accountPath ||
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${accountPath}/`,
+     )
+   ) {
+@@ -153,24 +168,27 @@ function getActiveFooterItem(
+ }
+ 
+ 
+-export function ClubFooter({
++/**
++ * 【追加】クラブslugと現在のパスを使い、表示対象のページで会員用または管理用の共通フッターを返す。
++ */
++export function ClubFooter({ // 【追加】現在のクラブとパスに対応する共通ナビゲーションを表示するComponent
+   clubSlug,
+-}: ClubFooterProps) {
++}: ClubFooterProps) { // 【追加】共通フッターへ渡すクラブslugの型
+   const rawPathname =//現在のページのURLをそのまま抜き出す
+-    usePathname();
++    usePathname(); // 【追加】現在のパス名を取得するhook
+ 
+   const pathname =
+-    normalizePathname(//正規化する（後ろの/を消す）
++    normalizePathname(//正規化する（後ろの/を消す） / 【追加】ルート以外のパスから末尾のスラッシュを除く関数
+       rawPathname,
+     );
+ 
+   const basePath =
+-    `/club/${encodeURIComponent(
++    `/club/${encodeURIComponent( // 【追加】パスへ埋め込む値をURL用にエンコードする関数
+       clubSlug,
+     )}`;
+ 
+   if (
+-    shouldHideFooter(//フッターを隠すページのURLかを判定しtrueならnullを返す
++    shouldHideFooter(//フッターを隠すページのURLかを判定しtrueならnullを返す / 【追加】新規・編集・LINE設定でフッターを隠すか判定する関数
+       pathname,
+       basePath,
+     )
+@@ -179,7 +197,7 @@ export function ClubFooter({
+   }
+ 
+   const activeItem =
+-    getActiveFooterItem(//フッターの現在の選択を光らせるための判定
++    getActiveFooterItem(//フッターの現在の選択を光らせるための判定 / 【追加】会員用・管理用パスから現在のフッター項目を返す関数
+       pathname,
+       basePath,
+     );
+@@ -192,15 +210,15 @@ export function ClubFooter({
+   const isAdminPage =
+     pathname ===
+       `${basePath}/admin` ||
+-    pathname.startsWith(//URLが、/admin/ という文字から始まっているか
++    pathname.startsWith(//URLが、/admin/ という文字から始まっているか / 【追加】指定パスで始まるかを確認するメソッド
+       `${basePath}/admin/`,
+     );
+ 
+   const items:
+-    readonly {
+-      id: FooterItem;
+-      label: string;
+-      href: string;
++    readonly { // 【追加】要素を変更しない読取専用の配列型
++      id: FooterItem; // 【追加】フッターのイベント・お知らせ・マイページの識別子型
++      label: string; // 【追加】文字列型
++      href: string; // 【追加】文字列型
+     }[] = [
+       {
+         id: "events",
+@@ -230,14 +248,18 @@ export function ClubFooter({
+         aria-label="クラブアプリ"
+         className="mx-auto grid w-full max-w-3xl grid-cols-3 gap-2"
+       >
+-        {items.map(
+-          (item) => {
++        {items.map( // 【追加】配列の各要素を表示用のデータや要素へ変換するメソッド
++          /**
++           * 【追加】フッター項目を受け取り、現在位置の強調表示を付けたナビゲーションリンクを返す。
++           */
++          (item) => { // 【追加】ナビゲーション項目を表示へ変換するコールバック
+             const selected =//今作っているボタン（id）が光らせるべきメニュー（activeItem）と一致しているか判定する
+               item.id ===
+               activeItem;
+ 
+             return (
+-              <Link
++              <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++                prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
+                 key={item.id}
+                 href={item.href}
+                 aria-current={
+@@ -252,6 +274,7 @@ export function ClubFooter({
+                 }
+               >
+                 {item.label}
++                {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+               </Link>
+             );
+           },
+diff --git a/app/(club-app)/club/[clubSlug]/_components/ClubHeader.tsx b/app/(club-app)/club/[clubSlug]/_components/ClubHeader.tsx
+index 79e1a80..e4adab8 100644
+--- a/app/(club-app)/club/[clubSlug]/_components/ClubHeader.tsx
++++ b/app/(club-app)/club/[clubSlug]/_components/ClubHeader.tsx
+@@ -6,30 +6,36 @@
+ import Link from "next/link";
+ 
+ import {
+-  logoutAction,
++  logoutAction, // 【追加】現在のブラウザーセッションだけをログアウトするAction
+ } from "@/app/(club-app)/club/actions";
+ 
+ import {
+   usePathname, 
+ } from "next/navigation";
+ 
+-type ClubHeaderProps = {
+-  clubName: string;
+-  clubSlug: string;
+-  canSwitchClub: boolean;
++/**
++ * 【追加】クラブ共通ヘッダーの表示に使うクラブ名・slug・切替可否をまとめた入力型。
++ */
++type ClubHeaderProps = { // 【追加】共通ヘッダーへ渡すクラブ名・slug・切替可否の型
++  clubName: string; // 【追加】文字列型
++  clubSlug: string; // 【追加】文字列型
++  canSwitchClub: boolean; // 【追加】真偽値型
+ };
+ 
+-export function ClubHeader({
++/**
++ * 【追加】クラブ名・slug・切替可否を受け取り、イベント一覧・クラブ切替・ログアウトの入口を表示する。
++ */
++export function ClubHeader({ // 【追加】クラブ名とslugに対応する入口・切替・ログアウトを表示するComponent
+   clubName,
+   clubSlug,
+   canSwitchClub,
+-}: ClubHeaderProps) {
++}: ClubHeaderProps) { // 【追加】共通ヘッダーへ渡すクラブ名・slug・切替可否の型
+ 
+     const pathname =
+-    usePathname();
++    usePathname(); // 【追加】現在のパス名を取得するhook
+ 
+     const basePath =
+-    `/club/${encodeURIComponent(
++    `/club/${encodeURIComponent( // 【追加】パスへ埋め込む値をURL用にエンコードする関数
+       clubSlug,
+     )}`;
+ 
+@@ -39,7 +45,7 @@ export function ClubHeader({
+   const isAdminPage =
+     pathname ===
+       `${basePath}/admin` ||
+-    pathname.startsWith(
++    pathname.startsWith( // 【追加】指定パスで始まるかを確認するメソッド
+       `${basePath}/admin/`,
+     );
+ 
+@@ -51,7 +57,8 @@ export function ClubHeader({
+   return (
+     <header className="sticky top-0 z-40 border-b border-slate-200 bg-white">
+       <div className="mx-auto flex max-w-3xl items-center justify-between gap-4 px-4 py-3">
+-        <Link
++        <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++          prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
+           href={eventsPath}
+           aria-label={`${clubName}のイベント一覧へ`}
+           className="group min-w-0 rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+@@ -66,6 +73,7 @@ export function ClubHeader({
+           >
+             {clubName}
+           </p>
++          {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+         </Link>
+ 
+         <nav
+@@ -73,15 +81,17 @@ export function ClubHeader({
+           className="flex shrink-0 items-center gap-2"
+         >
+           {canSwitchClub ? (
+-            <Link
++            <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++              prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
+               href="/club/select"
+               className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600"
+             >
+               クラブ切替
++              {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+             </Link>
+           ) : null}
+ 
+-          <form action={logoutAction}>
++          <form action={logoutAction /* 【追加】現在のブラウザーセッションだけをログアウトするAction */}>
+             <button
+               type="submit"
+               className="rounded-md border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+diff --git a/app/(club-app)/club/[clubSlug]/events/page.tsx b/app/(club-app)/club/[clubSlug]/events/page.tsx
+index 3b0efee..b35cfd9 100644
+--- a/app/(club-app)/club/[clubSlug]/events/page.tsx
++++ b/app/(club-app)/club/[clubSlug]/events/page.tsx
+@@ -26,7 +26,7 @@ import {
+ } from "@/domain/club/event/event-list-query";
+ 
+ import {
+-  ClubEventGenreFilter,//すべてを含むイベントのジャンル
++  ClubEventGenreFilter,// 【修正】現在のジャンルとURL生成関数からジャンル切替リンクを表示するComponent
+ } from "./_components/ClubEventGenreFilter";
+ 
+ import {
+@@ -38,33 +38,42 @@ import {
+   isEventUnread,//未読イベントがあるかどうかの判定関数
+ } from "@/domain/club/event/event-policy";
+ 
++/**
++ * 【追加】最新の認証・認可とDB状態を要求ごとに確認するため、月別一覧を動的に描画する。
++ */
+ export const dynamic =//このページにアクセスしたら毎回ページを作成する（キャッシュしない）
+   "force-dynamic";
+ 
+   //引数の型（スラッグと月）
+-type MemberEventsMonthPageProps = {
+-  params: Promise<{
+-    clubSlug: string;
++/**
++ * 【追加】クラブslugと月・ジャンルの検索条件を、非同期に受け取る月別一覧ページの入力型。
++ */
++type MemberEventsMonthPageProps = { // 【追加】非同期のクラブslugと月・ジャンルの検索値を受け取る型
++  params: Promise<{ // 【追加】非同期に解決する値を表す型
++    clubSlug: string; // 【追加】文字列型
+   }>;
+ 
+-  searchParams: Promise<{
++  searchParams: Promise<{ // 【追加】非同期に解決する値を表す型
+     month?:
+-      | string
+-      | string[];
++      | string // 【追加】文字列型
++      | string[]; // 【追加】文字列の配列型
+     genre?:
+-      | string
+-      | string[];
++      | string // 【追加】文字列型
++      | string[]; // 【追加】文字列の配列型
+   }>;
+ };
+ 
+-export default async function MemberEventsMonthPage({
++/**
++ * 【追加】認可済みクラブの現地月を検索し、本人のロールに公開されたイベントと未読情報を月別に表示する。
++ */
++export default async function MemberEventsMonthPage({ // 【追加】認可済みクラブの現地月とロールに対応する公開イベント一覧を返す関数
+   params,
+   searchParams,
+-}: MemberEventsMonthPageProps) {
++}: MemberEventsMonthPageProps) { // 【追加】非同期のクラブslugと月・ジャンルの検索値を受け取る型
+   const [//resolvedParamsとresolvedSearchParamsの箱に取得したものを入れる
+     resolvedParams,
+     resolvedSearchParams,
+-  ] = await Promise.all([
++  ] = await Promise.all([ // 【追加】URLパラメーターと検索条件の非同期解決をまとめて待つメソッド
+     params,
+     searchParams,
+   ]);
+@@ -74,7 +83,7 @@ export default async function MemberEventsMonthPage({
+    * CLUB_APP利用可能プランを確認する。
+    */
+   const context =
+-    await requireClubAppAccess(//クラブのアプリが使えるか確認する関数
++    await requireClubAppAccess(//クラブのアプリが使えるか確認する関数 / 【追加】認証・ACTIVE所属・アプリ利用プランを確認する関数
+       resolvedParams.clubSlug,
+     );
+ 
+@@ -83,13 +92,13 @@ export default async function MemberEventsMonthPage({
+    * クラブ現地時間の現在月を使用する。
+    */
+   const month =
+-    parseMonthSearchParam(//URLから年月を読み取って、正常なら文字列（YYYY-MM）を返し、壊れているならクラブ現地の月のYYYY-MM形式（文字列）を返す関数
++    parseMonthSearchParam(//URLから年月を読み取って、正常なら文字列（YYYY-MM）を返し、壊れているならクラブ現地の月のYYYY-MM形式（文字列）を返す関数 / 【追加】有効な検索年月またはクラブ現地の現在月を返す関数
+       resolvedSearchParams.month,
+       context.club.timezone,
+     );
+ 
+     const genre =
+-  parseClubEventGenreFilter(
++  parseClubEventGenreFilter( // 【追加】未指定や不正値をALLに整えるジャンル検索値の関数
+     resolvedSearchParams.genre,
+   );
+ 
+@@ -98,7 +107,7 @@ export default async function MemberEventsMonthPage({
+    * UTCの検索範囲へ変換する。
+    */
+   const range =
+-    getClubMonthUtcRange(//クラブの現地時間（年・月）とタイムゾーンを受け取り、それを世界共通の基準時である『UTCのDate型（オブジェクト）』に変換しDBに保存できる形：UTCにする関数
++    getClubMonthUtcRange(//クラブの現地時間（年・月）とタイムゾーンを受け取り、それを世界共通の基準時である『UTCのDate型（オブジェクト）』に変換しDBに保存できる形：UTCにする関数 / 【追加】クラブ現地の月初と翌月月初をUTCの検索範囲に変換する関数
+       month,
+       context.club.timezone,
+     );
+@@ -112,7 +121,7 @@ export default async function MemberEventsMonthPage({
+    * 対象月とイベント期間が重なる
+    */
+   const events =
+-    await findPublishedClubEventsInRange(//ある期間の公開済みイベントを複数取得する関数（既読の有無付き）
++    await findPublishedClubEventsInRange(//ある期間の公開済みイベントを複数取得する関数（既読の有無付き） / 【追加】クラブ・公開対象ロール・期間で公開イベントを既読情報付きで取得する関数
+       {
+         clubId: context.club.id,
+ 
+@@ -129,66 +138,72 @@ export default async function MemberEventsMonthPage({
+     );
+ 
+   const previousMonth =//先月
+-    shiftYearMonth(
++    shiftYearMonth( // 【追加】年月文字列を指定した月数だけ前後へずらす関数
+       month,
+       -1,
+     );
+ 
+   const nextMonth =//来月
+-    shiftYearMonth(
++    shiftYearMonth( // 【追加】年月文字列を指定した月数だけ前後へずらす関数
+       month,
+       1,
+     );
+ 
+   const encodedClubSlug =//スラッグをURLで使える形にする
+-    encodeURIComponent(
++    encodeURIComponent( // 【追加】パスへ埋め込む値をURL用にエンコードする関数
+       context.club.slug,
+     );
+ 
+   const basePath =//ベースとなるURLを作成する
+     `/club/${encodedClubSlug}`;
+ 
+-function buildMonthHref(//会員用月別イベント一覧ページのURlを作成する関数
+-  targetMonth: string,
+-): string {
++/**
++ * 【追加】対象年月を受け取り、選択中のジャンルを維持した月別一覧のURLを返す。
++ */
++function buildMonthHref(//会員用月別イベント一覧ページのURlを作成する関数 / 【追加】対象月とジャンルを維持した月別一覧URLを返す関数
++  targetMonth: string, // 【追加】文字列型
++): string { // 【追加】文字列型
+   const query =
+-    new URLSearchParams({
++    new URLSearchParams({ // 【追加】URLの検索条件を組み立てるコンストラクター
+       month: targetMonth,
+     });
+ 
+   if (genre !== "ALL") {
+-    query.set(
++    query.set( // 【追加】URL検索条件の名前と値を設定するメソッド
+       "genre",
+       genre,
+     );
+   }
+ 
+-  return `${basePath}/events?${query.toString()}`;
++  return `${basePath}/events?${query.toString()}`; // 【追加】URL検索条件を文字列へ変換するメソッド
+ }
+ 
+-function buildDayHref(//会員用日別イベント一覧ページのURlを作成する関数
+-  targetDate: string,
+-): string {
++/**
++ * 【追加】対象日を受け取り、選択中のジャンルを維持した日別一覧のURLを返す。
++ */
++function buildDayHref(//会員用日別イベント一覧ページのURlを作成する関数 / 【追加】対象日とジャンルを維持した日別一覧URLを返す関数
++  targetDate: string, // 【追加】文字列型
++): string { // 【追加】文字列型
+   const query =
+-    new URLSearchParams({
++    new URLSearchParams({ // 【追加】URLの検索条件を組み立てるコンストラクター
+       date: targetDate,
+     });
+ 
+   if (genre !== "ALL") {
+-    query.set(
++    query.set( // 【追加】URL検索条件の名前と値を設定するメソッド
+       "genre",
+       genre,
+     );
+   }
+ 
+-  return `${basePath}/events/list?${query.toString()}`;
++  return `${basePath}/events/list?${query.toString()}`; // 【追加】URL検索条件を文字列へ変換するメソッド
+ }
+ 
+ /*
+  * 詳細ページから月別一覧へ戻るための情報。
+  */
+ const detailQuery =
+-  new URLSearchParams({
++  new URLSearchParams({ // 【追加】URLの検索条件を組み立てるコンストラクター
+     returnView: "month",
+     returnMonth: month,
+ 
+@@ -202,12 +217,12 @@ const detailQuery =
+ 
+   // 詳細ページへ渡すクエリ文字列
+ const detailQueryString =
+-  detailQuery.toString();
++  detailQuery.toString(); // 【追加】URL検索条件を文字列へ変換するメソッド
+ 
+ 
+ // 日別一覧へ移動するときに維持する絞り込み条件
+ const memberCalendarDayQueryParams:
+-  Record<string, string> = {};
++  Record<string, string> = {}; // 【追加】検索条件のキーと文字列値を保持する辞書型 / 文字列型
+ 
+ if (genre !== "ALL") {
+   memberCalendarDayQueryParams.genre =
+@@ -217,14 +232,18 @@ if (genre !== "ALL") {
+ 
+ //Repositoryの取得結果を共通カレンダー用に変換する
+ const memberCalendarEvents:
+-  ClubEventMonthCalendarItem[] =
+-    events.map((event) => {
++  ClubEventMonthCalendarItem[] = // 【追加】ページから月間カレンダーへ渡す表示用イベントデータ型
++    events.map( // 【追加】配列の各要素を表示用のデータや要素へ変換するメソッド
++      /**
++       * 【追加】公開イベントを受け取り、既読と添付の状態を含む月間カレンダー用データへ変換する。
++       */
++      (event) => { // 【追加】公開イベントをカレンダー表示へ変換するコールバック
+       const readAt =
+         event.reads[0]
+           ?.readAt ?? null;
+ 
+       const unread =
+-        isEventUnread({//未読イベントがあるかどうかの判定関数
++        isEventUnread({//未読イベントがあるかどうかの判定関数 / 【追加】既読時刻と未読開始時刻からイベントが未読か判定する関数
+           readRequiredAt:
+             event.readRequiredAt,
+ 
+@@ -232,7 +251,7 @@ const memberCalendarEvents:
+         });
+ 
+       const detailPath =//会員用イベント詳細ページに行く時のリンクの作成
+-        `${basePath}/events/${encodeURIComponent(
++        `${basePath}/events/${encodeURIComponent( // 【追加】パスへ埋め込む値をURL用にエンコードする関数
+           event.id,
+         )}`;
+ 
+@@ -268,7 +287,7 @@ const memberCalendarEvents:
+ 
+ 
+   const canManageEvents =
+-    isClubAdminRole(//管理者(OWNER / COACH / OFFICER)かどうか判定する関数
++    isClubAdminRole(//管理者(OWNER / COACH / OFFICER)かどうか判定する関数 / 【追加】OWNER・COACH・OFFICERの管理者ロールか判定する関数
+       context.membership.role,
+     );
+ 
+@@ -280,11 +299,13 @@ const memberCalendarEvents:
+           月別イベント
+         </h1>
+         {canManageEvents ? (
+-          <Link
++          <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++            prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
+             href={`${basePath}/admin/events?month=${month}`}
+             className="rounded-md border border-blue-300 bg-white px-4 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+           >
+             イベント管理
++            {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+           </Link>
+         ) : null}
+         </div>
+@@ -295,39 +316,45 @@ const memberCalendarEvents:
+       </header>
+ 
+       <div className="flex flex-wrap gap-3">
+-        <Link
+-  href={buildDayHref(
++        <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++          prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
++  href={buildDayHref( // 【追加】対象日とジャンルを維持した日別一覧URLを返す関数
+     `${month}-01`,
+   )}
+   className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+ >
+   日別一覧へ
++  {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+ </Link>
+       </div>
+ 
+       
+ 
+       {/* ここに追加：ジャンル絞り込み */}
+-<ClubEventGenreFilter
++<ClubEventGenreFilter /* 【追加】現在のジャンルとURL生成関数からジャンル切替リンクを表示するComponent */
+   currentGenre={genre}
+-  buildHref={(
++  buildHref={
++    /**
++     * 【追加】切替先のジャンルを受け取り、対象月を維持した月別一覧のURLを返す。
++     */
++    ( // 【追加】ジャンル切替用URLを作るコールバック
+     nextGenre,
+   ) => {
+     const query =
+-      new URLSearchParams({
++      new URLSearchParams({ // 【追加】URLの検索条件を組み立てるコンストラクター
+         month,
+       });
+ 
+     if (
+       nextGenre !== "ALL"
+     ) {
+-      query.set(
++      query.set( // 【追加】URL検索条件の名前と値を設定するメソッド
+         "genre",
+         nextGenre,
+       );
+     }
+ 
+-    return `${basePath}/events?${query.toString()}`;
++    return `${basePath}/events?${query.toString()}`; // 【追加】URL検索条件を文字列へ変換するメソッド
+   }}
+ />
+ 
+@@ -340,32 +367,36 @@ const memberCalendarEvents:
+     aria-label="対象月の切り替え"
+     className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-3"
+   >
+-    <Link
+-      href={buildMonthHref(
++    <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++      prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
++      href={buildMonthHref( // 【追加】対象月とジャンルを維持した月別一覧URLを返す関数
+         previousMonth,
+       )}
+       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+     >
+       ← 前月
++      {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+     </Link>
+ 
+     <h2 className="font-bold text-slate-900">
+-      {formatYearMonthLabel(
++      {formatYearMonthLabel( // 【追加】年月文字列を日本語の年月表示へ変換する関数
+         month,
+       )}
+     </h2>
+ 
+-    <Link
+-      href={buildMonthHref(
++    <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++      prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
++      href={buildMonthHref( // 【追加】対象月とジャンルを維持した月別一覧URLを返す関数
+         nextMonth,
+       )}
+       className="rounded-md px-3 py-2 text-sm font-medium text-blue-700 hover:bg-blue-50"
+     >
+       翌月 →
++      {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+     </Link>
+   </nav>
+ 
+-  <ClubEventMonthCalendar
++  <ClubEventMonthCalendar /* 【追加】月・タイムゾーン・イベントから月間カレンダーを表示するComponent */
+     month={month}
+     timeZone={
+       context.club.timezone
+diff --git a/app/(club-app)/club/select/page.tsx b/app/(club-app)/club/select/page.tsx
+index 0cfc993..2ba92d9 100644
+--- a/app/(club-app)/club/select/page.tsx
++++ b/app/(club-app)/club/select/page.tsx
+@@ -7,17 +7,17 @@ import {
+ } from "next/navigation";
+ 
+ import {
+-  getAppEnabledMemberships,
++  getAppEnabledMemberships, // 【追加】クラブ運営アプリが使える会員のみに絞り込む関数
+ } from "@/domain/club/club-login-destination";//クラブ運営アプリが使える会員のみに絞り込む関数
+ import {
+-  findActiveClubMemberships,
++  findActiveClubMemberships, // 【追加】ユーザーのACTIVEな所属とクラブ情報を取得する関数
+ } from "@/app/(club-app)/club/find-active-club-memberships";//ユーザーのアクティブなクラブメンバーシップを取得する関数
+ import {
+-  createClient,
++  createClient, // 【追加】リクエストのCookieを扱うサーバー用Supabase clientを作る関数
+ } from "@/src/infrastructure/supabase/server";
+ 
+ import {
+-  logoutAction,
++  logoutAction, // 【追加】現在のブラウザーセッションだけをログアウトするAction
+ } from "../actions";
+ 
+ /**
+@@ -26,9 +26,12 @@ import {
+  */
+ export const dynamic = "force-dynamic";//絶対にキャッシュ（事前に保存）せずアクセスした瞬間に毎回最新のデータをサーバーで作り直す
+ 
+-function LogoutForm() {
++/**
++ * 【追加】現在のブラウザーセッションを終了するログアウトフォームを表示する。
++ */
++function LogoutForm() { // 【追加】現在のブラウザーセッションのログアウトフォームを表示するComponent
+   return (
+-    <form action={logoutAction}>
++    <form action={logoutAction /* 【追加】現在のブラウザーセッションだけをログアウトするAction */}>
+       <button
+         type="submit"
+         className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+@@ -39,12 +42,15 @@ function LogoutForm() {
+   );
+ }
+ 
+-function ClubSelectMessage({
++/**
++ * 【追加】見出しと説明文を受け取り、所属なし・利用不可の案内とログアウト入口を表示する。
++ */
++function ClubSelectMessage({ // 【追加】所属なし・利用不可の案内とログアウトフォームを表示するComponent
+   title,
+   description,
+ }: {
+-  title: string;
+-  description: string;
++  title: string; // 【追加】文字列型
++  description: string; // 【追加】文字列型
+ }) {
+   return (
+     <main className="mx-auto flex min-h-screen w-full max-w-md items-center px-4 py-12">
+@@ -59,38 +65,41 @@ function ClubSelectMessage({
+           </p>
+         </header>
+ 
+-        <LogoutForm />
++        <LogoutForm /* 【追加】現在のブラウザーセッションのログアウトフォームを表示するComponent */ />
+       </div>
+     </main>
+   );
+ }
+ 
+-export default async function ClubSelectPage() {
++/**
++ * 【追加】認証本人とACTIVEな所属を取得し、利用可能なクラブ数に応じて遷移または選択画面を返す。
++ */
++export default async function ClubSelectPage() { // 【追加】認証本人と所属数に応じて遷移またはクラブ選択画面を返す関数
+   // 1. Supabase Authを確認する
+   const supabase =
+-    await createClient();
++    await createClient(); // 【追加】リクエストのCookieを扱うサーバー用Supabase clientを作る関数
+ 
+   const {
+     data: {
+       user,
+     },
+     error,
+-  } = await supabase.auth.getUser();
++  } = await supabase.auth.getUser(); // 【追加】Supabase Authで現在の認証本人を確認するメソッド
+ 
+   // 2. 未ログインならグローバルログインへ移動する
+   if (error || !user) {
+-    redirect("/club-login");
++    redirect("/club-login"); // 【追加】指定URLへ遷移して現在の処理を終了する関数
+   }
+ 
+   // 3. ACTIVE Membershipを取得する
+   const memberships =
+-    await findActiveClubMemberships(
++    await findActiveClubMemberships( // 【追加】ユーザーのACTIVEな所属とクラブ情報を取得する関数
+       user.id,
+     );
+ 
+   // 4. CLUB_APPを利用できるMembershipだけに絞る
+   const availableMemberships =
+-    getAppEnabledMemberships(
++    getAppEnabledMemberships( // 【追加】クラブ運営アプリが使える会員のみに絞り込む関数
+       memberships,
+     );
+ 
+@@ -102,8 +111,8 @@ export default async function ClubSelectPage() {
+     availableMemberships.length === 1 &&
+     onlyMembership
+   ) {
+-    redirect(
+-      `/club/${encodeURIComponent(
++    redirect( // 【追加】指定URLへ遷移して現在の処理を終了する関数
++      `/club/${encodeURIComponent( // 【追加】パスへ埋め込む値をURL用にエンコードする関数
+         onlyMembership.club.slug,
+       )}/events`,
+     );
+@@ -112,7 +121,7 @@ export default async function ClubSelectPage() {
+   // 5-2. ACTIVE Membership自体が0件
+   if (memberships.length === 0) {
+     return (
+-      <ClubSelectMessage
++      <ClubSelectMessage /* 【追加】所属なし・利用不可の案内とログアウトフォームを表示するComponent */
+         title="所属クラブがありません"
+         description="クラブ管理者からの招待を確認してください。"
+       />
+@@ -124,7 +133,7 @@ export default async function ClubSelectPage() {
+     availableMemberships.length === 0
+   ) {
+     return (
+-      <ClubSelectMessage
++      <ClubSelectMessage /* 【追加】所属なし・利用不可の案内とログアウトフォームを表示するComponent */
+         title="アプリを利用できるクラブがありません"
+         description="所属クラブのプランまたは利用状態を確認してください。"
+       />
+@@ -146,15 +155,19 @@ export default async function ClubSelectPage() {
+         </header>
+ 
+         <ul className="space-y-3">
+-          {availableMemberships.map(
+-            (membership) => (
++          {availableMemberships.map( // 【追加】配列の各要素を表示用のデータや要素へ変換するメソッド
++            /**
++             * 【追加】利用可能な所属を受け取り、クラブ選択用のリンクを返す。
++             */
++            (membership) => ( // 【追加】所属を選択リンクへ変換するコールバック
+               <li
+                 key={
+                   membership.membershipId
+                 }
+               >
+-                <Link
+-                  href={`/club/${encodeURIComponent(
++                <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
++                  prefetch={false /* 【追加】先読み中の遷移で本文が空になる競合を回避する */}
++                  href={`/club/${encodeURIComponent( // 【追加】パスへ埋め込む値をURL用にエンコードする関数
+                     membership.club.slug,
+                   )}/events`}
+                   className="flex items-center justify-between rounded-lg border border-slate-200 bg-white p-4 shadow-sm transition hover:border-blue-400 hover:bg-blue-50"
+@@ -172,6 +185,7 @@ export default async function ClubSelectPage() {
+                   >
+                     →
+                   </span>
++                  {/* 【追加】Next.jsのページ遷移用リンクComponent */}
+                 </Link>
+               </li>
+             ),
+@@ -179,7 +193,7 @@ export default async function ClubSelectPage() {
+         </ul>
+ 
+         <div className="border-t border-slate-200 pt-6">
+-          <LogoutForm />
++          <LogoutForm /* 【追加】現在のブラウザーセッションのログアウトフォームを表示するComponent */ />
+         </div>
+       </div>
+     </main>
+diff --git a/e2e/authorization.spec.ts b/e2e/authorization.spec.ts
+new file mode 100644
+index 0000000..08e8dc8
+--- /dev/null
++++ b/e2e/authorization.spec.ts
+@@ -0,0 +1,390 @@
++// e2e/authorization.spec.ts
++// 正規のpasswordログインと既存Cookieで、クラブ・ロール・プラン・Platformの境界を確認する。
++
++import {
++  test, // 所有seedの準備・非更新検査・復元を行うPlaywright test
++  expect, // 同じPlaywrightの期待値検証API
++} from "./fixtures";
++
++const A_ROLES = [
++  ["aOwner", true, true],
++  ["aCoach", true, false],
++  ["aOfficer", true, false],
++  ["aMember", false, false],
++] as const; // 本人キー・管理権限・OWNER権限のリテラル型アサーション
++const INACTIVE = ["INVITED", "SUSPENDED", "WITHDRAWN"] as const; // ACTIVE以外の所属状態のリテラル型アサーション
++const PLANS = ["STARTER", "STANDARD", "PRO"] as const; // アプリ利用可否を確認するプランのリテラル型アサーション
++
++test("未ログインの直接アクセスはクラブ用・Platform用の正規入口へ戻る", // E2Eケースを登録する関数
++  /**
++   * 空のbrowser contextから各保護URLへ要求し、HTTP redirectと最終URLを確認する。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    const routes = [
++      [authorization.path("a"), "/club-login"], // 所有クラブの会員パスを作る関数
++      [authorization.path("a", "admin/events"), "/club-login"], // 所有クラブの管理パスを作る関数
++      [authorization.path("a", "admin/members"), "/club-login"], // 所有クラブのOWNERパスを作る関数
++      ["/platform/support", "/platform-login"],
++    ];
++    for (const [path, destination] of routes) {
++      const response = await page.goto(path); // 未認証の保護URLを開くメソッド
++      expect(response?.status()).toBe(200); // 期待値生成関数 / 最終HTTP状態取得メソッド / 正常応答の検証メソッド
++      expect(new URL(page.url()).pathname).toBe(destination); // 期待値生成関数 / URL解析コンストラクター / 現在URL取得メソッド / 入口の照合メソッド
++      const redirected = response?.request().redirectedFrom(); // 最終要求を返すメソッド / redirect前の要求を返すメソッド
++      expect(redirected !== null && // 期待値生成関数 / redirect存在の検証メソッド
++        redirected !== undefined).toBe(true); // 期待値生成関数 / redirect存在の検証メソッド
++      const initial = await redirected?.response(); // redirect元のHTTP応答を返すメソッド
++      expect([303, 307, 308].includes(initial?.status() ?? 0)).toBe(true); // 期待値生成関数 / redirect状態の照合メソッド / HTTP状態取得メソッド / 真偽値の検証メソッド
++    }
++  },
++);
++
++for (const [user, administrator, owner] of A_ROLES) {
++  test(`${user}はAの会員画面とロールに対応する正常導線だけを利用できる`, // ロール別E2Eケースを登録する関数
++    /**
++     * 実フォームからログインし、管理リンク・管理URL・OWNER URLを別々に検証する。
++     */
++    async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++      const member = authorization.path("a"); // Aの会員パスを作る関数
++      await authorization.login(user, user === "aOwner" ? "/club/select" : member); // 本人の実passwordでログインする関数
++      if (user === "aOwner") {
++        await expect(page.getByRole("heading", { // 期待値生成関数 / 選択画面の見出しを選ぶメソッド / 表示検証メソッド
++          name: "クラブを選択",
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / 選択画面の見出しを選ぶメソッド / 表示検証メソッド
++        await page.locator(`a[href="${member}"]`).click(); // Aの正規リンクを選ぶメソッド / リンクを操作するメソッド
++      }
++      await expect(page.getByRole("heading", { // 期待値生成関数 / 会員見出しを選ぶメソッド / 表示検証メソッド
++        name: "月別イベント",
++        exact: true
++      })).toBeVisible(); // 期待値生成関数 / 会員見出しを選ぶメソッド / 表示検証メソッド
++      if (administrator) {
++        await page.getByRole("link", { // 正常な管理リンクを選ぶメソッド / リンクを操作するメソッド
++          name: "イベント管理",
++          exact: true
++        }).click(); // 正常な管理リンクを選ぶメソッド / リンクを操作するメソッド
++        await expect(page.getByRole("heading", { // 期待値生成関数 / 管理見出しを選ぶメソッド / 表示検証メソッド
++          name: "月別イベント管理",
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / 管理見出しを選ぶメソッド / 表示検証メソッド
++        expect(new URL(page.url()).pathname).toBe(authorization.path("a", "admin/events")); // 期待値生成関数 / URL解析コンストラクター / 現在URL取得メソッド / パス照合メソッド / 所有管理パス生成関数
++      } else {
++        await expect(page.getByRole("link", { // 期待値生成関数 / 管理リンクを選ぶメソッド / リンク非表示の検証メソッド
++          name: "イベント管理",
++          exact: true
++        })).toHaveCount(0); // 期待値生成関数 / 管理リンクを選ぶメソッド / リンク非表示の検証メソッド
++      }
++      const admin = authorization.path("a", "admin/events"); // Aの管理パスを作る関数
++      if (administrator) {
++        expect((await page.goto(admin))?.status()).toBe(200); // 期待値生成関数 / 管理URLを直接開くメソッド / HTTP状態取得メソッド / 正常応答の検証メソッド
++      } else {
++        await authorization.deny(admin); // MEMBERによる管理URLの拒否を確認する関数
++      }
++      const members = authorization.path("a", "admin/members"); // AのOWNERパスを作る関数
++      if (owner) {
++        expect((await page.goto(members))?.status()).toBe(200); // 期待値生成関数 / OWNER URLを開くメソッド / HTTP状態取得メソッド / 正常応答の検証メソッド
++        await expect(page.getByRole("heading", { // 期待値生成関数 / OWNER見出しを選ぶメソッド / 表示検証メソッド
++          name: "メンバー管理",
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / OWNER見出しを選ぶメソッド / 表示検証メソッド
++      } else {
++        await authorization.deny(members); // OWNER以外の直接アクセス拒否を確認する関数
++      }
++    },
++  );
++}
++
++for (const owner of [true, false]) {
++  test(owner ? "B OWNERはBの正規管理画面を利用できる" : "A OWNER兼B MEMBERはBへAのOWNER権限を持ち込めない", // Bのロール別E2Eケースを登録する関数
++    /**
++     * B OWNERとA OWNER兼B MEMBERを分け、Bの公開対象と管理権限を確認する。
++     */
++    async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++      const member = authorization.path("b"); // Bの会員パスを作る関数
++      await authorization.login(owner ? "bOwner" : "aOwner", owner ? member : "/club/select"); // Bでの役割が異なる本人を実ログインさせる関数
++      if (!owner) {
++        await expect(page.getByRole("heading", { // 期待値生成関数 / 複数所属の見出しを選ぶメソッド / 表示検証メソッド
++          name: "クラブを選択",
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / 複数所属の見出しを選ぶメソッド / 表示検証メソッド
++        await expect(page.locator(`a[href="${authorization.path("a")}"]`)).toBeVisible(); // 期待値生成関数 / Aの正規リンクを選ぶメソッド / 所有パス生成関数 / 表示検証メソッド
++        await page.locator(`a[href="${member}"]`).click(); // Bの正規リンクを選ぶメソッド / リンクを操作するメソッド
++        await expect(page.getByRole("heading", { // 期待値生成関数 / B会員画面の見出しを選ぶメソッド
++          name: "月別イベント",
++          exact: true,
++        })).toBeVisible(); // 会員画面への正常な遷移を確認するメソッド
++        expect(new URL(page.url()).pathname).toBe(member); // 期待値生成関数 / URL解析コンストラクター / 現在URL取得メソッド / Bへの遷移を確認するメソッド
++      }
++      expect((await page.goto(authorization.path("b", "events/list") + "?date=2026-06-10"))?.status()).toBe(200); // 期待値生成関数 / B会員一覧を開くメソッド / 所有パス生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
++      await expect(page.getByText(authorization.publicTitle, { // 期待値生成関数 / MEMBER公開題名を選ぶメソッド / 表示検証メソッド
++        exact: true
++      })).toBeVisible(); // 期待値生成関数 / MEMBER公開題名を選ぶメソッド / 表示検証メソッド
++      await expect(page.getByText(authorization.draftTitle, { // 期待値生成関数 / 下書き題名を選ぶメソッド / 非表示の検証メソッド
++        exact: true
++      })).toHaveCount(0); // 期待値生成関数 / 下書き題名を選ぶメソッド / 非表示の検証メソッド
++      if (owner) {
++        await expect(page.getByText(authorization.staffTitle, { // 期待値生成関数 / OWNERが読めるCOACH公開題名を選ぶメソッド / 表示検証メソッド
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / OWNERが読めるCOACH公開題名を選ぶメソッド / 表示検証メソッド
++        expect((await page.goto(authorization.path("b", "admin/events")))?.status()).toBe(200); // 期待値生成関数 / B管理画面を開くメソッド / 所有パス生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
++        expect((await page.goto(authorization.path("b", "admin/members")))?.status()).toBe(200); // 期待値生成関数 / B OWNER画面を開くメソッド / 所有パス生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
++      } else {
++        await expect(page.getByText(authorization.staffTitle, { // 期待値生成関数 / COACH限定題名を選ぶメソッド / 非表示の検証メソッド
++          exact: true
++        })).toHaveCount(0); // 期待値生成関数 / COACH限定題名を選ぶメソッド / 非表示の検証メソッド
++        await authorization.deny(authorization.path("b", "admin/events")); // B管理画面の拒否検証関数 / 所有パス生成関数
++        await authorization.deny(authorization.path("b", "admin/members")); // B OWNER画面の拒否検証関数 / 所有パス生成関数
++      }
++    },
++  );
++}
++
++for (const status of INACTIVE) {
++  test(`${status}の本人も認証できるが、所属先へ入れない`, // 非ACTIVE状態別のE2Eケースを登録する関数
++    /**
++     * password認証とACTIVE所属の認可を分け、所属のない画面へ遷移することを確認する。
++     */
++    async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++      await authorization.configure({ // 所有する会員の状態だけを準備する関数
++        memberships: {
++          aMember: {
++            status
++          }
++        }
++      });
++      await authorization.login("aMember", "/club/select"); // 非ACTIVEの本人を正規フォームから認証する関数
++      await expect(page.getByRole("heading", { // 期待値生成関数 / 所属なしの見出しを選ぶメソッド / 表示検証メソッド
++        name: "所属クラブがありません",
++        exact: true
++      })).toBeVisible(); // 期待値生成関数 / 所属なしの見出しを選ぶメソッド / 表示検証メソッド
++      await authorization.deny(authorization.path("a")); // 会員URLの拒否検証関数 / 所有パス生成関数
++      await authorization.deny(authorization.path("a", "admin/events")); // 管理URLの拒否検証関数 / 所有パス生成関数
++    },
++  );
++
++  test(`既存Cookieがあっても、最新DBの${status}を確認して拒否する`, // Cookie再認可のE2Eケースを登録する関数
++    /**
++     * ACTIVE時に実認証し、同じpageとCookieのまま所属を失効させて直接アクセスする。
++     */
++    async ({ authorization }) => { // 新規pageに束縛した所有fixtureを受け取るコールバック
++      await authorization.login("aCoach", authorization.path("a")); // ACTIVEの本人を実ログインさせる関数 / 所有パス生成関数
++      const cookie = await authorization.cookieFingerprint(); // Cookie原文を出さず比較値を取得する関数
++      await authorization.configure({ // 当該本人の最新DB状態を変更する関数
++        memberships: {
++          aCoach: {
++            status
++          }
++        }
++      });
++      await authorization.deny(authorization.path("a", "admin/events")); // 既存Cookieによる管理URLの拒否検証関数 / 所有パス生成関数
++      await authorization.deny(authorization.path("a")); // 既存Cookieによる会員URLの拒否検証関数 / 所有パス生成関数
++      expect(await authorization.cookieFingerprint()).toBe(cookie); // 期待値生成関数 / 同じCookieの比較値を取得する関数 / Cookie維持の検証メソッド
++    },
++  );
++}
++
++test("OFFICERからMEMBERへ変更した既存Cookieは会員画面だけを利用できる", // ロール再認可のE2Eケースを登録する関数
++  /**
++   * 管理者でログインしたCookieを作り直さず、最新のMEMBER権限へ降格することを確認する。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    await authorization.login("aOfficer", authorization.path("a")); // 実passwordで管理者本人を認証する関数 / 所有パス生成関数
++    expect((await page.goto(authorization.path("a", "admin/events")))?.status()).toBe(200); // 期待値生成関数 / 変更前の管理URLを開くメソッド / 所有パス生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
++    const cookie = await authorization.cookieFingerprint(); // Cookieの比較値を取得する関数
++    await authorization.configure({ // 所有本人の最新ロールだけを変更する関数
++      memberships: {
++        aOfficer: {
++          role: "MEMBER"
++        }
++      }
++    });
++    expect((await page.goto(authorization.path("a")))?.status()).toBe(200); // 期待値生成関数 / 会員URLを開くメソッド / 所有パス生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
++    await expect(page.getByRole("link", { // 期待値生成関数 / 管理リンクを選ぶメソッド / 非表示の検証メソッド
++      name: "イベント管理",
++      exact: true
++    })).toHaveCount(0); // 期待値生成関数 / 管理リンクを選ぶメソッド / 非表示の検証メソッド
++    await authorization.deny(authorization.path("a", "admin/events")); // 降格後の管理URL拒否検証関数 / 所有パス生成関数
++    await authorization.deny(authorization.path("a", "admin/members")); // OWNER URLの拒否検証関数 / 所有パス生成関数
++    expect(await authorization.cookieFingerprint()).toBe(cookie); // 期待値生成関数 / 既存Cookieの比較値取得関数 / Cookie維持の検証メソッド
++  },
++);
++
++for (const planType of PLANS) {
++  test(`${planType}のアプリ利用可否をログイン後の遷移と直接URLで確認する`, // プラン別E2Eケースを登録する関数
++    /**
++     * 認証可能でもSTARTER・PROではアプリを使えず、STANDARDだけが利用できることを確認する。
++     */
++    async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++      await authorization.configure({ // 所有クラブのプランを準備する関数
++        plans: {
++          a: planType
++        }
++      });
++      const member = authorization.path("a"); // Aの会員パスを作る関数
++      await authorization.login("aMember", planType === "STANDARD" ? member : "/club/select"); // 実認証後の期待遷移先を指定する関数
++      if (planType === "STANDARD") {
++        expect((await page.goto(member))?.status()).toBe(200); // 期待値生成関数 / 会員URLを直接開くメソッド / HTTP状態取得メソッド / 正常応答の検証メソッド
++      } else {
++        await expect(page.getByRole("heading", { // 期待値生成関数 / プラン拒否の見出しを選ぶメソッド / 表示検証メソッド
++          name: "アプリを利用できるクラブがありません",
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / プラン拒否の見出しを選ぶメソッド / 表示検証メソッド
++        await authorization.deny(member); // プランによる直接URLの拒否を検証する関数
++        await authorization.deny(authorization.path("a", "admin/events")); // 管理URLの拒否検証関数 / 所有パス生成関数
++      }
++    },
++  );
++}
++
++for (const planType of ["STARTER", "PRO"] as const) { // 利用不可プランのリテラル型アサーション
++  test(`既存Cookieがあっても、STANDARDから${planType}への変更を反映する`, // 最新プランのE2Eケースを登録する関数
++    /**
++     * Cookieや認証状態を入れ替えず、プランの最新DB値による拒否を確認する。
++     */
++    async ({ authorization }) => { // 当該pageに束縛した所有fixtureを受け取るコールバック
++      await authorization.login("aMember", authorization.path("a")); // 実passwordで認証する関数 / 所有パス生成関数
++      const cookie = await authorization.cookieFingerprint(); // Cookieの比較値を取得する関数
++      await authorization.configure({ // 所有クラブの最新プランを変更する関数
++        plans: {
++          a: planType
++        }
++      });
++      await authorization.deny(authorization.path("a")); // プラン失効後の拒否検証関数 / 所有パス生成関数
++      expect(await authorization.cookieFingerprint()).toBe(cookie); // 期待値生成関数 / 同じCookieの比較値を取得する関数 / Cookie維持の検証メソッド
++    },
++  );
++}
++
++test("複数所属でも利用できるクラブが一件なら、そのクラブへ移動する", // 所属分岐のE2Eケースを登録する関数
++  /**
++   * BをSTARTERにして、実ログインと選択画面の双方からAへ移動することを確認する。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    await authorization.configure({ // Bだけをアプリ対象外へ準備する関数
++      plans: {
++        b: "STARTER"
++      }
++    });
++    await authorization.login("aOwner", authorization.path("a")); // 利用可能な一件へ実ログインする関数 / 所有パス生成関数
++    expect((await page.goto("/club/select"))?.status()).toBe(200); // 期待値生成関数 / 選択画面を開くメソッド / 最終HTTP状態取得メソッド / 正常応答の検証メソッド
++    expect(new URL(page.url()).pathname).toBe(authorization.path("a")); // 期待値生成関数 / URL解析コンストラクター / 現在URL取得メソッド / 一件への遷移検証メソッド / 所有パス生成関数
++    await authorization.deny(authorization.path("b")); // 利用不可のBへの拒否検証関数 / 所有パス生成関数
++  },
++);
++
++test("複数所属でも利用できるクラブが零件なら、利用不可の選択画面を表示する", // 所属分岐のE2Eケースを登録する関数
++  /**
++   * ACTIVE所属があっても、利用可能プランがなければアプリへ移動しないことを確認する。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    await authorization.configure({ // 二クラブの利用不可プランを準備する関数
++      plans: {
++        a: "STARTER",
++        b: "PRO"
++      }
++    });
++    await authorization.login("aOwner", "/club/select"); // ACTIVE所属のある本人を実認証する関数
++    await expect(page.getByRole("heading", { // 期待値生成関数 / 利用不可の見出しを選ぶメソッド / 表示検証メソッド
++      name: "アプリを利用できるクラブがありません",
++      exact: true
++    })).toBeVisible(); // 期待値生成関数 / 利用不可の見出しを選ぶメソッド / 表示検証メソッド
++    await authorization.deny(authorization.path("a")); // Aの直接URLの拒否検証関数 / 所有パス生成関数
++    await authorization.deny(authorization.path("b")); // Bの直接URLの拒否検証関数 / 所有パス生成関数
++  },
++);
++
++test("Aの一般会員は、実在する別クラブと未知slugへ入れない", // 所属境界のE2Eケースを登録する関数
++  /**
++   * 一般会員がAだけに所属することを、実在するBと未知slugへの直接アクセスで確認する。
++   */
++  async ({ authorization }) => { // 当該pageに束縛した所有fixtureを受け取るコールバック
++    await authorization.login("aMember", authorization.path("a")); // Aだけの本人を実認証する関数 / 所有パス生成関数
++    await authorization.deny(authorization.path("b")); // 実在する別クラブの拒否検証関数 / 所有パス生成関数
++    await authorization.deny(authorization.missingPath); // 存在しないslugの拒否を確認する関数
++  },
++);
++
++for (const role of ["DEVELOPER", "SUPPORT"] as const) { // 有効なPlatformロールのリテラル型アサーション
++  test(`クラブ所属のない${role}がPlatformの正規入口から両クラブの報告を読める`, // 独立PlatformのE2Eケースを登録する関数
++    /**
++     * クラブのAppUser・Membershipを持たない運営者が、意図した複数クラブ閲覧だけを行う。
++     */
++    async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++      await authorization.configure({ // 所有PlatformAdminのロールを準備する関数
++        platform: {
++          role
++        }
++      });
++      await authorization.login("platformAdmin", "/platform/support", "platform"); // Platformの正規フォームから実認証する関数
++      for (const club of ["a", "b"] as const) { // 所有クラブキーのリテラル型アサーション
++        expect((await page.goto(authorization.supportPath(club)))?.status()).toBe(200); // 期待値生成関数 / 対象クラブの報告を開くメソッド / 所有Platformパス生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
++        await page.getByText("本文・内部メモ・環境情報", { // 【追加】折り畳まれた報告の詳細を選ぶメソッド
++          exact: true,
++        }).click(); // 【追加】報告本文を表示する正規操作のメソッド
++        await expect(page.getByText(authorization.reportMessages[club], { // 期待値生成関数 / 対象クラブの報告本文を選ぶメソッド / 表示検証メソッド
++          exact: true
++        })).toBeVisible(); // 期待値生成関数 / 対象クラブの報告本文を選ぶメソッド / 表示検証メソッド
++        const other = club === "a" ? "b" : "a";
++        await expect(page.getByText(authorization.reportMessages[other], { // 期待値生成関数 / 対象外クラブの報告本文を選ぶメソッド / フィルターの検証メソッド
++          exact: true
++        })).toHaveCount(0); // 期待値生成関数 / 対象外クラブの報告本文を選ぶメソッド / フィルターの検証メソッド
++      }
++      await authorization.deny(authorization.path("a")); // Platform権限だけではクラブ会員にならないことの拒否検証関数 / 所有パス生成関数
++      await authorization.deny(authorization.path("b", "admin/members")); // Platform権限だけではクラブOWNERにならないことの拒否検証関数 / 所有パス生成関数
++    },
++  );
++}
++
++test("有効なPlatform Cookieでも、最新DBで無効になれば管理URLへ入れない", // Platform再認可のE2Eケースを登録する関数
++  /**
++   * 正規入口で取得したCookieを維持し、PlatformAdminのisActiveだけを失効させる。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    await authorization.login("platformAdmin", "/platform/support", "platform"); // 正規のPlatformフォームで実認証する関数
++    const cookie = await authorization.cookieFingerprint(); // 既存Cookieの比較値を取得する関数
++    await authorization.configure({ // 所有するPlatformAdminだけを無効化する関数
++      platform: {
++        isActive: false
++      }
++    });
++    await authorization.deny("/platform/support"); // 最新DBによるPlatform拒否を確認する関数
++    expect((await page.goto("/platform-login"))?.status()).toBe(200); // 期待値生成関数 / Platform入口を開くメソッド / HTTP状態取得メソッド / 正常応答の検証メソッド
++    await expect(page.getByRole("heading", { // 期待値生成関数 / Platform入口の見出しを選ぶメソッド / 表示検証メソッド
++      name: "Platformログイン",
++      exact: true
++    })).toBeVisible(); // 期待値生成関数 / Platform入口の見出しを選ぶメソッド / 表示検証メソッド
++    expect(await authorization.cookieFingerprint()).toBe(cookie); // 期待値生成関数 / 同じCookieの比較値を取得する関数 / Cookie維持の検証メソッド
++  },
++);
++
++test("一般OWNERの既存CookieはPlatform権限を持たない", // クラブ権限とPlatformの分離を確認するE2Eケースを登録する関数
++  /**
++   * 一般OWNERの既存セッションを維持したまま、Platform管理URLを拒否する。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    await authorization.login("aOwner", "/club/select"); // 一般OWNERを実認証する関数
++    const cookie = await authorization.cookieFingerprint(); // 既存Cookieの比較値を取得する関数
++    await authorization.deny("/platform/support"); // クラブOWNERのPlatform越権を拒否する関数
++    expect((await page.goto("/platform-login"))?.status()).toBe(200); // 期待値生成関数 / Platform入口を開くメソッド / HTTP状態取得メソッド / 正常応答の検証メソッド
++    await expect(page.getByRole("heading", { // 期待値生成関数 / Platform入口の見出しを選ぶメソッド / 表示検証メソッド
++      name: "Platformログイン",
++      exact: true
++    })).toBeVisible(); // 期待値生成関数 / Platform入口の見出しを選ぶメソッド / 表示検証メソッド
++    expect(await authorization.cookieFingerprint()).toBe(cookie); // 期待値生成関数 / 同じCookieの比較値を取得する関数 / Cookie維持の検証メソッド
++  },
++);
++
++test("クラブ所属のない独立運営者はクラブ用ログイン後も所属なし画面に留まる", // 零所属のE2Eケースを登録する関数
++  /**
++   * Auth本人の存在だけでクラブ所属やAppUserを自動作成しないことを確認する。
++   */
++  async ({ page, authorization }) => { // 新規pageと所有fixtureを受け取るコールバック
++    await authorization.login("platformAdmin", "/club/select"); // クラブ用フォームで独立運営者を実認証する関数
++    await expect(page.getByRole("heading", { // 期待値生成関数 / 零所属の見出しを選ぶメソッド / 表示検証メソッド
++      name: "所属クラブがありません",
++      exact: true
++    })).toBeVisible(); // 期待値生成関数 / 零所属の見出しを選ぶメソッド / 表示検証メソッド
++    await authorization.deny(authorization.path("a")); // 会員権限のないAへの拒否検証関数 / 所有パス生成関数
++    await authorization.deny(authorization.missingPath); // 未知slugの拒否を確認する関数
++  },
++);
+diff --git a/e2e/fixtures.ts b/e2e/fixtures.ts
+new file mode 100644
+index 0000000..7ccdd3f
+--- /dev/null
++++ b/e2e/fixtures.ts
+@@ -0,0 +1,740 @@
++// e2e/fixtures.ts
++// 実Cookieと所有する既存seedを使い、認可シナリオの準備・非更新確認・復元を行う。
++
++import {
++  createHash,
++  randomUUID,
++} from "node:crypto";
++import {
++  test as base,
++  expect,
++} from "@playwright/test";
++import type {
++  ClubMemberRole,
++  ClubMembershipStatus,
++  PlanType,
++  PlatformAdminRole,
++  PrismaClient,
++} from "@prisma/client";
++import {
++  z,
++} from "zod";
++
++import {
++  requireMvpTestEnvironment, // F12専用の接続前ガード関数
++} from "../tests/mvp/environment";
++
++const USERS = [
++  "aOwner",
++  "aCoach",
++  "aOfficer",
++  "aMember",
++  "bOwner",
++  "platformAdmin",
++] as const; // 本人キーのリテラル型を保持する型アサーション
++const ACTORS = [
++  "aOwner",
++  "aCoach",
++  "aOfficer",
++  "aMember",
++  "bOwner",
++  "bMember",
++] as const; // 所属キーのリテラル型を保持する型アサーション
++const CLUBS = ["a", "b"] as const; // 二クラブのリテラル型を保持する型アサーション
++const SETUP_ERROR = "F12_AUTHORIZATION_SETUP_FAILED";
++const CHANGED_ERROR = "F12_AUTHORIZATION_BUSINESS_DB_CHANGED";
++const RESTORE_ERROR = "F12_AUTHORIZATION_RESTORE_FAILED";
++const LOGIN_ERROR = "F12_AUTHORIZATION_LOGIN_FAILED";
++const COOKIE_ERROR = "F12_AUTHORIZATION_COOKIE_MISSING";
++
++const userSchema = z.object({ // 本人識別情報の構造を検証する関数
++  id: z.string().uuid(), // 文字列型のUUIDを検証する関数
++  email: z.string().email(), // 文字列型のメール形式を検証する関数
++});
++const clubSchema = z.object({ // 所有クラブの構造を検証する関数
++  id: z.string().uuid(), // 文字列型のUUIDを検証する関数
++  slug: z.string(), // slugの文字列型を検証する関数
++  planType: z.enum(["STARTER", "STANDARD", "PRO"]), // DBと一致するプランの列挙型を検証する関数
++});
++const actorSchema = z.object({ // 本人・所属・クラブの対応を検証する関数
++  userId: z.string().uuid(), // 本人IDの文字列型を検証する関数
++  membershipId: z.string().uuid(), // 所属IDの文字列型を検証する関数
++  clubId: z.string().uuid(), // クラブIDの文字列型を検証する関数
++  role: z.enum(["OWNER", "COACH", "OFFICER", "MEMBER"]), // 所属ロールの列挙型を検証する関数
++  status: z.enum(["INVITED", "ACTIVE", "SUSPENDED", "WITHDRAWN"]), // 所属状態の列挙型を検証する関数
++});
++const payloadSchema = z.object({ // 制御secretで受け取ったデータの構造を検証する関数
++  fixture: z.object({ // 登録済みfixtureの構造を検証する関数
++    database: z.object({ // DBの識別情報を検証する関数
++      runId: z.string().regex(/^[0-9a-f]{32}$/u), // 実行識別子の文字列型と書式を検証する関数
++      scopeId: z.string().uuid(), // 所有範囲を表すUUIDの文字列型を検証する関数
++      clubs: z.object({ // 二クラブの対応を検証する関数
++        a: clubSchema,
++        b: clubSchema,
++      }),
++      users: z.record(z.enum(USERS), userSchema), // 必須本人キーと本人情報の対応型を検証する関数
++      actors: z.record(z.enum(ACTORS), actorSchema), // 必須所属キーと所属情報の対応型を検証する関数
++    }),
++    credentials: z.record(z.enum(USERS), z.object({ // 必須本人キーと認証情報の対応型を検証する関数
++      email: z.string().email(), // メール文字列型を検証する関数
++      password: z.string().min(12), // 検証用passwordの文字列型と長さを検証する関数
++    })),
++  }),
++});
++
++/**
++ * ログインする既存fixtureの本人キー。B MEMBERはA OWNERと同じ本人を使う。
++ */
++export type AuthorizationUser = typeof USERS[number]; // 本人キー型 / 配列要素を参照する型
++
++/**
++ * 正規の画面アクセス前後に、所有行だけへ設定するプラン・所属・Platform状態。
++ */
++export type AuthorizationOverrides = { // 認可シナリオの準備入力型
++  plans?: Partial<Record<typeof CLUBS[number], PlanType>>; // 任意のクラブキーとプラン型の対応型
++  memberships?: Partial<Record<typeof ACTORS[number], { // 任意の所属キーと変更情報の対応型
++    role?: ClubMemberRole; // 所属ロールの列挙型
++    status?: ClubMembershipStatus; // 所属状態の列挙型
++  }>>;
++  platform?: {
++    isActive?: boolean; // Platform権限の有効状態を表す真偽値型
++    role?: PlatformAdminRole; // Platform運営者のロール型
++  };
++};
++
++/**
++ * 秘密を公開せず、同じテストのpageと所有seedに限定して操作する認可試験API。
++ */
++export type AuthorizationScenario = { // 一件の認可試験で使用する操作契約型
++  path: (club: typeof CLUBS[number], section?: "events" | "events/list" | "admin/events" | "admin/members") => string; // 所有クラブキーから同クラブのパスを返す関数型
++  configure: (input: AuthorizationOverrides) => Promise<void>; // 所有行だけを変更する関数型 / 準備入力型 / 非同期結果型
++  login: ( // 実passwordフォームからログインする関数型
++    user: AuthorizationUser, // 既存fixtureの本人キー型
++    destination: string, // 期待する固定遷移先の文字列型
++    entry?: "club" | "platform", // ログイン入口のリテラル型
++  ) => Promise<void>; // 非同期処理の完了を表す型
++  deny: (path: string) => Promise<void>; // HTTP状態・404 UI・noindexを検証する関数型 / 非同期結果型
++  cookieFingerprint: () => Promise<string>; // Cookie原文を出さず比較値を返す関数型 / 非同期結果型
++  missingPath: string; // 所有クラブと異なるslugのパス文字列型
++  publicTitle: string; // B MEMBERにも公開する題名の文字列型
++  staffTitle: string; // B OWNER・COACHへ公開する題名の文字列型
++  draftTitle: string; // Bの下書き題名の文字列型
++  supportPath: (club: typeof CLUBS[number]) => string; // Platformの対象クラブを選ぶパス生成関数型
++  reportMessages: Readonly<Record<typeof CLUBS[number], string>>; // 二クラブの固定報告本文を保持する読取専用型
++};
++
++/**
++ * 拒否されたアクセスが業務行を書き換えないことを、所有範囲のハッシュで確認する。
++ * Auth自身のセッション更新とLoginSubmissionLogの正規の監査記録は比較対象にしない。
++ */
++async function fingerprint( // 所有する業務行の比較値を作る関数
++  database: PrismaClient, // ガード後に生成した専用DB client型
++  clubIds: string[], // 所有クラブIDの文字列配列型
++  userIds: string[], // 所有本人IDの文字列配列型
++): Promise<string> { // 比較値の文字列を返す非同期結果型
++  const where = {
++    clubId: {
++      in: clubIds,
++    },
++  };
++  const orderBy = {
++    id: "asc" as const, // ID順のリテラル型を保持する型アサーション
++  };
++  const rows = await database.$transaction([ // 一貫した業務行のスナップショットを取得するメソッド
++    database.club.findMany({ // 所有クラブを取得するメソッド
++      where: {
++        id: {
++          in: clubIds
++        }
++      },
++      orderBy
++    }),
++    database.appUser.findMany({ // 所有AppUserを取得するメソッド
++      where: {
++        id: {
++          in: userIds
++        }
++      },
++      orderBy
++    }),
++    database.platformAdmin.findMany({ // 所有PlatformAdminを取得するメソッド
++      where: {
++        id: {
++          in: userIds
++        }
++      },
++      orderBy
++    }),
++    database.child.findMany({ // 所有本人の子どもを取得するメソッド
++      where: {
++        parentId: {
++          in: userIds
++        }
++      },
++      orderBy
++    }),
++    database.clubMembership.findMany({ // 所有所属を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.childClubMembership.findMany({ // 所有クラブの子ども所属を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubEvent.findMany({ // 所有イベントを取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubNotice.findMany({ // 所有お知らせを取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubEventAttachment.findMany({ // 所有イベント添付を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubNoticeAttachment.findMany({ // 所有お知らせ添付を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubEventRead.findMany({ // 所有イベント既読を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubNoticeRead.findMany({ // 所有お知らせ既読を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubEventMemo.findMany({ // 所有メモを取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubInvitation.findMany({ // 所有招待を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubLineSetting.findMany({ // 所有LINE設定を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubLineTarget.findMany({ // 所有LINE対象を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubLineRegistrationToken.findMany({ // 所有LINE登録tokenを取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubLineDelivery.findMany({ // 所有LINE配送記録を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.storageDeletionJob.findMany({ // 所有Storage jobを取得するメソッド
++      where,
++      orderBy
++    }),
++    database.supportReport.findMany({ // 所有サポート報告を取得するメソッド
++      where,
++      orderBy
++    }),
++    database.clubEventBatchOperation.findMany({ // 所有イベント一括操作記録を取得するメソッド
++      where,
++      orderBy
++    }),
++  ], {
++    isolationLevel: "RepeatableRead",
++  });
++  return createHash("sha256").update(JSON.stringify(rows)).digest("hex"); // ハッシュ生成関数 / JSON直列化関数 / 入力追加メソッド / ハッシュ確定メソッド
++}
++
++/**
++ * テストごとに新しいpageを使い、所有行の準備・HTTP確認後の非更新検査・復元を実行する。
++ */
++export const test = base.extend<{ authorization: AuthorizationScenario }>({ // fixtureを追加する関数 / 認可試験APIの型
++  /**
++   * runnerの所有契約を検証してからDB clientを生成し、公開する操作を当該pageへ束縛する。
++   */
++  authorization: async ({ page }, provide, testInfo) => { // page・fixture受渡し関数・試験情報を受け取るコールバック
++    let database: PrismaClient | undefined; // 初期化済み専用DB clientまたは未設定の型
++    try {
++      if (testInfo.config.workers !== 1) {
++        throw new Error(SETUP_ERROR); // 共有する所有seedの並列変更を拒否する固定例外コンストラクター
++      }
++      const { readMvpE2eSession } = await import("../tests/mvp/outbound-stub.mjs"); // 所有契約を検証する関数 / ESM moduleの遅延読込関数
++      const session = readMvpE2eSession(); // preloader・明示flag・接続契約を検証する関数
++      // browser段階の所有確認後だけ、launcher用ガードへ渡す検証辞書をtestとして扱う。
++      // 既存preloaderがworkerへ継承するproductionと、Next本体の環境は変更しない。
++      const environment = requireMvpTestEnvironment( // 接続前ガード関数
++        {
++          ...process.env,
++          NODE_ENV: "test",
++          // 所有確認済みpreloaderの指定は残したまま、検証用辞書からだけ除く。
++          NODE_OPTIONS: undefined,
++        },
++        process.cwd(), // 作業ディレクトリの取得関数
++        session.runId,
++      );
++      if (environment.appOrigin !== session.appOrigin) {
++        throw new Error(SETUP_ERROR); // 所有入口の不一致を拒否する固定例外コンストラクター
++      }
++      const response = await fetch(session.stubOrigin + "/control", { // 所有する制御入口へ要求する関数
++        method: "POST",
++        headers: {
++          "Content-Type": "application/json",
++          "x-mvp-secret": session.secret,
++        },
++        body: JSON.stringify({ // 秘密をログへ渡さず制御要求を直列化する関数
++          runId: session.runId,
++          action: "read",
++        }),
++        signal: AbortSignal.timeout(5000), // 制御要求の期限signalを生成する関数
++        redirect: "error",
++      });
++      if (!response.ok) {
++        throw new Error(SETUP_ERROR); // 制御要求の失敗を固定例外にするコンストラクター
++      }
++      const { database: data, credentials } = payloadSchema.parse(await response.json()).fixture; // 構造検証メソッド / JSON応答を取得するメソッド
++      if (data.runId !== session.runId) {
++        throw new Error(SETUP_ERROR); // 別実行のfixtureを拒否する固定例外コンストラクター
++      }
++      for (const club of CLUBS) {
++        if (data.clubs[club].slug !== `mvp-f12-${data.scopeId}-${club}`) {
++          throw new Error(SETUP_ERROR); // 所有slug不一致の固定例外コンストラクター
++        }
++      }
++      for (const user of USERS) {
++        const email = `mvp-f12-${data.scopeId}-${user.toLowerCase()}@example.test`; // 本人キーを小文字にするメソッド
++        if (data.users[user].email !== email ||
++          credentials[user].email !== email) {
++          throw new Error(SETUP_ERROR); // 所有メール不一致の固定例外コンストラクター
++        }
++      }
++      const definitions = [
++        ["aOwner", "a", "aOwner", "OWNER"],
++        ["aCoach", "a", "aCoach", "COACH"],
++        ["aOfficer", "a", "aOfficer", "OFFICER"],
++        ["aMember", "a", "aMember", "MEMBER"],
++        ["bOwner", "b", "bOwner", "OWNER"],
++        ["bMember", "b", "aOwner", "MEMBER"],
++      ] as const; // fixtureの対応関係を表すリテラル型の型アサーション
++      for (const [actor, club, user, role] of definitions) {
++        const value = data.actors[actor];
++        if (
++          value.clubId !== data.clubs[club].id ||
++          value.userId !== data.users[user].id ||
++          value.role !== role ||
++          value.status !== "ACTIVE" ||
++          value.userId === data.users.platformAdmin.id
++        ) {
++          throw new Error(SETUP_ERROR); // 本人・所属・ロールの不一致を拒否する固定例外コンストラクター
++        }
++      }
++      const { PrismaClient } = await import("@prisma/client"); // DB clientのコンストラクター / moduleの遅延読込関数
++      const { PrismaPg } = await import("@prisma/adapter-pg"); // PostgreSQL adapterのコンストラクター / moduleの遅延読込関数
++      database = new PrismaClient({ // 専用DB clientのコンストラクター
++        adapter: new PrismaPg({ // 専用PostgreSQL adapterのコンストラクター
++          connectionString: environment.databaseUrl,
++          max: 1,
++          connectionTimeoutMillis: 3000,
++          statement_timeout: 5000,
++        }),
++        log: [],
++      });
++      const client = database;
++      const clubIds = CLUBS.map( // 所有クラブIDを配列へ写すメソッド
++        /**
++         * 制御secretで確認した所有クラブのIDだけを選ぶ。
++         */
++        (key) => data.clubs[key].id, // 所有クラブIDを選ぶコールバック
++      );
++      const userIds = USERS.map( // 所有本人IDを配列へ写すメソッド
++        /**
++         * 制御secretで確認した所有本人のIDだけを選ぶ。
++         */
++        (key) => data.users[key].id, // 所有本人IDを選ぶコールバック
++      );
++      const original = {
++        clubs: await client.club.findMany({ // 所有IDとslugのDB照合に使う行を取得するメソッド
++          where: {
++            id: {
++              in: clubIds
++            }
++          },
++        }),
++        memberships: await client.clubMembership.findMany({ // 所有クラブの所属行を取得するメソッド
++          where: {
++            clubId: {
++              in: clubIds
++            }
++          },
++        }),
++        admin: await client.platformAdmin.findUniqueOrThrow({ // 所有する独立PlatformAdminを取得するメソッド
++          where: {
++            id: data.users.platformAdmin.id
++          },
++        }),
++      };
++      if (
++        original.clubs.length !== 2 ||
++        original.memberships.length !== 6 ||
++        !original.admin.isActive ||
++        original.admin.role !== "DEVELOPER" ||
++        await client.appUser.count({ // 独立運営者のAppUserが自動作成されていないか確認するメソッド
++          where: {
++            id: data.users.platformAdmin.id
++          },
++        }) !== 0
++      ) {
++        throw new Error(SETUP_ERROR); // 所有行の不足・追加を拒否する固定例外コンストラクター
++      }
++      for (const club of original.clubs) {
++        if (!CLUBS.some( // IDとslugの対応を検証するメソッド
++          /**
++           * DBの行が制御入口で確認した同じクラブかを照合する。
++           */
++          (key) => data.clubs[key].id === club.id && // 所有クラブを照合するコールバック
++            data.clubs[key].slug === club.slug, // 所有クラブを照合するコールバック
++        )) {
++          throw new Error(SETUP_ERROR); // DB所有範囲不一致の固定例外コンストラクター
++        }
++      }
++      for (const [key] of definitions) {
++        const actor = data.actors[key];
++        if (!original.memberships.some( // 本人・所属・クラブの一致を検証するメソッド
++          /**
++           * DBの所属が登録済みの同じ本人・クラブ・初期状態であることを確認する。
++           */
++          (row) => row.id === actor.membershipId && // 所有する値を受け取り、この照合処理を実行するコールバック
++            row.clubId === actor.clubId &&
++            row.userId === actor.userId &&
++            row.role === actor.role &&
++            row.status === actor.status, // 所有所属を照合するコールバック
++        )) {
++          throw new Error(SETUP_ERROR); // DB所属不一致の固定例外コンストラクター
++        }
++      }
++      const eventIds = [randomUUID(), randomUUID(), randomUUID()]; // 試験が所有するイベントIDを生成する関数
++      const reportIds = [randomUUID(), randomUUID()]; // 試験が所有する報告IDを生成する関数
++      const publicTitle = "F12-B-MEMBER公開";
++      const staffTitle = "F12-B-COACH限定";
++      const draftTitle = "F12-B-下書き";
++      const reportMessages = {
++        a: "F12-Aの認可確認",
++        b: "F12-Bの認可確認"
++      };
++      try {
++        await client.clubEvent.createMany({ // ロール分離だけを確認する最小の三行を作成するメソッド
++          data: ([
++            {
++              id: eventIds[0],
++              title: publicTitle,
++              status: "PUBLISHED",
++              targetRoles: ["OWNER", "MEMBER"]
++            },
++            {
++              id: eventIds[1],
++              title: staffTitle,
++              status: "PUBLISHED",
++              targetRoles: ["OWNER", "COACH"]
++            },
++            {
++              id: eventIds[2],
++              title: draftTitle,
++              status: "DRAFT",
++              targetRoles: ["OWNER", "MEMBER"]
++            },
++          ] as const).map( // 公開状態・対象ロールのリテラル型を保持する型アサーション / 共通情報を追加するメソッド
++            /**
++             * Bクラブの既存OWNERへ紐付けた、当該試験だけの保存入力を作る。
++             */
++            (row) => ({ // イベントの保存入力を作るコールバック
++              ...row,
++              targetRoles: [...row.targetRoles],
++              clubId: data.clubs.b.id,
++              createdByMembershipId: data.actors.bOwner.membershipId,
++              startAt: new Date("2026-06-10T09:00:00Z"), // 固定日時を生成するコンストラクター
++            }),
++          ),
++        });
++        await client.supportReport.createMany({ // 独立Platform権限で両クラブを読むための最小行を作成するメソッド
++          data: CLUBS.map( // 所有クラブごとの報告入力を作るメソッド
++            /**
++             * 会員の本人情報を入れず、所有クラブに固定本文だけを保存する。
++             */
++            (club, index) => ({ // サポート報告入力を作るコールバック
++              id: reportIds[index],
++              clubId: data.clubs[club].id,
++              message: reportMessages[club],
++            }),
++          ),
++        });
++        let expected = await fingerprint(client, clubIds, userIds); // 業務行の初期比較値を作る関数
++        // 正規のpassword認証を通したまま、ケース別の監査用IPで試行件数を分離する。
++        const ip = createHash("sha256").update(session.runId + testInfo.testId).digest(); // 試験専用IPを導出するハッシュ生成関数 / 入力追加メソッド / ハッシュ確定メソッド
++        await page.context().setExtraHTTPHeaders({ // 当該contextだけへリクエストheaderを設定するメソッド / pageのcontextを返すメソッド
++          "x-forwarded-for": `198.18.${ip[0]}.${ip[1]}`,
++        });
++        await provide({ // 当該テストへ秘密を含まない操作APIを渡す関数
++          /**
++           * 所有クラブキーからアプリ内のパスを作る。
++           */
++          path(club, section = "events") { // 所有クラブのパスを作る関数
++            return `/club/${data.clubs[club].slug}/${section}`;
++          },
++          /**
++           * 先行アクセスの非更新を確認してから、所有する認可行だけを変更する。
++           */
++          async configure(input) { // 認可シナリオを準備する関数
++            if (await fingerprint(client, clubIds, userIds) !== expected) { // 変更前の業務行を確認する関数
++              throw new Error(CHANGED_ERROR); // 想定外の業務更新を示す固定例外コンストラクター
++            }
++            try {
++              await client.$transaction( // 準備する認可行を一体更新するメソッド
++                /**
++                 * 所有ID・クラブ・本人をwhereへ入れ、対象が一行の更新だけを許す。
++                 */
++                async (transaction) => { // 認可行を更新するtransactionコールバック
++                  for (const club of CLUBS) {
++                    const planType = input.plans?.[club];
++                    if (planType !== undefined) {
++                      const result = await transaction.club.updateMany({ // 所有クラブのプランを変更するメソッド
++                        where: {
++                          id: data.clubs[club].id,
++                          slug: data.clubs[club].slug
++                        },
++                        data: {
++                          planType
++                        },
++                      });
++                      if (result.count !== 1) {
++                        throw new Error(SETUP_ERROR); // 更新件数不一致の固定例外コンストラクター
++                      }
++                    }
++                  }
++                  for (const key of ACTORS) {
++                    const change = input.memberships?.[key];
++                    if (change) {
++                      const actor = data.actors[key];
++                      const result = await transaction.clubMembership.updateMany({ // 所有する本人・クラブの所属だけを変更するメソッド
++                        where: {
++                          clubId: actor.clubId,
++                          id: actor.membershipId,
++                          userId: actor.userId
++                        },
++                        data: change,
++                      });
++                      if (result.count !== 1) {
++                        throw new Error(SETUP_ERROR); // 更新件数不一致の固定例外コンストラクター
++                      }
++                    }
++                  }
++                  if (input.platform) {
++                    const result = await transaction.platformAdmin.updateMany({ // 所有する独立PlatformAdminだけを変更するメソッド
++                      where: {
++                        id: data.users.platformAdmin.id
++                      },
++                      data: input.platform,
++                    });
++                    if (result.count !== 1) {
++                      throw new Error(SETUP_ERROR); // 更新件数不一致の固定例外コンストラクター
++                    }
++                  }
++                },
++              );
++              expected = await fingerprint(client, clubIds, userIds); // 準備した状態の比較値を更新する関数
++            } catch {
++              throw new Error(SETUP_ERROR); // SQLや接続秘密を公開しない固定例外コンストラクター
++            }
++          },
++          /**
++           * 実際のログインフォームを送信し、呼出し元が指定した遷移先まで待つ。
++           */
++          async login(user, destination, entry = "club") { // 実Cookieを取得するログイン関数
++            try {
++              await page.goto(entry === "club" ? "/club-login" : "/platform-login"); // 正規のログイン画面を開くメソッド
++              await page.getByLabel("メールアドレス", { // ラベルで入力欄を選ぶメソッド / 検証用メールを入力するメソッド
++                exact: true
++              }).fill(credentials[user].email); // ラベルで入力欄を選ぶメソッド / 検証用メールを入力するメソッド
++              await page.getByLabel("パスワード", { // ラベルで入力欄を選ぶメソッド / 検証用passwordを入力するメソッド
++                exact: true
++              }).fill(credentials[user].password); // ラベルで入力欄を選ぶメソッド / 検証用passwordを入力するメソッド
++              await Promise.all([ // 遷移とフォーム送信を一緒に待つ関数
++                page.waitForURL(session.appOrigin + destination), // 指定した正規の遷移先を待つメソッド
++                page.getByRole("button", { // 正規のログインボタンを選ぶメソッド / 送信するメソッド
++                  name: "ログイン",
++                  exact: true
++                }).click(), // 正規のログインボタンを選ぶメソッド / 送信するメソッド
++              ]);
++              const cookies = await page.context().cookies(session.appOrigin); // Cookieを取得するメソッド / 当該pageのcontextを返すメソッド
++              if (!cookies.some( // Auth Cookieが実際に保存されたか調べるメソッド
++                /**
++                 * SDKの分割Cookieも含め、Auth Cookieの名前だけを確認する。
++                 */
++                (cookie) => /^sb-.+-auth-token(?:\.\d+)?$/u.test(cookie.name), // Cookie名を確認するコールバック / 正規表現の検証メソッド
++              )) {
++                throw new Error(LOGIN_ERROR); // Cookie不足の固定例外コンストラクター
++              }
++            } catch {
++              throw new Error(LOGIN_ERROR); // passwordやAuth原文を公開しない固定例外コンストラクター
++            }
++          },
++          /**
++           * Nextの非streaming 404、またはstreaming 200と404 UI・noindexを一体で検証する。
++           */
++          async deny(path) { // 保護画面の拒否を検証する関数
++            const denied = await page.goto(path); // 対象URLを直接開くメソッド
++            expect([200, 404].includes(denied?.status() ?? 0)).toBe(true); // 期待値生成関数 / 許容HTTP状態の照合メソッド / 状態取得メソッド / 真偽値検証メソッド
++            await expect(page.locator('meta[name="robots"][content*="noindex"]').first()).toBeAttached(); // 期待値生成関数 / noindex要素を選ぶメソッド / 最初の要素を選ぶメソッド / DOMの存在検証メソッド
++            await expect(page.getByRole("heading", { // 期待値生成関数 / 拒否見出しを選ぶメソッド / 最初の要素を選ぶメソッド / 表示検証メソッド
++              name: /^(404|イベントが見つかりません)$/u
++            }).first()).toBeVisible(); // 期待値生成関数 / 拒否見出しを選ぶメソッド / 最初の要素を選ぶメソッド / 表示検証メソッド
++            await expect(page.getByRole("heading", { // 期待値生成関数 / 保護画面の見出しを選ぶメソッド / 非表示を検証するメソッド
++              name: "月別イベント管理",
++              exact: true
++            })).toHaveCount(0); // 期待値生成関数 / 保護画面の見出しを選ぶメソッド / 非表示を検証するメソッド
++          },
++          /**
++           * Auth Cookieをメモリ上でだけハッシュ化し、既存セッションを使い続けたか比較する。
++           */
++          async cookieFingerprint() { // Cookie原文を出さない比較値生成関数
++            const cookies = await page.context().cookies(session.appOrigin); // 当該pageのcontextを返すメソッド / Cookieを取得するメソッド
++            const auth = cookies.filter( // Auth Cookieだけを選ぶメソッド
++              /**
++               * Cookie値を外へ渡さず、SDKのCookie名だけで選ぶ。
++               */
++              (cookie) => /^sb-.+-auth-token(?:\.\d+)?$/u.test(cookie.name), // Cookieを選ぶコールバック / Cookie名の検証メソッド
++            );
++            if (auth.length === 0) {
++              throw new Error(COOKIE_ERROR); // Cookie不足の固定例外コンストラクター
++            }
++            auth.sort( // Cookie名順に並べるメソッド
++              /**
++               * 分割Cookieの並び順を固定する。
++               */
++              (left, right) => left.name.localeCompare(right.name), // Cookie名を比較するコールバック / 文字列比較メソッド
++            );
++            const values = auth.map( // Cookieの更新可能な属性を比較対象から外すメソッド
++              /**
++               * 期限属性が再設定されても、Cookie名と値が同じなら同じ認証状態として扱う。
++               */
++              (cookie) => ({ // Cookieの名前と値だけを選ぶコールバック
++                name: cookie.name,
++                value: cookie.value,
++              }),
++            );
++            return createHash("sha256").update(JSON.stringify(values)).digest("hex"); // ハッシュ生成関数 / Cookieの直列化関数 / 入力追加メソッド / ハッシュ確定メソッド
++          },
++          missingPath: `/club/mvp-f12-${data.scopeId}-missing/events`,
++          publicTitle,
++          staffTitle,
++          draftTitle,
++          /**
++           * Platformで所有クラブの報告を読むための固定queryを作る。
++           */
++          supportPath(club) { // 所有クラブのPlatformパスを返す関数
++            const query = new URLSearchParams({ // 所有クラブIDだけでqueryを作るコンストラクター
++              clubId: data.clubs[club].id
++            });
++            return `/platform/support?${query.toString()}`; // queryを文字列にするメソッド
++          },
++          reportMessages,
++        });
++        if (await fingerprint(client, clubIds, userIds) !== expected) { // 画面アクセス後の業務行を確認する関数
++          throw new Error(CHANGED_ERROR); // 想定外の業務更新を示す固定例外コンストラクター
++        }
++      } finally {
++        try {
++          await client.$transaction( // 試験の追加行削除と認可行復元を一体で行うメソッド
++            /**
++             * 当該試験が登録した追加IDと、検証済みの元行だけを削除・復元する。
++             */
++            async (transaction) => { // 所有行を復元するtransactionコールバック
++              await transaction.clubEvent.deleteMany({ // 当該試験のイベントだけを削除するメソッド
++                where: {
++                  clubId: data.clubs.b.id,
++                  id: {
++                    in: eventIds
++                  }
++                },
++              });
++              await transaction.supportReport.deleteMany({ // 当該試験の報告だけを削除するメソッド
++                where: {
++                  clubId: {
++                    in: clubIds
++                  },
++                  id: {
++                    in: reportIds
++                  }
++                },
++              });
++              for (const club of original.clubs) {
++                const result = await transaction.club.updateMany({ // 所有クラブの初期プランを復元するメソッド
++                  where: {
++                    id: club.id,
++                    slug: club.slug
++                  },
++                  data: {
++                    planType: club.planType,
++                    updatedAt: club.updatedAt
++                  },
++                });
++                if (result.count !== 1) {
++                  throw new Error(RESTORE_ERROR); // 復元件数不一致の固定例外コンストラクター
++                }
++              }
++              for (const actor of original.memberships) {
++                const result = await transaction.clubMembership.updateMany({ // 所有所属の初期ロール・状態を復元するメソッド
++                  where: {
++                    clubId: actor.clubId,
++                    id: actor.id,
++                    userId: actor.userId
++                  },
++                  data: {
++                    role: actor.role,
++                    status: actor.status,
++                    updatedAt: actor.updatedAt
++                  },
++                });
++                if (result.count !== 1) {
++                  throw new Error(RESTORE_ERROR); // 復元件数不一致の固定例外コンストラクター
++                }
++              }
++              const result = await transaction.platformAdmin.updateMany({ // 所有PlatformAdminの初期権限を復元するメソッド
++                where: {
++                  id: original.admin.id
++                },
++                data: {
++                  role: original.admin.role,
++                  isActive: original.admin.isActive,
++                  updatedAt: original.admin.updatedAt
++                },
++              });
++              if (result.count !== 1) {
++                throw new Error(RESTORE_ERROR); // 復元件数不一致の固定例外コンストラクター
++              }
++            },
++          );
++        } catch {
++          throw new Error(RESTORE_ERROR); // SQLや識別情報を出さない復元失敗の固定例外コンストラクター
++        }
++      }
++    } catch (error) {
++      if (error instanceof Error && // 固定文だけを公開できる例外型かを確認する
++        [SETUP_ERROR, CHANGED_ERROR, RESTORE_ERROR, LOGIN_ERROR, COOKIE_ERROR].includes(error.message)) { // 例外型の判定 / 公開してよい固定コードを照合するメソッド
++        throw error;
++      }
++      throw new Error(SETUP_ERROR); // SDK・DB・認証情報を出さない固定例外コンストラクター
++    } finally {
++      try {
++        await database?.$disconnect(); // 専用DB clientを切断するメソッド
++      } catch {
++        throw new Error(RESTORE_ERROR); // 切断の失敗も原文を公開しない固定例外コンストラクター
++      }
++    }
++  },
++});
++
++/**
++ * 認可試験用のtestと同じPlaywrightの期待値検証APIを公開する。
++ */
++export { expect }; // 同じPlaywrightの期待値検証関数を公開する
+diff --git a/scripts/test-e2e.mjs b/scripts/test-e2e.mjs
+index 76758b9..1b2dac5 100644
+--- a/scripts/test-e2e.mjs
++++ b/scripts/test-e2e.mjs
+@@ -772,6 +772,10 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+         RUN_MVP_TESTS: "1",
+         MVP_TEST_DISPOSABLE: "1",
+         RUN_MVP_E2E: "1",
++        // 【追加：F12粒度13】テスト用Nodeだけへ渡す。Chromiumの環境はpreloaderが別に限定する。
++        DATABASE_URL: configuration.databaseUrl,
++        NEXT_PUBLIC_SUPABASE_URL: configuration.supabaseOrigin,
++        APP_BASE_URL: configuration.appOrigin,
+         MVP_E2E_SESSION: JSON.stringify(session), // JSONへ直列化するメソッド
+         MVP_E2E_PRELOAD: JSON.stringify({ // JSONへ直列化するメソッド
+           ...preload,
+diff --git a/tests/mvp/outbound-harness.test.ts b/tests/mvp/outbound-harness.test.ts
+index 006d84e..07e5582 100644
+--- a/tests/mvp/outbound-harness.test.ts
++++ b/tests/mvp/outbound-harness.test.ts
+@@ -535,6 +535,70 @@ it("未知のCONNECT先をbrowser proxyが拒否し、URL原文を応答へ返
+     expect(received).not.toContain("remote.invalid"); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
+     expect(stub.status().violations).toBe(1); // 期待値を生成する関数 / 実行全体の遮断件数はresetで消さず、集計だけを返す / 値の一致を検証するメソッド
+   });
++it("CONNECT中のECONNRESETでもstubの制御と後片付けを継続できる", // 【追加】接続切断の回帰試験を登録する関数
++  /**
++   * 【追加】所有するCONNECTの受信側へ切断を注入し、制御APIが利用可能なことを確認する。
++   */
++  async () => { // 【追加】実接続と固定エラーで回収処理を確認するコールバック
++    const originalEmit = http.Server.prototype.emit; // 【追加】HTTP serverの元のイベント通知メソッド
++    let injected = false;
++    vi.spyOn(http.Server.prototype, "emit").mockImplementation( // 【追加】HTTPイベントの監視関数 / 通知を置換するメソッド
++      /**
++       * 【追加】通常の接続処理を呼んだ後、所有するCONNECTだけへ切断エラーを通知する。
++       */
++      function ( // 【追加】元のserverを保持する通知関数
++        this: http.Server, // 【追加】元のHTTP server型
++        event: string | symbol, // 【追加】イベント名の文字列型 / symbol型
++        ...args: unknown[] // 【追加】イベント引数の未確定配列型
++      ) {
++        const result = Reflect.apply(originalEmit, this, [event, ...args]); // 【追加】元のイベント処理を同じthisで呼び出す関数 / 元の通知メソッド
++        if (event === "connect") {
++          injected = true;
++          const socket = args[1] as net.Socket; // 【追加】所有CONNECTの受信socket型アサーション
++          const error = Object.assign(new Error("F12_TEST_CONNECTION_RESET"), { // 【追加】固定エラーを作るコンストラクター / エラーコードを付ける関数
++            code: "ECONNRESET",
++          });
++          socket.emit("error", error); // 【追加】受信側の通信切断を再現する通知メソッド
++        }
++        return result;
++      },
++    );
++    const port = Number(new URL(stub.origin).port); // 【追加】所有proxy URLの解析コンストラクター / ポートの数値化関数
++    const authorization = Buffer.from(`${RUN_ID}:${secret}`).toString("base64"); // 【追加】所有認証値のバイト列を作る関数 / Basic認証形式へ変換するメソッド
++    await new Promise<void>( // 【追加】接続回収を待つ非同期結果の型 / 戻り値のない型
++      /**
++       * 【追加】所有proxyへ接続し、受信側の切断で接続が閉じるまで待つ。
++       */
++      (accept, reject) => { // 【追加】接続の完了と失敗を受け取るコールバック
++        const socket = net.connect(port, "127.0.0.1", // 【追加】所有proxyだけへ接続する関数
++          /**
++           * 【追加】当該実行の資格情報で許可されたローカルCONNECTだけを要求する。
++           */
++          () => { // 【追加】所有proxyとの接続後のコールバック
++            socket.write([ // 【追加】所有するCONNECT要求だけを送信するメソッド
++              "CONNECT 127.0.0.1:3443 HTTP/1.1",
++              "Host: 127.0.0.1:3443",
++              "Proxy-Authorization: Basic " + authorization,
++              "",
++              "",
++            ].join("\r\n")); // 【追加】HTTP要求を改行で連結するメソッド
++          },
++        );
++        socket.resume(); // 【追加】応答を消費し、接続の終端を受け取るメソッド
++        socket.once("error", reject); // 【追加】接続失敗を登録するメソッド / 試験失敗を通知する関数
++        socket.once("close", // 【追加】接続の終了を一度だけ受け取るメソッド
++          /**
++           * 【追加】当該接続の回収完了を通知する。
++           */
++          () => accept(), // 【追加】完了を通知するコールバック / 非同期結果を完了する関数
++        );
++      },
++    );
++    expect(injected).toBe(true); // 【追加】期待値の生成関数 / 切断が注入されたことを確認するメソッド
++    expect((await control({ action: "status" })).status).toBe(200); // 【追加】期待値の生成関数 / 所有制御要求の関数 / 制御継続を確認するメソッド
++    expect(stub.status().violations).toBe(0); // 【追加】期待値の生成関数 / 違反件数を取得する関数 / 通信制約の維持を確認するメソッド
++  },
++);
+ it("TLSは所有証明書を検証し、所有runの応答だけを中継する",  // 試験ケースを登録する関数
+   /**
+    * 架空設定と所有資源だけで、このケースの準備・検証・後片付けを実行する。
+diff --git a/tests/mvp/outbound-stub.mjs b/tests/mvp/outbound-stub.mjs
+index 468f9f6..6d64169 100644
+--- a/tests/mvp/outbound-stub.mjs
++++ b/tests/mvp/outbound-stub.mjs
+@@ -451,6 +451,11 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+      * 登録したイベントを受け取り、この処理の状態更新や完了通知を行うコールバック。
+      */
+     (request, socket, head) => { // この処理を定義する関数・コールバック
++      socket.on("error", // 【追加】CONNECT接続の切断エラーを回収するメソッド
++        /**
++         * 【追加】ブラウザーの接続切断を受け、当該socketだけを終了する。
++         */
++        () => socket.destroy()); // 【追加】切断を処理するコールバック / 当該接続を閉じるメソッド
+       if (!equalSecret(request.headers["proxy-authorization"], basic)) { // 内容と長さを同時に照合し、制御secretを通常の文字列比較へ渡さない
+         socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="MVP"\r\n\r\n'); // 送信・応答を終了するメソッド
+         return;
