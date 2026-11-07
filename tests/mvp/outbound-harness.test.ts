@@ -535,6 +535,70 @@ it("未知のCONNECT先をbrowser proxyが拒否し、URL原文を応答へ返�
     expect(received).not.toContain("remote.invalid"); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
     expect(stub.status().violations).toBe(1); // 期待値を生成する関数 / 実行全体の遮断件数はresetで消さず、集計だけを返す / 値の一致を検証するメソッド
   });
+it("CONNECT中のECONNRESETでもstubの制御と後片付けを継続できる", // 【追加】接続切断の回帰試験を登録する関数
+  /**
+   * 【追加】所有するCONNECTの受信側へ切断を注入し、制御APIが利用可能なことを確認する。
+   */
+  async () => { // 【追加】実接続と固定エラーで回収処理を確認するコールバック
+    const originalEmit = http.Server.prototype.emit; // 【追加】HTTP serverの元のイベント通知メソッド
+    let injected = false;
+    vi.spyOn(http.Server.prototype, "emit").mockImplementation( // 【追加】HTTPイベントの監視関数 / 通知を置換するメソッド
+      /**
+       * 【追加】通常の接続処理を呼んだ後、所有するCONNECTだけへ切断エラーを通知する。
+       */
+      function ( // 【追加】元のserverを保持する通知関数
+        this: http.Server, // 【追加】元のHTTP server型
+        event: string | symbol, // 【追加】イベント名の文字列型 / symbol型
+        ...args: unknown[] // 【追加】イベント引数の未確定配列型
+      ) {
+        const result = Reflect.apply(originalEmit, this, [event, ...args]); // 【追加】元のイベント処理を同じthisで呼び出す関数 / 元の通知メソッド
+        if (event === "connect") {
+          injected = true;
+          const socket = args[1] as net.Socket; // 【追加】所有CONNECTの受信socket型アサーション
+          const error = Object.assign(new Error("F12_TEST_CONNECTION_RESET"), { // 【追加】固定エラーを作るコンストラクター / エラーコードを付ける関数
+            code: "ECONNRESET",
+          });
+          socket.emit("error", error); // 【追加】受信側の通信切断を再現する通知メソッド
+        }
+        return result;
+      },
+    );
+    const port = Number(new URL(stub.origin).port); // 【追加】所有proxy URLの解析コンストラクター / ポートの数値化関数
+    const authorization = Buffer.from(`${RUN_ID}:${secret}`).toString("base64"); // 【追加】所有認証値のバイト列を作る関数 / Basic認証形式へ変換するメソッド
+    await new Promise<void>( // 【追加】接続回収を待つ非同期結果の型 / 戻り値のない型
+      /**
+       * 【追加】所有proxyへ接続し、受信側の切断で接続が閉じるまで待つ。
+       */
+      (accept, reject) => { // 【追加】接続の完了と失敗を受け取るコールバック
+        const socket = net.connect(port, "127.0.0.1", // 【追加】所有proxyだけへ接続する関数
+          /**
+           * 【追加】当該実行の資格情報で許可されたローカルCONNECTだけを要求する。
+           */
+          () => { // 【追加】所有proxyとの接続後のコールバック
+            socket.write([ // 【追加】所有するCONNECT要求だけを送信するメソッド
+              "CONNECT 127.0.0.1:3443 HTTP/1.1",
+              "Host: 127.0.0.1:3443",
+              "Proxy-Authorization: Basic " + authorization,
+              "",
+              "",
+            ].join("\r\n")); // 【追加】HTTP要求を改行で連結するメソッド
+          },
+        );
+        socket.resume(); // 【追加】応答を消費し、接続の終端を受け取るメソッド
+        socket.once("error", reject); // 【追加】接続失敗を登録するメソッド / 試験失敗を通知する関数
+        socket.once("close", // 【追加】接続の終了を一度だけ受け取るメソッド
+          /**
+           * 【追加】当該接続の回収完了を通知する。
+           */
+          () => accept(), // 【追加】完了を通知するコールバック / 非同期結果を完了する関数
+        );
+      },
+    );
+    expect(injected).toBe(true); // 【追加】期待値の生成関数 / 切断が注入されたことを確認するメソッド
+    expect((await control({ action: "status" })).status).toBe(200); // 【追加】期待値の生成関数 / 所有制御要求の関数 / 制御継続を確認するメソッド
+    expect(stub.status().violations).toBe(0); // 【追加】期待値の生成関数 / 違反件数を取得する関数 / 通信制約の維持を確認するメソッド
+  },
+);
 it("TLSは所有証明書を検証し、所有runの応答だけを中継する",  // 試験ケースを登録する関数
   /**
    * 架空設定と所有資源だけで、このケースの準備・検証・後片付けを実行する。

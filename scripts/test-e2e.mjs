@@ -772,6 +772,10 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
         RUN_MVP_TESTS: "1",
         MVP_TEST_DISPOSABLE: "1",
         RUN_MVP_E2E: "1",
+        // 【追加：F12粒度13】テスト用Nodeだけへ渡す。Chromiumの環境はpreloaderが別に限定する。
+        DATABASE_URL: configuration.databaseUrl,
+        NEXT_PUBLIC_SUPABASE_URL: configuration.supabaseOrigin,
+        APP_BASE_URL: configuration.appOrigin,
         MVP_E2E_SESSION: JSON.stringify(session), // JSONへ直列化するメソッド
         MVP_E2E_PRELOAD: JSON.stringify({ // JSONへ直列化するメソッド
           ...preload,

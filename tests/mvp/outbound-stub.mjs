@@ -451,6 +451,11 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
      * 登録したイベントを受け取り、この処理の状態更新や完了通知を行うコールバック。
      */
     (request, socket, head) => { // この処理を定義する関数・コールバック
+      socket.on("error", // 【追加】CONNECT接続の切断エラーを回収するメソッド
+        /**
+         * 【追加】ブラウザーの接続切断を受け、当該socketだけを終了する。
+         */
+        () => socket.destroy()); // 【追加】切断を処理するコールバック / 当該接続を閉じるメソッド
       if (!equalSecret(request.headers["proxy-authorization"], basic)) { // 内容と長さを同時に照合し、制御secretを通常の文字列比較へ渡さない
         socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="MVP"\r\n\r\n'); // 送信・応答を終了するメソッド
         return;
