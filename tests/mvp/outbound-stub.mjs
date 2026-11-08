@@ -479,6 +479,7 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
           name: status === 422
             ? "validation_error"
             : "application_error",
+          statusCode: status, // 【追加】Resend SDKが本文から読む拒否状態を実HTTPと一致させる
           message: FAILURE
         }
       : {

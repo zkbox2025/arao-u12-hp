@@ -21,6 +21,9 @@ import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import {
+  gzipSync, // 【追加】試験用バイト列をgzip圧縮する関数
+} from "node:zlib";
+import {
   tmpdir,
 } from "node:os";
 import {
@@ -297,13 +300,20 @@ it.each([ // 試験ケースを登録する関数 / パラメーター別試験�
       "const mail = await client.emails.send({from:'from@example.test',to:'to@example.test',subject:'fixture',html:" + JSON.stringify(PRIVATE) + "},{idempotencyKey:'mail-owned'});", // JSONへ直列化するメソッド
       "const {sendLinePushMessage} = await import(" + JSON.stringify(lineModule) + ");", // JSONへ直列化するメソッド
       "const line = await sendLinePushMessage({channelAccessToken:'FAKE',lineGroupId:'FAKE',message:" + JSON.stringify(PRIVATE) + ",retryKey:'11111111-1111-4111-8111-111111111111'});", // JSONへ直列化するメソッド
-      "console.log(JSON.stringify({mail:!mail.error,line:line.success}));",
+      "console.log(JSON.stringify({mail:!mail.error,line:line.success,mailStatus:mail.error?.statusCode??null}));", // 【修正】実SDKが受け取ったHTTP状態も固定項目だけで検証する
     ].join("\n"); // 値を連結するメソッド
     const result = await probe(source); // SDKを本物のNodeプロセスで読み込み、preloader適用後の結果だけをメモリへ回収する
     expect(result.code).toBe(0); // 期待値を生成する関数 / 値の一致を検証するメソッド
     expect(JSON.parse(result.output)).toEqual({ // 期待値を生成する関数 / JSONを解析するメソッド / 構造の一致を検証するメソッド
       mail: mailAccepted,
-      line: lineAccepted
+      line: lineAccepted,
+      mailStatus: mode === "rejected" // 【追加】拒否JSONと実HTTP状態の一致を検証する
+        ? 422
+        : mode === "conflict"
+          ? 409
+          : mode === "server-error"
+            ? 503
+            : null,
     });
     expect(result.error).not.toContain(PRIVATE); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
     expect(result.error).not.toContain(secret); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
@@ -752,6 +762,116 @@ it("TLSは所有証明書を検証し、所有runの応答だけを中継する"
     expect(status).toBe(200); // 期待値を生成する関数 / 値の一致を検証するメソッド
     expect(certificate.pin).toMatch(/^[A-Za-z0-9+/]{43}=$/u); // 期待値を生成する関数 / 書式を検証するメソッド
   });
+it.each(["identity", "gzip", "oversized"] as const)( // 【追加】Action応答の転送・上限を検証する試験登録メソッド・リテラル型
+  "TLSはAction RSCの%s応答を完全転送し、上限超過を成功にしない",
+  /**
+   * 【追加】分割された架空RSCをHTTPSへ中継し、圧縮保持・終端・サイズ制限を確認する。
+   */
+  async (encoding) => { // 【追加】転送条件ごとの試験コールバック
+    const certificate = await createMvpCertificate(directory); // 【追加】所有一時領域に証明書を作る関数
+    const plain = Buffer.from("0:{\"a\":\"$@1\"}\n1:{\"status\":\"success\"}\n"); // 【追加】架空RSCのバイト列を生成する関数
+    const bytes = encoding === "gzip" ? gzipSync(plain) : // 【追加】圧縮を含む元データを作る関数
+      encoding === "oversized" ? Buffer.alloc(4 * 1024 * 1024 + 1, 1) : plain; // 【追加】上限超過の架空バイト列を生成する関数
+    let owned = false;
+    const backend = http.createServer( // 【追加】所有する試験backendを作る関数
+      /**
+       * 【追加】所有headerを照合し、Action応答を別tickの二つのchunkに分けて返す。
+       */
+      (request, response) => { // 【追加】試験要求を受け取るコールバック
+        owned = request.method === "POST" && request.headers["x-mvp-upstream-secret"] === secret;
+        request.resume(); // 【追加】架空の要求本文を読み捨てるメソッド
+        response.setHeader("x-mvp-application-run", RUN_ID); // 【追加】所有runの印を付けるメソッド
+        response.setHeader("Content-Type", "text/x-component"); // 【追加】Action RSCの種類を設定するメソッド
+        if (encoding === "gzip") {
+          response.setHeader("Content-Encoding", "gzip"); // 【追加】元の圧縮形式を設定するメソッド
+        }
+        const middle = Math.floor(bytes.length / 2); // 【追加】分割位置を求めるメソッド
+        response.write(bytes.subarray(0, middle)); // 【追加】前半バイト列を送るメソッド・部分列取得メソッド
+        setImmediate( // 【追加】後半を別tickに分ける関数
+          /**
+           * 【追加】元の後半バイト列を保ったまま応答を終端する。
+           */
+          () => response.end(bytes.subarray(middle)), // 【追加】応答終端のコールバック・部分列取得・送信メソッド
+        );
+      },
+    );
+    cleanup.push(ownMvpServer(backend)); // 【追加】所有backendの回収登録メソッド・所有回収関数
+    const port = await listenMvpServer(backend, 0); // 【追加】衝突しない所有portへbindする関数
+    const tls = await startMvpTls(certificate, { // 【追加】証明書検証付きTLS入口を作る関数
+      runId: RUN_ID,
+      secret,
+    }, {
+      frontend: 0,
+      backend: port,
+    });
+    cleanup.push(tls.close); // 【追加】所有TLS入口の回収を登録するメソッド・回収関数
+    const result = await new Promise<{ // 【追加】受信完了か通信失敗を表す非同期型
+      failed: boolean; // 【追加】接続失敗の真偽値型
+      headers?: http.IncomingHttpHeaders; // 【追加】受信したHTTP headerの型
+      body?: Buffer; // 【追加】受信した元バイト列の型
+    }>(
+      /**
+       * 【追加】実HTTPSの終端まで受信し、エラー原文を試験結果へ含めない。
+       */
+      (accept) => { // 【追加】受信結果を解決するコールバック・解決関数
+        const request = https.request("https://127.0.0.1:" + tls.port, { // 【追加】所有TLSへ実要求するメソッド
+          method: "POST",
+          ca: certificate.cert,
+        },
+          /**
+           * 【追加】転送後のheaderと圧縮を含むバイト列をメモリ内へ受信する。
+           */
+          (response) => { // 【追加】実応答を受け取るコールバック
+            const chunks: Buffer[] = []; // 【追加】受信バイト列の配列型
+            response.on("data", // 【追加】バイト列の受信を登録するメソッド
+              /**
+               * 【追加】試験専用の受信バイト列だけを配列へ保持する。
+               */
+              (chunk) => chunks.push(chunk), // 【追加】受信のコールバック・配列登録メソッド
+            );
+            response.once("end", // 【追加】完全受信の終端を登録するメソッド
+              /**
+               * 【追加】成功時だけ受信headerと元バイト列を返す。
+               */
+              () => accept({ // 【追加】受信成功のコールバック・解決関数
+                failed: false,
+                headers: response.headers,
+                body: Buffer.concat(chunks), // 【追加】受信バイト列を結合する関数
+              }),
+            );
+            response.once("error", // 【追加】受信途中の失敗を登録するメソッド
+              /**
+               * 【追加】受信失敗を原文なしの真偽値だけへ変換する。
+               */
+              () => accept({ failed: true }), // 【追加】失敗を解決するコールバック・関数
+            );
+          },
+        );
+        request.once("error", // 【追加】接続失敗を登録するメソッド
+          /**
+           * 【追加】上限超過などの接続終了を固定の失敗分類へ変換する。
+           */
+          () => accept({ failed: true }), // 【追加】失敗を解決するコールバック・関数
+        );
+        request.setTimeout(5000, // 【追加】試験要求の待機期限を設定するメソッド
+          /**
+           * 【追加】終端しない応答も成功扱いせず、所有接続を閉じる。
+           */
+          () => request.destroy(new Error("F12_TLS_RESPONSE_TIMEOUT")), // 【追加】中断のコールバック・接続破棄メソッド・固定例外コンストラクター
+        );
+        request.end("fixture"); // 【追加】架空の要求だけを送信するメソッド
+      },
+    );
+    expect(owned).toBe(true); // 【追加】所有runを検証する期待値関数・比較メソッド
+    expect(result.failed).toBe(encoding === "oversized"); // 【追加】上限超過だけを失敗とする期待値関数・比較メソッド
+    if (encoding !== "oversized") {
+      expect(result.body?.equals(bytes)).toBe(true); // 【追加】完全な元バイト列の一致を検証する期待値関数・比較メソッド
+      expect(result.headers?.["content-length"]).toBe(String(bytes.length)); // 【追加】終端を表す実バイト長を検証する期待値関数・文字列変換関数・比較メソッド
+      expect(result.headers?.["transfer-encoding"]).toBeUndefined(); // 【追加】別接続のchunked headerを引き継がない検証関数・比較メソッド
+      expect(result.headers?.["content-encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined); // 【追加】圧縮形式保持を検証する期待値関数・比較メソッド
+    }
+  },
+);
 it("guard不成立ではSDK・server・子プロセスを起動せず固定文で失敗する",  // 試験ケースを登録する関数
   /**
    * 架空設定と所有資源だけで、このケースの準備・検証・後片付けを実行する。

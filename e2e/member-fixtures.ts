@@ -156,9 +156,15 @@ export async function confirmAccount(page: Page, // 確認付きフォームか�
 export async function replayAs(page: Page, // 正規Actionを別本人の実Cookieで再送する関数 / 実画面の操作型
   actor: Page, // 実画面の操作型
   submit: () => Promise<void>): Promise<void> { // 受け取った処理を表す関数型 / 非同期の完了を表す型 / 戻り値を利用しない型
-  const path = new URL(page.url()).pathname; // URLをメモリ内で解析するコンストラクター / 要求・画面のURLをメモリ内で取得するメソッド
+  const target = new URL(page.url()); // 【修正】同じOriginとpathnameの要求だけを捕捉するURLコンストラクター・画面URL取得メソッド
+  /**
+   * 【追加】検索条件の有無にかかわらず、元の正規Actionの送信先だけを選ぶ。
+   */
+  const match = (url: URL) => // 【追加】送信先照合コールバック・URL型
+    url.origin === target.origin &&
+    url.pathname === target.pathname;
   let completed = false;
-  await page.route("**" + path, // 正規Actionの通信を試験用に捕捉するメソッド
+  await page.route(match, // 正規Actionの通信を試験用に捕捉するメソッド
     /**
      * ActionのPOSTだけを別本人へ持ち替え、元Cookieの更新を防ぐ。
      */
@@ -194,7 +200,7 @@ export async function replayAs(page: Page, // 正規Actionを別本人の実Cook
       () => completed, // 所有する入力を受け取り操作・照合するコールバック
     ).toBe(true); // 値の一致を検証するメソッド
   } finally {
-    await page.unroute("**" + path); // 試験用の通信捕捉を解除するメソッド
+    await page.unroute(match); // 試験用の通信捕捉を解除するメソッド
   }
 }
 

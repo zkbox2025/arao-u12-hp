@@ -377,6 +377,46 @@ export async function startMvpTls(certificate, owner, ports = { // この処理�
             response.end(FAILURE); // 送信・応答を終了するメソッド
             return;
           }
+          if (request.method === "POST" &&
+            String(received.headers["content-type"] ?? "").includes("text/x-component")) { // 【追加】ActionのRSC応答だけを判定する文字列変換関数・包含メソッド
+            /** @type {Buffer[]} */
+            const chunks = []; // 【追加】この応答だけの一時バイト列の配列型
+            let length = 0;
+            received.on("data", // 【追加】Action応答のバイト列を受け取るメソッド
+              /**
+               * 【追加】圧縮を含む元のバイト列を上限付きで一時保持する。
+               */
+              (chunk) => { // 【追加】応答バイト列を受け取るコールバック
+                length += chunk.length;
+                if (length > 4 * 1024 * 1024) {
+                  received.destroy(); // 【追加】上限超過した所有upstreamを止めるメソッド
+                  response.destroy(); // 【追加】不完全な応答を成功させず中断するメソッド
+                  return;
+                }
+                chunks.push(chunk); // 【追加】元の圧縮バイト列を変更せず保持するメソッド
+              },
+            );
+            received.once("end", // 【追加】Action応答の終端を待つメソッド
+              /**
+               * 【追加】完全受信後に実バイト長を付け、RSC応答の終端を明示する。
+               */
+              () => { // 【追加】完全な応答を転送するコールバック
+                const headers = { ...received.headers };
+                delete headers["transfer-encoding"];
+                delete headers.connection;
+                headers["content-length"] = String(length); // 【追加】実バイト長をHTTP headerへ設定する変換関数
+                response.writeHead(received.statusCode ?? 502, headers); // 【追加】元の状態と圧縮形式を保つメソッド
+                response.end(Buffer.concat(chunks)); // 【追加】受信済み応答を送るメソッド・バイト列結合関数
+              },
+            );
+            received.once("error", // 【追加】所有upstreamの途中失敗を処理するメソッド
+              /**
+               * 【追加】受信失敗を固定の接続終了にし、例外原文を表示しない。
+               */
+              () => response.destroy(), // 【追加】所有応答だけを中断するコールバック・メソッド
+            );
+            return;
+          }
           response.writeHead(received.statusCode ?? 502, received.headers); // HTTP状態とheaderを設定するメソッド
           received.pipe(response); // streamを転送するメソッド
         });

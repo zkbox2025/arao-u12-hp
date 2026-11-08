@@ -1,2389 +1,1600 @@
-diff --git a/e2e/account-children.spec.ts b/e2e/account-children.spec.ts
+diff --git a/e2e/line-settings.spec.ts b/e2e/line-settings.spec.ts
 new file mode 100644
-index 0000000..82a803d
+index 0000000..268f23e
 --- /dev/null
-+++ b/e2e/account-children.spec.ts
-@@ -0,0 +1,358 @@
-+// e2e/account-children.spec.ts
-+// 保護者の実Cookieから氏名・子ども・複数クラブ所属と改ざん拒否を確認する。
++++ b/e2e/line-settings.spec.ts
+@@ -0,0 +1,329 @@
++// e2e/line-settings.spec.ts
++// 実画面の登録コードと署名付きHTTPを接続し、クラブ・本人・通知先の束縛を照合する。
 +
 +import {
-+  randomUUID // 試験資源の識別用UUIDを生成する関数
++  createHash,
++  createHmac,
++  randomUUID
 +} from "node:crypto";
++import type {
++  Page
++} from "@playwright/test";
 +import {
-+  test, // 実Cookieを使うE2Eケースを登録する関数
-+  expect, // 期待値を生成する関数
-+  confirmAccount, // 確認付きフォームから保存してダイアログ終了を待つ関数
-+  replayAs // 正規Actionを別本人の実Cookieで再送する関数
++  test, // 所有LINE設定と回収台帳を備えた実Cookie fixture
++  expect, // 画面・HTTP・DBを照合する期待値関数
++  type OperationsScenario, // 粒度16の所有DB・画面・LINE設定の契約型
++} from "./operations-fixtures";
++import {
++  replayAs, // 正規Actionを別本人の実Cookieで再送する関数
 +} from "./member-fixtures";
++import {
++  contentDenied, // Streamingを含む404表示とnoindexを照合する関数
++} from "./content-fixtures";
 +
-+test("本人氏名と子どもの作成・編集・クラブ追加・退会をUIで行い、他クラブ所属を維持する", // 実Cookieを使うE2Eケースを登録する関数
-+  /**
-+   * A OWNERとB MEMBERを兼ねる保護者が、同じ子を両クラブで使う正当な操作を確認する。
-+   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { admin, database, data } = members;
-+      const name = "F12子ども-" + randomUUID(); // 試験資源の識別用UUIDを生成する関数
-+      await admin.goto(`/club/${data.clubs.a.slug}/account`); // 実画面へナビゲーションするメソッド
-+      const account = admin.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator('input[name="name"]') // フォーム・hidden値などの要素を選ぶメソッド
-+      }).filter({ // 条件に一致する要素だけを選ぶメソッド
-+        hasNot: admin.locator('select[name="grade"]') // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      await account.locator('input[name="name"]').fill("F12本人名更新"); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await confirmAccount(admin, account); // 確認付きフォームから保存してダイアログ終了を待つ関数
-+      expect(await database.appUser.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          id: data.users.aOwner.id,
-+          name: "F12本人名更新"
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+      const create = admin.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.getByText("子どもを新しく登録", { // 固定の表示文で要素を選ぶメソッド
-+          exact: true
-+        })
-+      });
-+      await create.locator('input[name="name"]').fill(name); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await create.locator('select[name="grade"]').selectOption("ELEMENTARY_3"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await confirmAccount(admin, create); // 確認付きフォームから保存してダイアログ終了を待つ関数
-+      const child = await database.child.findFirstOrThrow({ // 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          parentId: data.users.aOwner.id,
-+          name
-+        }
-+      });
-+      const item = admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator(`input[name="childId"][value="${child.id}"]`) // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      const edit = item.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator('select[name="grade"]') // 【修正】候補form内を基準に学年欄を探すメソッド
-+      });
-+      await expect(edit).toHaveCount(1); // 【追加】編集フォームが1件に絞れていることを検証する関数・メソッド
-+      await edit.locator('input[name="name"]').fill(name + "編集"); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await edit.locator('select[name="grade"]').selectOption("ELEMENTARY_4"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await confirmAccount(admin, edit); // 確認付きフォームから保存してダイアログ終了を待つ関数
-+      expect(await database.child.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          id: child.id,
-+          parentId: child.parentId,
-+          name: name + "編集",
-+          grade: "ELEMENTARY_4"
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+      await admin.goto(`/club/${data.clubs.b.slug}/account`); // 実画面へナビゲーションするメソッド
-+      await admin.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "登録済みの子どもを現在クラブへ追加",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      const candidate = admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator(`input[name="childId"][value="${child.id}"]`) // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      await candidate.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "現在クラブへ追加する",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await admin.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "現在クラブへ追加する",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await expect(admin.getByRole("dialog")).toHaveCount(0); // DOM要素数を検証するメソッド / 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+      expect(await database.childClubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          childId: child.id,
-+          parentUserId: child.parentId,
-+          status: "ACTIVE",
-+          clubId: {
-+            in: [data.clubs.a.id, data.clubs.b.id]
-+          }
-+        }
-+      })).toBe(2); // 値の一致を検証するメソッド
-+      await admin.goto(`/club/${data.clubs.a.slug}/account`); // 実画面へナビゲーションするメソッド
-+      const added = admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator(`input[name="childId"][value="${child.id}"]`) // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      await added.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "現在クラブから外す",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await admin.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "現在クラブから外す",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await expect(admin.getByRole("dialog")).toHaveCount(0); // DOM要素数を検証するメソッド / 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+      expect(await database.childClubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          childId: child.id,
-+          clubId: data.clubs.a.id,
-+          status: "WITHDRAWN"
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+      expect(await database.childClubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          childId: child.id,
-+          clubId: data.clubs.b.id,
-+          status: "ACTIVE"
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+      expect(await database.child.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          id: child.id,
-+          parentId: child.parentId
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
-+    }
-+  },
-+);
++/**
++ * 所有クラブのLINE管理画面だけを指す相対URLを作る。
++ */
++function settingsPath(scenario: OperationsScenario, // 所有クラブのLINE管理URLを作る関数 / 所有DB・実Cookie・回収台帳の操作契約型
++  club: "a" | "b"): string { // URL生成関数 / 操作契約型 / クラブキー型 / 文字列型
++  return `/club/${scenario.data.clubs[club].slug}/admin/settings/line`;
++}
 +
-+test("他保護者childIdとhidden clubId・parentId・B membershipIdの混入で他人行を変更できない", // 実Cookieを使うE2Eケースを登録する関数
-+  /**
-+   * 編集bind対象とhidden値の照合、認可由来clubId・parentIdの採用を実フォームで確認する。
-+   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { admin, database, data } = members;
-+      const owned = await database.child.create({ // 試験所有のDB行を作成するメソッド
-+        data: {
-+          parentId: data.users.aOwner.id,
-+          name: "F12本人子ども",
-+          grade: "ELEMENTARY_2",
-+          clubMemberships: {
-+            create: {
-+              clubId: data.clubs.a.id
-+            }
-+          },
-+        }
-+      });
-+      const foreign = await database.child.create({ // 試験所有のDB行を作成するメソッド
-+        data: {
-+          parentId: data.users.bOwner.id,
-+          name: "F12別保護者の子ども",
-+          grade: "ELEMENTARY_5",
-+          clubMemberships: {
-+            create: {
-+              clubId: data.clubs.b.id
-+            }
-+          },
-+        },
-+        include: {
-+          clubMemberships: true
-+        }
-+      });
-+      await admin.goto(`/club/${data.clubs.a.slug}/account`); // 実画面へナビゲーションするメソッド
-+      const item = admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator(`input[name="childId"][value="${owned.id}"]`) // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      const form = item.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator('select[name="grade"]') // 【修正】候補form内を基準に学年欄を探すメソッド
-+      });
-+      await expect(form).toHaveCount(1); // 【追加】編集フォームが1件に絞れていることを検証する関数・メソッド
-+      await form.locator('input[name="name"]').fill("F12不正な変更"); // 【修正】Reactの入力更新を先に完了するlocator・入力メソッド
-+      await form.evaluate( // 【修正】フォームの送信データ生成へ一度だけ介入するメソッド
-+        /**
-+         * 【修正】再描画で戻るDOM値ではなく、確認ダイアログへ保存するFormDataを改ざんする。
-+         */
-+        (element, id) => { // 【修正】対象フォームと他保護者の子IDを受け取るコールバック
-+          const target = element as HTMLFormElement; // 【追加】対象をフォーム要素として扱う型アサーション
-+          target.addEventListener( // 【追加】FormData生成時のイベントを監視するメソッド
-+            "formdata",
-+            /**
-+             * 【追加】確認フォームが生成した送信データのchildIdだけを他保護者のIDへ変更する。
-+             */
-+            (event) => { // 【追加】生成したFormDataを持つイベントを受け取るコールバック
-+              event.formData.set("childId", id); // 【追加】送信データ内の対象IDを単一値へ置き換えるメソッド
-+            },
-+            {
-+              once: true,
-+            },
-+          );
-+        },
-+        foreign.id,
-+      );
-+      await confirmAccount(admin, form); // 確認付きフォームから保存してダイアログ終了を待つ関数
-+      await expect(form.getByText("対象の子どもを選び直してください。", { // 期待値を生成する関数 / 固定の表示文で要素を選ぶメソッド
-+        exact: true
-+      })).toBeVisible(); // 画面表示を検証するメソッド
-+      expect(await database.child.findFirstOrThrow({ // 期待値を生成する関数 / 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          id: foreign.id,
-+          parentId: foreign.parentId
-+        },
-+        include: {
-+          clubMemberships: true
-+        }
-+      })).toEqual(foreign); // 構造と値の一致を検証するメソッド
-+      expect(await database.child.findFirstOrThrow({ // 期待値を生成する関数 / 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          id: owned.id,
-+          parentId: owned.parentId
-+        }
-+      })).toEqual(owned); // 構造と値の一致を検証するメソッド
-+      await admin.reload(); // 更新済みの正規画面を再取得するメソッド
-+      const create = admin.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.getByText("子どもを新しく登録", { // 固定の表示文で要素を選ぶメソッド
-+          exact: true
-+        })
-+      });
-+      await create.locator('input[name="name"]').fill("F12認可由来の子ども"); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await create.locator('select[name="grade"]').selectOption("ELEMENTARY_1"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await create.evaluate( // 画面内で試験用のhidden値やdisabledを変更するメソッド
-+        /**
-+         * 正規フォームへB側IDを追加しても、本人・現在クラブを変更できないことを確認する。
-+         */
-+        (element, ids) => { // 所有する入力を受け取り操作・照合するコールバック
-+          for (const [name, value] of Object.entries(ids)) { // 辞書のキーと値を列挙する関数
-+            const input = document.createElement("input"); // 試験用のhidden入力要素を生成するメソッド
-+            input.type = "hidden";
-+            input.name = name;
-+            input.value = value;
-+            element.appendChild(input); // 試験フォームへhidden入力を追加するメソッド
-+          }
-+        }, {
-+        clubId: data.clubs.b.id,
-+        parentId: data.users.bOwner.id,
-+        membershipId: data.actors.bOwner.membershipId,
++/**
++ * OWNERの実フォームでコードを発行し、DBにはhashだけが保存されたことを照合する。
++ */
++async function issueCode( // OWNERの実フォームで登録コードを発行しhash保存を照合する関数
++  scenario: OperationsScenario, // 所有DBと画面の契約型
++  club: "a" | "b", // 所有クラブキー型
++): Promise<string> { // メモリ内だけに保持するコードの非同期文字列型
++  const page = club === "a" ? scenario.admin : scenario.foreignAdmin;
++  await page.goto(settingsPath(scenario, club)); // 正規画面への移動メソッド / 所有URL生成関数
++  const [response] = await Promise.all([ // 【追加】正規POSTの応答とクリックを同時に待つメソッド
++    page.waitForResponse( // 【追加】同じOrigin・管理画面への実POSTだけを待つメソッド
++      /**
++       * 【追加】先読みGETと区別し、所有クラブのコード発行Actionだけを選ぶ。
++       */
++      (candidate) => { // 【追加】発行Actionの応答を照合するコールバック
++        const url = new URL(candidate.url()); // 【追加】応答URLをメモリ内で解析するコンストラクター・URL取得メソッド
++        return candidate.request().method() === "POST" && // 【追加】要求取得・メソッド判定メソッド
++          url.origin === scenario.session.appOrigin &&
++          url.pathname === settingsPath(scenario, club); // 【追加】所有管理URLを作る関数
 +      },
-+      );
-+      await confirmAccount(admin, create); // 確認付きフォームから保存してダイアログ終了を待つ関数
-+      const created = await database.child.findFirstOrThrow({ // 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          name: "F12認可由来の子ども",
-+          parentId: data.users.aOwner.id
-+        },
-+        include: {
-+          clubMemberships: true
++    ),
++    page.getByRole("button", { // 【修正】正規発行ボタンを選ぶメソッド
++      name: "登録コードを発行する",
++      exact: true,
++    }).click(), // 【修正】実POSTを発生させる操作メソッド
++  ]);
++  expect(response.status()).toBe(200); // 【追加】発行ActionのHTTP成功を検証する期待値関数・状態取得・比較メソッド
++  await expect(page.locator("code")).toHaveCount(1, { // 【修正】Action後の実表示を条件待機する期待値関数・選択・比較メソッド
++    timeout: 15000,
++  });
++  const code = await page.locator("code").innerText(); // 発行値をメモリへ取得する選択・取得メソッド
++  expect(/^CLUB-LINE-[A-Za-z0-9_-]{43}$/u.test(code)).toBe(true); // 書式だけを照合する期待値関数・正規表現・比較メソッド
++  const hash = createHash("sha256").update(code).digest("hex"); // 保存値との比較用hashを生成・入力・終端する関数・メソッド
++  const tokens = await scenario.database.clubLineRegistrationToken.findMany({ // 所有設定の未使用tokenを取得するメソッド
++    where: {
++      clubId: scenario.data.clubs[club].id,
++      lineSettingId: scenario.line[club].id,
++      usedAt: null,
++      expiresAt: {
++        gt: new Date(), // 有効期限比較の日時コンストラクター
++      },
++    },
++  });
++  expect(tokens.length).toBe(1); // 所有token数を検証する期待値関数・比較メソッド
++  expect(tokens[0].tokenHash === hash && // 画面・DBの期待値を検証する関数
++    tokens[0].tokenHash !== code).toBe(true); // 生コードが保存されていないことを検証する期待値関数・比較メソッド
++  return code;
++}
++
++/**
++ * 架空LINEの未加工本文を署名し、同じ専用アプリのWebhookへHTTP POSTする。
++ */
++async function webhook( // 架空署名を付けて専用WebhookへHTTP POSTする関数
++  scenario: OperationsScenario, // 所有URLと署名秘密の契約型
++  club: "a" | "b", // 受付先クラブキー型
++  code: string, // メモリ内だけの登録コード文字列型
++  overrides: { // クラブ間の差し替え条件型
++    key?: string; // 公開識別子の文字列型
++    secret?: string; // 架空署名秘密の文字列型
++    destination?: string; // 架空Bot IDの文字列型
++    malformed?: boolean; // 署名書式不正の真偽値型
++  } = {},
++) { // APIRequestContextの応答を返す関数
++  const setting = scenario.line[club];
++  const body = JSON.stringify({ // 署名対象の未加工本文を作るメソッド
++    destination: overrides.destination ?? setting.lineBotUserId,
++    events: [{
++      type: "message",
++      source: {
++        type: "group",
++        groupId: "C" + setting.id.replaceAll("-", ""), // 所有設定IDから架空group IDを作るメソッド
++      },
++      message: {
++        type: "text",
++        text: code,
++      },
++    }],
++  });
++  const signature = createHmac("sha256", overrides.secret ?? setting.secret).update(body).digest("base64"); // 未加工本文の署名生成関数・入力・符号化メソッド
++  return scenario.admin.context().request.post(`/api/line/webhook/${overrides.key ?? setting.webhookKey}`, { // 実HTTPのcontext取得・POSTメソッド
++    headers: {
++      "Content-Type": "application/json",
++      "x-line-signature": overrides.malformed ? "invalid" : signature,
++    },
++    data: body,
++    maxRedirects: 0,
++  });
++}
++
++/**
++ * 二クラブのtoken・通知先をメモリ内比較値にし、HTTP拒否の前後差分を検出する。
++ */
++async function lineState(scenario: OperationsScenario): Promise<string> { // 比較値取得関数 / 操作契約型 / 非同期文字列型
++  const ids = [scenario.data.clubs.a.id, scenario.data.clubs.b.id];
++  return JSON.stringify(await scenario.database.$transaction([ // 比較値の直列化メソッド / 読取transactionメソッド
++    scenario.database.clubLineRegistrationToken.findMany({ // 所有tokenを固定順で読むメソッド
++      where: {
++        clubId: {
++          in: ids
 +        }
-+      });
-+      expect(created.clubMemberships.length).toBe(1); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(created.clubMemberships[0].clubId).toBe(data.clubs.a.id); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(created.clubMemberships[0].parentUserId).toBe(data.users.aOwner.id); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(await database.child.findFirstOrThrow({ // 期待値を生成する関数 / 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          id: foreign.id,
-+          parentId: foreign.parentId
-+        },
-+        include: {
-+          clubMemberships: true
++      },
++      orderBy: {
++        id: "asc"
++      },
++    }),
++    scenario.database.clubLineTarget.findMany({ // 所有通知先を固定順で読むメソッド
++      where: {
++        clubId: {
++          in: ids
 +        }
-+      })).toEqual(foreign); // 構造と値の一致を検証するメソッド
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
-+    }
++      },
++      orderBy: {
++        id: "asc"
++      },
++    }),
++  ]));
++}
++
++/**
++ * 正規Webhookで無効登録し、OWNERの実フォームでのみ有効化する。
++ */
++test("OWNERのコード発行・署名Webhook登録・通知先有効化と使用済みコード再送を確認する", // E2Eケース登録関数
++  /**
++   * stub配送を発生させず、登録と通知先設定のDB状態を実画面で確認する。
++   */
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 【追加】複数の実ActionとRSC反映を含むケースの期限を設定するメソッド
++    const code = await issueCode(scenario, "a"); // 正規発行とhash保存の検証関数
++    const response = await webhook(scenario, "a", code); // 正規署名付きHTTP送信関数
++    expect(response.status()).toBe(200); // 公開HTTP状態を検証する期待値関数・取得・比較メソッド
++    expect(await response.json()).toEqual({ // 画面・DBの期待値を検証する関数 / 公開応答をJSONとしてメモリへ取得するメソッド / 期待する構造との一致を検証するメソッド
++      ok: true
++    }); // 公開応答を検証する期待値関数・JSON取得・比較メソッド
++    const target = await scenario.database.clubLineTarget.findFirstOrThrow({ // 所有通知先を取得するメソッド
++      where: {
++        clubId: scenario.data.clubs.a.id,
++        lineSettingId: scenario.line.a.id,
++      },
++    });
++    expect(target.isEnabled).toBe(false); // 初期無効を検証する期待値関数・比較メソッド
++    expect(target.targetRoles).toEqual([]); // 初期通知対象が空であることを検証する期待値関数・比較メソッド
++    await scenario.admin.goto(settingsPath(scenario, "a")); // 新規読込メソッド / 所有URL生成関数
++    const form = scenario.admin.locator('form:has(input[name="targetName"])'); // 通知先フォームを選ぶメソッド
++    await expect(form).toHaveCount(1); // 対象フォーム数を検証する期待値関数・比較メソッド
++    await form.locator('input[name="targetName"]').fill("F12通知先"); // 名称欄の選択・入力メソッド
++    await form.locator('input[name="targetRoles"][value="MEMBER"]').check(); // 対象roleの選択・有効化メソッド
++    await form.locator('input[name="isEnabled"]').check(); // 通知先有効化欄の選択・操作メソッド
++    await form.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++      name: "設定を保存する",
++      exact: true
++    }).click(); // 保存ボタンの選択・操作メソッド
++    await expect.poll( // DB更新の完了を検証するメソッド
++      /**
++       * URLや秘密を出さず、所有通知先の有効化だけを待つ。
++       */
++      async () => (await scenario.database.clubLineTarget.findUniqueOrThrow({ // 所有通知先取得のコールバック・メソッド
++        where: {
++          id: target.id
++        },
++      })).isEnabled,
++    ).toBe(true); // 有効化済みを検証するメソッド
++    const saved = await scenario.database.clubLineTarget.findUniqueOrThrow({ // 識別子に一致する所有行を取得するメソッド
++      where: {
++        id: target.id
++      }
++    }); // 保存値を取得するメソッド
++    expect(saved.targetName).toBe("F12通知先"); // 正規名称を検証する期待値関数・比較メソッド
++    expect(saved.targetRoles).toEqual(["MEMBER"]); // 正規対象roleを検証する期待値関数・比較メソッド
++    const before = await lineState(scenario); // 再送前の比較値を取得する関数
++    expect((await webhook(scenario, "a", code)).status()).toBe(200); // 再送HTTP関数・状態取得・期待値・比較メソッド
++    expect(await lineState(scenario) === before).toBe(true); // 使用済みコードが設定を変えないことを検証する関数・比較メソッド
 +  },
 +);
 +
-+test("他保護者の正規編集Actionを本人Cookieで再送しても対象childIdを変更しない", // 実Cookieを使うE2Eケースを登録する関数
++/**
++ * key・署名秘密・destination・登録tokenのクラブ間入替でDB非更新を確認する。
++ */
++test("A/BのWebhook key・署名・destination・登録tokenの入替は対象を作らない", // E2Eケース登録関数
 +  /**
-+   * hiddenとbindの両方が正しい他人のActionでも、RepositoryのparentId照合で拒否する。
++   * 公開応答の失敗分類と、200で無視される別クラブtokenを区別する。
 +   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { admin, member, database, data } = members;
-+      const child = await database.child.create({ // 試験所有のDB行を作成するメソッド
-+        data: {
-+          parentId: data.users.aMember.id,
-+          name: "F12別保護者A",
-+          grade: "ELEMENTARY_2",
-+          clubMemberships: {
-+            create: {
-+              clubId: data.clubs.a.id
-+            }
-+          },
-+        },
-+        include: {
-+          clubMemberships: true
-+        }
-+      });
-+      await member.goto(`/club/${data.clubs.a.slug}/account`); // 実画面へナビゲーションするメソッド
-+      const item = member.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: member.locator(`input[name="childId"][value="${child.id}"]`) // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      const form = item.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: member.locator('select[name="grade"]') // 【修正】候補form内を基準に学年欄を探すメソッド
-+      });
-+      await expect(form).toHaveCount(1); // 【追加】編集フォームが1件に絞れていることを検証する関数・メソッド
-+      await form.locator('input[name="name"]').fill("F12許可されない編集"); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await replayAs(member, admin, // 正規Actionを別本人の実Cookieで再送する関数
-+        /**
-+         * 正規保護者のフォーム送信を、同じクラブの別保護者Cookieへ持ち替える。
-+         */
-+        async () => { // 所有する入力を受け取り操作・照合するコールバック
-+          await form.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+            name: "確認して保存",
-+            exact: true
-+          }).click(); // 正規のボタンを操作するメソッド
-+          await member.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+            name: "保存する",
-+            exact: true
-+          }).click(); // 正規のボタンを操作するメソッド
-+        },
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 【追加】複数の実ActionとRSC反映を含むケースの期限を設定するメソッド
++    const a = await issueCode(scenario, "a"); // Aの正規コード発行関数
++    const b = await issueCode(scenario, "b"); // Bの正規コード発行関数
++    const before = await lineState(scenario); // 二クラブの比較値取得関数
++    const cases = [
++      {
++        key: randomUUID(), // 試験資源のUUIDを予約する関数
++        expected: 404
++      }, // 未登録の公開識別子を生成する関数
++      {
++        key: scenario.line.b.webhookKey,
++        expected: 401
++      },
++      {
++        secret: scenario.line.b.secret,
++        expected: 401
++      },
++      {
++        destination: scenario.line.b.lineBotUserId,
++        expected: 403
++      },
++      {
++        malformed: true,
++        expected: 401
++      },
++    ];
++    for (const entry of cases) {
++      const response = await webhook(scenario, "a", a, entry); // 差し替えた実HTTPを送る関数
++      expect(response.status()).toBe(entry.expected); // 公開状態の取得・期待値・比較メソッド
++      const body = await response.json(); // 公開応答をメモリへ取得するメソッド
++      expect(body.ok).toBe(false); // 公開拒否フラグを検証する期待値関数・比較メソッド
++      expect(body.message).toBe( // 公開メッセージだけを検証する期待値関数・比較メソッド
++        entry.expected === 404 ? "Not found" : entry.expected === 403 ? "Forbidden" : "Unauthorized",
 +      );
-+      expect(await database.child.findFirstOrThrow({ // 期待値を生成する関数 / 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          id: child.id,
-+          parentId: child.parentId
-+        },
-+        include: {
-+          clubMemberships: true
-+        }
-+      })).toEqual(child); // 構造と値の一致を検証するメソッド
-+      await member.goto(`/club/${data.clubs.a.slug}/account`); // 実画面へナビゲーションするメソッド
-+      const withdrawal = member.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: member.locator(`input[name="childId"][value="${child.id}"]`) // フォーム・hidden値などの要素を選ぶメソッド
-+      });
-+      await replayAs(member, admin, // 正規Actionを別本人の実Cookieで再送する関数
-+        /**
-+         * 他保護者の正規退会Actionも別の実Cookieで送信し、子どもの所属を維持する。
-+         */
-+        async () => { // 所有する入力を受け取り操作・照合するコールバック
-+          await withdrawal.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+            name: "現在クラブから外す",
-+            exact: true
-+          }).click(); // 正規のボタンを操作するメソッド
-+          await member.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+            name: "現在クラブから外す",
-+            exact: true
-+          }).click(); // 正規のボタンを操作するメソッド
-+        },
-+      );
-+      expect(await database.child.findFirstOrThrow({ // 期待値を生成する関数 / 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          id: child.id,
-+          parentId: child.parentId
-+        },
-+        include: {
-+          clubMemberships: true
-+        }
-+      })).toEqual(child); // 構造と値の一致を検証するメソッド
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
++      expect(Object.keys(body).sort()).toEqual(["message", "ok"]); // 公開列だけを検証する列挙関数・整列・期待値・比較メソッド
++      expect(await lineState(scenario) === before).toBe(true); // 対象・token非更新を検証する取得関数・期待値・比較メソッド
 +    }
++    expect((await webhook(scenario, "a", b)).status()).toBe(200); // 別クラブtokenの無視を検証するHTTP関数・状態取得・期待値・比較メソッド
++    expect((await webhook(scenario, "b", a)).status()).toBe(200); // 逆方向の無視を検証するHTTP関数・状態取得・期待値・比較メソッド
++    expect(await lineState(scenario) === before).toBe(true); // tokenを消費していないことを検証する関数・期待値・比較メソッド
++  },
++);
++
++/**
++ * MEMBERの直接コード発行Actionと、管理画面へのアクセスを拒否する。
++ */
++test("MEMBERの実CookieでOWNERの登録コードActionを再送しても発行しない", // E2Eケース登録関数
++  /**
++   * UIの非表示だけでなく正規Actionの直接POSTでもDB非更新を照合する。
++   */
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 【追加】複数の実ActionとRSC反映を含むケースの期限を設定するメソッド
++    await scenario.admin.goto(settingsPath(scenario, "a")); // 正規管理画面への移動メソッド・URL生成関数
++    const before = await lineState(scenario); // 拒否前の比較値取得関数
++    await replayAs(scenario.admin, scenario.member, // 正規Actionを別本人Cookieで再送する関数
++      /**
++       * 必須nonceを含む正規の発行Actionを捕捉する。
++       */
++      async () => { // 正規フォーム送信のコールバック
++        await scenario.admin.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++          name: "登録コードを発行する",
++          exact: true
++        }).click(); // 発行ボタン選択・操作メソッド
++      },
++    );
++    expect(await lineState(scenario) === before).toBe(true); // 不正発行の非更新を検証する関数・期待値・比較メソッド
++    await contentDenied(scenario.member, settingsPath(scenario, "a")); // 404とnoindex検証関数・所有URL生成関数
++  },
++);
++
++/**
++ * AのOWNERでBではMEMBERの本人へ、BのtargetId付き正規Actionを再送する。
++ */
++test("B targetIdの通知先更新をA OWNER・B MEMBERのCookieで再送してもBは変わらない", // E2Eケース登録関数
++  /**
++   * 暗号化されたbind引数を含む実Actionを使用し、hidden clubIdに依存しない。
++   */
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 【追加】複数の実ActionとRSC反映を含むケースの期限を設定するメソッド
++    const code = await issueCode(scenario, "b"); // Bのコード発行関数
++    expect((await webhook(scenario, "b", code)).status()).toBe(200); // 正規登録のHTTP関数・状態取得・期待値・比較メソッド
++    await scenario.foreignAdmin.goto(settingsPath(scenario, "b")); // Bの正規画面へ移動するメソッド・URL生成関数
++    const form = scenario.foreignAdmin.locator('form:has(input[name="targetName"])'); // B通知先フォームを選ぶメソッド
++    await form.locator('input[name="targetName"]').fill("F12越境変更"); // 変更欄の選択・入力メソッド
++    await form.locator('input[name="targetRoles"][value="MEMBER"]').check(); // 必須通知対象の選択・操作メソッド
++    const before = await lineState(scenario); // Bの拒否前比較値を取得する関数
++    await replayAs(scenario.foreignAdmin, scenario.admin, // B正規ActionをB MEMBER Cookieで再送する関数
++      /**
++       * BのtargetIdにbindした正規更新Actionを送信する。
++       */
++      async () => { // 正規保存のコールバック
++        await form.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++          name: "設定を保存する",
++          exact: true
++        }).click(); // 保存ボタン選択・操作メソッド
++      },
++    );
++    expect(await lineState(scenario) === before).toBe(true); // B非更新を検証する比較値取得関数・期待値・比較メソッド
++  },
++);
++
++/**
++ * Platform権限からクラブのOWNER権限を推定しない。
++ */
++test("クラブ所属のないPlatformAdminにもLINE管理画面を許可しない", // E2Eケース登録関数
++  /**
++   * 独立した実ログイン後にクラブ画面の404とDB非更新を確認する。
++   */
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 【追加】複数の実ActionとRSC反映を含むケースの期限を設定するメソッド
++    const page: Page = await scenario.platform(); // 実Platformログイン関数・画面型
++    const before = await lineState(scenario); // 管理権限拒否前の比較値取得関数
++    await contentDenied(page, settingsPath(scenario, "a")); // 404・noindexの検証関数・所有URL生成関数
++    expect(await lineState(scenario) === before).toBe(true); // 一般管理権限が追加されないことを検証する関数・期待値・比較メソッド
 +  },
 +);
 diff --git a/e2e/member-fixtures.ts b/e2e/member-fixtures.ts
-new file mode 100644
-index 0000000..ed8a44f
---- /dev/null
+index ed8a44f..d6c489d 100644
+--- a/e2e/member-fixtures.ts
 +++ b/e2e/member-fixtures.ts
-@@ -0,0 +1,517 @@
-+// e2e/member-fixtures.ts
-+// 実Cookieと所有するクラブだけを使い、招待・子ども操作の変更をケース後に回収する。
+@@ -156,9 +156,15 @@ export async function confirmAccount(page: Page, // 確認付きフォームか
+ export async function replayAs(page: Page, // 正規Actionを別本人の実Cookieで再送する関数 / 実画面の操作型
+   actor: Page, // 実画面の操作型
+   submit: () => Promise<void>): Promise<void> { // 受け取った処理を表す関数型 / 非同期の完了を表す型 / 戻り値を利用しない型
+-  const path = new URL(page.url()).pathname; // URLをメモリ内で解析するコンストラクター / 要求・画面のURLをメモリ内で取得するメソッド
++  const target = new URL(page.url()); // 【修正】同じOriginとpathnameの要求だけを捕捉するURLコンストラクター・画面URL取得メソッド
++  /**
++   * 【追加】検索条件の有無にかかわらず、元の正規Actionの送信先だけを選ぶ。
++   */
++  const match = (url: URL) => // 【追加】送信先照合コールバック・URL型
++    url.origin === target.origin &&
++    url.pathname === target.pathname;
+   let completed = false;
+-  await page.route("**" + path, // 正規Actionの通信を試験用に捕捉するメソッド
++  await page.route(match, // 正規Actionの通信を試験用に捕捉するメソッド
+     /**
+      * ActionのPOSTだけを別本人へ持ち替え、元Cookieの更新を防ぐ。
+      */
+@@ -194,7 +200,7 @@ export async function replayAs(page: Page, // 正規Actionを別本人の実Cook
+       () => completed, // 所有する入力を受け取り操作・照合するコールバック
+     ).toBe(true); // 値の一致を検証するメソッド
+   } finally {
+-    await page.unroute("**" + path); // 試験用の通信捕捉を解除するメソッド
++    await page.unroute(match); // 試験用の通信捕捉を解除するメソッド
+   }
+ }
+ 
+diff --git a/e2e/operations-fixtures.ts b/e2e/operations-fixtures.ts
+new file mode 100644
+index 0000000..53a2197
+--- /dev/null
++++ b/e2e/operations-fixtures.ts
+@@ -0,0 +1,260 @@
++// e2e/operations-fixtures.ts
++// 粒度16の操作だけを準備・回収し、一般認可fixtureの業務DB非更新契約を維持する。
 +
 +import {
-+  createHash // 試験用IPのhashを生成する関数
++  createHash
 +} from "node:crypto";
-+import {
-+  test as base, // fixture定義の基底となるPlaywright API
-+  expect // 期待値を生成する関数
++import type {
++  Page,
++  BrowserContext
 +} from "@playwright/test";
-+import type {
-+  BrowserContext, // 実Cookieを保持するbrowser context型
-+  Page, // 実画面の操作型
-+  Locator // 画面の要素を選ぶ操作型
-+} from "@playwright/test";
-+import type {
-+  PrismaClient // ガード後の専用DB client型
-+} from "@prisma/client";
 +import {
-+  requireMvpTestEnvironment // SDK初期化前に専用環境を検証する関数
-+} from "../tests/mvp/environment";
++  z
++} from "zod";
 +import {
-+  parseContentFixture // 制御payloadのrun・本人・所属を照合する関数
-+} from "../tests/mvp/content-fixture";
-+import type {
-+  ContentFixturePayload // 所有する制御payloadの契約型
-+} from "../tests/mvp/content-fixture";
++  test as base, // 実Cookie・所有DBの準備と招待・子ども操作の回収を行うfixture
++  expect, // 同じPlaywrightの期待値検証関数
++  memberControl, // 同じrunの私有stubを読み取り・リセットする関数
++  type MemberScenario, // 所有本人・画面・DBの操作契約型
++} from "./member-fixtures";
 +import {
-+  invitationRecipientEmail, // 所有scopeに予約した招待先メールを返す関数
-+  readInvitationLink // 宛先・origin・slugが一致する招待URLだけを返す関数
-+} from "../tests/mvp/member-fixture";
-+import type {
-+  MvpE2eSession // runnerの同一実行・接続契約型
-+} from "../tests/mvp/outbound-stub.mjs";
++  planOperationsLineSettings, // 実行鍵とクラブを束縛した架空LINE設定を作る関数
++  parseOperationsPlatform, // 同一runのPlatform本人と一時passwordを照合する関数
++  type OperationsLineSetting, // DB保存前に予約したLINE設定の型
++} from "../tests/mvp/operations-fixture";
++
++const FAILURE = "F12_OPERATIONS_CASE_FAILED";
 +
 +/**
-+ * 招待・アカウント画面で使う本人キー。
++ * 画面が生成した報告IDと正規の所属だけを記録する、回収用の所有条件。
 + */
-+type MemberUser = "aOwner" | "aMember" | "bOwner"; // 認証済みの本人キー型
-+/**
-+ * worker内だけに保持するDB接続・実Cookie・所有ID。
-+ */
-+type MemberWorker = { // worker内のDB・実Cookie・所有ID型
-+  database: PrismaClient; // ガード後の専用DB client型
-+  data: ContentFixturePayload["database"]; // 所有する制御payloadの契約型
-+  session: Readonly<MvpE2eSession>; // 読取専用にする型 / runnerの同一実行・接続契約型
-+  cookies: Record<MemberUser, Awaited<ReturnType<BrowserContext["cookies"]>>>; // キーと値を対応付ける辞書型 / 認証済みの本人キー型 / 非同期結果の解決値を得る型 / 関数の戻り値を取得する型 / 実Cookieを保持するbrowser context型
-+};
-+/**
-+ * ケースごとの実Cookie画面とローカルstub制御をまとめる。
-+ */
-+export type MemberScenario = MemberWorker & { // ケース内の独立画面と所有DBの契約型 / worker内のDB・実Cookie・所有ID型
-+  admin: Page; // 実画面の操作型
-+  member: Page; // 実画面の操作型
-+  foreignAdmin: Page; // 実画面の操作型
-+  recipient: Page; // 実画面の操作型
++type ReportOwner = { // 報告の回収条件型
++  clubId: string; // 所有クラブIDの文字列型
++  membershipId: string; // 正規の報告者所属IDの文字列型
 +};
 +
 +/**
-+ * 同じrunのprivate制御口だけへ要求し、応答はメモリ内に留める。
++ * 一ケースのLINE設定・報告台帳・遅延Platformログインをまとめる。
 + */
-+export async function memberControl(scenario: Pick<MemberWorker, "session">, // 同じ実行のprivate stubへ期限付きで要求する関数 / 必要な項目だけを選ぶ型 / worker内のDB・実Cookie・所有ID型
-+  action: "read" | "reset"): Promise<unknown> { // 非同期の完了を表す型 / 未確定値の型
++export type OperationsScenario = MemberScenario & { // 専用操作契約型 / 共通の実Cookie・所有DB契約型
++  line: Record<"a" | "b", OperationsLineSetting>; // 所有LINE設定の辞書型・準備情報型
++  reports: Map<string, ReportOwner>; // 所有報告IDと回収条件の対応型
++  platform: () => Promise<Page>; // 必要時だけ実ログインする関数型・非同期画面型
++};
++
++/**
++ * 同一runの認証付き私有制御口へ接続し、例外原文は公開しない。
++ */
++export async function operationsControl( // 同一runの認証付き私有stubを制御する関数
++  scenario: Pick<OperationsScenario, "session">, // 接続契約だけを選ぶ型
++  body: Record<string, unknown>, // 制御指定の辞書型・未確定値型
++): Promise<unknown> { // 私有応答の非同期型・未確定型
 +  try {
 +    const { session } = scenario;
-+    const response = await fetch(session.stubOrigin + "/control", { // 所有する接続先へ要求する関数
++    const response = await fetch(session.stubOrigin + "/control", { // 所有stubだけへ要求する関数
 +      method: "POST",
 +      headers: {
 +        "Content-Type": "application/json",
 +        "x-mvp-secret": session.secret,
 +      },
-+      body: JSON.stringify({ // 値をJSON文字列へ変換するメソッド
-+        action,
-+        runId: session.runId
++      body: JSON.stringify({ // 制御指定をJSON化するメソッド
++        ...body,
++        runId: session.runId,
 +      }),
-+      signal: AbortSignal.timeout(5000), // 通信の期限signalを生成するメソッド
 +      redirect: "error",
++      signal: AbortSignal.timeout(5000), // 制御通信の期限を作るメソッド
 +    });
 +    if (!response.ok) {
-+      throw new Error("F12_MEMBER_CONTROL_FAILED"); // 秘密を含めない固定例外のコンストラクター
++      throw new Error(FAILURE); // 制御失敗の固定例外コンストラクター
 +    }
-+    return await response.json(); // 応答のJSONをメモリへ取得するメソッド
++    return await response.json(); // 私有応答をメモリへ取得するメソッド
 +  } catch {
-+    throw new Error("F12_MEMBER_CONTROL_FAILED"); // 秘密を含めない固定例外のコンストラクター
++    throw new Error(FAILURE); // URL・secret・応答原文を捨てるコンストラクター
 +  }
 +}
 +
 +/**
-+ * 正規メールの宛先・ローカル接続先と一致する最新の招待リンクだけを返す。
++ * 正規フォームの未使用requestIdを送信前に登録し、所属とIDの両方で回収範囲を限定する。
 + */
-+export async function invitationLink(scenario: MemberScenario, // 所有stubから一致する最新の招待URLを取得する関数 / ケース内の独立画面と所有DBの契約型
-+  email: string, // 文字列型
-+  club: "a" | "b",
-+  kind: "new" | "existing"): Promise<string> { // 非同期の完了を表す型 / 文字列型
-+  return readInvitationLink(await memberControl(scenario, "read"), email, // 宛先・origin・slugが一致する招待URLだけを返す関数 / 同じ実行のprivate stubへ期限付きで要求する関数
-+    scenario.session.appOrigin, process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
-+    scenario.data.clubs[club].slug, kind);
-+}
-+
-+/**
-+ * 所有クラブの招待フォームを実送信し、PENDINGのDB行と画面遷移を照合する。
-+ */
-+export async function invite(scenario: MemberScenario, // OWNERの実フォームから招待を送信しDB状態を検証する関数 / ケース内の独立画面と所有DBの契約型
-+  page: Page, // 実画面の操作型
-+  club: "a" | "b",
-+  email: string): Promise<void> { // 文字列型 / 非同期の完了を表す型 / 戻り値を利用しない型
-+  const { data, database } = scenario;
-+  await page.goto(`/club/${data.clubs[club].slug}/admin/members`); // 実画面へナビゲーションするメソッド
-+  const form = page.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+    has: page.locator('input[name="email"]') // フォーム・hidden値などの要素を選ぶメソッド
-+  });
-+  await form.locator('input[name="email"]').fill(email); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+  await form.locator('input[name="name"]').fill("F12招待先"); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+  await form.locator('select[name="role"]').selectOption("MEMBER"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+  await form.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+    name: "招待メールを送信する",
-+    exact: true
-+  }).click(); // 正規のボタンを操作するメソッド
-+  await expect.poll( // 非同期の検証結果を待つメソッド
-+    /**
-+     * OWNER操作で対象クラブへ保存された招待の受付成功を待つ。
-+     */
-+    () => database.clubInvitation.count({ // 所有する入力を受け取り操作・照合するコールバック / 所有条件に合うDB行数を取得するメソッド
++export async function reserveSupportReport( // 正規フォームの報告IDと所属を送信前に記録する関数
++  scenario: OperationsScenario, // 所有DBと回収台帳の契約型
++  page: Page, // 正規報告フォームを表示する画面型
++  club: "a" | "b", // 所有クラブキー型
++): Promise<string> { // 登録した報告IDの非同期文字列型
++  const id = await page.locator('form:has(textarea[name="message"]) input[name="requestId"]').inputValue(); // 正規フォームを選ぶ・nonceを取得するメソッド
++  if (
++    !z.string().uuid().safeParse(id).success || // UUIDのschema定義・入力検証メソッド
++    scenario.reports.has(id) || // 二重登録を検出するメソッド
++    await scenario.database.supportReport.count({ // 所有条件に合うDB行を数えるメソッド
 +      where: {
-+        clubId: data.clubs[club].id,
-+        email,
-+        status: "SENT"
-+      },
-+    }),
-+  ).toBe(1); // 値の一致を検証するメソッド
-+  await expect(page.getByText("招待メールを送信しました。", { // 期待値を生成する関数 / 固定の表示文で要素を選ぶメソッド
-+    exact: true
-+  })).toBeVisible(); // 画面表示を検証するメソッド
-+}
-+
-+/**
-+ * 確認付きアカウントフォームを操作し、正規の保存と確認ダイアログ終了を待つ。
-+ */
-+export async function confirmAccount(page: Page, // 確認付きフォームから保存してダイアログ終了を待つ関数 / 実画面の操作型
-+  form: Locator): Promise<void> { // 画面の要素を選ぶ操作型 / 非同期の完了を表す型 / 戻り値を利用しない型
-+  await form.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+    name: "確認して保存",
-+    exact: true
-+  }).click(); // 正規のボタンを操作するメソッド
-+  await page.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+    name: "保存する",
-+    exact: true
-+  }).click(); // 正規のボタンを操作するメソッド
-+  await expect(page.getByRole("dialog")).toHaveCount(0); // DOM要素数を検証するメソッド / 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+}
-+
-+/**
-+ * 正規の暗号化済みActionを別の実Cookieで送信し直し、元の要求を実行しない。
-+ * 本文・Cookie・応答・URLはメモリ内だけで扱う。
-+ */
-+export async function replayAs(page: Page, // 正規Actionを別本人の実Cookieで再送する関数 / 実画面の操作型
-+  actor: Page, // 実画面の操作型
-+  submit: () => Promise<void>): Promise<void> { // 受け取った処理を表す関数型 / 非同期の完了を表す型 / 戻り値を利用しない型
-+  const path = new URL(page.url()).pathname; // URLをメモリ内で解析するコンストラクター / 要求・画面のURLをメモリ内で取得するメソッド
-+  let completed = false;
-+  await page.route("**" + path, // 正規Actionの通信を試験用に捕捉するメソッド
-+    /**
-+     * ActionのPOSTだけを別本人へ持ち替え、元Cookieの更新を防ぐ。
-+     */
-+    async (route) => { // 所有する入力を受け取り操作・照合するコールバック
-+      const request = route.request(); // 捕捉したHTTP要求を取得するメソッド
-+      if (request.method() !== "POST") { // HTTPメソッドを取得するメソッド
-+        await route.continue(); // 対象外の通信を変更せず継続するメソッド
-+        return;
++        id
 +      }
-+      const headers = request.headers(); // HTTP headerをメモリ内だけへ取得するメソッド
-+      delete headers.cookie;
-+      delete headers["content-length"];
-+      const response = await actor.context().request.fetch(request.url(), { // 所有する接続先へ要求する関数 / 実Cookieを保持するcontextを取得するメソッド / 要求・画面のURLをメモリ内で取得するメソッド
-+        method: "POST",
-+        headers,
-+        data: request.postDataBuffer() ?? undefined, // 暗号化済みAction本文をメモリ内へ取得するメソッド
-+        maxRedirects: 0,
-+      });
-+      expect(response.status()).toBeLessThan(500); // HTTP状態がサーバーエラーでないことを検証するメソッド / 期待値を生成する関数 / HTTP状態を取得するメソッド
-+      expect(response.headers()["x-action-redirect"]?.includes("toast=") ?? false).toBe(false); // 値の一致を検証するメソッド / 期待値を生成する関数 / 対象の値を含むか検証するメソッド / HTTP headerをメモリ内だけへ取得するメソッド
-+      completed = true;
-+      await route.fulfill({ // 再送した応答で元の通信を完了するメソッド
-+        response
-+      });
-+    },
-+  );
-+  try {
-+    await submit(); // 受け取った正規フォームの送信を実行する関数
-+    await expect.poll( // 非同期の検証結果を待つメソッド
-+      /**
-+       * POSTの再送が実際に行われたことを確認する。
-+       */
-+      () => completed, // 所有する入力を受け取り操作・照合するコールバック
-+    ).toBe(true); // 値の一致を検証するメソッド
-+  } finally {
-+    await page.unroute("**" + path); // 試験用の通信捕捉を解除するメソッド
++    }) !== 0 // 既存報告との衝突を検出するメソッド
++  ) {
++    throw new Error(FAILURE); // 既存行を回収対象にしない固定例外コンストラクター
 +  }
++  scenario.reports.set(id, { // 保存前に回収対象を登録するメソッド
++    clubId: scenario.data.clubs[club].id,
++    membershipId: scenario.data.actors[club === "a" ? "aMember" : "bOwner"].membershipId,
++  });
++  return id;
 +}
 +
 +/**
-+ * 接続前ガードと実在照合の後だけ、実ログインのCookieをworker内へ保持する。
++ * 実認証・所有照合を継承し、今回だけのLINE設定と報告をfinallyで回収する。
 + */
-+export const test = base.extend<{ members: MemberScenario }, { memberWorker: MemberWorker }>({ // 所有fixtureをPlaywrightへ登録するメソッド / ケース内の独立画面と所有DBの契約型 / worker内のDB・実Cookie・所有ID型
-+  memberWorker: [
-+    /**
-+     * 所有する2クラブ・本人を照合し、実画面のpassword認証を一度ずつ行う。
-+     */
-+    async ({ browser }, provideFixture) => { // 所有する入力を受け取り操作・照合するコールバック
-+      const { readMvpE2eSession } = await import("../tests/mvp/outbound-stub.mjs"); // ガード後に必要なSDK・ESMを遅延読込する関数
-+      const session = readMvpE2eSession(); // runnerと同じ実行の接続契約を検証する関数
-+      const environment = requireMvpTestEnvironment({ // SDK初期化前に専用環境を検証する関数
-+        ...process.env,
-+        NODE_ENV: "test",
-+        NODE_OPTIONS: undefined,
-+      }, process.cwd(), session.runId); // 専用checkoutの現在パスを取得するメソッド
-+      if (environment.appOrigin !== session.appOrigin) {
-+        throw new Error("F12_MEMBER_SETUP_FAILED"); // 秘密を含めない固定例外のコンストラクター
-+      }
-+      const payload = parseContentFixture(await memberControl({ // 制御payloadのrun・本人・所属を照合する関数 / 同じ実行のprivate stubへ期限付きで要求する関数
-+        session
-+      }, "read"), session.runId);
-+      const data = payload.database;
-+      const { PrismaClient } = await import("@prisma/client"); // ガード後に必要なSDK・ESMを遅延読込する関数
-+      const { PrismaPg } = await import("@prisma/adapter-pg"); // ガード後に必要なSDK・ESMを遅延読込する関数
-+      const database = new PrismaClient({ // 専用DB clientのコンストラクター
-+        adapter: new PrismaPg({ // 専用PostgreSQL adapterのコンストラクター
-+          connectionString: environment.databaseUrl,
-+          max: 1,
-+          connectionTimeoutMillis: 3000,
-+          statement_timeout: 5000,
-+        }),
-+        log: [],
-+      });
-+      let originals: Awaited<ReturnType<typeof database.club.findMany>> = []; // 所有クラブ取得結果の配列型 / 非同期結果・戻り値・既存メソッドから型を得る指定 / 非同期結果の解決値を得る型 / 関数の戻り値を取得する型 / 既存宣言から取得する型
-+      try {
-+        originals = await database.club.findMany({ // 所有条件に合うDB行を取得するメソッド
++export const test = base.extend<{ operations: OperationsScenario }>({ // 操作fixtureを追加するメソッド・契約型
++  /**
++   * 所有クラブに既存LINE設定がないことを確認し、一時設定だけを作成する。
++   */
++  operations: async ({ members, browser }, provideFixture, testInfo) => { // ケース準備と回収のコールバック・fixture提供関数
++    const { database, data, session } = members;
++    const line = planOperationsLineSettings(process.env.LINE_CREDENTIAL_ENCRYPTION_KEY, data.clubs); // 同一実行の架空設定を生成する関数
++    const reports = new Map<string, ReportOwner>(); // 回収台帳のコンストラクター・ID文字列型・所有条件型
++    const contexts: BrowserContext[] = []; // ケースが所有するbrowser contextの配列型
++    const created: OperationsLineSetting[] = []; // 保存済み設定だけを登録する配列型
++    let platformPage: Page | undefined; // 遅延ログイン済み画面型・未設定型
++    try {
++      for (const setting of Object.values(line)) { // 所有設定だけを列挙する関数
++        if (await database.clubLineSetting.count({ // 既存LINE設定の有無を確認するメソッド
 +          where: {
-+            id: {
-+              in: [data.clubs.a.id, data.clubs.b.id]
-+            }
++            clubId: setting.clubId,
 +          },
-+        });
-+        if (originals.length !== 2) {
-+          throw new Error("F12_MEMBER_SETUP_FAILED"); // 秘密を含めない固定例外のコンストラクター
++        }) !== 0) {
++          throw new Error(FAILURE); // 既存設定を上書きしない固定例外コンストラクター
 +        }
-+        for (const row of Object.values(data.actors)) { // 辞書の値を列挙する関数
-+          if (await database.clubMembership.count({ // 所有条件に合うDB行数を取得するメソッド
-+            where: {
-+              id: row.membershipId,
-+              clubId: row.clubId,
-+              userId: row.userId,
-+              role: row.role,
-+              status: row.status,
-+            }
-+          }) !== 1) {
-+            throw new Error("F12_MEMBER_SETUP_FAILED"); // 秘密を含めない固定例外のコンストラクター
-+          }
-+        }
-+        await database.club.updateMany({ // 所有条件に合うDB行だけを更新するメソッド
-+          where: {
-+            id: {
-+              in: originals.map( // 各行から照合用の値を取り出すメソッド
-+                /**
-+                 * 受け取った所有行・画面を使い、この試験の操作・照合を行う。
-+                 */
-+                (row) => row.id) // 所有する入力を受け取り操作・照合するコールバック
-+            }
-+          },
++        created.push(setting); // 作成結果が不明でも所有IDを回収できるよう先に登録するメソッド
++        await database.clubLineSetting.create({ // 当該runの所有クラブへ設定を保存するメソッド
 +          data: {
-+            appBaseUrl: session.appOrigin
++            id: setting.id,
++            clubId: setting.clubId,
++            webhookKey: setting.webhookKey,
++            lineChannelId: "F12_FAKE_CHANNEL",
++            lineBotUserId: setting.lineBotUserId,
++            lineChannelSecretEncrypted: setting.lineChannelSecretEncrypted,
++            lineChannelAccessTokenEncrypted: setting.lineChannelAccessTokenEncrypted,
 +          },
 +        });
-+        const cookies = {} as MemberWorker["cookies"]; // 検証済みの値の型を明示する型アサーション / worker内の所有DB・実Cookie・制御の契約型 / 型を明示するアサーション / worker内のDB・実Cookie・所有ID型
-+        for (const user of ["aOwner", "aMember", "bOwner"] as const) { // 検証済みの値の型を明示する型アサーション / リテラル型を保持する型 / リテラル型を保持する型 / constの参照型 / 型を明示するアサーション / リテラル型を保持する指定
-+          const loginAddress = createHash("sha256").update(`${session.runId}-${user}`).digest(); // 実行と本人の比較値を生成する関数 / 入力値をhashへ追加するメソッド / hashをバイト列へ変換するメソッド / 試験用hashへ実行識別情報を追加するメソッド / 実行と本人に対応する試験用hashを生成する関数 / 所有行または試験用hashを更新するメソッド / 試験用IPのhashを生成する関数
-+          const context = await browser.newContext({ // 別の実Cookieを使う新規browser contextを作るメソッド / 独立した実Cookieのbrowser contextを作るメソッド
++      }
++      await provideFixture({ // 所有資源と遅延ログイン関数をケースへ渡す関数
++        ...members,
++        line,
++        reports,
++        /**
++         * 私有payloadと実DBのPlatform本人を照合し、正規フォームで一度だけログインする。
++         */
++        platform: async () => { // 遅延ログインのコールバック
++          if (platformPage) {
++            return platformPage;
++          }
++          const identity = parseOperationsPlatform(await memberControl(members, "read"), session.runId); // 私有応答の取得関数・本人照合関数
++          expect(await database.platformAdmin.count({ // 実DBの独立したPlatform権限を検証する関数・件数取得メソッド
++            where: {
++              id: identity.id,
++              email: identity.email,
++              isActive: true,
++              role: "DEVELOPER",
++            },
++          })).toBe(1); // 所有Platform本人が一件存在することを検証するメソッド
++          const address = createHash("sha256").update(session.runId + testInfo.title).digest(); // ケース別試験IPのhash生成関数・入力追加・終端メソッド
++          const context = await browser.newContext({ // 実Cookieを分離するcontext生成メソッド
 +            baseURL: session.appOrigin,
 +            proxy: {
 +              server: session.stubOrigin,
 +              username: session.runId,
-+              password: session.secret
++              password: session.secret,
 +            },
-+            // 実認証の回数は増やさず、既存のIP単位のアプリ側試行制限からケースを分離する。
 +            extraHTTPHeaders: {
-+              "x-forwarded-for": `198.18.${loginAddress[0]}.${loginAddress[1]}`,
++              "x-forwarded-for": `198.18.${address[0]}.${address[1]}`,
 +            },
 +            serviceWorkers: "block",
 +            acceptDownloads: false,
 +            storageState: {
 +              cookies: [],
-+              origins: []
++              origins: [],
 +            },
 +          });
-+          try {
-+            const page = await context.newPage(); // 所有context内にpageを作るメソッド / 所有context内に画面を作るメソッド
-+            await page.goto("/club-login"); // 新規ナビゲーションで正規画面を取得するメソッド / 実画面へナビゲーションするメソッド
-+            await page.getByLabel("メールアドレス", { // ラベルで入力欄を選ぶメソッド / labelに対応する入力を選ぶメソッド
-+              exact: true
-+            }).fill(payload.credentials[user].email); // テスト用の入力値を設定するメソッド / 架空の入力値を設定するメソッド
-+            await page.getByLabel("パスワード", { // ラベルで入力欄を選ぶメソッド / labelに対応する入力を選ぶメソッド
-+              exact: true
-+            }).fill(payload.credentials[user].password); // テスト用の入力値を設定するメソッド / 架空の入力値を設定するメソッド
-+            await page.getByRole("button", { // roleと名前で対象を選ぶメソッド / roleと表示名で要素を選ぶメソッド
-+              name: "ログイン",
-+              exact: true
-+            }).click(); // 正規のボタンを操作するメソッド
-+            const destination = user === "aOwner" ? "/club/select" :
-+              `/club/${data.clubs[user === "bOwner" ? "b" : "a"].slug}/events`;
-+            await page.waitForURL(session.appOrigin + destination); // 正規のログイン遷移を待つメソッド
-+            cookies[user] = await context.cookies(); // contextが保持する実Cookieをメモリへ取得するメソッド / 実Cookieをメモリ内へ取得するメソッド
-+            if (!cookies[user].some(// 対象条件に一致する要素の有無を検証するメソッド // 条件に一致する要素の有無を調べるメソッド
-+              /**
-+               * 当該の所有ID・名前・受付情報に対応する要素だけを選ぶ。
-+               */
-+              (cookie) => /^sb-.+-auth-token(?:\.\d+)?$/u.test(cookie.name))) { // 所有する入力を受け取る検証コールバック / 正規表現の書式に一致するかを検証するメソッド / 所有する入力を受け取り操作・照合するコールバック / 正規表現との一致を検証するメソッド
-+              throw new Error("F12_CONTENT_LOGIN_FAILED"); // 秘密を含めない固定例外のコンストラクター
-+            }
-+          } finally {
-+            await context.close(); // 所有browser contextを回収するメソッド
-+          }
-+        }
-+        await provideFixture({ // Playwrightへ所有fixtureを渡す関数
-+          database,
-+          data,
-+          session,
-+          cookies
-+        });
-+      } finally {
-+        try {
-+          for (const original of originals) {
-+            await database.club.update({ // 所有行または試験用hashを更新するメソッド
-+              where: {
-+                id: original.id
-+              },
-+              data: {
-+                appBaseUrl: original.appBaseUrl,
-+                updatedAt: original.updatedAt
-+              },
-+            });
-+          }
-+        } finally {
-+          await database.$disconnect(); // 専用DB接続を解放するメソッド
-+        }
-+      }
-+    },
-+    {
-+      scope: "worker"
-+    },
-+  ],
-+  /**
-+   * 実Cookieの独立contextを作り、招待・所属・子ども・氏名のケース内変更だけを回収する。
-+   */
-+  members: async ({ browser, memberWorker }, provideFixture) => { // 所有する入力を受け取り操作・照合するコールバック
-+    const { data, session, database } = memberWorker;
-+    const contexts: BrowserContext[] = []; // 実Cookieを保持するbrowser context型
-+    const clubIds = [data.clubs.a.id, data.clubs.b.id];
-+    const userIds = Object.values(data.users).map( // 各行から照合用の値を取り出すメソッド / 辞書の値を列挙する関数
-+      /**
-+       * 受け取った所有行・画面を使い、この試験の操作・照合を行う。
-+       */
-+      (user) => user.id); // 所有する入力を受け取り操作・照合するコールバック
-+    const originalMemberships = await database.clubMembership.findMany({ // 所有条件に合うDB行を取得するメソッド
-+      where: {
-+        clubId: {
-+          in: clubIds
-+        }
-+      }
-+    });
-+    const originalInvitations = await database.clubInvitation.findMany({ // 所有条件に合うDB行を取得するメソッド
-+      where: {
-+        clubId: {
-+          in: clubIds
-+        }
-+      },
-+      select: {
-+        id: true
-+      }
-+    });
-+    const originalChildren = await database.child.findMany({ // 所有条件に合うDB行を取得するメソッド
-+      where: {
-+        parentId: {
-+          in: userIds
-+        }
-+      },
-+      select: {
-+        id: true
-+      }
-+    });
-+    const originalUsers = await database.appUser.findMany({ // 所有条件に合うDB行を取得するメソッド
-+      where: {
-+        id: {
-+          in: userIds
-+        }
-+      }
-+    });
-+    try {
-+      const pages: Page[] = []; // 実画面の操作型
-+      for (const user of ["aOwner", "aMember", "bOwner", "recipient"] as const) { // 型を明示するアサーション / リテラル型を保持する指定
-+        const context = await browser.newContext({ // 独立した実Cookieのbrowser contextを作るメソッド
-+          baseURL: session.appOrigin,
-+          proxy: {
-+            server: session.stubOrigin,
-+            username: session.runId,
-+            password: session.secret
-+          },
-+          serviceWorkers: "block",
-+          acceptDownloads: false,
-+          storageState: {
-+            cookies: user === "recipient" ? [] : structuredClone(memberWorker.cookies[user]), // 実Cookieをメモリ上で複製する関数
-+            origins: []
-+          },
-+        });
-+        contexts.push(context); // 所有資源を配列へ登録するメソッド
-+        pages.push(await context.newPage()); // 所有資源を配列へ登録するメソッド / 所有context内に画面を作るメソッド
-+      }
-+      await memberControl(memberWorker, "reset"); // 同じ実行のprivate stubへ期限付きで要求する関数
-+      const [admin, member, foreignAdmin, recipient] = pages;
-+      await provideFixture({ // Playwrightへ所有fixtureを渡す関数
-+        ...memberWorker,
-+        admin,
-+        member,
-+        foreignAdmin,
-+        recipient
++          contexts.push(context); // 回収するcontextを先に記録するメソッド
++          const page = await context.newPage(); // 所有contextに画面を作るメソッド
++          await page.goto("/platform-login"); // 正規Platformログイン画面へ移動するメソッド
++          await page.getByLabel("メールアドレス", { // ラベルで正規入力を選ぶメソッド
++            exact: true
++          }).fill(identity.email); // ラベル選択・一時メール入力メソッド
++          await page.getByLabel("パスワード", { // ラベルで正規入力を選ぶメソッド
++            exact: true
++          }).fill(identity.password); // ラベル選択・一時password入力メソッド
++          await page.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++            name: "ログイン",
++            exact: true
++          }).click(); // 正規ログインのボタン選択・操作メソッド
++          await page.waitForURL(session.appOrigin + "/platform/support"); // 実認証の成功遷移を待つメソッド
++          platformPage = page;
++          return page;
++        },
 +      });
 +    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密を含めない固定例外のコンストラクター
++      throw new Error(FAILURE); // 本文・Cookie・暗号文・DB例外を捨てるコンストラクター
 +    } finally {
-+      try {
-+        await memberControl(memberWorker, "reset"); // 同じ実行のprivate stubへ期限付きで要求する関数
-+        await database.$transaction( // 関連するDB操作を一体で実行するメソッド
-+          /**
-+           * 受け取った所有行・画面を使い、この試験の操作・照合を行う。
-+           */
-+          async (transaction) => { // 所有する入力を受け取り操作・照合するコールバック
-+            await transaction.clubInvitation.deleteMany({ // 所有条件に合うDB行だけを回収するメソッド
-+              where: {
-+                clubId: {
-+                  in: clubIds
-+                },
-+                id: {
-+                  notIn: originalInvitations.map( // 各行から照合用の値を取り出すメソッド
-+                    /**
-+                     * 受け取った所有行・画面を使い、この試験の操作・照合を行う。
-+                     */
-+                    (row) => row.id) // 所有する入力を受け取り操作・照合するコールバック
-+                },
-+              }
-+            });
-+            await transaction.clubMembership.deleteMany({ // 所有条件に合うDB行だけを回収するメソッド
-+              where: {
-+                clubId: {
-+                  in: clubIds
-+                },
-+                id: {
-+                  notIn: originalMemberships.map( // 各行から照合用の値を取り出すメソッド
-+                    /**
-+                     * 受け取った所有行・画面を使い、この試験の操作・照合を行う。
-+                     */
-+                    (row) => row.id) // 所有する入力を受け取り操作・照合するコールバック
-+                },
-+              }
-+            });
-+            await transaction.child.deleteMany({ // 所有条件に合うDB行だけを回収するメソッド
-+              where: {
-+                parentId: {
-+                  in: userIds
-+                },
-+                id: {
-+                  notIn: originalChildren.map( // 各行から照合用の値を取り出すメソッド
-+                    /**
-+                     * 受け取った所有行・画面を使い、この試験の操作・照合を行う。
-+                     */
-+                    (row) => row.id) // 所有する入力を受け取り操作・照合するコールバック
-+                },
-+              }
-+            });
-+            for (const row of originalMemberships) {
-+              await transaction.clubMembership.update({ // 所有行または試験用hashを更新するメソッド
-+                where: {
-+                  id: row.id,
-+                  clubId: row.clubId
-+                },
-+                data: {
-+                  role: row.role,
-+                  status: row.status,
-+                  updatedAt: row.updatedAt,
-+                }
-+              });
-+            }
-+            for (const row of originalUsers) {
-+              await transaction.appUser.update({ // 所有行または試験用hashを更新するメソッド
-+                where: {
-+                  id: row.id
-+                },
-+                data: {
-+                  name: row.name,
-+                  updatedAt: row.updatedAt
-+                }
-+              });
-+            }
++      let cleanupFailed = false;
++      for (const [id, owner] of reports) {
++        try {
++          await database.supportReport.deleteMany({ // 登録IDと正規所属が一致する行だけを回収するメソッド
++            where: {
++              id,
++              clubId: owner.clubId,
++              membershipId: owner.membershipId,
++            },
 +          });
-+      } catch {
-+        throw new Error("F12_MEMBER_CLEANUP_FAILED"); // 秘密を含めない固定例外のコンストラクター
-+      } finally {
-+        for (const context of contexts) {
-+          await context.close(); // 所有browser contextを回収するメソッド
++          if (await database.supportReport.count({ // 所有条件に合うDB行を数えるメソッド
++            where: {
++              id
++            }
++          }) !== 0) { // 回収漏れを数えるメソッド
++            cleanupFailed = true;
++          }
++        } catch {
++          cleanupFailed = true;
 +        }
++      }
++      for (const setting of created) {
++        try {
++          await database.clubLineSetting.deleteMany({ // 所有設定と配下token・targetだけを回収するメソッド
++            where: {
++              id: setting.id,
++              clubId: setting.clubId,
++            },
++          });
++          if (await database.clubLineSetting.count({ // 所有条件に合うDB行を数えるメソッド
++            where: {
++              id: setting.id
++            }
++          }) !== 0) { // 回収漏れを数えるメソッド
++            cleanupFailed = true;
++          }
++        } catch {
++          cleanupFailed = true;
++        }
++      }
++      try {
++        await memberControl(members, "reset"); // 故障条件と私有記録を次のケースへ残さない関数
++      } catch {
++        cleanupFailed = true;
++      }
++      for (const context of contexts) {
++        try {
++          await context.close(); // 当該ケースの実Cookieを破棄するメソッド
++        } catch {
++          cleanupFailed = true;
++        }
++      }
++      if (cleanupFailed) {
++        throw new Error("F12_OPERATIONS_CLEANUP_FAILED"); // 一部回収失敗でも全回収を試みた後に失敗を通知するコンストラクター
 +      }
 +    }
 +  },
 +});
 +
 +/**
-+ * 同じPlaywrightの期待値検証と、予約済み招待先の生成関数を公開する。
++ * fixtureと同じPlaywrightの期待値検証を公開する。
 + */
-+export { expect, invitationRecipientEmail }; // 期待値を生成する関数 / 所有scopeに予約した招待先メールを返す関数
-diff --git a/e2e/members-invitations.spec.ts b/e2e/members-invitations.spec.ts
++export { expect }; // 実Cookie画面とDB状態を照合する期待値関数
+diff --git a/e2e/support-platform.spec.ts b/e2e/support-platform.spec.ts
 new file mode 100644
-index 0000000..ec8d6f7
+index 0000000..27aacf5
 --- /dev/null
-+++ b/e2e/members-invitations.spec.ts
-@@ -0,0 +1,377 @@
-+// e2e/members-invitations.spec.ts
-+// OWNER管理と招待リンクを実Cookieで確認し、配送はローカルstubに限定する。
++++ b/e2e/support-platform.spec.ts
+@@ -0,0 +1,280 @@
++// e2e/support-platform.spec.ts
++// 会員の実受付・配送stub障害・独立したPlatform管理を実Cookieと所有DBで照合する。
 +
++import type {
++  Page,
++  Locator
++} from "@playwright/test";
 +import {
-+  test, // 実Cookieを使うE2Eケースを登録する関数
-+  expect, // 期待値を生成する関数
-+  invite, // OWNERの実フォームから招待を送信しDB状態を検証する関数
-+  invitationLink, // 所有stubから一致する最新の招待URLを取得する関数
-+  invitationRecipientEmail, // 所有scopeに予約した招待先メールを返す関数
++  test, // 所有DB・LINE設定・報告回収台帳を持つ実Cookie fixture
++  expect, // 画面とDBを照合する期待値検証関数
++  operationsControl, // 同一runの認証付き私有stubを制御する関数
++  reserveSupportReport, // 正規nonceと報告者所属を送信前に回収台帳へ登録する関数
++  type OperationsScenario, // 専用操作と回収の契約型
++} from "./operations-fixtures";
++import {
 +  replayAs, // 正規Actionを別本人の実Cookieで再送する関数
 +} from "./member-fixtures";
++import {
++  contentDenied, // Streamingを含む404 UIとnoindexを検証する関数
++} from "./content-fixtures";
++import {
++  supportStubCount, // 所有報告のstub受付回数だけを返す関数
++} from "../tests/mvp/operations-fixture";
++import {
++  SUPPORT_REPORT_ACCEPTED_MESSAGE, // サポート報告の固定受付完了メッセージ
++} from "../domain/club/support/support-report-form";
 +
-+test("最後のACTIVE OWNERは通常UIでもdisabled改変でも失われない", // 実Cookieを使うE2Eケースを登録する関数
-+  /**
-+   * 唯一のOWNERの降格と停止を実フォームから試し、DB行が不変であることを確認する。
-+   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { admin, database, data } = members;
-+      const before = await database.clubMembership.findFirstOrThrow({ // 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          id: data.actors.aOwner.membershipId,
-+          clubId: data.clubs.a.id,
-+        }
-+      });
-+      await admin.goto(`/club/${data.clubs.a.slug}/admin/members`); // 実画面へナビゲーションするメソッド
-+      await admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        hasText: data.users.aOwner.email
-+      })
-+        .getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+          name: "権限・状態を変更",
-+          exact: true
-+        }).click(); // 正規のボタンを操作するメソッド
-+      const dialog = admin.getByRole("dialog"); // roleと表示名で要素を選ぶメソッド
-+      for (const violation of ["role", "status"] as const) { // 型を明示するアサーション / リテラル型を保持する指定
-+        const field = dialog.locator(`select[name="${violation}"]`); // フォーム・hidden値などの要素を選ぶメソッド
-+        const value = violation === "role" ? "MEMBER" : "SUSPENDED";
-+        await expect(field.locator(`option[value="${value}"]`)).toBeDisabled(); // 無効な選択肢であることを検証するメソッド / 期待値を生成する関数 / フォーム・hidden値などの要素を選ぶメソッド
-+        await field.evaluate( // 画面内で試験用のhidden値やdisabledを変更するメソッド
-+          /**
-+           * クライアントのdisabledだけを外し、Action側にも拒否判定があることを確認する。
-+           */
-+          (element) => { // 所有する入力を受け取り操作・照合するコールバック
-+            for (const option of element.querySelectorAll("option")) { // 画面内の対象要素を列挙するメソッド
-+              option.disabled = false;
-+            }
-+          },
-+        );
-+        await field.selectOption(value); // フォームの選択値を変更するメソッド
-+        await dialog.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+          name: "変更を保存する",
-+          exact: true
-+        }).click(); // 正規のボタンを操作するメソッド
-+        await expect(dialog.getByText("最後の有効なOWNERは降格・利用停止・退会扱いにできません。先に別のメンバーをOWNERに設定してください。", { // 期待値を生成する関数 / 固定の表示文で要素を選ぶメソッド
-+          exact: true
-+        })).toBeVisible(); // 画面表示を検証するメソッド
-+        expect(await database.clubMembership.findFirstOrThrow({ // 期待値を生成する関数 / 所有するDB行を取得し不在なら失敗するメソッド
-+          where: {
-+            id: before.id,
-+            clubId: before.clubId,
-+          }
-+        })).toEqual(before); // 構造と値の一致を検証するメソッド
-+        await dialog.locator('select[name="role"]').selectOption("OWNER"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        await dialog.locator('select[name="status"]').selectOption("ACTIVE"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      }
-+      await dialog.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "キャンセル",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        hasText: data.users.aMember.email
-+      })
-+        .getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+          name: "権限・状態を変更",
-+          exact: true
-+        }).click(); // 正規のボタンを操作するメソッド
-+      await admin.getByRole("dialog").locator('select[name="role"]').selectOption("COACH"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド / roleと表示名で要素を選ぶメソッド
-+      await admin.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "変更を保存する",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await expect(admin.getByRole("dialog")).toHaveCount(0); // DOM要素数を検証するメソッド / 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+      expect(await database.clubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          id: data.actors.aMember.membershipId,
-+          clubId: data.clubs.a.id,
-+          role: "COACH",
-+          status: "ACTIVE",
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
-+    }
-+  },
-+);
++/**
++ * 会員またはB OWNERの正規フォームで報告し、受付表示と所有DB行を照合する。
++ */
++async function report( // 実画面で報告し所有DBの受付を確認する関数
++  scenario: OperationsScenario, // 所有DB・実画面・回収台帳の契約型
++  club: "a" | "b", // 正規報告クラブのキー型
++): Promise<string> { // 報告IDの非同期文字列型
++  const page = club === "a" ? scenario.member : scenario.foreignAdmin;
++  await page.goto(`/club/${scenario.data.clubs[club].slug}/account`); // 正規アカウント画面へ移動するメソッド
++  const form = page.locator('form:has(textarea[name="message"])'); // 報告フォームを選ぶメソッド
++  await form.locator('select[name="category"]').selectOption("BUG"); // 種別欄の選択・入力メソッド
++  await form.locator('textarea[name="message"]').fill(`F12-${scenario.data.scopeId}-${club}-報告`); // 架空本文の選択・入力メソッド
++  const id = await reserveSupportReport(scenario, page, club); // 正規IDと所属を保存前に登録する関数
++  await form.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++    name: "確認して送信",
++    exact: true
++  }).click(); // 正規確認ボタンの選択・操作メソッド
++  await page.getByRole("dialog").getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++    name: "送信する",
++    exact: true
++  }).click(); // 正規ダイアログ・送信ボタン選択・操作メソッド
++  await expect(page.getByRole("dialog")).toHaveCount(0); // ダイアログ終了を検証する期待値関数・選択・比較メソッド
++  await expect(page.getByText(SUPPORT_REPORT_ACCEPTED_MESSAGE, { // 画面・DBの期待値を検証する関数 / 固定の期待表示で要素を選ぶメソッド
++    exact: true
++  })).toBeVisible(); // 固定受付表示を検証する期待値関数・選択・表示メソッド
++  const saved = await scenario.database.supportReport.findFirstOrThrow({ // 正規の所属に束縛された報告を取得するメソッド
++    where: {
++      id,
++      clubId: scenario.data.clubs[club].id,
++      membershipId: scenario.data.actors[club === "a" ? "aMember" : "bOwner"].membershipId,
++    },
++  });
++  expect(saved.status).toBe("OPEN"); // 初期対応状態を検証する期待値関数・比較メソッド
++  expect(saved.reporterEmail === scenario.data.users[club === "a" ? "aMember" : "bOwner"].email).toBe(true); // 報告者本人の一致だけを検証する期待値関数・比較メソッド
++  return id;
++}
 +
-+test("MEMBERの直接招待Actionと、B membershipId付き更新の別Cookie再送を拒否する", // 実Cookieを使うE2Eケースを登録する関数
-+  /**
-+   * 正規OWNERの暗号化済みActionを実MEMBER Cookieで再送し、所属・招待の非更新を確認する。
-+   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { admin, member, foreignAdmin, database, data } = members;
-+      await member.goto(`/club/${data.clubs.a.slug}/admin/members`); // 実画面へナビゲーションするメソッド
-+      await expect(member.locator('meta[name="robots"][content*="noindex"]').first()).toBeAttached(); // DOMへの存在を検証するメソッド / 期待値を生成する関数 / 同じ属性の先頭要素を選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await admin.goto(`/club/${data.clubs.a.slug}/admin/members`); // 実画面へナビゲーションするメソッド
-+      const form = admin.locator("form").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        has: admin.locator('input[name="email"]') // フォーム・hidden値などの要素を選ぶメソッド
++/**
++ * 所有クラブで絞ったPlatform一覧から、対象報告の操作行を選ぶ。
++ */
++async function managementRow( // 所有クラブで絞ったPlatformの対象報告行を選ぶ関数
++  scenario: OperationsScenario, // 実Platformログインと所有クラブの契約型
++  club: "a" | "b", // 所有クラブキー型
++  id: string, // 予約済み報告IDの文字列型
++): Promise<{ // 管理画面と対象行を返す非同期型
++  page: Page; // 実Cookieの管理画面型
++  row: Locator; // 対象報告行の選択型
++}> {
++  const page = await scenario.platform(); // 正規フォームによる実Platformログイン関数
++  await page.goto(`/platform/support?clubId=${scenario.data.clubs[club].id}`); // 所有クラブだけに絞る新規読込メソッド
++  const row = page.locator("tr").filter({ // 対象報告の行選択・絞り込みメソッド
++    has: page.locator(`input[name="reportId"][value="${id}"]`), // 行内を基準に報告IDを照合するメソッド
++  });
++  await expect(row).toHaveCount(1); // 操作対象が一行であることを検証する期待値関数・比較メソッド
++  return {
++    page,
++    row
++  };
++}
++
++/**
++ * 通知成功と拒否を別ケースにし、受付保存と外部受付結果を混同しない。
++ */
++for (const mode of ["success", "rejected"] as const) { // stubの許可モードを保持するリテラル型
++  test(`会員サポートはResend ${mode}でも受付を保持し通知結果だけを記録する`, // 固定モード別のE2E登録関数
++    /**
++     * 実配送せず、私有stubの要求件数と通知列を独立して照合する。
++     */
++    async ({ operations: scenario }) => { // 所有ケースのコールバック
++      await operationsControl(scenario, { // 同一runのResendだけを設定する制御関数
++        action: "configure",
++        channel: "resend",
++        mode,
 +      });
-+      const email = invitationRecipientEmail(data.scopeId); // 所有scopeに予約した招待先メールを返す関数
-+      await form.locator('input[name="email"]').fill(email); // 架空の入力値を設定するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      await form.locator('input[name="name"]').fill("F12招待先"); // 【追加】必須の氏名を入力してActionのPOSTを発生させるlocator・入力メソッド
-+      await form.locator('select[name="role"]').selectOption("MEMBER"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+      const invitations = await database.clubInvitation.findMany({ // 所有条件に合うDB行を取得するメソッド
++      const id = await report(scenario, "a"); // 実画面から会員受付を作る関数
++      const saved = await scenario.database.supportReport.findUniqueOrThrow({ // 識別子に一致する所有行を取得するメソッド
 +        where: {
-+          clubId: data.clubs.a.id
++          id
 +        }
-+      });
-+      await replayAs(admin, member, // 正規Actionを別本人の実Cookieで再送する関数
++      }); // 保存済みの通知結果を取得するメソッド
++      expect(saved.notifiedAt !== null).toBe(mode === "success"); // 通知受付日時の有無を検証する期待値関数・比較メソッド
++      expect(saved.notifyError).toBe(mode === "success" ? null : "EMAIL_SEND_FAILED"); // 安全な固定エラーを検証する期待値関数・比較メソッド
++      const records = await operationsControl(scenario, { // 同一runの認証付き私有stubを制御する関数
++        action: "read"
++      }); // 私有配送記録をメモリへ読む関数
++      expect(supportStubCount(records, id)).toBe(1); // 当該報告の要求一回だけを検証する件数関数・期待値・比較メソッド
++      expect(await scenario.database.supportReport.count({ // 障害後も一件だけ保持されることを検証する期待値関数・件数メソッド
++        where: {
++          id,
++          clubId: scenario.data.clubs.a.id,
++        },
++      })).toBe(1); // 受付保持を検証する比較メソッド
++    },
++  );
++}
++
++/**
++ * 所属のないPlatform本人がA/Bを管理でき、内部メモと報告者情報が会員へ出ないことを確認する。
++ */
++test("PlatformはA/Bの報告を状態・内部メモ更新でき、会員画面には管理情報が出ない", // E2E登録関数
++  /**
++   * 本文は実受付から作り、実UIでの状態変更とメモ保存をDBまで追跡する。
++   */
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 二クラブの実操作に必要なケース期限を設定するメソッド
++    const ids = {
++      a: await report(scenario, "a"), // A会員の正規報告を作る関数
++      b: await report(scenario, "b"), // B OWNERの正規報告を作る関数
++    };
++    for (const club of ["a", "b"] as const) { // 二クラブのキーを保持するリテラル型
++      const id = ids[club];
++      const { page, row } = await managementRow(scenario, club, id); // 独立したPlatformで対象行を選ぶ関数
++      await row.locator("summary").click(); // 報告本文の詳細を開く選択・操作メソッド
++      await expect(row.getByText(`F12-${scenario.data.scopeId}-${club}-報告`, { // 画面・DBの期待値を検証する関数 / 固定の期待表示で要素を選ぶメソッド
++        exact: true
++      })).toBeVisible(); // 正規本文を検証する期待値関数・選択・表示メソッド
++      await row.locator('select[name="status"]').selectOption("IN_PROGRESS"); // 自動保存されるstatusの選択・操作メソッド
++      await expect.poll( // DB側のstatus保存を待つメソッド
 +        /**
-+         * 正規OWNERのフォームを送信するが、通信境界でMEMBER Cookieへ持ち替える。
++         * 当該報告だけの対応中状態を待つ。
 +         */
-+        () => form.getByRole("button", { // 所有する入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
-+          name: "招待メールを送信する",
-+          exact: true
-+        }).click(), // 正規のボタンを操作するメソッド
-+      );
-+      expect(await database.clubInvitation.findMany({ // 期待値を生成する関数 / 所有条件に合うDB行を取得するメソッド
-+        where: {
-+          clubId: data.clubs.a.id
-+        }
-+      })).toEqual(invitations); // 構造と値の一致を検証するメソッド
-+      const before = await database.clubMembership.findMany({ // 所有条件に合うDB行を取得するメソッド
-+        where: {
-+          clubId: data.clubs.b.id
-+        },
-+        orderBy: {
-+          id: "asc"
-+        }
-+      });
-+      await foreignAdmin.goto(`/club/${data.clubs.b.slug}/admin/members`); // 実画面へナビゲーションするメソッド
-+      await foreignAdmin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        hasText: data.users.aOwner.email
-+      })
-+        .getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+          name: "権限・状態を変更",
-+          exact: true
-+        }).click(); // 正規のボタンを操作するメソッド
-+      await foreignAdmin.getByRole("dialog").locator('select[name="role"]').selectOption("COACH"); // フォームの選択値を変更するメソッド / フォーム・hidden値などの要素を選ぶメソッド / roleと表示名で要素を選ぶメソッド
-+      await replayAs(foreignAdmin, admin, // 正規Actionを別本人の実Cookieで再送する関数
-+        /**
-+         * B OWNERの対象membershipIdを保持したActionを、B MEMBERの実Cookieで再送する。
-+         */
-+        () => foreignAdmin.getByRole("dialog").getByRole("button", { // 所有する入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
-+          name: "変更を保存する",
-+          exact: true
-+        }).click(), // 正規のボタンを操作するメソッド
-+      );
-+      expect(await database.clubMembership.findMany({ // 期待値を生成する関数 / 所有条件に合うDB行を取得するメソッド
-+        where: {
-+          clubId: data.clubs.b.id
-+        },
-+        orderBy: {
-+          id: "asc"
-+        }
-+      })).toEqual(before); // 構造と値の一致を検証するメソッド
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
-+    }
-+  },
-+);
-+
-+test("新規招待を再送し、旧token・B slug・他人Cookieを拒否してから実Authで初回承諾する", // 実Cookieを使うE2Eケースを登録する関数
-+  /**
-+   * 予約した未確認Auth本人だけを使い、再送から実リンク・初回password設定までUIで接続する。
-+   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { admin, member, recipient, database, data } = members;
-+      const email = invitationRecipientEmail(data.scopeId); // 所有scopeに予約した招待先メールを返す関数
-+      await invite(members, admin, "a", email); // OWNERの実フォームから招待を送信しDB状態を検証する関数
-+      const original = await invitationLink(members, email, "a", "new"); // 所有stubから一致する最新の招待URLを取得する関数
-+      const before = await database.clubInvitation.findFirstOrThrow({ // 所有するDB行を取得し不在なら失敗するメソッド
-+        where: {
-+          clubId: data.clubs.a.id,
-+          email,
-+          status: "SENT"
-+        }
-+      });
-+      await database.clubInvitation.update({ // 所有行または試験用hashを更新するメソッド
-+        where: {
-+          id: before.id,
-+          clubId: before.clubId
-+        },
-+        data: {
-+          lastAttemptAt: new Date(Date.now() - 61_000), // 試験用の日時を表す型・コンストラクター / 現在の時刻をミリ秒で取得するメソッド
-+        }
-+      });
-+      await admin.reload(); // 更新済みの正規画面を再取得するメソッド
-+      await admin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        hasText: email
-+      })
-+        .getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+          name: "招待メールを再送する",
-+          exact: true
-+        }).click(); // 正規のボタンを操作するメソッド
-+      await expect(admin.getByText("招待メールを再送しました。", { // 期待値を生成する関数 / 固定の表示文で要素を選ぶメソッド
-+        exact: true
-+      })).toBeVisible(); // 画面表示を検証するメソッド
-+      const latest = await invitationLink(members, email, "a", "new"); // 所有stubから一致する最新の招待URLを取得する関数
-+      const oldDestination = new URL(new URL(original).searchParams.get("redirect_to")!); // URLをメモリ内で解析するコンストラクター / query項目を取得するメソッド
-+      oldDestination.pathname = "/club-invitations/accept";
-+      const validDestination = new URL(new URL(latest).searchParams.get("redirect_to")!); // URLをメモリ内で解析するコンストラクター / query項目を取得するメソッド
-+      validDestination.pathname = "/club-invitations/accept";
-+      const foreign = new URL(validDestination); // URLをメモリ内で解析するコンストラクター
-+      foreign.searchParams.set("clubSlug", data.clubs.b.slug); // query項目を単一値へ設定するメソッド
-+      for (const url of [oldDestination, foreign, validDestination]) {
-+        await member.goto(url.toString()); // 実画面へナビゲーションするメソッド / URL等を文字列にするメソッド
-+        await expect(member.getByRole("heading", { // 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+          name: "クラブ招待の承諾",
-+          exact: true
-+        })).toBeVisible(); // 画面表示を検証するメソッド
-+        await expect(member.getByRole("button", { // 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+          name: "招待を承諾する",
-+          exact: true
-+        })).toHaveCount(0); // DOM要素数を検証するメソッド
-+        expect(await database.clubInvitation.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
++        async () => (await scenario.database.supportReport.findUniqueOrThrow({ // 識別子に一致する所有行を取得するメソッド
 +          where: {
-+            id: before.id,
-+            clubId: before.clubId,
-+            status: "SENT",
-+            acceptedAt: null
++            id
 +          }
-+        })).toBe(1); // 値の一致を検証するメソッド
-+      }
-+      const sameOrigin = await recipient.context().request.post("/auth/confirm", { // 【追加】Cookieなしの認証POSTで公開Originの認識を検証するメソッド
-+        headers: {
-+          origin: members.session.appOrigin,
-+          "sec-fetch-site": "same-origin",
-+        },
-+        data: {},
-+        maxRedirects: 0,
-+      });
-+      expect(sameOrigin.status()).toBe(400); // 【追加】Origin検査を通過し、招待context不足で拒否されることを検証する関数・メソッド
-+      const foreignOrigin = await recipient.context().request.post("/auth/confirm", { // 【追加】接続先は専用入口のままOrigin headerだけを偽装するメソッド
-+        headers: {
-+          origin: "https://foreign.invalid",
-+          "sec-fetch-site": "same-origin",
-+        },
-+        data: {},
-+        maxRedirects: 0,
-+      });
-+      expect(foreignOrigin.status()).toBe(403); // 【追加】異なるOriginは認証処理の前に拒否されることを検証する関数・メソッド
-+      await recipient.goto(latest); // 実画面へナビゲーションするメソッド
-+      await recipient.getByLabel("パスワード", { // labelに対応する入力を選ぶメソッド
++        })).status, // 所有報告の取得コールバック・メソッド
++      ).toBe("IN_PROGRESS"); // 対応中への変更を検証するメソッド
++      const note = `F12内部-${scenario.data.scopeId}-${club}`;
++      await row.locator('textarea[name="internalNote"]').fill(note); // 内部メモの選択・入力メソッド
++      await row.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++        name: "メモを保存",
 +        exact: true
-+      }).fill("F12-New-Recipient-Aa9!2026"); // 架空の入力値を設定するメソッド
-+      await recipient.getByLabel("パスワード（確認）", { // labelに対応する入力を選ぶメソッド
-+        exact: true
-+      }).fill("F12-New-Recipient-Aa9!2026"); // 架空の入力値を設定するメソッド
-+      await recipient.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "パスワードを設定して招待を承諾する",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await expect(recipient).toHaveURL(members.session.appOrigin + `/club/${data.clubs.a.slug}/events`); // 正規の遷移先を検証するメソッド / 期待値を生成する関数
-+      const accepted = await database.clubInvitation.findFirstOrThrow({ // 所有するDB行を取得し不在なら失敗するメソッド
++      }).click(); // 正規メモ保存ボタンの選択・操作メソッド
++      await expect.poll( // 内部メモ保存を待つメソッド
++        /**
++         * 元の本文を保持したまま、同じ報告のメモだけが保存されることを確認する。
++         */
++        async () => (await scenario.database.supportReport.findUniqueOrThrow({ // 識別子に一致する所有行を取得するメソッド
++          where: {
++            id
++          }
++        })).internalNote === note, // 所有メモ取得と一致判定のコールバック・メソッド
++      ).toBe(true); // メモ保存を検証するメソッド
++      const saved = await scenario.database.supportReport.findUniqueOrThrow({ // 識別子に一致する所有行を取得するメソッド
 +        where: {
-+          id: before.id,
-+          clubId: before.clubId
++          id
 +        }
-+      });
-+      expect(accepted.status).toBe("ACCEPTED"); // 値の一致を検証するメソッド / 期待値を生成する関数
-+      expect(accepted.acceptedAt).not.toBeNull(); // nullとの一致を検証するメソッド / 期待値を生成する関数
-+      expect(await database.clubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          id: accepted.membershipId!,
-+          clubId: before.clubId,
-+          userId: accepted.authUserId!,
-+          role: "MEMBER",
-+          status: "ACTIVE",
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+      expect(await database.appUser.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          id: accepted.authUserId!,
-+          email
-+        }
-+      })).toBe(1); // 値の一致を検証するメソッド
-+      expect(await database.clubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
-+        where: {
-+          clubId: data.clubs.b.id,
-+          userId: accepted.authUserId!
-+        }
-+      })).toBe(0); // 値の一致を検証するメソッド
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
++      }); // 更新後の所有報告を読むメソッド
++      const platform = await page.locator('textarea[name="internalNote"]').count(); // 管理専用欄の存在を確認する選択・件数メソッド
++      expect(platform).toBe(1); // 管理側の表示を検証する期待値関数・比較メソッド
++      expect(saved.handledByPlatformAdminId !== null).toBe(true); // 対応者の記録を検証する期待値関数・比較メソッド
++      expect(saved.resolvedAt).toBeNull(); // 対応中で解決扱いにならないことを検証する期待値関数・比較メソッド
++      await scenario.member.goto(`/club/${scenario.data.clubs.a.slug}/account`); // 会員の正規画面を新規取得するメソッド
++      const html = await scenario.member.content(); // 会員向けHTMLをメモリ内へ取得するメソッド
++      expect(html.includes(note)).toBe(false); // 内部メモ非出力を検証する期待値関数・包含・比較メソッド
++      expect(html.includes(scenario.data.users.bOwner.email)).toBe(false); // 他クラブ報告者メール非出力を検証する期待値関数・包含・比較メソッド
 +    }
 +  },
 +);
 +
-+test("既存ユーザーの招待取消と旧token拒否を確認し、再招待をpassword Cookieで承諾して複数所属になる", // 実Cookieを使うE2Eケースを登録する関数
++/**
++ * 一般OWNERの画面拒否と、実Platform Actionを一般本人へ持ち替えた直接POST拒否を確認する。
++ */
++test("OWNER・MEMBERはPlatformの内部メモActionを直接再送しても更新できない", // E2E登録関数
 +  /**
-+   * B OWNERからA MEMBERへ招待し、取消後の新しい案内だけでB所属を有効化する。
++   * それぞれの実Cookieで再送し、拒否前後の報告全列をメモリ内で比較する。
 +   */
-+  async ({ members }) => { // 所有する入力を受け取り操作・照合するコールバック
-+    try { // 所有する入力を受け取り操作・照合するコールバック
-+      const { foreignAdmin, member, database, data } = members;
-+      const email = data.users.aMember.email;
-+      await invite(members, foreignAdmin, "b", email); // OWNERの実フォームから招待を送信しDB状態を検証する関数
-+      const old = await invitationLink(members, email, "b", "existing"); // 所有stubから一致する最新の招待URLを取得する関数
-+      await foreignAdmin.locator("li").filter({ // 条件に一致する要素だけを選ぶメソッド / フォーム・hidden値などの要素を選ぶメソッド
-+        hasText: email
-+      })
-+        .getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+          name: "招待を取り消す",
-+          exact: true
-+        }).click(); // 正規のボタンを操作するメソッド
-+      await foreignAdmin.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "招待を取り消す",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await expect(foreignAdmin.getByText("招待を取り消しました。", { // 期待値を生成する関数 / 固定の表示文で要素を選ぶメソッド
-+        exact: true
-+      })).toBeVisible(); // 画面表示を検証するメソッド
-+      await member.goto(old); // 実画面へナビゲーションするメソッド
-+      await expect(member.getByRole("heading", { // 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+        name: "クラブ招待の承諾",
-+        exact: true
-+      })).toBeVisible(); // 画面表示を検証するメソッド
-+      await expect(member.getByRole("button", { // 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+        name: "招待を承諾する",
-+        exact: true
-+      })).toHaveCount(0); // DOM要素数を検証するメソッド
-+      await invite(members, foreignAdmin, "b", email); // OWNERの実フォームから招待を送信しDB状態を検証する関数
-+      const link = await invitationLink(members, email, "b", "existing"); // 所有stubから一致する最新の招待URLを取得する関数
-+      const crossed = new URL(link); // URLをメモリ内で解析するコンストラクター
-+      crossed.searchParams.set("clubSlug", data.clubs.a.slug); // query項目を単一値へ設定するメソッド
-+      await member.goto(crossed.toString()); // 実画面へナビゲーションするメソッド / URL等を文字列にするメソッド
-+      await expect(member.getByRole("heading", { // 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+        name: "クラブ招待の承諾",
-+        exact: true
-+      })).toBeVisible(); // 画面表示を検証するメソッド
-+      await expect(member.getByRole("button", { // 期待値を生成する関数 / roleと表示名で要素を選ぶメソッド
-+        name: "招待を承諾する",
-+        exact: true
-+      })).toHaveCount(0); // DOM要素数を検証するメソッド
-+      expect(await database.clubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    test.setTimeout(60000); // 複数本人の再送に必要なケース期限を設定するメソッド
++    const id = await report(scenario, "a"); // 会員の正規報告を作る関数
++    for (const actor of [scenario.admin, scenario.member]) {
++      const { page, row } = await managementRow(scenario, "a", id); // 正規Platform行を新規取得する関数
++      await row.locator('textarea[name="internalNote"]').fill("F12許可されないメモ"); // 必須メモの選択・入力メソッド
++      const before = JSON.stringify(await scenario.database.supportReport.findUniqueOrThrow({ // メモリ内だけの比較値をJSON化するメソッド / 識別子に一致する所有行を取得するメソッド
 +        where: {
-+          clubId: data.clubs.b.id,
-+          userId: data.users.aMember.id,
-+          status: "ACTIVE",
++          id
 +        }
-+      })).toBe(0); // 値の一致を検証するメソッド
-+      await member.goto(link); // 実画面へナビゲーションするメソッド
-+      await member.getByRole("button", { // roleと表示名で要素を選ぶメソッド
-+        name: "招待を承諾する",
-+        exact: true
-+      }).click(); // 正規のボタンを操作するメソッド
-+      await expect(member).toHaveURL(members.session.appOrigin + `/club/${data.clubs.b.slug}/events`); // 正規の遷移先を検証するメソッド / 期待値を生成する関数
-+      expect(await database.clubMembership.count({ // 期待値を生成する関数 / 所有条件に合うDB行数を取得するメソッド
++      })); // 拒否前の全列を取得・直列化するメソッド
++      await replayAs(page, actor, // 正規Actionを一般本人のCookieで直接再送する関数
++        /**
++         * 本物のnonce・versionを含むPlatform更新Actionを捕捉する。
++         */
++        async () => { // 正規Action送信のコールバック
++          await row.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++            name: "メモを保存",
++            exact: true
++          }).click(); // 正規保存ボタンの選択・操作メソッド
++        },
++      );
++      const after = JSON.stringify(await scenario.database.supportReport.findUniqueOrThrow({ // メモリ内だけの比較値をJSON化するメソッド / 識別子に一致する所有行を取得するメソッド
 +        where: {
-+          clubId: {
-+            in: [data.clubs.a.id, data.clubs.b.id]
-+          },
-+          userId: data.users.aMember.id,
-+          status: "ACTIVE",
++          id
 +        }
-+      })).toBe(2); // 値の一致を検証するメソッド
-+      await member.goto("/club/select"); // 実画面へナビゲーションするメソッド
-+      for (const club of ["a", "b"] as const) { // 型を明示するアサーション / リテラル型を保持する指定
-+        await expect(member.locator(`a[href="/club/${data.clubs[club].slug}/events"]`)).toBeVisible(); // 画面表示を検証するメソッド / 期待値を生成する関数 / フォーム・hidden値などの要素を選ぶメソッド
-+      }
-+    } catch {
-+      throw new Error("F12_MEMBER_CASE_FAILED"); // 秘密やURLを含めない固定例外のコンストラクター / 秘密を含めない固定例外のコンストラクター
++      })); // 拒否後の全列を取得・直列化するメソッド
++      expect(before === after).toBe(true); // 一般本人による非更新を検証する期待値関数・比較メソッド
++      await contentDenied(actor, "/platform/support"); // 一般本人の管理画面拒否とnoindexを検証する関数
 +    }
 +  },
 +);
-diff --git a/e2e/smoke.spec.ts b/e2e/smoke.spec.ts
-index f3d8569..8684d54 100644
---- a/e2e/smoke.spec.ts
-+++ b/e2e/smoke.spec.ts
-@@ -15,7 +15,7 @@ test( // 公開ログイン入口を確認するE2Eケースの登録関数
-   async ({ page }) => { // Playwrightが分離したpageを受け取る非同期テスト関数
-     const response = await page.goto("/club-login"); // ローカルの公開ログイン入口へ遷移するメソッド
-     expect(response?.status()).toBe(200); // 期待値生成関数 / HTTP状態取得メソッド / 正常応答の比較メソッド
--    await expect(page).toHaveURL("https://127.0.0.1:3443/club-login"); // 【修正】期待値生成関数 / 所有するHTTPS遷移先の照合メソッド
-+    await expect(page).toHaveURL("https://localhost:3443/club-login"); // 【修正】期待値生成関数 / 所有するHTTPS遷移先の照合メソッド
-     await expect( // 期待値を生成する関数
-       page.getByRole("heading", { // アクセシブルな見出しを特定するメソッド
-         name: "クラブ運営アプリ",
-diff --git a/playwright.config.mts b/playwright.config.mts
-index 3575c7a..9db49e3 100644
---- a/playwright.config.mts
-+++ b/playwright.config.mts
-@@ -43,7 +43,7 @@ export default defineConfig({ // 型を検証しながらPlaywright設定を定
-     diff: false,
-   },
-   use: {
--    baseURL: "https://127.0.0.1:3443", // 【修正】本番のHTTPS条件を維持した専用入口
-+    baseURL: "https://localhost:3443", // 【修正】本番のHTTPS条件を維持した専用入口
-     headless: true,
-     trace: "off",
-     video: "off",
++
++/**
++ * 古い管理画面のversionによる保存が、新しいメモを上書きしないことを実Actionで確認する。
++ */
++test("Platformの古いversionからのメモ保存は競合し、新しい保存内容を保持する", // E2E登録関数
++  /**
++   * 同じ実Cookieの二画面を使い、後から保存する古いフォームの拒否を確認する。
++   */
++  async ({ operations: scenario }) => { // 所有ケースのコールバック
++    const id = await report(scenario, "a"); // 会員の正規報告を作る関数
++    const { page, row } = await managementRow(scenario, "a", id); // 正規の管理行を取得する関数
++    const stale = await page.context().newPage(); // 同じCookieの別画面を作るcontext取得・画面生成メソッド
++    try {
++      await stale.goto(page.url()); // 同じ一覧URLをメモリ内で取得して新規表示するメソッド
++      const old = stale.locator(`tr:has(input[name="reportId"][value="${id}"])`); // 古いversionを保持した対象行を選ぶメソッド
++      await expect(old).toHaveCount(1); // 古いフォームの存在を検証する期待値関数・比較メソッド
++      await row.locator('textarea[name="internalNote"]').fill("F12新しい保存"); // 最新メモの選択・入力メソッド
++      await row.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++        name: "メモを保存",
++        exact: true
++      }).click(); // 最新保存のボタン選択・操作メソッド
++      await expect.poll( // 最新のDB保存完了を待つメソッド
++        /**
++         * 古い画面を操作する前に、新しい保存を確定させる。
++         */
++        async () => (await scenario.database.supportReport.findUniqueOrThrow({ // 識別子に一致する所有行を取得するメソッド
++          where: {
++            id
++          }
++        })).internalNote === "F12新しい保存", // 保存値取得と一致判定のコールバック・メソッド
++      ).toBe(true); // 最新保存を検証するメソッド
++      const before = JSON.stringify(await scenario.database.supportReport.findUniqueOrThrow({ // メモリ内だけの比較値をJSON化するメソッド / 識別子に一致する所有行を取得するメソッド
++        where: {
++          id
++        }
++      })); // 最新版の比較値を取得・直列化するメソッド
++      await old.locator('textarea[name="internalNote"]').fill("F12古い画面の上書き"); // 古い画面への入力・選択メソッド
++      await old.getByRole("button", { // roleと名前で正規要素を選ぶメソッド
++        name: "メモを保存",
++        exact: true
++      }).click(); // 古いversionの保存ボタン選択・操作メソッド
++      await expect(old.getByRole("alert")).toBeVisible(); // 固定競合エラーの期待値関数・選択・表示メソッド
++      const after = JSON.stringify(await scenario.database.supportReport.findUniqueOrThrow({ // メモリ内だけの比較値をJSON化するメソッド / 識別子に一致する所有行を取得するメソッド
++        where: {
++          id
++        }
++      })); // 拒否後比較値の取得・直列化メソッド
++      expect(before === after).toBe(true); // 最新内容の保持を検証する期待値関数・比較メソッド
++      expect(await old.locator('textarea[name="internalNote"]').inputValue() === "F12古い画面の上書き").toBe(true); // 下書き保持を検証する選択・取得・期待値・比較メソッド
++    } finally {
++      await stale.close(); // 所有する古い画面だけを回収するメソッド
++    }
++  },
++);
 diff --git a/scripts/test-e2e.mjs b/scripts/test-e2e.mjs
-index f42f5c9..aed4e4e 100644
+index aed4e4e..a598f1d 100644
 --- a/scripts/test-e2e.mjs
 +++ b/scripts/test-e2e.mjs
-@@ -354,8 +354,8 @@ export async function startMvpTls(certificate, owner, ports = { // この処理
-     (request, response) => { // この処理を定義する関数・コールバック
-       const headers = {
-         ...request.headers,
--        host: "127.0.0.1:3443",
--        "x-forwarded-host": "127.0.0.1:3443",
-+        host: "localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-+        "x-forwarded-host": "localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-         "x-forwarded-proto": "https",
-         "x-mvp-upstream-secret": owner.secret,
-       };
-@@ -429,7 +429,7 @@ async function waitApplication(application, owner, interrupted) { // この処
-        * 非同期処理の完了と失敗を、呼出し元へ通知するコールバック。
-        */
-       (accept) => { // この処理を定義する関数・コールバック / 成功を通知する関数
--        const request = https.get("https://127.0.0.1:3443/club-login", { // 取得する関数・メソッド
-+        const request = https.get("https://localhost:3443/club-login", { // 取得する関数・メソッド
-           ca: owner.cert,
-           timeout: 1000,
-         },
-@@ -641,7 +641,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
-     });
-     tls = await startMvpTls(certificate, owner); // 専用HTTPS入口から内部Nextへ中継し、同じrunのNode応答だけを受け入れる
-     services = await import("../tests/mvp/local-services-fixture"); // moduleを遅延読込みする関数
--    fixture = services.planMvpLocalServicesFixture(configuration); // DBのUUID・メールを先に決め、Auth・Storageに触れずに所有ハンドルを返す
-+    fixture = services.planMvpLocalServicesFixture(configuration, {}, true); // 【修正】所有する未確認Auth招待先を予約し、DB・Auth・PDFの生成予定資源を計画する関数
-     /** @type {NodeJS.ProcessEnv} */
-     const environment = {
-       ...configuration.variables,
-@@ -720,15 +720,9 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
-     await database.$queryRawUnsafe("SELECT 1"); // 固定SQLで専用DBへ疎通確認するメソッド
-     await releaseBackend(); // 所有するbackend予約を解放する関数
-     const application = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
--      file: "npm",
-+      file: process.execPath,
-       args: [
--        "run",
--        "start",
--        "--",
--        "--hostname",
--        "127.0.0.1",
--        "--port",
--        "3000"
-+        join(checkout, "tests/mvp/next-e2e-server.mjs"), // 【修正】公開Originを保つ専用production serverのパスを作る関数
-       ],
-       cwd: checkout,
-       env: {
-diff --git a/tests/mvp/environment.test.ts b/tests/mvp/environment.test.ts
-index 6d92021..f011769 100644
---- a/tests/mvp/environment.test.ts
-+++ b/tests/mvp/environment.test.ts
-@@ -601,9 +601,9 @@ it("明示したE2Eだけが所有HTTPS入口を使い、fixtureの再検証で
-   () => { // 【追加】E2E接続契約を確認するコールバック
-     const variables = environment(); // 【追加】架空設定の生成関数
-     variables.RUN_MVP_E2E = "1";
--    variables.APP_BASE_URL = "https://127.0.0.1:3443";
-+    variables.APP_BASE_URL = "https://localhost:3443"; // 【修正】Nextが正規化する公開HTTPS Originに揃える
-     const result = requireMvpTestEnvironment(variables, checkout, RUN_ID); // 【追加】接続前ガード関数
--    expect(result.appOrigin).toBe("https://127.0.0.1:3443"); // 【追加】期待値生成関数 / 所有originの比較メソッド
-+    expect(result.appOrigin).toBe("https://localhost:3443"); // 【追加】期待値生成関数 / 所有originの比較メソッド
-     expect(result.variables.RUN_MVP_E2E).toBe("1"); // 【追加】期待値生成関数 / E2E flagの比較メソッド
-     expect(requireMvpTestEnvironment( // 【追加】期待値生成関数 / 接続契約を再検証する関数
-       result.variables,
-@@ -621,7 +621,7 @@ it.each([undefined, "", "0", "true", "01", "1 "])( // 【追加】不正flag別
-   (value) => { // 【追加】不正flagを確認するコールバック
-     const variables = environment(); // 【追加】架空設定の生成関数
-     variables.RUN_MVP_E2E = value;
--    variables.APP_BASE_URL = "https://127.0.0.1:3443";
-+    variables.APP_BASE_URL = "https://localhost:3443"; // 【修正】Nextが正規化する公開HTTPS Originに揃える
-     fixedFailure( // 【追加】固定例外を検証する関数
-       /**
-        * 【追加】明示されていないHTTPS接続を拒否する。
-@@ -634,7 +634,7 @@ it.each([undefined, "", "0", "true", "01", "1 "])( // 【追加】不正flag別
- it.each([ // 【追加】E2Eの不正origin別の試験登録メソッド
-   "http://127.0.0.1:3000",
-   "http://127.0.0.1:3443",
--  "https://localhost:3443",
-+  "https://127.0.0.1:3443",
-   "https://127.0.0.1:3000",
-   "https://127.0.0.1:3443/",
-   "https://remote.invalid:3443",
-diff --git a/tests/mvp/environment.ts b/tests/mvp/environment.ts
-index 4cd1503..25b0d6b 100644
---- a/tests/mvp/environment.ts
-+++ b/tests/mvp/environment.ts
-@@ -170,10 +170,10 @@ export function requireMvpTestEnvironment( // F12の実行前ガード関数
-     const supabaseOrigin = localOrigin(environment.NEXT_PUBLIC_SUPABASE_URL, "54321"); // Supabase origin検証関数
-     let appOrigin: string; // 【追加】検証したアプリoriginの文字列型
-     if (e2e) {
--      if (environment.APP_BASE_URL !== "https://127.0.0.1:3443") {
-+      if (environment.APP_BASE_URL !== "https://localhost:3443") { // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-         throw new Error(GUARD_ERROR); // 【追加】所有するTLS入口以外を拒否する例外コンストラクター
-       }
--      appOrigin = "https://127.0.0.1:3443";
-+      appOrigin = "https://localhost:3443"; // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-     } else {
-       appOrigin = localOrigin(environment.APP_BASE_URL, "3000"); // 【追加】既存のHTTP origin検証関数
-     }
-diff --git a/tests/mvp/local-services-fixture.integration.test.ts b/tests/mvp/local-services-fixture.integration.test.ts
-index ef7b580..fe78d00 100644
---- a/tests/mvp/local-services-fixture.integration.test.ts
-+++ b/tests/mvp/local-services-fixture.integration.test.ts
-@@ -245,7 +245,7 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし
-                 const user = {
-                   id: input.id!, // 事前確認を前提にする非nullアサーション
-                   email: input.email,
--                  email_confirmed_at: "2026-11-01T00:00:00Z",
-+                  email_confirmed_at: input.email_confirm ? "2026-11-01T00:00:00Z" : undefined, // 【修正】新規招待先の未確認状態も再現する
-                   app_metadata: input.app_metadata,
-                 } as User; // Auth本人の戻り値型
-                 users.set(user.id, user); // 値と所有台帳を登録するメソッド
-@@ -556,6 +556,8 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし
-             count: vi.fn().mockResolvedValue(0) // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
-           },
-           appUser: {
-+            findUnique: vi.fn().mockResolvedValue(null), // 【追加】予約本人のAppUser未作成を再現する関数・メソッド
-+            deleteMany: vi.fn().mockResolvedValue({ count: 1 }), // 【追加】予約本人だけの削除結果を再現する関数・メソッド
-             count: vi.fn().mockResolvedValue(0) // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
-           },
-           platformAdmin: {
-@@ -564,6 +566,113 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし
-         } as unknown as PrismaClient; // 未確定値の型 / 専用DB clientの型
-       },
-     );
-+    it("予約招待先だけを未確認Authで作り、承諾AppUserとAuthを所有確認して回収する", // 【追加】通信なしの試験を登録する関数
-+      /**
-+       * 【追加】通常6人と異なる未確認の7人目を準備し、作成された業務行だけを回収する。
-+       */
-+      async () => {
-+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】SDK初期化前にDB・Auth・PDFの所有資源を計画する関数
-+        handles.push(fixture); // 【追加】作成前の所有ハンドルを記録するメソッド
-+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】計画したAuth・DB・PDFを順に作成する関数
-+        expect(admin.auth.admin.createUser).toHaveBeenCalledTimes(7); // 【追加】期待値を生成する関数 / 予約したAuth本人の作成入力を記録するmockメソッド / 呼出し回数を検証するメソッド
-+        const call = admin.auth.admin.createUser.mock.calls[6][0]; // 【追加】予約したAuth本人の作成入力を記録するmockメソッド
-+        expect(call.email_confirm).toBe(false); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
-+        expect(call.password).toBeUndefined(); // 【追加】期待値を生成する関数 / 未設定であることを検証するメソッド
-+        vi.mocked(database.appUser.findUnique).mockResolvedValue({ // 【追加】境界関数を型付きmockとして扱う関数 / 予約本人のAppUserを取得するmockメソッド / 非同期のfake応答を設定するmockメソッド
-+          email: call.email,
-+          children: [],
-+          memberships: [{
-+            clubId: fixture.database.clubs.a.id
-+          }],
-+        } as never); // 【追加】fake境界の最小データをmock応答として扱う型アサーション
-+        const report = await cleanupMvpLocalServicesFixture(fixture); // 【追加】所有DB・Auth・Storageを回収し残存件数を返す関数
-+        expect(report.remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
-+        expect(database.appUser.deleteMany).toHaveBeenCalledWith({ // 【追加】期待値を生成する関数 / 孤立した予約AppUserだけを削除するメソッド / 呼出し引数を検証するメソッド
-+          where: {
-+            id: call.id,
-+            email: call.email,
-+            memberships: {
-+              none: {}
-+            },
-+            children: {
-+              none: {}
-+            },
-+          }
-+        });
-+        expect(users.size).toBe(0); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
-+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
-+      },
-+    );
-+
-+    it.each(["email", "foreign-membership", "children", "metadata"])( // 【追加】通信なしの試験を登録する関数 / 入力ごとの試験を登録するメソッド
-+      "予約招待先の%sが所有範囲を外れた場合はDBとAuthを残し、復元後に再試行する",
-+      /**
-+       * 【追加】他人や他クラブへの関連を検出し、不明な資源を削除しないことを確認する。
-+       */
-+      async (mode) => {
-+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】SDK初期化前にDB・Auth・PDFの所有資源を計画する関数
-+        handles.push(fixture); // 【追加】作成前の所有ハンドルを記録するメソッド
-+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】計画したAuth・DB・PDFを順に作成する関数
-+        const call = admin.auth.admin.createUser.mock.calls[6][0]; // 【追加】予約したAuth本人の作成入力を記録するmockメソッド
-+        const original = users.get(call.id!)!; // 【追加】メモリ内のAuth本人を取得するメソッド
-+        vi.mocked(database.appUser.findUnique).mockResolvedValue({ // 【追加】境界関数を型付きmockとして扱う関数 / 予約本人のAppUserを取得するmockメソッド / 非同期のfake応答を設定するmockメソッド
-+          email: mode === "email" ? "other@example.test" : call.email,
-+          children: mode === "children" ? [{
-+            id: "other"
-+          }] : [],
-+          memberships: mode === "foreign-membership" ? [{
-+            clubId: "other"
-+          }] : [],
-+        } as never); // 【追加】fake境界の最小データをmock応答として扱う型アサーション
-+        if (mode === "metadata") {
-+          users.set(call.id!, { // 【追加】メモリ内のAuth本人を設定するメソッド
-+            ...original,
-+            app_metadata: {}
-+          });
-+        }
-+        const report = await cleanupMvpLocalServicesFixture(fixture); // 【追加】所有DB・Auth・Storageを回収し残存件数を返す関数
-+        expect(report.remaining.database).toBe(true); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
-+        expect(report.remaining.database).toBe(true); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
-+        expect(admin.auth.admin.deleteUser).not.toHaveBeenCalled(); // 【追加】期待値を生成する関数 / 所有Auth本人を削除するmockメソッド / 呼出しの否定条件を検証する操作 / 境界の呼出し有無を検証するメソッド
-+        expect(database.appUser.deleteMany).not.toHaveBeenCalled(); // 【追加】期待値を生成する関数 / 孤立した予約AppUserだけを削除するメソッド / 呼出しの否定条件を検証する操作 / 境界の呼出し有無を検証するメソッド
-+        users.set(call.id!, original); // 【追加】メモリ内のAuth本人を設定するメソッド
-+        vi.mocked(database.appUser.findUnique).mockResolvedValue(null); // 【追加】境界関数を型付きmockとして扱う関数 / 予約本人のAppUserを取得するmockメソッド / 非同期のfake応答を設定するmockメソッド
-+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
-+      },
-+    );
-+
-+    it("予約本人の業務行削除が失敗した場合、Authを残して再試行できる", // 【追加】通信なしの試験を登録する関数
-+      /**
-+       * 【追加】回収失敗を成功扱いせず、DB回収が終わるまでAuthを消さない。
-+       */
-+      async () => {
-+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】SDK初期化前にDB・Auth・PDFの所有資源を計画する関数
-+        handles.push(fixture); // 【追加】作成前の所有ハンドルを記録するメソッド
-+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】計画したAuth・DB・PDFを順に作成する関数
-+        vi.mocked(database.appUser.deleteMany).mockRejectedValueOnce(new Error(PRIVATE)); // 【追加】境界関数を型付きmockとして扱う関数 / 孤立した予約AppUserだけを削除するメソッド / 一回だけ非同期失敗を返すmockメソッド / 秘密を含めない試験例外のコンストラクター
-+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(true); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
-+        expect(admin.auth.admin.deleteUser).not.toHaveBeenCalled(); // 【追加】期待値を生成する関数 / 所有Auth本人を削除するmockメソッド / 呼出しの否定条件を検証する操作 / 境界の呼出し有無を検証するメソッド
-+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
-+      },
-+    );
-+
-+    it("予約ID・メールに既存AppUserがある場合は新規招待先を作らず回収対象にも含めない", // 【追加】既存行との衝突を通信なしで検証する試験登録関数
-+      /**
-+       * 【追加】衝突した業務行を上書きせず、先に作成した通常Authだけを補償する。
-+       */
-+      async () => {
-+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】予約招待先を含む所有資源を計画する関数
-+        handles.push(fixture); // 【追加】後片付け用の所有ハンドルを記録するメソッド
-+        vi.mocked(database.appUser.count).mockResolvedValue(1); // 【追加】既存行の検出を再現する型付きmock関数・メソッド
-+        await expect(seedMvpLocalServicesFixture(database, fixture)).rejects.toThrow(SERVICE_ERROR); // 【追加】新規作成の固定例外を検証する関数・メソッド
-+        expect(admin.auth.admin.createUser).toHaveBeenCalledTimes(6); // 【追加】通常6人だけの作成を検証する関数・メソッド
-+        expect(bridge.seed).not.toHaveBeenCalled(); // 【追加】業務行の保存が行われないことを検証する関数・メソッド
-+        expect(database.appUser.deleteMany).not.toHaveBeenCalled(); // 【追加】既存AppUserを消さないことを検証する関数・メソッド
-+        const report = await cleanupMvpLocalServicesFixture(fixture); // 【追加】作成したAuthだけを回収する関数
-+        expect(report.remaining.authUsers).toBe(0); // 【追加】Authの回収完了を検証する関数・メソッド
-+      },
-+    );
-+
-     afterEach( // 各ケースの後処理を登録する関数
-       /**
-        * fake資源もfinallyで片付け、元の環境ファイルを読まない。
-diff --git a/tests/mvp/local-services-fixture.ts b/tests/mvp/local-services-fixture.ts
-index f0d32b4..ee1f930 100644
---- a/tests/mvp/local-services-fixture.ts
-+++ b/tests/mvp/local-services-fixture.ts
-@@ -5,6 +5,7 @@ import {
-   Buffer, // 小さなPDFをメモリ上で組み立てるクラス
- } from "node:buffer";
- import {
-+  randomUUID, // 【追加】予約する招待先のAuth IDを作る関数
-   randomBytes, // run専用passwordの乱数を作る関数
- } from "node:crypto";
- import type {
-@@ -37,6 +38,10 @@ import type {
-   MvpTestEnvironment, // F12の検証済み実行環境型
- } from "./environment";
- 
-+import {
-+  invitationRecipientEmail, // 【追加】所有scopeへ予約する新規招待先メールを返す関数
-+} from "./member-fixture";
-+
- const SERVICE_ERROR = "F12ローカルサービスfixtureの設定・作成・認証を確認してください。";
- 
- /**
-@@ -87,6 +92,10 @@ export type MvpLocalCleanupReport = Readonly<{ // 残存・未確認件数の報
- type LocalState = { // ローカル資源の非公開所有台帳型
-   configuration: MvpTestEnvironment; // ガード済み実行環境型
-   credentials: Map<MvpFixtureUserKey, MvpFixtureCredentials>; // キーと値を保持するMap型 / 本人キー型 / 検証専用の認証情報型
-+  invitationRecipient?: { // 【追加】新規招待で初回設定する予約本人の型
-+    id: string; // 【追加】予約Auth IDの文字列型
-+    email: string; // 【追加】予約メールの文字列型
-+  };
-   pendingUsers: Set<string>; // 所有ID・pathの集合型 / 文字列型
-   createdUsers: Set<string>; // 所有ID・pathの集合型 / 文字列型
-   objects: Set<string>; // 所有ID・pathの集合型 / 文字列型
-@@ -195,6 +204,7 @@ export function createMvpFixturePdf(): Uint8Array { // 小さなPDFをメモリ
- export function planMvpLocalServicesFixture( // ローカル資源の所有ハンドルを計画する関数
-   configuration: MvpTestEnvironment, // ガード済み実行環境型
-   options: Omit<MvpFixtureOptions, "authUserIds"> = {}, // 指定した項目を入力から除く型 / ケース別fixture入力型
-+  reserveInvitationRecipient = false, // 【追加】E2E親runnerだけが新規招待先を予約する
- ): MvpLocalServicesFixture { // 秘密を列挙しない所有ハンドル型
-   try {
-     const checked = checkedConfiguration(configuration); // SDK初期化前に接続条件を再検証する関数
-@@ -217,6 +227,10 @@ export function planMvpLocalServicesFixture( // ローカル資源の所有ハ
-     states.set(fixture, { // 値と所有台帳を登録するメソッド
-       configuration: checked,
-       credentials,
-+      invitationRecipient: reserveInvitationRecipient ? {
-+        id: randomUUID(), // 【追加】作成前に招待先の所有IDを登録する関数
-+        email: invitationRecipientEmail(database.scopeId), // 【追加】scopeと対応する予約メールを生成する関数
-+      } : undefined,
-       pendingUsers: new Set(), // 重複しない集合のコンストラクター
-       createdUsers: new Set(), // 重複しない集合のコンストラクター
-       objects: new Set(), // 重複しない集合のコンストラクター
-@@ -235,11 +249,11 @@ export function planMvpLocalServicesFixture( // ローカル資源の所有ハ
-  * 戻りID・メール・管理者だけが書けるrun識別を使ってAuth本人の所有を照合する。
-  */
- function ownsUser(fixture: MvpLocalServicesFixture, user: User, id: string): boolean { // 登録IDと管理者metadataからAuth所有を照合する関数 / 秘密を列挙しない所有ハンドル型 / Auth本人の戻り値型 / 文字列型 / 真偽値型
--  const expected = Object.values(fixture.database.users).find( // 条件に合う所有資源を選ぶメソッド / 値を列挙する関数
-+  const expected = [...Object.values(fixture.database.users), stateOf(fixture).invitationRecipient].find( // 条件に合う所有資源を選ぶメソッド / 値を列挙する関数
-     /**
-      * 作成前に計画したメールと完全一致する本人だけを選ぶ。
-      */
--    (candidate) => candidate.email === user.email, // 所有するメールを照合するコールバック
-+    (candidate) => candidate?.email === user.email, // 所有するメールを照合するコールバック
-   );
-   return Boolean( // 条件の成立を真偽値に変換する関数
-     expected &&
-@@ -317,6 +331,44 @@ export async function seedMvpLocalServicesFixture( // Auth・DB・private PDFを
-         throw new Error(SERVICE_ERROR); // 例外を生成するコンストラクター
-       }
-     }
-+    // 【追加】メール配送は行わず、AppUser未作成・メール未確認の予約Authだけを作る。
-+    const recipient = state.invitationRecipient;
-+    if (recipient) {
-+      if (await database.appUser.count({ // 【追加】予約ID・メールの既存業務行との衝突を検出するメソッド
-+        where: {
-+          OR: [
-+            {
-+              id: recipient.id
-+            },
-+            {
-+              email: recipient.email
-+            },
-+          ],
-+        },
-+      }) !== 0) {
-+        throw new Error(SERVICE_ERROR); // 【追加】衝突を固定例外で拒否するコンストラクター
-+      }
-+      state.pendingUsers.add(recipient.id); // 【追加】作成応答喪失に備えて先に登録するメソッド
-+      const result = await state.admin.auth.admin.createUser({ // 【追加】招待前の未確認Auth本人を作成するメソッド
-+        id: recipient.id,
-+        email: recipient.email,
-+        email_confirm: false,
-+        app_metadata: {
-+          mvp_f12_run: fixture.runId,
-+          mvp_f12_scope: fixture.database.scopeId,
-+        },
-+      });
-+      if (
-+        result.error ||
-+        !result.data.user ||
-+        result.data.user.id !== recipient.id ||
-+        !ownsUser(fixture, result.data.user, recipient.id) || // 【追加】作成した本人のID・メール・所有metadataを照合する関数
-+        result.data.user.email_confirmed_at
-+      ) {
-+        throw new Error(SERVICE_ERROR); // 【追加】予約Authの不一致を固定例外で拒否するコンストラクター
-+      }
-+      state.createdUsers.add(recipient.id); // 【追加】作成確認済みの本人を記録するメソッド
-+    }
-     state.databaseAttempted = true;
-     await seedMvpDatabaseFixture(database, fixture.database); // 計画した行を一体保存する関数
-     state.databaseReady = true;
-@@ -673,7 +725,72 @@ export async function cleanupMvpLocalServicesFixture( // 登録した資源だ
-   ) {
-     try {
-       if (state.databaseReady) {
-+        const recipient = state.invitationRecipient;
-+        if (recipient && state.pendingUsers.has(recipient.id)) { // 【追加】回収済みAuthを再照合せず再試行を可能にするメソッド
-+          const found = await state.admin?.auth.admin.getUserById(recipient.id); // 【追加】予約Authの所有metadataを削除直前に照合するメソッド
-+          if (
-+            !found ||
-+            found.error ||
-+            !found.data.user ||
-+            !ownsUser(fixture, found.data.user, recipient.id) // 【追加】所有が確認できない場合は業務行も残す関数
-+          ) {
-+            throw new Error(SERVICE_ERROR); // 【追加】所有不明を固定例外で拒否するコンストラクター
-+          }
-+          const row = await state.database.appUser.findUnique({ // 【追加】招待準備・承諾で作られた予約本人の業務行を取得するメソッド
-+            where: {
-+              id: recipient.id
-+            },
-+            select: {
-+              email: true,
-+              children: {
-+                select: {
-+                  id: true
+@@ -377,6 +377,46 @@ export async function startMvpTls(certificate, owner, ports = { // この処理
+             response.end(FAILURE); // 送信・応答を終了するメソッド
+             return;
+           }
++          if (request.method === "POST" &&
++            String(received.headers["content-type"] ?? "").includes("text/x-component")) { // 【追加】ActionのRSC応答だけを判定する文字列変換関数・包含メソッド
++            /** @type {Buffer[]} */
++            const chunks = []; // 【追加】この応答だけの一時バイト列の配列型
++            let length = 0;
++            received.on("data", // 【追加】Action応答のバイト列を受け取るメソッド
++              /**
++               * 【追加】圧縮を含む元のバイト列を上限付きで一時保持する。
++               */
++              (chunk) => { // 【追加】応答バイト列を受け取るコールバック
++                length += chunk.length;
++                if (length > 4 * 1024 * 1024) {
++                  received.destroy(); // 【追加】上限超過した所有upstreamを止めるメソッド
++                  response.destroy(); // 【追加】不完全な応答を成功させず中断するメソッド
++                  return;
 +                }
++                chunks.push(chunk); // 【追加】元の圧縮バイト列を変更せず保持するメソッド
 +              },
-+              memberships: {
-+                select: {
-+                  clubId: true
-+                }
++            );
++            received.once("end", // 【追加】Action応答の終端を待つメソッド
++              /**
++               * 【追加】完全受信後に実バイト長を付け、RSC応答の終端を明示する。
++               */
++              () => { // 【追加】完全な応答を転送するコールバック
++                const headers = { ...received.headers };
++                delete headers["transfer-encoding"];
++                delete headers.connection;
++                headers["content-length"] = String(length); // 【追加】実バイト長をHTTP headerへ設定する変換関数
++                response.writeHead(received.statusCode ?? 502, headers); // 【追加】元の状態と圧縮形式を保つメソッド
++                response.end(Buffer.concat(chunks)); // 【追加】受信済み応答を送るメソッド・バイト列結合関数
 +              },
-+            },
-+          });
-+          if (row) {
-+            if (
-+              row.email !== recipient.email ||
-+              row.children.length !== 0 ||
-+              row.memberships.some( // 【追加】所有2クラブ以外の所属を検出するメソッド
-+                /**
-+                 * 【追加】予約本人に他環境の所属が混ざった場合は削除を止める。
-+                 */
-+                (membership) => ![fixture.database.clubs.a.id, fixture.database.clubs.b.id].includes(membership.clubId), // 【追加】所有clubIdとの一致を調べるコールバック・メソッド
-+              )
-+            ) {
-+              throw new Error(SERVICE_ERROR); // 【追加】想定外の関連行を残して失敗するコンストラクター
-+            }
++            );
++            received.once("error", // 【追加】所有upstreamの途中失敗を処理するメソッド
++              /**
++               * 【追加】受信失敗を固定の接続終了にし、例外原文を表示しない。
++               */
++              () => response.destroy(), // 【追加】所有応答だけを中断するコールバック・メソッド
++            );
++            return;
 +          }
-+        }
-         await cleanupMvpDatabaseFixture(state.database, fixture.database); // 所有台帳の範囲だけを削除する関数
-+        if (recipient) {
-+          await state.database.appUser.deleteMany({ // 【追加】クラブ回収後の孤立した予約本人だけを削除するメソッド
-+            where: {
-+              id: recipient.id,
-+              email: recipient.email,
-+              memberships: {
-+                none: {}
-+              },
-+              children: {
-+                none: {}
-+              },
-+            },
-+          });
-+          if (await state.database.appUser.count({ // 【追加】予約本人の残存を確認するメソッド
-+            where: {
-+              id: recipient.id
-+            },
-+          }) !== 0) {
-+            throw new Error(SERVICE_ERROR); // 【追加】残存を成功扱いしないコンストラクター
-+          }
-+        }
-       } else {
-         // commit応答が失われた可能性は、既存helperの成功台帳と混同しない。
-         // 残存確認ができなければDB・Authを残し、専用環境の廃棄時に回収する。
-diff --git a/tests/mvp/member-fixture.test.ts b/tests/mvp/member-fixture.test.ts
+           response.writeHead(received.statusCode ?? 502, received.headers); // HTTP状態とheaderを設定するメソッド
+           received.pipe(response); // streamを転送するメソッド
+         });
+diff --git a/tests/mvp/operations-fixture.test.ts b/tests/mvp/operations-fixture.test.ts
 new file mode 100644
-index 0000000..d40fe63
+index 0000000..4def7f3
 --- /dev/null
-+++ b/tests/mvp/member-fixture.test.ts
-@@ -0,0 +1,164 @@
-+// tests/mvp/member-fixture.test.ts
-+// 架空メールとURLだけで招待リンクの所有照合と秘密非出力を検証する。
++++ b/tests/mvp/operations-fixture.test.ts
+@@ -0,0 +1,265 @@
++// tests/mvp/operations-fixture.test.ts
++// DB・Auth・配送なしで、暗号用途・Platform所有照合・stub受付集計を検証する。
 +
 +import {
-+  expect, // 期待値を生成する関数
-+  it // 単体ケースを登録する関数
-+} from "vitest";
++  Buffer
++} from "node:buffer";
 +import {
-+  invitationRecipientEmail, // 所有scopeに予約した招待先メールを返す関数
-+  readInvitationLink // 宛先・origin・slugが一致する招待URLだけを返す関数
-+} from "./member-fixture";
-+
-+const SCOPE = "12345678-1234-4234-8234-123456789abc";
-+const APP = "https://127.0.0.1:3443";
-+const AUTH = "http://127.0.0.1:54321";
-+const SLUG = `mvp-f12-${SCOPE}-a`;
-+const PRIVATE = "FAKE_PRIVATE_TOKEN_".repeat(3).slice(0, 43); // 架空の秘密文字列を試験用の長さへ繰り返すメソッド / 架空tokenを仕様どおり43文字へ切り出すメソッド
-+
-+/**
-+ * 本番メール本文と同じ独立したURL行を持つ、架空のstub応答を作る。
-+ */
-+function message(link: string, // 架空のメール記録を持つstub応答を作る関数 / 文字列型
-+  email = invitationRecipientEmail(SCOPE)): unknown { // 所有scopeに予約した招待先メールを返す関数 / 未確定値の型
-+  return {
-+    records: [{
-+      channel: "resend",
-+      body: {
-+        to: email,
-+        text: `案内\n${link}\n期限`
-+      }
-+    }]
-+  };
-+}
-+
-+/**
-+ * 実装と同じqueryキーだけで、架空の既存アカウント向けURLを作る。
-+ */
-+function destination(): URL { // 架空の招待先URLを作る関数 / 解析済みURLの型
-+  const url = new URL("/club-invitations/accept", APP); // URLをメモリ内で解析するコンストラクター
-+  url.searchParams.set("clubSlug", SLUG); // query項目を単一値へ設定するメソッド
-+  url.searchParams.set("token", PRIVATE); // query項目を単一値へ設定するメソッド
-+  return url;
-+}
-+
-+it("所有scopeの予約メールと、単一宛先の最新ローカル案内だけを返す", // 単体ケースを登録する関数
-+  /**
-+   * 架空の2通から最新の案内を選び、入力を変更しない。
-+   */
-+  () => { // 所有する入力を受け取り操作・照合するコールバック
-+    const email = invitationRecipientEmail(SCOPE); // 所有scopeに予約した招待先メールを返す関数
-+    expect(email).toBe(`mvp-f12-${SCOPE}-invitee@example.test`); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    const url = destination(); // 架空の招待先URLを作る関数
-+    const value = message(url.toString()); // 架空のメール記録を持つstub応答を作る関数 / URL等を文字列にするメソッド
-+    expect(readInvitationLink(value, email, APP, AUTH, SLUG, "existing") === url.toString()).toBe(true); // 値の一致を検証するメソッド / 期待値を生成する関数 / 宛先・origin・slugが一致する招待URLだけを返す関数 / URL等を文字列にするメソッド
-+    const verify = new URL("/auth/v1/verify", AUTH); // URLをメモリ内で解析するコンストラクター
-+    verify.searchParams.set("type", "invite"); // query項目を単一値へ設定するメソッド
-+    verify.searchParams.set("token", PRIVATE); // query項目を単一値へ設定するメソッド
-+    url.pathname = "/welcome";
-+    verify.searchParams.set("redirect_to", url.toString()); // query項目を単一値へ設定するメソッド / URL等を文字列にするメソッド
-+    expect(readInvitationLink(message(verify.toString()), email, APP, AUTH, SLUG, "new") === verify.toString()).toBe(true); // 値の一致を検証するメソッド / 期待値を生成する関数 / 宛先・origin・slugが一致する招待URLだけを返す関数 / 架空のメール記録を持つstub応答を作る関数 / URL等を文字列にするメソッド
-+  },
-+);
-+
-+it.each(["origin", "slug", "duplicate", "empty-token", "credentials", "fragment", "recipient", "multiple", "unparseable", "extra-query"])( // 入力ごとの試験ケースを登録する関数 / 入力ごとの試験を登録するメソッド
-+  "%sの不正な案内ではURL・token・causeを公開しない",
-+  /**
-+   * 秘密を含む不正入力は必ず固定文で拒否されることを確認する。
-+   */
-+  (mode) => { // 所有する入力を受け取り操作・照合するコールバック
-+    const url = destination(); // 架空の招待先URLを作る関数
-+    if (mode === "origin") url.hostname = "remote.invalid";
-+    if (mode === "slug") url.searchParams.set("clubSlug", "other"); // query項目を単一値へ設定するメソッド
-+    if (mode === "duplicate") url.searchParams.append("token", PRIVATE); // 重複したquery項目を追加するメソッド
-+    if (mode === "empty-token") url.searchParams.set("token", ""); // query項目を単一値へ設定するメソッド
-+    if (mode === "credentials") url.username = PRIVATE;
-+    if (mode === "fragment") url.hash = PRIVATE;
-+    if (mode === "extra-query") url.searchParams.set("clubId", PRIVATE); // queryを改ざんするメソッド / query項目を単一値へ設定するメソッド
-+    let value = message(url.toString(), mode === "recipient" ? "other@example.test" : undefined); // 架空のメール記録を持つstub応答を作る関数 / URL等を文字列にするメソッド
-+    if (mode === "multiple") value = message(url.toString() + "\n" + url.toString()); // 架空のメール記録を持つstub応答を作る関数 / URL等を文字列にするメソッド
-+    if (mode === "unparseable") value = {
-+      records: PRIVATE
-+    };
-+    let caught: unknown; // 未確定値の型
-+    try {
-+      readInvitationLink(value, invitationRecipientEmail(SCOPE), APP, AUTH, SLUG, "existing"); // 宛先・origin・slugが一致する招待URLだけを返す関数 / 所有scopeに予約した招待先メールを返す関数
-+    } catch (error) {
-+      caught = error;
-+    }
-+    expect(caught instanceof Error).toBe(true); // 値の一致を検証するメソッド / 期待値を生成する関数
-+    expect(String(caught)).toBe("Error: F12_MEMBER_INVITATION_LINK_FAILED"); // 値の一致を検証するメソッド / 期待値を生成する関数 / 例外を文字列へ変換する関数
-+    expect((caught as Error).cause).toBeUndefined(); // 未設定であることを検証するメソッド / 期待値を生成する関数 / 型を明示するアサーション / 例外の型
-+  },
-+);
-+
-+it.each(["origin", "path", "type", "redirect", "duplicate"])( // 入力ごとの試験ケースを登録する関数 / 入力ごとの試験を登録するメソッド
-+  "新規Authの%s不一致を固定文で拒否する",
-+  /**
-+   * Authリンクの送信先と戻り先の両方をローカルの実行契約へ限定する。
-+   */
-+  (mode) => { // 所有する入力を受け取り操作・照合するコールバック
-+    const target = destination(); // 架空の招待先URLを作る関数
-+    target.pathname = "/welcome";
-+    const link = new URL("/auth/v1/verify", AUTH); // URLをメモリ内で解析するコンストラクター
-+    link.searchParams.set("type", "invite"); // query項目を単一値へ設定するメソッド
-+    link.searchParams.set("token", PRIVATE); // query項目を単一値へ設定するメソッド
-+    link.searchParams.set("redirect_to", target.toString()); // query項目を単一値へ設定するメソッド / URL等を文字列にするメソッド
-+    if (mode === "origin") link.hostname = "remote.invalid";
-+    if (mode === "path") link.pathname = "/auth/v1/token";
-+    if (mode === "type") link.searchParams.set("type", "recovery"); // query項目を単一値へ設定するメソッド
-+    if (mode === "redirect") link.searchParams.set("redirect_to", PRIVATE); // query項目を単一値へ設定するメソッド
-+    if (mode === "duplicate") link.searchParams.append("redirect_to", target.toString()); // 重複したquery項目を追加するメソッド / URL等を文字列にするメソッド
-+    expect( // 期待値を生成する関数
-+      /**
-+       * 不正URLの値そのものは期待値へ渡さず、固定例外だけを照合する。
-+       */
-+      () => readInvitationLink(message(link.toString()), invitationRecipientEmail(SCOPE), APP, AUTH, SLUG, "new"), // 所有する入力を受け取り操作・照合するコールバック / 宛先・origin・slugが一致する招待URLだけを返す関数 / 架空のメール記録を持つstub応答を作る関数 / URL等を文字列にするメソッド / 所有scopeに予約した招待先メールを返す関数
-+    ).toThrow("F12_MEMBER_INVITATION_LINK_FAILED"); // 固定例外による拒否を検証するメソッド
-+  },
-+);
-+
-+it("不正scopeをURLやメールへ組み込まない", // 単体ケースを登録する関数
-+  /**
-+   * 予約先名の生成前に入力のUUIDを確認する。
-+   */
-+  () => { // 所有する入力を受け取り操作・照合するコールバック
-+    expect( // 期待値を生成する関数
-+      /**
-+       * scopeへパスや秘密を混入した入力を渡す。
-+       */
-+      () => invitationRecipientEmail(PRIVATE), // 所有する入力を受け取り操作・照合するコールバック / 所有scopeに予約した招待先メールを返す関数
-+    ).toThrow("F12_MEMBER_INVITATION_LINK_FAILED"); // 固定例外による拒否を検証するメソッド
-+  },
-+);
-+
-+it("同じ宛先の2通から最後の案内だけを選ぶ", // 単体ケースを登録する関数
-+  /**
-+   * 再送前後のURLを同じstub記録へ入れ、旧リンクを選ばないことを確認する。
-+   */
-+  () => { // 所有する入力を受け取り操作・照合するコールバック
-+    const first = destination(); // 架空の招待先URLを作る関数
-+    const last = destination(); // 架空の招待先URLを作る関数
-+    last.searchParams.set("token", "b".repeat(43)); // query項目を単一値へ設定するメソッド / 架空の秘密文字列を試験用の長さへ繰り返すメソッド
-+    const email = invitationRecipientEmail(SCOPE); // 所有scopeに予約した招待先メールを返す関数
-+    const value = {
-+      records: [
-+        {
-+          channel: "resend",
-+          body: {
-+            to: [email],
-+            text: first.toString() // URL等を文字列にするメソッド
-+          }
-+        },
-+        {
-+          channel: "resend",
-+          body: {
-+            to: [email],
-+            text: last.toString() // URL等を文字列にするメソッド
-+          }
-+        },
-+      ]
-+    };
-+    expect(readInvitationLink(value, email, APP, AUTH, SLUG, "existing") === last.toString()).toBe(true); // 値の一致を検証するメソッド / 期待値を生成する関数 / 宛先・origin・slugが一致する招待URLだけを返す関数 / URL等を文字列にするメソッド
-+  },
-+);
-diff --git a/tests/mvp/member-fixture.ts b/tests/mvp/member-fixture.ts
-new file mode 100644
-index 0000000..e1a3c60
---- /dev/null
-+++ b/tests/mvp/member-fixture.ts
-@@ -0,0 +1,111 @@
-+// tests/mvp/member-fixture.ts
-+// 招待先とメール内URLをメモリ上で照合し、URLやtokenを例外へ含めない。
-+
-+import {
-+  z // 所有fixture付きのE2Eケースを登録する関数
-+} from "zod";
-+
-+const FAILURE = "F12_MEMBER_INVITATION_LINK_FAILED";
-+const mail = z.object({ // オブジェクトの入力schemaを定義するメソッド
-+  to: z.union([z.string(), z.array(z.string())]), // 許可する入力型をまとめるメソッド / 文字列の入力schemaを定義するメソッド / 配列の入力schemaを定義するメソッド
-+  text: z.string(), // 文字列の入力schemaを定義するメソッド
-+});
-+const payload = z.object({ // オブジェクトの入力schemaを定義するメソッド
-+  records: z.array(z.object({ // 配列の入力schemaを定義するメソッド / オブジェクトの入力schemaを定義するメソッド
-+    channel: z.enum(["resend", "line"]), // 許可値の入力schemaを定義するメソッド
-+    body: z.unknown(), // 未確定値の入力schemaを定義するメソッド
-+  })),
-+});
-+
-+/**
-+ * 所有scopeに予約する、AppUser未作成の招待先メールを返す。
-+ */
-+export function invitationRecipientEmail(scopeId: string): string { // 所有scopeに予約した招待先メールを返す関数 / 文字列型
-+  if (!z.uuid().safeParse(scopeId).success) { // 入力の検証結果を返すメソッド / UUID書式の入力schemaを定義するメソッド
-+    throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+  }
-+  return `mvp-f12-${scopeId}-invitee@example.test`;
-+}
-+
-+/**
-+ * ローカルstubの最新メールから、宛先・origin・clubSlugが一致する招待URLだけを返す。
-+ * 新規Authのverify URLと既存アカウント用URLは別々に照合する。返り値は記録しない。
-+ */
-+export function readInvitationLink( // 宛先・origin・slugが一致する招待URLだけを返す関数
-+  value: unknown, // 未確定値の型
-+  email: string, // 文字列型
-+  appOrigin: string, // 文字列型
-+  supabaseOrigin: string, // 文字列型
-+  clubSlug: string, // 文字列型
-+  kind: "new" | "existing",
-+): string { // 文字列型
-+  try {
-+    if (!/^mvp-f12-[a-z0-9-]+@example\.test$/u.test(email)) { // 正規表現との一致を検証するメソッド
-+      throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+    }
-+    const messages = payload.parse(value).records; // 入力構造を検証するメソッド
-+    let result: string | undefined; // 文字列型 / 未設定の型
-+    for (const record of messages) {
-+      if (record.channel !== "resend") {
-+        continue;
-+      }
-+      const message = mail.parse(record.body); // 入力構造を検証するメソッド
-+      const recipients = typeof message.to === "string" ? [message.to] : message.to;
-+      if (recipients.length !== 1 ||
-+        recipients[0] !== email) {
-+        continue;
-+      }
-+      const links = message.text.split("\n").filter( // 条件に一致する要素だけを選ぶメソッド / 文字列を区切りで分割するメソッド
-+        /**
-+         * 本文の独立したURL行だけを候補にする。
-+         */
-+        (line) => /^https?:\/\//u.test(line), // 所有する入力を受け取り操作・照合するコールバック / 正規表現との一致を検証するメソッド
-+      );
-+      if (links.length !== 1) {
-+        throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+      }
-+      const link = new URL(links[0]); // URLをメモリ内で解析するコンストラクター
-+      if (link.username ||
-+        link.password ||
-+        link.hash) {
-+        throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+      }
-+      const destination = kind === "new"
-+        ? new URL(link.searchParams.get("redirect_to") ?? "") // URLをメモリ内で解析するコンストラクター / query項目を取得するメソッド
-+        : link;
-+      if (
-+        destination.origin !== appOrigin ||
-+        Array.from(destination.searchParams.keys()).length !== 2 || // queryキーを列挙して追加項目を拒否する関数・メソッド / 列挙値を配列へ変換する関数 / query項目の名前を列挙するメソッド
-+        destination.pathname !== (kind === "new" ? "/welcome" : "/club-invitations/accept") ||
-+        destination.searchParams.getAll("clubSlug").length !== 1 || // 同じquery項目の値をすべて取得するメソッド
-+        destination.searchParams.get("clubSlug") !== clubSlug || // query項目を取得するメソッド
-+        destination.searchParams.getAll("token").length !== 1 || // 同じquery項目の値をすべて取得するメソッド
-+        !/^[a-zA-Z0-9_-]{43}$/u.test(destination.searchParams.get("token") ?? "") || // 正規表現との一致を検証するメソッド / query項目を取得するメソッド
-+        destination.username ||
-+        destination.password ||
-+        destination.hash
-+      ) {
-+        throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+      }
-+      if (kind === "new" &&
-+        (
-+          link.origin !== supabaseOrigin ||
-+          link.pathname !== "/auth/v1/verify" ||
-+          link.searchParams.getAll("type").length !== 1 || // 同じquery項目の値をすべて取得するメソッド
-+          link.searchParams.get("type") !== "invite" || // query項目を取得するメソッド
-+          link.searchParams.getAll("token").length !== 1 || // 同じquery項目の値をすべて取得するメソッド
-+          !link.searchParams.get("token") || // query項目を取得するメソッド
-+          link.searchParams.getAll("redirect_to").length !== 1 // 同じquery項目の値をすべて取得するメソッド
-+        )) {
-+        throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+      }
-+      result = link.toString(); // URL等を文字列にするメソッド
-+    }
-+    if (!result) {
-+      throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+    }
-+    return result;
-+  } catch {
-+    throw new Error(FAILURE); // 秘密を含めない固定例外のコンストラクター
-+  }
-+}
-diff --git a/tests/mvp/next-e2e-server.mjs b/tests/mvp/next-e2e-server.mjs
-new file mode 100644
-index 0000000..1829d8f
---- /dev/null
-+++ b/tests/mvp/next-e2e-server.mjs
-@@ -0,0 +1,125 @@
-+// tests/mvp/next-e2e-server.mjs
-+// 使い捨てE2Eだけで公開HTTPSのhostname・portをNextへ渡し、HTTP backendはloopbackへ限定する。
-+// @ts-check
-+import http from "node:http";
-+import {
-+  realpathSync,
-+  readdirSync
-+} from "node:fs";
-+import {
-+  resolve
-+} from "node:path";
-+import {
-+  fileURLToPath
-+} from "node:url";
-+const FAILURE = "F12_E2E_SERVER_FAILED";
-+
-+/**
-+ * 通信遮断preloaderと親runnerの所有契約を確認し、Nextの読込前に不正な起動を拒否する。
-+ * @param {Readonly<Record<string, string | undefined>>} environment 明示された起動環境。
-+ * @param {string} checkout 専用コピーの絶対パス。
-+ * @param {unknown} marker preloaderが凍結して登録した所有識別。
-+ * @returns {void} 検証成功時だけ呼出し元へ戻る。
-+ */
-+export function assertMvpNextServerEnvironment(environment, // 専用production serverの接続前ガード関数
-+  checkout,
-+  marker) { // 専用production serverの接続前ガード関数
-+  try {
-+    const owner = JSON.parse(environment.MVP_E2E_PRELOAD ?? ""); // 親runnerの起動契約を解析するメソッド
-+    if (
-+      environment.NODE_ENV !== "production" ||
-+      !marker ||
-+      typeof marker !== "object" ||
-+      !Object.isFrozen(marker) || // preloaderが凍結した値であることを確認する関数
-+      !("phase" in marker) ||
-+      marker.phase !== "start" ||
-+      !("runId" in marker) ||
-+      marker.runId !== owner.runId ||
-+      owner.phase !== "start" ||
-+      realpathSync(checkout) !== owner.checkoutDirectory // 専用コピーとの一致を確認する関数
-+    ) {
-+      throw new Error(FAILURE); // 秘密を含まない固定例外のコンストラクター
-+    }
-+    if (
-+      environment.RUN_MVP_TESTS !== "1" ||
-+      environment.MVP_TEST_DISPOSABLE !== "1" ||
-+      environment.RUN_MVP_E2E !== "1" ||
-+      environment.APP_BASE_URL !== "https://localhost:3443" ||
-+      readdirSync(checkout).some( // 親・preloaderの確認後にも環境ファイルの名前だけを拒否する関数・メソッド
-+        /**
-+         * Nextが自動読込する名前だけを検出し、ファイル内容は開かない。
-+         */
-+        (name) => /^\.env(?:\.(?:local|development(?:\.local)?|test(?:\.local)?|production.*))?$/u.test(name), // ファイル名の一致を調べるコールバック・メソッド
-+      )
-+    ) {
-+      throw new Error(FAILURE); // 専用flag・公開Origin・自動読込の不一致を拒否するコンストラクター
-+    }
-+  } catch {
-+    throw new Error(FAILURE); // 設定・パス・例外原文を含めないコンストラクター
-+  }
-+}
-+
-+/**
-+ * guard後だけNextのproduction handlerを起動し、親runner所有のHTTP backendへ接続する。
-+ * hostname・portはブラウザーが接続する公開HTTPS入口を表し、実listenは内部3000番へ限定する。
-+ */
-+export async function startMvpNextServer() { // 公開URLを保つ専用Next起動関数
-+  const marker = Reflect.get(globalThis, Symbol.for("mvp.e2e.outbound.guard")); // 所有markerを取得する関数 / 共有symbolを取得するメソッド
-+  assertMvpNextServerEnvironment(process.env, process.cwd(), marker); // 接続前の所有確認関数 / 現在のコピーを取得するメソッド
-+  const { default: next } = await import("next"); // guard後だけNext APIを遅延読込する関数
-+  const application = next({ // インストール済みNextのcustom server APIを使う関数
-+    dev: false,
-+    dir: process.cwd(), // 専用buildの場所を取得するメソッド
-+    hostname: "localhost",
-+    port: 3443,
-+    quiet: true,
-+  });
-+  if (application.hostname !== "localhost" ||
-+    application.port !== 3443) {
-+    throw new Error(FAILURE); // 公開hostname・portの不一致を拒否するコンストラクター
-+  }
-+  await application.prepare(); // 既存のproduction buildからNextを準備するメソッド
-+  const handle = application.getRequestHandler(); // production request handlerを取得するメソッド
-+  const server = http.createServer( // 所有preloaderが包むHTTP backendを生成する関数
-+    /**
-+     * 親TLS proxyで所有確認済みの要求だけをNextへ渡し、例外原文は返さない。
-+     */
-+    (request, response) => { // backend要求を受け取るコールバック
-+      void handle(request, response).catch( // Nextのhandlerを呼ぶ関数 / 非同期例外を処理するメソッド
-+        /**
-+         * 処理失敗時は固定応答だけを返し、SDK例外やURLを表示しない。
-+         */
-+        () => { // 固定エラー応答のコールバック
-+          if (!response.headersSent) {
-+            response.writeHead(500); // 固定HTTP状態を設定するメソッド
-+          }
-+          response.end(FAILURE); // 秘密を含まない応答で終了するメソッド
-+        },
-+      );
-+    },
-+  );
-+  await new Promise( // backendの起動結果だけを待つ非同期処理のコンストラクター
-+    /**
-+     * 同じrunのTLS proxyだけが接続できるloopback backendを起動する。
-+     */
-+    (accept, reject) => { // 起動結果を受け取るコールバック
-+      server.once("error", reject); // 起動失敗を通知するメソッド / 失敗通知関数
-+      server.listen(3000, "127.0.0.1", // 所有するloopbackの固定portへbindするメソッド
-+        /**
-+         * loopback backendがlistenしたことだけを通知する。
-+         */
-+        () => accept(undefined), // 起動完了を通知するコールバック・関数
-+      ); // loopbackの固定portへbindするメソッド / 成功通知関数
-+    },
-+  );
-+}
-+
-+if (process.argv[1] &&
-+  resolve(process.argv[1]) === fileURLToPath(import.meta.url)) { // CLI直接起動の判定関数・メソッド
-+  try {
-+    await startMvpNextServer(); // guard後だけ専用production serverを起動する関数
-+  } catch {
-+    console.error(FAILURE); // 固定コードだけを表示するメソッド
-+    process.exitCode = 1;
-+  }
-+}
-diff --git a/tests/mvp/next-e2e-server.test.ts b/tests/mvp/next-e2e-server.test.ts
-new file mode 100644
-index 0000000..481996c
---- /dev/null
-+++ b/tests/mvp/next-e2e-server.test.ts
-@@ -0,0 +1,187 @@
-+// tests/mvp/next-e2e-server.test.ts
-+// Next・DB・Authを初期化せず、専用production serverの起動前ガードを確認する。
-+import {
-+  mkdtempSync,
-+  realpathSync,
-+  rmSync,
-+  writeFileSync,
-+} from "node:fs";
-+import {
-+  tmpdir
-+} from "node:os";
-+import {
-+  join
-+} from "node:path";
++  randomUUID
++} from "node:crypto";
 +import {
 +  afterEach,
-+  beforeEach,
 +  expect,
 +  it,
 +  vi
 +} from "vitest";
 +import {
-+  NextRequest
-+} from "next/server";
++  planOperationsLineSettings, // 明示鍵と異なる二クラブの架空LINE設定を予約する関数
++  parseOperationsPlatform, // 同一runのPlatform本人と一時passwordを照合する関数
++  supportStubCount, // 所有報告のResend要求件数だけを返す関数
++} from "./operations-fixture";
 +import {
-+  assertMvpNextServerEnvironment, // 所有preloader・専用コピー・接続先をNext読込前に検証する関数
-+  startMvpNextServer, // 所有確認の後だけproduction handlerを起動する関数
-+} from "./next-e2e-server.mjs";
++  planMvpDatabaseFixture, // DBへ接続せず生成予定の本人・クラブIDを予約する関数
++} from "./database-fixture";
++import {
++  decryptLineCredential, // clubId・資格情報種別のAADを照合して復号する関数
++} from "../../src/infrastructure/security/line-credential-crypto";
 +
-+const RUN_ID = "a".repeat(32); // 架空の実行識別子を作るメソッド
-+const PRIVATE = "FAKE_SECRET_DO_NOT_PRINT";
-+const forbidden = vi.hoisted( // Next初期化の検出関数をimportより先に作るメソッド
-+  /**
-+   * Nextの初期化が接続前ガードより先に起きたことを検出するmockを用意する。
-+   */
-+  () => vi.fn(), // mockを先に用意する関数・コールバック
-+);
-+vi.mock("next", // Next初期化の境界を置き換えるメソッド
-+  /**
-+   * 実際のNext・HTTP serverを起動せず、初期化の試みだけを記録する。
-+   */
-+  () => ({
-+    default: forbidden // Next初期化を検出するmock関数
-+  }), // Next境界を置き換えるコールバック
-+);
-+
-+let checkout: string; // この試験が所有する一時コピーの文字列型
++const RUN_ID = "a".repeat(32); // 架空run IDを作るメソッド
++const KEY = Buffer.alloc(32, 1).toString("base64"); // 架空鍵の生成関数・符号化メソッド
++const FAILURE = "F12_OPERATIONS_FIXTURE_FAILED";
 +
 +/**
-+ * 元のprocess.envを読まず、使い捨て起動の架空設定だけを作る。
++ * 実環境変数を使わず、共通plannerで所有IDを予約した架空の私有制御応答を作る。
 + */
-+function environment(): Record<string, string | undefined> { // 架空設定の生成関数 / 環境変数辞書型 / 文字列型・未設定の型
++function payload() { // 通信なしの制御応答生成関数
++  const database = planMvpDatabaseFixture({ // DB未接続の共通planner関数
++    runId: RUN_ID,
++    checkoutDirectory: "/fake-checkout",
++    databaseUrl: "postgresql://fixture:fixture@127.0.0.1:54322/postgres",
++    supabaseOrigin: "http://127.0.0.1:54321",
++    appOrigin: "https://localhost:3443",
++    variables: {},
++    migrationDatabaseNames: [],
++  }, {
++    features: []
++  });
++  const credentials = {
++    aOwner: {
++      email: database.users.aOwner.email,
++      password: "F12_FAKE_PASSWORD"
++    },
++    aMember: {
++      email: database.users.aMember.email,
++      password: "F12_FAKE_PASSWORD"
++    },
++    bOwner: {
++      email: database.users.bOwner.email,
++      password: "F12_FAKE_PASSWORD"
++    },
++    platformAdmin: {
++      email: database.users.platformAdmin.email,
++      password: "F12_FAKE_PASSWORD"
++    },
++  };
 +  return {
-+    NODE_ENV: "production",
-+    RUN_MVP_TESTS: "1",
-+    MVP_TEST_DISPOSABLE: "1",
-+    RUN_MVP_E2E: "1",
-+    DATABASE_URL: `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/postgres`,
-+    NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
-+    APP_BASE_URL: "https://localhost:3443",
-+    MVP_E2E_PRELOAD: JSON.stringify({ // 架空の所有契約を文字列へ変換するメソッド
-+      runId: RUN_ID,
-+      phase: "start",
-+      checkoutDirectory: checkout,
-+    }),
++    fixture: {
++      database: {
++        ...database,
++        clubs: {
++          a: {
++            ...database.clubs.a
++          },
++          b: {
++            ...database.clubs.b
++          },
++        },
++        users: {
++          ...database.users,
++          platformAdmin: {
++            ...database.users.platformAdmin
++          },
++        },
++      },
++      credentials,
++    },
 +  };
 +}
 +
 +/**
-+ * 原文・cause・秘密を含めない、固定の起動拒否を検証する。
++ * 原文やcauseを含めない固定例外だけを返すことを検証する。
 + */
-+function fixedFailure(operation: () => void): void { // 拒否検証関数 / 検証対象の関数型 / 戻り値を使わない型
-+  let caught: unknown; // 捕捉した例外の未確定型
++function fixedFailure(operation: () => unknown): void { // 固定例外検証関数・関数型・未確定型・戻り値なし型
++  let caught: unknown; // 捕捉した値の未確定型
 +  try {
-+    operation(); // 検証対象のガードを実行する関数
++    operation(); // 不正入力の検証処理を実行する関数
 +  } catch (error) {
 +    caught = error;
 +  }
-+  expect(caught instanceof Error).toBe(true); // 例外型を確認する期待値関数・メソッド
-+  expect(String(caught)).toBe("Error: F12_E2E_SERVER_FAILED"); // 固定文を確認する文字列変換関数・期待値関数・メソッド
-+  expect((caught as Error).cause).toBeUndefined(); // causeを公開しないことを確認する型アサーション・期待値関数・メソッド
++  expect(caught instanceof Error).toBe(true); // 例外の型を検証する期待値関数・コンストラクター・比較メソッド
++  expect(String(caught)).toBe("Error: " + FAILURE); // 原文非出力を検証する期待値関数・文字列変換関数・比較メソッド
++  expect((caught as Error).cause).toBeUndefined(); // cause非公開を検証する期待値関数・型アサーション・比較メソッド
 +}
 +
-+beforeEach( // ケースごとの準備を登録する関数
++afterEach( // ケース後の環境復元を登録する関数
 +  /**
-+   * この試験だけが所有する空のコピーを作り、mockの履歴を分離する。
++   * 架空の暗号鍵だけを試験前の環境へ戻す。
 +   */
-+  () => { // 準備のコールバック
-+    checkout = realpathSync(mkdtempSync(join(tmpdir(), "f12-next-server-test-"))); // 一時領域作成・パス結合・一時領域取得の関数
-+    forbidden.mockClear(); // 初期化の呼出し記録を消すメソッド
-+  },
++  () => vi.unstubAllEnvs(), // 試験専用環境の復元コールバック・メソッド
 +);
-+afterEach( // ケースごとの後片付けを登録する関数
++
++it("A/BのSecretとAccess tokenは本番の復号関数で対応する用途だけ復号できる", // 暗号互換性の試験登録関数
 +  /**
-+   * Nextが未初期化であることを確認し、この試験の一時領域だけを回収する。
++   * 本番のAAD・形式と一致し、別クラブ・別用途への移植を拒否することを確認する。
 +   */
-+  () => { // 後片付けのコールバック
-+    try {
-+      expect(forbidden).not.toHaveBeenCalled(); // Next非初期化を確認する期待値関数・メソッド
-+    } finally {
-+      vi.unstubAllEnvs(); // 試験で変更した環境変数を戻すメソッド
-+      rmSync(checkout, { // 所有する一時領域だけを回収する関数
-+        recursive: true,
-+        force: true
-+      }); // 所有する一時領域だけを削除する関数
++  () => { // 暗号互換性を検証するコールバック
++    vi.stubEnv("LINE_CREDENTIAL_ENCRYPTION_KEY", KEY); // 架空の実行鍵を設定するメソッド
++    const clubs = payload().fixture.database.clubs; // 架空クラブを予約する関数
++    const settings = planOperationsLineSettings(KEY, clubs); // DB未接続の架空設定生成関数
++    for (const club of ["a", "b"] as const) { // クラブキーのリテラル型
++      const setting = settings[club];
++      expect(decryptLineCredential({ // 本番復号との一致を検証する期待値関数・復号関数
++        clubId: setting.clubId,
++        credentialType: "CHANNEL_SECRET",
++        encryptedValue: setting.lineChannelSecretEncrypted,
++      }) === setting.secret).toBe(true); // 架空秘密の一致だけを比較するメソッド
++      expect(decryptLineCredential({ // 架空送信tokenを検証する期待値関数・復号関数
++        clubId: setting.clubId,
++        credentialType: "CHANNEL_ACCESS_TOKEN",
++        encryptedValue: setting.lineChannelAccessTokenEncrypted,
++      })).toBe("F12_FAKE_NEVER_SEND"); // 実資格情報でないことを比較するメソッド
++      expect( // 別クラブ暗号文の拒否を検証する関数
++        /**
++         * 所有する暗号文を他クラブへ移植しても復号できないことを確認する。
++         */
++        () => decryptLineCredential({ // 不正なAADを渡すコールバック・復号関数
++          clubId: settings[club === "a" ? "b" : "a"].clubId,
++          credentialType: "CHANNEL_SECRET",
++          encryptedValue: setting.lineChannelSecretEncrypted,
++        }),
++      ).toThrow(); // 他クラブ暗号文の拒否を検証するメソッド
++      expect( // 別用途の暗号文の拒否を検証する関数
++        /**
++         * Access tokenをSecretとして復号できないことを確認する。
++         */
++        () => decryptLineCredential({ // 不正用途を渡すコールバック・復号関数
++          clubId: setting.clubId,
++          credentialType: "CHANNEL_SECRET",
++          encryptedValue: setting.lineChannelAccessTokenEncrypted,
++        }),
++      ).toThrow(); // 別用途の拒否を検証するメソッド
 +    }
 +  },
 +);
 +
-+it("一致する所有markerとproduction・HTTPS条件だけを許可する", // 起動契約の試験を登録する関数
++it.each([undefined, "", "private", Buffer.alloc(31).toString("base64"), KEY + " "])( // 不正な明示鍵の試験登録メソッド・架空バイト列生成関数・符号化メソッド
++  "不正な実行鍵を原文なしで拒否する（ケース%#）",
 +  /**
-+   * SDKなしで、検証済み起動条件だけを通過させる。
++   * 明示鍵が不正なら設定を生成せず、鍵やcauseを返さない。
 +   */
-+  () => { // 許可条件を検証するコールバック
-+    assertMvpNextServerEnvironment(environment(), checkout, Object.freeze({ // 接続前ガード・架空設定生成・凍結の関数
-+      runId: RUN_ID,
-+      phase: "start",
-+    }));
++  (key) => { // 不正鍵ごとのコールバック
++    fixedFailure( // 固定例外を検証する関数
++      /**
++       * 不正鍵をDB未接続のplannerへ渡す。
++       */
++      () => planOperationsLineSettings(key, payload().fixture.database.clubs), // 不正入力コールバック・設定生成・架空応答生成関数
++    );
 +  },
 +);
 +
-+it.each(["development", "flag", "origin", "absent", "mutable", "phase", "run", "checkout"])( // 起動拒否のパラメーター試験を登録するメソッド
-+  "%sの不一致ではNextを初期化せず固定例外で止める",
++it.each(["same", "invalid"])( // 不正クラブ境界の試験登録メソッド
++  "%sのクラブを設定準備に使わない",
 +  /**
-+   * 明示flag・公開URL・起動段階・所有marker・コピーの取り違えを拒否する。
++   * 同一クラブや不正IDを二テナントと扱わない。
 +   */
-+  (mode) => { // 条件ごとの検証コールバック
-+    const values = environment(); // 架空設定を作る関数
-+    if (mode === "development") values.NODE_ENV = "development";
-+    if (mode === "flag") values.RUN_MVP_TESTS = "0";
-+    if (mode === "origin") values.APP_BASE_URL = "http://127.0.0.1:3000";
-+    if (mode === "checkout") values.MVP_E2E_PRELOAD = JSON.stringify({ // 別コピーの契約を作るメソッド
-+      runId: RUN_ID,
-+      phase: "start",
-+      checkoutDirectory: join(checkout, "other"), // 別コピーのパスを組み立てる関数
-+    });
-+    const candidate = {
-+      runId: mode === "run" ? "b".repeat(32) : RUN_ID, // 別の実行識別子を作るメソッド
-+      phase: mode === "phase" ? "browser" : "start",
++  (mode) => { // クラブ条件ごとのコールバック
++    const clubs = structuredClone(payload().fixture.database.clubs); // 架空応答生成・所有クラブ複製関数
++    clubs.b.id = mode === "same" ? clubs.a.id : "PRIVATE_INVALID_ID";
++    fixedFailure( // 固定例外を検証する関数
++      /**
++       * 不正クラブをDB未接続のplannerへ渡す。
++       */
++      () => planOperationsLineSettings(KEY, clubs), // 不正入力コールバック・設定生成関数
++    );
++  },
++);
++
++it("同一runのPlatform本人・予約メール・passwordだけを返す", // 所有照合の試験登録関数
++  /**
++   * 一般本人の情報をPlatform用の戻り値へ含めないことを確認する。
++   */
++  () => { // 所有照合のコールバック
++    const input = payload(); // 架空の私有応答を生成する関数
++    const identity = parseOperationsPlatform(input, RUN_ID); // Platform本人を照合する関数
++    expect(identity.id === input.fixture.database.users.platformAdmin.id).toBe(true); // Platform本人の一致を検証する期待値関数・比較メソッド
++    expect(Object.keys(identity).sort()).toEqual(["email", "id", "password"]); // 必要な戻り値だけを検証する列挙関数・整列・期待値・比較メソッド
++  },
++);
++
++it.each(["run", "scope", "email", "password", "identity"])( // Platform不一致の試験登録メソッド
++  "%sの取り違えを原文なしで拒否する",
++  /**
++   * 他run・一般本人・予約外メール・欠損passwordをPlatform資格情報として使わない。
++   */
++  (mode) => { // 不一致条件ごとのコールバック
++    const input = structuredClone(payload()); // 架空応答生成・複製関数
++    if (mode === "scope") input.fixture.database.clubs.a.slug = "foreign";
++    if (mode === "email") input.fixture.credentials.platformAdmin.email = "private@example.test";
++    if (mode === "password") input.fixture.credentials.platformAdmin.password = "";
++    if (mode === "identity") input.fixture.database.users.platformAdmin.id = input.fixture.database.users.aOwner.id;
++    fixedFailure( // 固定例外を検証する関数
++      /**
++       * 不一致を含む応答を所有照合へ渡す。
++       */
++      () => parseOperationsPlatform(input, mode === "run" ? "b".repeat(32) : RUN_ID), // 拒否検証コールバック・所有照合関数・別run生成メソッド
++    );
++  },
++);
++
++it("当該報告のResend要求だけを数え、本文・他報告・LINEは件数へ混ぜない", // stub集計の試験登録関数
++  /**
++   * 実配送完了と混同せず、該当する一つのstub要求だけを数える。
++   */
++  () => { // 集計を検証するコールバック
++    const id = randomUUID(); // 架空報告IDを予約する関数
++    const value = {
++      records: [
++        {
++          channel: "resend",
++          idempotencyKey: `support-report/${id}`,
++          body: "PRIVATE"
++        },
++        {
++          channel: "line",
++          idempotencyKey: `support-report/${id}`
++        },
++        {
++          channel: "resend",
++          idempotencyKey: `support-report/${randomUUID()}` // 試験資源のUUIDを予約する関数
++        }, // 他報告IDを生成する関数
++        {
++          channel: "resend",
++          idempotencyKey: null
++        },
++      ],
 +    };
-+    const marker = mode === "absent" ? undefined : mode === "mutable" ? candidate : Object.freeze(candidate); // 所有識別を凍結する関数
-+    fixedFailure( // 固定例外と秘密非出力を検証する関数
++    expect(supportStubCount(value, id)).toBe(1); // 所有受付件数を検証する集計関数・期待値・比較メソッド
++    expect(supportStubCount({ // 画面・DBの期待値を検証する関数 / 所有報告のResend stub要求件数だけを数える関数
++      records: []
++    }, id)).toBe(0); // 未送信を成功扱いしない集計関数・期待値・比較メソッド
++    fixedFailure( // 固定例外を検証する関数
 +      /**
-+       * 不一致のある架空設定をガードへ渡す。
++       * 未確認の応答形を受付済みとして扱わない。
 +       */
-+      () => assertMvpNextServerEnvironment(values, checkout, marker), // 固定例外の検証コールバック・接続前ガード関数
++      () => supportStubCount({ // 所有報告のResend stub要求件数だけを数える関数
++        records: "PRIVATE"
++      }, id), // 不正応答コールバック・集計関数
++    );
++    fixedFailure( // 固定例外を検証する関数
++      /**
++       * 不正な報告IDを受付件数へ混ぜない。
++       */
++      () => supportStubCount(value, "PRIVATE"), // 不正IDコールバック・集計関数
 +    );
 +  },
 +);
+diff --git a/tests/mvp/operations-fixture.ts b/tests/mvp/operations-fixture.ts
+new file mode 100644
+index 0000000..c003884
+--- /dev/null
++++ b/tests/mvp/operations-fixture.ts
+@@ -0,0 +1,188 @@
++// tests/mvp/operations-fixture.ts
++// 通信を行わず、粒度16の架空LINE資格情報とPlatform本人・stub受付を照合する。
 +
-+it("環境ファイル名があるコピーを内容を読まずに拒否する", // 起動契約の試験を登録する関数
-+  /**
-+   * Nextが自動で環境ファイルを読む前に、名前だけのguardで止まる。
-+   */
-+  () => { // ファイル存在の拒否を確認するコールバック
-+    writeFileSync(join(checkout, ".env.local"), PRIVATE); // 架空の試験ファイルを作る関数・パス結合関数
-+    fixedFailure( // 固定例外と秘密非出力を検証する関数
-+      /**
-+       * 環境ファイルを持つ架空コピーをガードへ渡す。
-+       */
-+      () => assertMvpNextServerEnvironment(environment(), checkout, Object.freeze({ // 拒否検証コールバック・接続前ガード・架空設定生成・凍結の関数
-+        runId: RUN_ID,
-+        phase: "start",
++import {
++  Buffer
++} from "node:buffer";
++import {
++  createCipheriv,
++  randomBytes,
++  randomUUID,
++} from "node:crypto";
++import {
++  z
++} from "zod";
++import {
++  parseContentFixture, // 制御payloadのrun・scope・本人・所属を照合する関数
++} from "./content-fixture";
++
++const FAILURE = "F12_OPERATIONS_FIXTURE_FAILED";
++
++/**
++ * 保存前に所有IDと架空の署名秘密を予約した、一クラブ分のLINE設定。
++ */
++export type OperationsLineSetting = { // LINE設定の準備情報型
++  id: string; // 設定IDの文字列型
++  clubId: string; // 所有クラブIDの文字列型
++  webhookKey: string; // 公開識別子の文字列型
++  lineBotUserId: string; // 架空Bot IDの文字列型
++  secret: string; // この実行だけの署名秘密の文字列型
++  lineChannelSecretEncrypted: string; // 本番形式の暗号文の文字列型
++  lineChannelAccessTokenEncrypted: string; // 架空送信token暗号文の文字列型
++};
++
++/**
++ * Nextと同じAES-GCM形式・clubId・資格情報種別で、実行内の架空値だけを暗号化する。
++ */
++function encrypt( // clubId・資格情報種別のAADで架空値を暗号化する関数
++  key: Buffer, // 検証済み32バイトの型
++  clubId: string, // 所有クラブIDの文字列型
++  kind: "CHANNEL_SECRET" | "CHANNEL_ACCESS_TOKEN", // 暗号の用途を区別する型
++  value: string, // 架空資格情報の文字列型
++): string { // 暗号文の文字列型
++  const iv = randomBytes(12); // GCM用の一時乱数を生成する関数
++  const cipher = createCipheriv("aes-256-gcm", key, iv, { // 認証付き暗号器を作る関数
++    authTagLength: 16,
++  });
++  cipher.setAAD(Buffer.from(JSON.stringify(["v1", clubId, kind]))); // AAD設定メソッド / バイト列変換関数 / JSON直列化メソッド
++  const encrypted = Buffer.concat([ // 暗号文を結合する関数
++    cipher.update(value, "utf8"), // 架空値を暗号化するメソッド
++    cipher.final(), // 暗号処理を終端するメソッド
++  ]);
++  return [
++    "v1",
++    iv.toString("base64url"), // IVを符号化するメソッド
++    cipher.getAuthTag().toString("base64url"), // 認証tag取得・符号化メソッド
++    encrypted.toString("base64url"), // 暗号文を符号化するメソッド
++  ].join("."); // 本番と同じ形式へ連結するメソッド
++}
++
++/**
++ * ガード済み実行鍵と異なる二クラブから、DB未接続の生成予定設定を作る。
++ */
++export function planOperationsLineSettings( // 明示鍵と二クラブに束縛した架空LINE設定を予約する関数
++  encoded: string | undefined, // 明示された実行鍵の文字列型・未設定型
++  clubs: Record<"a" | "b", { id: string }>, // 二クラブの辞書型・ID文字列型
++): Record<"a" | "b", OperationsLineSetting> { // 所有設定の辞書型・準備情報型
++  try {
++    const key = Buffer.from(encoded ?? "", "base64"); // 明示鍵をバイト列へ変換する関数
++    if (
++      key.length !== 32 ||
++      key.toString("base64") !== encoded || // 正規のBase64表記を照合するメソッド
++      !z.string().uuid().safeParse(clubs.a.id).success || // 文字列・UUIDのschema定義と入力検証メソッド
++      !z.string().uuid().safeParse(clubs.b.id).success || // 文字列・UUIDのschema定義と入力検証メソッド
++      clubs.a.id === clubs.b.id
++    ) {
++      throw new Error(FAILURE); // 原文を含めない例外コンストラクター
++    }
++    /**
++     * 一クラブの所有IDを先に決め、別用途の暗号文をそれぞれ生成する。
++     */
++    function setting(clubId: string): OperationsLineSetting { // 準備関数 / クラブID文字列型 / 準備情報型
++      const secret = randomBytes(32).toString("hex"); // 架空秘密の生成関数・符号化メソッド
++      return {
++        id: randomUUID(), // 所有設定IDを予約する関数
++        clubId,
++        webhookKey: randomUUID(), // 推測困難な公開識別子を作る関数
++        lineBotUserId: "U" + randomBytes(16).toString("hex"), // 架空Bot IDの生成関数・符号化メソッド
++        secret,
++        lineChannelSecretEncrypted: encrypt(key, clubId, "CHANNEL_SECRET", secret), // clubId・用途を束縛する暗号化関数
++        lineChannelAccessTokenEncrypted: encrypt(key, clubId, "CHANNEL_ACCESS_TOKEN", "F12_FAKE_NEVER_SEND"), // 架空送信tokenの暗号化関数
++      };
++    }
++    return {
++      a: setting(clubs.a.id), // Aの生成予定設定を作る関数
++      b: setting(clubs.b.id), // Bの生成予定設定を作る関数
++    };
++  } catch {
++    throw new Error(FAILURE); // 原文・cause・鍵を捨てる例外コンストラクター
++  }
++}
++
++/**
++ * 所有Platform本人とローカルpasswordのメモリ内契約。
++ */
++export type OperationsPlatformIdentity = { // Platform本人の契約型
++  id: string; // Auth・PlatformAdmin共通IDの文字列型
++  email: string; // 予約された架空メールの文字列型
++  password: string; // runnerが生成した一時passwordの文字列型
++};
++
++/**
++ * 同一runのpayloadと予約メールを照合し、Platformログインに必要な値だけを返す。
++ */
++export function parseOperationsPlatform( // 同一runのPlatform本人と一時passwordを照合する関数
++  value: unknown, // 私有制御応答の未確定型
++  runId: string, // 同一実行の識別子文字列型
++): OperationsPlatformIdentity { // Platform本人の契約型
++  try {
++    const content = parseContentFixture(value, runId); // 共通のrun・scope・所属照合関数
++    const credential = z.object({ // 認証情報のschema定義メソッド
++      email: z.string().email(), // メール形式を定義するメソッド
++      password: z.string().min(12), // passwordの最小長を定義するメソッド
++    });
++    const payload = z.object({ // Platformの追加項目を検証するschema定義メソッド
++      fixture: z.object({ // fixtureのschema定義メソッド
++        database: z.object({ // DB識別情報のschema定義メソッド
++          users: z.object({ // 本人一覧のschema定義メソッド
++            platformAdmin: z.object({ // Platform本人のschema定義メソッド
++              id: z.string().uuid(), // UUID形式を定義するメソッド
++              email: z.string().email(), // メール形式を定義するメソッド
++            }),
++          }),
++        }),
++        credentials: z.object({ // 認証情報一覧のschema定義メソッド
++          platformAdmin: credential,
++        }),
++      }),
++    }).parse(value).fixture; // 私有応答を検証するメソッド
++    const identity = payload.database.users.platformAdmin;
++    const login = payload.credentials.platformAdmin;
++    if (
++      identity.email !== `mvp-f12-${content.database.scopeId}-platformadmin@example.test` ||
++      identity.email !== login.email ||
++      Object.values(content.database.users).some( // 本人一覧の列挙関数・重複判定メソッド
++        /**
++         * 一般本人とPlatform本人のIDを取り違えない。
++         */
++        (user) => user.id === identity.id, // 本人IDを照合するコールバック
++      )
++    ) {
++      throw new Error(FAILURE); // 本人不一致の固定例外コンストラクター
++    }
++    return {
++      id: identity.id,
++      email: identity.email,
++      password: login.password,
++    };
++  } catch {
++    throw new Error(FAILURE); // 認証情報・schema例外を公開しないコンストラクター
++  }
++}
++
++/**
++ * 所有報告IDのResend stub受付回数だけを数え、本文・宛先・tokenを返さない。
++ */
++export function supportStubCount(value: unknown, // 所有報告のResend stub要求件数だけを数える関数 / 未確定の入力型
++  reportId: string): number { // 受付件数関数 / 未確定型 / 報告ID文字列型 / 件数型
++  try {
++    const payload = z.object({ // 制御応答のschema定義メソッド
++      records: z.array(z.object({ // 記録の配列・要素schema定義メソッド
++        channel: z.string(), // チャネル名のschema定義メソッド
++        idempotencyKey: z.string().nullable(), // 任意の受付キーschema定義メソッド
 +      })),
-+    );
-+  },
-+);
-+
-+it("preloaderの所有markerがない直接起動ではSDKより先に拒否する", // 起動契約の試験を登録する関数
-+  /**
-+   * 通常テストのNodeではNextの遅延importへ到達しないことを確認する。
-+   */
-+  async () => { // 起動境界を確認するコールバック
-+    vi.stubEnv("NODE_ENV", "test"); // 架空の起動条件を設定するメソッド
-+    await expect(startMvpNextServer()).rejects.toThrow("F12_E2E_SERVER_FAILED"); // 起動拒否を確認する関数・期待値メソッド
-+  },
-+);
-+
-+it("Nextのloopback正規化と公開HTTPS Originを同じhostnameへ揃える", // 起動契約の試験を登録する関数
-+  /**
-+   * インストール済みNextのURL正規化を確認し、認証POSTのOrigin不一致を再発させない。
-+   */
-+  () => { // Nextの互換性契約を確認するコールバック
-+    const request = new NextRequest("https://127.0.0.1:3443/auth/confirm"); // 入力URLを正規化するNextRequestコンストラクター
-+    expect(new URL(request.url).origin).toBe("https://localhost:3443"); // 公開Originとの一致を確認するURLコンストラクター・期待値関数・メソッド
-+  },
-+);
++    }).parse(value); // 応答を検証するメソッド
++    if (!z.string().uuid().safeParse(reportId).success) { // UUIDのschema定義・入力検証メソッド
++      throw new Error(FAILURE); // 不正IDの固定例外コンストラクター
++    }
++    return payload.records.filter( // 対象報告の受付だけを選ぶメソッド
++      /**
++       * 実配送と区別し、同じ報告のResend要求だけを数える。
++       */
++      (record) => record.channel === "resend" &&
++        record.idempotencyKey === `support-report/${reportId}`, // 受付キー照合のコールバック
++    ).length;
++  } catch {
++    throw new Error(FAILURE); // 私有応答を公開しない固定例外コンストラクター
++  }
++}
 diff --git a/tests/mvp/outbound-harness.test.ts b/tests/mvp/outbound-harness.test.ts
-index 1359936..9d30578 100644
+index 9d30578..d9dc9e5 100644
 --- a/tests/mvp/outbound-harness.test.ts
 +++ b/tests/mvp/outbound-harness.test.ts
-@@ -570,7 +570,7 @@ it("global setupは所有secretを照合し、準備未完了や違反済みのs
-         runId: RUN_ID,
-         secret,
-         stubOrigin: stub.origin,
--        appOrigin: "https://127.0.0.1:3443",
-+        appOrigin: "https://localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-         certificatePin: Buffer.alloc(32).toString("base64"), // バイト列を扱うBuffer API / 指定長のバイト列を生成する関数 / 文字列へ変換するメソッド
-         browserExecutable: process.execPath,
-       }),
-@@ -679,8 +679,8 @@ it("CONNECT中のECONNRESETでもstubの制御と後片付けを継続できる"
-            */
-           () => { // 【追加】所有proxyとの接続後のコールバック
-             socket.write([ // 【追加】所有するCONNECT要求だけを送信するメソッド
--              "CONNECT 127.0.0.1:3443 HTTP/1.1",
--              "Host: 127.0.0.1:3443",
-+              "CONNECT localhost:3443 HTTP/1.1", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-+              "Host: localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-               "Proxy-Authorization: Basic " + authorization,
-               "",
-               "",
-diff --git a/tests/mvp/outbound-preload.mjs b/tests/mvp/outbound-preload.mjs
-index 30118e9..54a2722 100644
---- a/tests/mvp/outbound-preload.mjs
-+++ b/tests/mvp/outbound-preload.mjs
-@@ -240,7 +240,7 @@ globalThis.fetch = async function(input, init) { // HTTP通信を実行する関
-     /^\/(?:auth|storage)\/v1\//u.test(url.pathname); // 正規表現の一致を調べるメソッド
-   const owned = url.origin === config.stubOrigin ||
-     url.origin === "http://127.0.0.1:3000" ||
--    url.origin === "https://127.0.0.1:3443";
-+    url.origin === "https://localhost:3443"; // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-   if ((!channel ||
-     method !== "POST") &&
-     !localService &&
+@@ -20,6 +20,9 @@ import {
+ import http from "node:http";
+ import https from "node:https";
+ import net from "node:net";
++import {
++  gzipSync, // 【追加】試験用バイト列をgzip圧縮する関数
++} from "node:zlib";
+ import {
+   tmpdir,
+ } from "node:os";
+@@ -297,13 +300,20 @@ it.each([ // 試験ケースを登録する関数 / パラメーター別試験
+       "const mail = await client.emails.send({from:'from@example.test',to:'to@example.test',subject:'fixture',html:" + JSON.stringify(PRIVATE) + "},{idempotencyKey:'mail-owned'});", // JSONへ直列化するメソッド
+       "const {sendLinePushMessage} = await import(" + JSON.stringify(lineModule) + ");", // JSONへ直列化するメソッド
+       "const line = await sendLinePushMessage({channelAccessToken:'FAKE',lineGroupId:'FAKE',message:" + JSON.stringify(PRIVATE) + ",retryKey:'11111111-1111-4111-8111-111111111111'});", // JSONへ直列化するメソッド
+-      "console.log(JSON.stringify({mail:!mail.error,line:line.success}));",
++      "console.log(JSON.stringify({mail:!mail.error,line:line.success,mailStatus:mail.error?.statusCode??null}));", // 【修正】実SDKが受け取ったHTTP状態も固定項目だけで検証する
+     ].join("\n"); // 値を連結するメソッド
+     const result = await probe(source); // SDKを本物のNodeプロセスで読み込み、preloader適用後の結果だけをメモリへ回収する
+     expect(result.code).toBe(0); // 期待値を生成する関数 / 値の一致を検証するメソッド
+     expect(JSON.parse(result.output)).toEqual({ // 期待値を生成する関数 / JSONを解析するメソッド / 構造の一致を検証するメソッド
+       mail: mailAccepted,
+-      line: lineAccepted
++      line: lineAccepted,
++      mailStatus: mode === "rejected" // 【追加】拒否JSONと実HTTP状態の一致を検証する
++        ? 422
++        : mode === "conflict"
++          ? 409
++          : mode === "server-error"
++            ? 503
++            : null,
+     });
+     expect(result.error).not.toContain(PRIVATE); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
+     expect(result.error).not.toContain(secret); // 期待値を生成する関数 / 期待値の否定を表すAPI / 含まれる値を検証するメソッド
+@@ -752,6 +762,116 @@ it("TLSは所有証明書を検証し、所有runの応答だけを中継する"
+     expect(status).toBe(200); // 期待値を生成する関数 / 値の一致を検証するメソッド
+     expect(certificate.pin).toMatch(/^[A-Za-z0-9+/]{43}=$/u); // 期待値を生成する関数 / 書式を検証するメソッド
+   });
++it.each(["identity", "gzip", "oversized"] as const)( // 【追加】Action応答の転送・上限を検証する試験登録メソッド・リテラル型
++  "TLSはAction RSCの%s応答を完全転送し、上限超過を成功にしない",
++  /**
++   * 【追加】分割された架空RSCをHTTPSへ中継し、圧縮保持・終端・サイズ制限を確認する。
++   */
++  async (encoding) => { // 【追加】転送条件ごとの試験コールバック
++    const certificate = await createMvpCertificate(directory); // 【追加】所有一時領域に証明書を作る関数
++    const plain = Buffer.from("0:{\"a\":\"$@1\"}\n1:{\"status\":\"success\"}\n"); // 【追加】架空RSCのバイト列を生成する関数
++    const bytes = encoding === "gzip" ? gzipSync(plain) : // 【追加】圧縮を含む元データを作る関数
++      encoding === "oversized" ? Buffer.alloc(4 * 1024 * 1024 + 1, 1) : plain; // 【追加】上限超過の架空バイト列を生成する関数
++    let owned = false;
++    const backend = http.createServer( // 【追加】所有する試験backendを作る関数
++      /**
++       * 【追加】所有headerを照合し、Action応答を別tickの二つのchunkに分けて返す。
++       */
++      (request, response) => { // 【追加】試験要求を受け取るコールバック
++        owned = request.method === "POST" && request.headers["x-mvp-upstream-secret"] === secret;
++        request.resume(); // 【追加】架空の要求本文を読み捨てるメソッド
++        response.setHeader("x-mvp-application-run", RUN_ID); // 【追加】所有runの印を付けるメソッド
++        response.setHeader("Content-Type", "text/x-component"); // 【追加】Action RSCの種類を設定するメソッド
++        if (encoding === "gzip") {
++          response.setHeader("Content-Encoding", "gzip"); // 【追加】元の圧縮形式を設定するメソッド
++        }
++        const middle = Math.floor(bytes.length / 2); // 【追加】分割位置を求めるメソッド
++        response.write(bytes.subarray(0, middle)); // 【追加】前半バイト列を送るメソッド・部分列取得メソッド
++        setImmediate( // 【追加】後半を別tickに分ける関数
++          /**
++           * 【追加】元の後半バイト列を保ったまま応答を終端する。
++           */
++          () => response.end(bytes.subarray(middle)), // 【追加】応答終端のコールバック・部分列取得・送信メソッド
++        );
++      },
++    );
++    cleanup.push(ownMvpServer(backend)); // 【追加】所有backendの回収登録メソッド・所有回収関数
++    const port = await listenMvpServer(backend, 0); // 【追加】衝突しない所有portへbindする関数
++    const tls = await startMvpTls(certificate, { // 【追加】証明書検証付きTLS入口を作る関数
++      runId: RUN_ID,
++      secret,
++    }, {
++      frontend: 0,
++      backend: port,
++    });
++    cleanup.push(tls.close); // 【追加】所有TLS入口の回収を登録するメソッド・回収関数
++    const result = await new Promise<{ // 【追加】受信完了か通信失敗を表す非同期型
++      failed: boolean; // 【追加】接続失敗の真偽値型
++      headers?: http.IncomingHttpHeaders; // 【追加】受信したHTTP headerの型
++      body?: Buffer; // 【追加】受信した元バイト列の型
++    }>(
++      /**
++       * 【追加】実HTTPSの終端まで受信し、エラー原文を試験結果へ含めない。
++       */
++      (accept) => { // 【追加】受信結果を解決するコールバック・解決関数
++        const request = https.request("https://127.0.0.1:" + tls.port, { // 【追加】所有TLSへ実要求するメソッド
++          method: "POST",
++          ca: certificate.cert,
++        },
++          /**
++           * 【追加】転送後のheaderと圧縮を含むバイト列をメモリ内へ受信する。
++           */
++          (response) => { // 【追加】実応答を受け取るコールバック
++            const chunks: Buffer[] = []; // 【追加】受信バイト列の配列型
++            response.on("data", // 【追加】バイト列の受信を登録するメソッド
++              /**
++               * 【追加】試験専用の受信バイト列だけを配列へ保持する。
++               */
++              (chunk) => chunks.push(chunk), // 【追加】受信のコールバック・配列登録メソッド
++            );
++            response.once("end", // 【追加】完全受信の終端を登録するメソッド
++              /**
++               * 【追加】成功時だけ受信headerと元バイト列を返す。
++               */
++              () => accept({ // 【追加】受信成功のコールバック・解決関数
++                failed: false,
++                headers: response.headers,
++                body: Buffer.concat(chunks), // 【追加】受信バイト列を結合する関数
++              }),
++            );
++            response.once("error", // 【追加】受信途中の失敗を登録するメソッド
++              /**
++               * 【追加】受信失敗を原文なしの真偽値だけへ変換する。
++               */
++              () => accept({ failed: true }), // 【追加】失敗を解決するコールバック・関数
++            );
++          },
++        );
++        request.once("error", // 【追加】接続失敗を登録するメソッド
++          /**
++           * 【追加】上限超過などの接続終了を固定の失敗分類へ変換する。
++           */
++          () => accept({ failed: true }), // 【追加】失敗を解決するコールバック・関数
++        );
++        request.setTimeout(5000, // 【追加】試験要求の待機期限を設定するメソッド
++          /**
++           * 【追加】終端しない応答も成功扱いせず、所有接続を閉じる。
++           */
++          () => request.destroy(new Error("F12_TLS_RESPONSE_TIMEOUT")), // 【追加】中断のコールバック・接続破棄メソッド・固定例外コンストラクター
++        );
++        request.end("fixture"); // 【追加】架空の要求だけを送信するメソッド
++      },
++    );
++    expect(owned).toBe(true); // 【追加】所有runを検証する期待値関数・比較メソッド
++    expect(result.failed).toBe(encoding === "oversized"); // 【追加】上限超過だけを失敗とする期待値関数・比較メソッド
++    if (encoding !== "oversized") {
++      expect(result.body?.equals(bytes)).toBe(true); // 【追加】完全な元バイト列の一致を検証する期待値関数・比較メソッド
++      expect(result.headers?.["content-length"]).toBe(String(bytes.length)); // 【追加】終端を表す実バイト長を検証する期待値関数・文字列変換関数・比較メソッド
++      expect(result.headers?.["transfer-encoding"]).toBeUndefined(); // 【追加】別接続のchunked headerを引き継がない検証関数・比較メソッド
++      expect(result.headers?.["content-encoding"]).toBe(encoding === "gzip" ? "gzip" : undefined); // 【追加】圧縮形式保持を検証する期待値関数・比較メソッド
++    }
++  },
++);
+ it("guard不成立ではSDK・server・子プロセスを起動せず固定文で失敗する",  // 試験ケースを登録する関数
+   /**
+    * 架空設定と所有資源だけで、このケースの準備・検証・後片付けを実行する。
 diff --git a/tests/mvp/outbound-stub.mjs b/tests/mvp/outbound-stub.mjs
-index 92bfde2..d4c0d32 100644
+index d4c0d32..aaf6037 100644
 --- a/tests/mvp/outbound-stub.mjs
 +++ b/tests/mvp/outbound-stub.mjs
-@@ -66,7 +66,7 @@ export function readMvpE2eSession(environment = process.env) { // この処理
-       guard.phase !== "browser" ||
-       !/^[0-9a-f]{32}$/u.test(value.runId) || // 正規表現の一致を調べるメソッド
-       !/^[0-9a-f]{64}$/u.test(value.secret) || // 正規表現の一致を調べるメソッド
--      value.appOrigin !== "https://127.0.0.1:3443" ||
-+      value.appOrigin !== "https://localhost:3443" || // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-       typeof value.stubOrigin !== "string" ||
-       !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/u.test(value.stubOrigin) || // 正規表現の一致を調べるメソッド
-       new URL(value.stubOrigin).origin !== value.stubOrigin || // URLを解析・構築するコンストラクター
-@@ -519,7 +519,7 @@ export async function startMvpOutboundStub(options) { // この処理を定義
-         socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="MVP"\r\n\r\n'); // 送信・応答を終了するメソッド
-         return;
-       }
--      if (request.url !== "127.0.0.1:3443") {
-+      if (request.url !== "localhost:3443") { // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
-         violate(); // 原文を保持せず、通信遮断を成功結果から除外する件数だけを増やす
-         socket.end("HTTP/1.1 403 Forbidden\r\n\r\n"); // 送信・応答を終了するメソッド
-         return;
+@@ -479,6 +479,7 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+           name: status === 422
+             ? "validation_error"
+             : "application_error",
++          statusCode: status, // 【追加】Resend SDKが本文から読む拒否状態を実HTTPと一致させる
+           message: FAILURE
+         }
+       : {
