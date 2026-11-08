@@ -66,7 +66,7 @@ export function readMvpE2eSession(environment = process.env) { // この処理�
       guard.phase !== "browser" ||
       !/^[0-9a-f]{32}$/u.test(value.runId) || // 正規表現の一致を調べるメソッド
       !/^[0-9a-f]{64}$/u.test(value.secret) || // 正規表現の一致を調べるメソッド
-      value.appOrigin !== "https://127.0.0.1:3443" ||
+      value.appOrigin !== "https://localhost:3443" || // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
       typeof value.stubOrigin !== "string" ||
       !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/u.test(value.stubOrigin) || // 正規表現の一致を調べるメソッド
       new URL(value.stubOrigin).origin !== value.stubOrigin || // URLを解析・構築するコンストラクター
@@ -519,7 +519,7 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
         socket.end('HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm="MVP"\r\n\r\n'); // 送信・応答を終了するメソッド
         return;
       }
-      if (request.url !== "127.0.0.1:3443") {
+      if (request.url !== "localhost:3443") { // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
         violate(); // 原文を保持せず、通信遮断を成功結果から除外する件数だけを増やす
         socket.end("HTTP/1.1 403 Forbidden\r\n\r\n"); // 送信・応答を終了するメソッド
         return;

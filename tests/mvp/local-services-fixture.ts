@@ -5,6 +5,7 @@ import {
   Buffer, // 小さなPDFをメモリ上で組み立てるクラス
 } from "node:buffer";
 import {
+  randomUUID, // 【追加】予約する招待先のAuth IDを作る関数
   randomBytes, // run専用passwordの乱数を作る関数
 } from "node:crypto";
 import type {
@@ -36,6 +37,10 @@ import {
 import type {
   MvpTestEnvironment, // F12の検証済み実行環境型
 } from "./environment";
+
+import {
+  invitationRecipientEmail, // 【追加】所有scopeへ予約する新規招待先メールを返す関数
+} from "./member-fixture";
 
 const SERVICE_ERROR = "F12ローカルサービスfixtureの設定・作成・認証を確認してください。";
 
@@ -87,6 +92,10 @@ export type MvpLocalCleanupReport = Readonly<{ // 残存・未確認件数の報
 type LocalState = { // ローカル資源の非公開所有台帳型
   configuration: MvpTestEnvironment; // ガード済み実行環境型
   credentials: Map<MvpFixtureUserKey, MvpFixtureCredentials>; // キーと値を保持するMap型 / 本人キー型 / 検証専用の認証情報型
+  invitationRecipient?: { // 【追加】新規招待で初回設定する予約本人の型
+    id: string; // 【追加】予約Auth IDの文字列型
+    email: string; // 【追加】予約メールの文字列型
+  };
   pendingUsers: Set<string>; // 所有ID・pathの集合型 / 文字列型
   createdUsers: Set<string>; // 所有ID・pathの集合型 / 文字列型
   objects: Set<string>; // 所有ID・pathの集合型 / 文字列型
@@ -195,6 +204,7 @@ export function createMvpFixturePdf(): Uint8Array { // 小さなPDFをメモリ�
 export function planMvpLocalServicesFixture( // ローカル資源の所有ハンドルを計画する関数
   configuration: MvpTestEnvironment, // ガード済み実行環境型
   options: Omit<MvpFixtureOptions, "authUserIds"> = {}, // 指定した項目を入力から除く型 / ケース別fixture入力型
+  reserveInvitationRecipient = false, // 【追加】E2E親runnerだけが新規招待先を予約する
 ): MvpLocalServicesFixture { // 秘密を列挙しない所有ハンドル型
   try {
     const checked = checkedConfiguration(configuration); // SDK初期化前に接続条件を再検証する関数
@@ -217,6 +227,10 @@ export function planMvpLocalServicesFixture( // ローカル資源の所有ハ�
     states.set(fixture, { // 値と所有台帳を登録するメソッド
       configuration: checked,
       credentials,
+      invitationRecipient: reserveInvitationRecipient ? {
+        id: randomUUID(), // 【追加】作成前に招待先の所有IDを登録する関数
+        email: invitationRecipientEmail(database.scopeId), // 【追加】scopeと対応する予約メールを生成する関数
+      } : undefined,
       pendingUsers: new Set(), // 重複しない集合のコンストラクター
       createdUsers: new Set(), // 重複しない集合のコンストラクター
       objects: new Set(), // 重複しない集合のコンストラクター
@@ -235,11 +249,11 @@ export function planMvpLocalServicesFixture( // ローカル資源の所有ハ�
  * 戻りID・メール・管理者だけが書けるrun識別を使ってAuth本人の所有を照合する。
  */
 function ownsUser(fixture: MvpLocalServicesFixture, user: User, id: string): boolean { // 登録IDと管理者metadataからAuth所有を照合する関数 / 秘密を列挙しない所有ハンドル型 / Auth本人の戻り値型 / 文字列型 / 真偽値型
-  const expected = Object.values(fixture.database.users).find( // 条件に合う所有資源を選ぶメソッド / 値を列挙する関数
+  const expected = [...Object.values(fixture.database.users), stateOf(fixture).invitationRecipient].find( // 条件に合う所有資源を選ぶメソッド / 値を列挙する関数
     /**
      * 作成前に計画したメールと完全一致する本人だけを選ぶ。
      */
-    (candidate) => candidate.email === user.email, // 所有するメールを照合するコールバック
+    (candidate) => candidate?.email === user.email, // 所有するメールを照合するコールバック
   );
   return Boolean( // 条件の成立を真偽値に変換する関数
     expected &&
@@ -316,6 +330,44 @@ export async function seedMvpLocalServicesFixture( // Auth・DB・private PDFを
       ) {
         throw new Error(SERVICE_ERROR); // 例外を生成するコンストラクター
       }
+    }
+    // 【追加】メール配送は行わず、AppUser未作成・メール未確認の予約Authだけを作る。
+    const recipient = state.invitationRecipient;
+    if (recipient) {
+      if (await database.appUser.count({ // 【追加】予約ID・メールの既存業務行との衝突を検出するメソッド
+        where: {
+          OR: [
+            {
+              id: recipient.id
+            },
+            {
+              email: recipient.email
+            },
+          ],
+        },
+      }) !== 0) {
+        throw new Error(SERVICE_ERROR); // 【追加】衝突を固定例外で拒否するコンストラクター
+      }
+      state.pendingUsers.add(recipient.id); // 【追加】作成応答喪失に備えて先に登録するメソッド
+      const result = await state.admin.auth.admin.createUser({ // 【追加】招待前の未確認Auth本人を作成するメソッド
+        id: recipient.id,
+        email: recipient.email,
+        email_confirm: false,
+        app_metadata: {
+          mvp_f12_run: fixture.runId,
+          mvp_f12_scope: fixture.database.scopeId,
+        },
+      });
+      if (
+        result.error ||
+        !result.data.user ||
+        result.data.user.id !== recipient.id ||
+        !ownsUser(fixture, result.data.user, recipient.id) || // 【追加】作成した本人のID・メール・所有metadataを照合する関数
+        result.data.user.email_confirmed_at
+      ) {
+        throw new Error(SERVICE_ERROR); // 【追加】予約Authの不一致を固定例外で拒否するコンストラクター
+      }
+      state.createdUsers.add(recipient.id); // 【追加】作成確認済みの本人を記録するメソッド
     }
     state.databaseAttempted = true;
     await seedMvpDatabaseFixture(database, fixture.database); // 計画した行を一体保存する関数
@@ -673,7 +725,72 @@ export async function cleanupMvpLocalServicesFixture( // 登録した資源だ�
   ) {
     try {
       if (state.databaseReady) {
+        const recipient = state.invitationRecipient;
+        if (recipient && state.pendingUsers.has(recipient.id)) { // 【追加】回収済みAuthを再照合せず再試行を可能にするメソッド
+          const found = await state.admin?.auth.admin.getUserById(recipient.id); // 【追加】予約Authの所有metadataを削除直前に照合するメソッド
+          if (
+            !found ||
+            found.error ||
+            !found.data.user ||
+            !ownsUser(fixture, found.data.user, recipient.id) // 【追加】所有が確認できない場合は業務行も残す関数
+          ) {
+            throw new Error(SERVICE_ERROR); // 【追加】所有不明を固定例外で拒否するコンストラクター
+          }
+          const row = await state.database.appUser.findUnique({ // 【追加】招待準備・承諾で作られた予約本人の業務行を取得するメソッド
+            where: {
+              id: recipient.id
+            },
+            select: {
+              email: true,
+              children: {
+                select: {
+                  id: true
+                }
+              },
+              memberships: {
+                select: {
+                  clubId: true
+                }
+              },
+            },
+          });
+          if (row) {
+            if (
+              row.email !== recipient.email ||
+              row.children.length !== 0 ||
+              row.memberships.some( // 【追加】所有2クラブ以外の所属を検出するメソッド
+                /**
+                 * 【追加】予約本人に他環境の所属が混ざった場合は削除を止める。
+                 */
+                (membership) => ![fixture.database.clubs.a.id, fixture.database.clubs.b.id].includes(membership.clubId), // 【追加】所有clubIdとの一致を調べるコールバック・メソッド
+              )
+            ) {
+              throw new Error(SERVICE_ERROR); // 【追加】想定外の関連行を残して失敗するコンストラクター
+            }
+          }
+        }
         await cleanupMvpDatabaseFixture(state.database, fixture.database); // 所有台帳の範囲だけを削除する関数
+        if (recipient) {
+          await state.database.appUser.deleteMany({ // 【追加】クラブ回収後の孤立した予約本人だけを削除するメソッド
+            where: {
+              id: recipient.id,
+              email: recipient.email,
+              memberships: {
+                none: {}
+              },
+              children: {
+                none: {}
+              },
+            },
+          });
+          if (await state.database.appUser.count({ // 【追加】予約本人の残存を確認するメソッド
+            where: {
+              id: recipient.id
+            },
+          }) !== 0) {
+            throw new Error(SERVICE_ERROR); // 【追加】残存を成功扱いしないコンストラクター
+          }
+        }
       } else {
         // commit応答が失われた可能性は、既存helperの成功台帳と混同しない。
         // 残存確認ができなければDB・Authを残し、専用環境の廃棄時に回収する。

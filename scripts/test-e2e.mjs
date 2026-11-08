@@ -354,8 +354,8 @@ export async function startMvpTls(certificate, owner, ports = { // この処理�
     (request, response) => { // この処理を定義する関数・コールバック
       const headers = {
         ...request.headers,
-        host: "127.0.0.1:3443",
-        "x-forwarded-host": "127.0.0.1:3443",
+        host: "localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
+        "x-forwarded-host": "localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
         "x-forwarded-proto": "https",
         "x-mvp-upstream-secret": owner.secret,
       };
@@ -429,7 +429,7 @@ async function waitApplication(application, owner, interrupted) { // この処�
        * 非同期処理の完了と失敗を、呼出し元へ通知するコールバック。
        */
       (accept) => { // この処理を定義する関数・コールバック / 成功を通知する関数
-        const request = https.get("https://127.0.0.1:3443/club-login", { // 取得する関数・メソッド
+        const request = https.get("https://localhost:3443/club-login", { // 取得する関数・メソッド
           ca: owner.cert,
           timeout: 1000,
         },
@@ -641,7 +641,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     });
     tls = await startMvpTls(certificate, owner); // 専用HTTPS入口から内部Nextへ中継し、同じrunのNode応答だけを受け入れる
     services = await import("../tests/mvp/local-services-fixture"); // moduleを遅延読込みする関数
-    fixture = services.planMvpLocalServicesFixture(configuration); // DBのUUID・メールを先に決め、Auth・Storageに触れずに所有ハンドルを返す
+    fixture = services.planMvpLocalServicesFixture(configuration, {}, true); // 【修正】所有する未確認Auth招待先を予約し、DB・Auth・PDFの生成予定資源を計画する関数
     /** @type {NodeJS.ProcessEnv} */
     const environment = {
       ...configuration.variables,
@@ -720,15 +720,9 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     await database.$queryRawUnsafe("SELECT 1"); // 固定SQLで専用DBへ疎通確認するメソッド
     await releaseBackend(); // 所有するbackend予約を解放する関数
     const application = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
-      file: "npm",
+      file: process.execPath,
       args: [
-        "run",
-        "start",
-        "--",
-        "--hostname",
-        "127.0.0.1",
-        "--port",
-        "3000"
+        join(checkout, "tests/mvp/next-e2e-server.mjs"), // 【修正】公開Originを保つ専用production serverのパスを作る関数
       ],
       cwd: checkout,
       env: {

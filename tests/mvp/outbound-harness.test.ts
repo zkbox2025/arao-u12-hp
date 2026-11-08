@@ -570,7 +570,7 @@ it("global setupは所有secretを照合し、準備未完了や違反済みのs
         runId: RUN_ID,
         secret,
         stubOrigin: stub.origin,
-        appOrigin: "https://127.0.0.1:3443",
+        appOrigin: "https://localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
         certificatePin: Buffer.alloc(32).toString("base64"), // バイト列を扱うBuffer API / 指定長のバイト列を生成する関数 / 文字列へ変換するメソッド
         browserExecutable: process.execPath,
       }),
@@ -679,8 +679,8 @@ it("CONNECT中のECONNRESETでもstubの制御と後片付けを継続できる"
            */
           () => { // 【追加】所有proxyとの接続後のコールバック
             socket.write([ // 【追加】所有するCONNECT要求だけを送信するメソッド
-              "CONNECT 127.0.0.1:3443 HTTP/1.1",
-              "Host: 127.0.0.1:3443",
+              "CONNECT localhost:3443 HTTP/1.1", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
+              "Host: localhost:3443", // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
               "Proxy-Authorization: Basic " + authorization,
               "",
               "",

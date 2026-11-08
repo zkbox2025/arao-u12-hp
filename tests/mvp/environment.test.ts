@@ -601,9 +601,9 @@ it("明示したE2Eだけが所有HTTPS入口を使い、fixtureの再検証で�
   () => { // 【追加】E2E接続契約を確認するコールバック
     const variables = environment(); // 【追加】架空設定の生成関数
     variables.RUN_MVP_E2E = "1";
-    variables.APP_BASE_URL = "https://127.0.0.1:3443";
+    variables.APP_BASE_URL = "https://localhost:3443"; // 【修正】Nextが正規化する公開HTTPS Originに揃える
     const result = requireMvpTestEnvironment(variables, checkout, RUN_ID); // 【追加】接続前ガード関数
-    expect(result.appOrigin).toBe("https://127.0.0.1:3443"); // 【追加】期待値生成関数 / 所有originの比較メソッド
+    expect(result.appOrigin).toBe("https://localhost:3443"); // 【追加】期待値生成関数 / 所有originの比較メソッド
     expect(result.variables.RUN_MVP_E2E).toBe("1"); // 【追加】期待値生成関数 / E2E flagの比較メソッド
     expect(requireMvpTestEnvironment( // 【追加】期待値生成関数 / 接続契約を再検証する関数
       result.variables,
@@ -621,7 +621,7 @@ it.each([undefined, "", "0", "true", "01", "1 "])( // 【追加】不正flag別�
   (value) => { // 【追加】不正flagを確認するコールバック
     const variables = environment(); // 【追加】架空設定の生成関数
     variables.RUN_MVP_E2E = value;
-    variables.APP_BASE_URL = "https://127.0.0.1:3443";
+    variables.APP_BASE_URL = "https://localhost:3443"; // 【修正】Nextが正規化する公開HTTPS Originに揃える
     fixedFailure( // 【追加】固定例外を検証する関数
       /**
        * 【追加】明示されていないHTTPS接続を拒否する。
@@ -634,7 +634,7 @@ it.each([undefined, "", "0", "true", "01", "1 "])( // 【追加】不正flag別�
 it.each([ // 【追加】E2Eの不正origin別の試験登録メソッド
   "http://127.0.0.1:3000",
   "http://127.0.0.1:3443",
-  "https://localhost:3443",
+  "https://127.0.0.1:3443",
   "https://127.0.0.1:3000",
   "https://127.0.0.1:3443/",
   "https://remote.invalid:3443",

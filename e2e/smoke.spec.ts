@@ -15,7 +15,7 @@ test( // 公開ログイン入口を確認するE2Eケースの登録関数
   async ({ page }) => { // Playwrightが分離したpageを受け取る非同期テスト関数
     const response = await page.goto("/club-login"); // ローカルの公開ログイン入口へ遷移するメソッド
     expect(response?.status()).toBe(200); // 期待値生成関数 / HTTP状態取得メソッド / 正常応答の比較メソッド
-    await expect(page).toHaveURL("https://127.0.0.1:3443/club-login"); // 【修正】期待値生成関数 / 所有するHTTPS遷移先の照合メソッド
+    await expect(page).toHaveURL("https://localhost:3443/club-login"); // 【修正】期待値生成関数 / 所有するHTTPS遷移先の照合メソッド
     await expect( // 期待値を生成する関数
       page.getByRole("heading", { // アクセシブルな見出しを特定するメソッド
         name: "クラブ運営アプリ",

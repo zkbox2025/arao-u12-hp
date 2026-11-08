@@ -245,7 +245,7 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
                 const user = {
                   id: input.id!, // 事前確認を前提にする非nullアサーション
                   email: input.email,
-                  email_confirmed_at: "2026-11-01T00:00:00Z",
+                  email_confirmed_at: input.email_confirm ? "2026-11-01T00:00:00Z" : undefined, // 【修正】新規招待先の未確認状態も再現する
                   app_metadata: input.app_metadata,
                 } as User; // Auth本人の戻り値型
                 users.set(user.id, user); // 値と所有台帳を登録するメソッド
@@ -556,6 +556,8 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
             count: vi.fn().mockResolvedValue(0) // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
           },
           appUser: {
+            findUnique: vi.fn().mockResolvedValue(null), // 【追加】予約本人のAppUser未作成を再現する関数・メソッド
+            deleteMany: vi.fn().mockResolvedValue({ count: 1 }), // 【追加】予約本人だけの削除結果を再現する関数・メソッド
             count: vi.fn().mockResolvedValue(0) // 非同期の戻り値を設定するメソッド / 呼出し記録用mockを作る関数
           },
           platformAdmin: {
@@ -564,6 +566,113 @@ describe("F12ローカルサービスのguard・所有・補償（通信なし�
         } as unknown as PrismaClient; // 未確定値の型 / 専用DB clientの型
       },
     );
+    it("予約招待先だけを未確認Authで作り、承諾AppUserとAuthを所有確認して回収する", // 【追加】通信なしの試験を登録する関数
+      /**
+       * 【追加】通常6人と異なる未確認の7人目を準備し、作成された業務行だけを回収する。
+       */
+      async () => {
+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】SDK初期化前にDB・Auth・PDFの所有資源を計画する関数
+        handles.push(fixture); // 【追加】作成前の所有ハンドルを記録するメソッド
+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】計画したAuth・DB・PDFを順に作成する関数
+        expect(admin.auth.admin.createUser).toHaveBeenCalledTimes(7); // 【追加】期待値を生成する関数 / 予約したAuth本人の作成入力を記録するmockメソッド / 呼出し回数を検証するメソッド
+        const call = admin.auth.admin.createUser.mock.calls[6][0]; // 【追加】予約したAuth本人の作成入力を記録するmockメソッド
+        expect(call.email_confirm).toBe(false); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
+        expect(call.password).toBeUndefined(); // 【追加】期待値を生成する関数 / 未設定であることを検証するメソッド
+        vi.mocked(database.appUser.findUnique).mockResolvedValue({ // 【追加】境界関数を型付きmockとして扱う関数 / 予約本人のAppUserを取得するmockメソッド / 非同期のfake応答を設定するmockメソッド
+          email: call.email,
+          children: [],
+          memberships: [{
+            clubId: fixture.database.clubs.a.id
+          }],
+        } as never); // 【追加】fake境界の最小データをmock応答として扱う型アサーション
+        const report = await cleanupMvpLocalServicesFixture(fixture); // 【追加】所有DB・Auth・Storageを回収し残存件数を返す関数
+        expect(report.remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
+        expect(database.appUser.deleteMany).toHaveBeenCalledWith({ // 【追加】期待値を生成する関数 / 孤立した予約AppUserだけを削除するメソッド / 呼出し引数を検証するメソッド
+          where: {
+            id: call.id,
+            email: call.email,
+            memberships: {
+              none: {}
+            },
+            children: {
+              none: {}
+            },
+          }
+        });
+        expect(users.size).toBe(0); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
+      },
+    );
+
+    it.each(["email", "foreign-membership", "children", "metadata"])( // 【追加】通信なしの試験を登録する関数 / 入力ごとの試験を登録するメソッド
+      "予約招待先の%sが所有範囲を外れた場合はDBとAuthを残し、復元後に再試行する",
+      /**
+       * 【追加】他人や他クラブへの関連を検出し、不明な資源を削除しないことを確認する。
+       */
+      async (mode) => {
+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】SDK初期化前にDB・Auth・PDFの所有資源を計画する関数
+        handles.push(fixture); // 【追加】作成前の所有ハンドルを記録するメソッド
+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】計画したAuth・DB・PDFを順に作成する関数
+        const call = admin.auth.admin.createUser.mock.calls[6][0]; // 【追加】予約したAuth本人の作成入力を記録するmockメソッド
+        const original = users.get(call.id!)!; // 【追加】メモリ内のAuth本人を取得するメソッド
+        vi.mocked(database.appUser.findUnique).mockResolvedValue({ // 【追加】境界関数を型付きmockとして扱う関数 / 予約本人のAppUserを取得するmockメソッド / 非同期のfake応答を設定するmockメソッド
+          email: mode === "email" ? "other@example.test" : call.email,
+          children: mode === "children" ? [{
+            id: "other"
+          }] : [],
+          memberships: mode === "foreign-membership" ? [{
+            clubId: "other"
+          }] : [],
+        } as never); // 【追加】fake境界の最小データをmock応答として扱う型アサーション
+        if (mode === "metadata") {
+          users.set(call.id!, { // 【追加】メモリ内のAuth本人を設定するメソッド
+            ...original,
+            app_metadata: {}
+          });
+        }
+        const report = await cleanupMvpLocalServicesFixture(fixture); // 【追加】所有DB・Auth・Storageを回収し残存件数を返す関数
+        expect(report.remaining.database).toBe(true); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
+        expect(report.remaining.database).toBe(true); // 【追加】期待値を生成する関数 / 値の一致を検証するメソッド
+        expect(admin.auth.admin.deleteUser).not.toHaveBeenCalled(); // 【追加】期待値を生成する関数 / 所有Auth本人を削除するmockメソッド / 呼出しの否定条件を検証する操作 / 境界の呼出し有無を検証するメソッド
+        expect(database.appUser.deleteMany).not.toHaveBeenCalled(); // 【追加】期待値を生成する関数 / 孤立した予約AppUserだけを削除するメソッド / 呼出しの否定条件を検証する操作 / 境界の呼出し有無を検証するメソッド
+        users.set(call.id!, original); // 【追加】メモリ内のAuth本人を設定するメソッド
+        vi.mocked(database.appUser.findUnique).mockResolvedValue(null); // 【追加】境界関数を型付きmockとして扱う関数 / 予約本人のAppUserを取得するmockメソッド / 非同期のfake応答を設定するmockメソッド
+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
+      },
+    );
+
+    it("予約本人の業務行削除が失敗した場合、Authを残して再試行できる", // 【追加】通信なしの試験を登録する関数
+      /**
+       * 【追加】回収失敗を成功扱いせず、DB回収が終わるまでAuthを消さない。
+       */
+      async () => {
+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】SDK初期化前にDB・Auth・PDFの所有資源を計画する関数
+        handles.push(fixture); // 【追加】作成前の所有ハンドルを記録するメソッド
+        await seedMvpLocalServicesFixture(database, fixture); // 【追加】計画したAuth・DB・PDFを順に作成する関数
+        vi.mocked(database.appUser.deleteMany).mockRejectedValueOnce(new Error(PRIVATE)); // 【追加】境界関数を型付きmockとして扱う関数 / 孤立した予約AppUserだけを削除するメソッド / 一回だけ非同期失敗を返すmockメソッド / 秘密を含めない試験例外のコンストラクター
+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(true); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
+        expect(admin.auth.admin.deleteUser).not.toHaveBeenCalled(); // 【追加】期待値を生成する関数 / 所有Auth本人を削除するmockメソッド / 呼出しの否定条件を検証する操作 / 境界の呼出し有無を検証するメソッド
+        expect((await cleanupMvpLocalServicesFixture(fixture)).remaining.database).toBe(false); // 【追加】期待値を生成する関数 / 所有DB・Auth・Storageを回収し残存件数を返す関数 / 値の一致を検証するメソッド
+      },
+    );
+
+    it("予約ID・メールに既存AppUserがある場合は新規招待先を作らず回収対象にも含めない", // 【追加】既存行との衝突を通信なしで検証する試験登録関数
+      /**
+       * 【追加】衝突した業務行を上書きせず、先に作成した通常Authだけを補償する。
+       */
+      async () => {
+        const fixture = planMvpLocalServicesFixture(configuration, {}, true); // 【追加】予約招待先を含む所有資源を計画する関数
+        handles.push(fixture); // 【追加】後片付け用の所有ハンドルを記録するメソッド
+        vi.mocked(database.appUser.count).mockResolvedValue(1); // 【追加】既存行の検出を再現する型付きmock関数・メソッド
+        await expect(seedMvpLocalServicesFixture(database, fixture)).rejects.toThrow(SERVICE_ERROR); // 【追加】新規作成の固定例外を検証する関数・メソッド
+        expect(admin.auth.admin.createUser).toHaveBeenCalledTimes(6); // 【追加】通常6人だけの作成を検証する関数・メソッド
+        expect(bridge.seed).not.toHaveBeenCalled(); // 【追加】業務行の保存が行われないことを検証する関数・メソッド
+        expect(database.appUser.deleteMany).not.toHaveBeenCalled(); // 【追加】既存AppUserを消さないことを検証する関数・メソッド
+        const report = await cleanupMvpLocalServicesFixture(fixture); // 【追加】作成したAuthだけを回収する関数
+        expect(report.remaining.authUsers).toBe(0); // 【追加】Authの回収完了を検証する関数・メソッド
+      },
+    );
+
     afterEach( // 各ケースの後処理を登録する関数
       /**
        * fake資源もfinallyで片付け、元の環境ファイルを読まない。

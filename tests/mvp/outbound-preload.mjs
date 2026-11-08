@@ -240,7 +240,7 @@ globalThis.fetch = async function(input, init) { // HTTP通信を実行する関
     /^\/(?:auth|storage)\/v1\//u.test(url.pathname); // 正規表現の一致を調べるメソッド
   const owned = url.origin === config.stubOrigin ||
     url.origin === "http://127.0.0.1:3000" ||
-    url.origin === "https://127.0.0.1:3443";
+    url.origin === "https://localhost:3443"; // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
   if ((!channel ||
     method !== "POST") &&
     !localService &&

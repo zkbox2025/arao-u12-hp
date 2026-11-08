@@ -170,10 +170,10 @@ export function requireMvpTestEnvironment( // F12の実行前ガード関数
     const supabaseOrigin = localOrigin(environment.NEXT_PUBLIC_SUPABASE_URL, "54321"); // Supabase origin検証関数
     let appOrigin: string; // 【追加】検証したアプリoriginの文字列型
     if (e2e) {
-      if (environment.APP_BASE_URL !== "https://127.0.0.1:3443") {
+      if (environment.APP_BASE_URL !== "https://localhost:3443") { // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
         throw new Error(GUARD_ERROR); // 【追加】所有するTLS入口以外を拒否する例外コンストラクター
       }
-      appOrigin = "https://127.0.0.1:3443";
+      appOrigin = "https://localhost:3443"; // 【修正】Nextのloopback正規化に合わせた専用HTTPS入口
     } else {
       appOrigin = localOrigin(environment.APP_BASE_URL, "3000"); // 【追加】既存のHTTP origin検証関数
     }

@@ -43,7 +43,7 @@ export default defineConfig({ // 型を検証しながらPlaywright設定を定�
     diff: false,
   },
   use: {
-    baseURL: "https://127.0.0.1:3443", // 【修正】本番のHTTPS条件を維持した専用入口
+    baseURL: "https://localhost:3443", // 【修正】本番のHTTPS条件を維持した専用入口
     headless: true,
     trace: "off",
     video: "off",
