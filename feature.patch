@@ -1,2678 +1,734 @@
-diff --git a/package.json b/package.json
-index 8468536851ffd62649d20a2c2bca82b341fe4644..8f02e8f8b5f4e98549addb30cbecf4132743fe96 100644
---- a/package.json
-+++ b/package.json
-@@ -32,6 +32,8 @@
-     "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts",
-     "test:event-month-copy:local": "RUN_EVENT_MONTH_COPY_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-month-copy.flow.integration.test.ts",
-     "test:event-practice-batch:local": "RUN_EVENT_PRACTICE_BATCH_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-practice-batch.flow.integration.test.ts",
-+    "test:e2e": "node --import tsx scripts/test-e2e.mjs",
-+    "verify:mvp": "node --import tsx scripts/verify-mvp.mjs",
-     "test:e2e:list": "playwright test --list"
-   },
-   "dependencies": {
-diff --git a/scripts/test-e2e.mjs b/scripts/test-e2e.mjs
-index cc95319022e284a50757cac55576b0b58849fe35..3994842541170e018f47d51ea9c609e51ae6f426 100644
---- a/scripts/test-e2e.mjs
-+++ b/scripts/test-e2e.mjs
-@@ -49,6 +49,11 @@ import {
-   createMvpReportReader, // 【追加】PlaywrightのJSONをファイルへ保存せずメモリ内で解析する関数
-   createMvpOutputObserver, // 【追加】子の出力原文を保存せずsentinel検出件数だけを保持する関数
- } from "../tests/mvp/failure-observability.mjs";
-+import {
-+  assertMvpE2eManifest, // 【追加】必須E2Eの実在・所有checkoutを確認する関数
-+  assertMvpE2eResults, // 【追加】必須E2E全ファイルの終端件数を照合する関数
-+  MVP_E2E_SUITES, // 【追加】粒度18までの必須E2E一覧
-+} from "../tests/mvp/suite-manifest";
- const FAILURE = "F12_E2E_FAILED";
- const CHECKOUT = fileURLToPath(new URL("../", import.meta.url)); // URLをファイルパスへ変換する関数 / URLを解析・構築するコンストラクター
- /**
-@@ -574,10 +579,64 @@ export function assertMvpE2eReport(input) { // この処理を定義する関数
-     throw new Error(FAILURE); // 固定例外のコンストラクター
-   }
- }
-+/**
-+ * 【追加】実結果の全成功を先に確認し、必須E2Eをファイル別の安全な件数へ写す。
-+ * @param {unknown} input メモリ内のPlaywright JSON。
-+ * @param {string} checkoutDirectory 所有checkout。
-+ * @returns {import("../tests/mvp/suite-manifest.ts").MvpE2eSuiteResult[]} ファイル別の終端件数。
-+ */
-+export function getMvpE2eSuiteResults(input, checkoutDirectory) { // 【追加】必須E2E結果の安全な集計関数
-+  assertMvpE2eReport(input); // 【追加】skip・case0・失敗・hook失敗を拒否する関数
-+  try {
-+    const report = /** @type {import("playwright/types/testReporter").JSONReport} */ (input); // 【追加】Playwright JSONの結果型注釈
-+    const results = MVP_E2E_SUITES.map( // 【追加】必須ファイルを0件から集計するメソッド
-+      /**
-+       * 【追加】見つからないファイルを0件として残し、後段で拒否する。
-+       */
-+      (path) => ({ // 【追加】安全な初期件数を作るコールバック
-+        path,
-+        passed: 0,
-+        failed: 0,
-+        skipped: 0,
-+        pending: 0,
-+      }),
-+    );
-+    /**
-+     * 【追加】describeの入れ子を辿り、実行済みspecの所有ファイルだけを集計する。
-+     * @param {typeof report.suites} suites Playwright suite配列。
-+     */
-+    function visit(suites) { // 【追加】実行結果を再帰集計する関数
-+      for (const suite of suites) {
-+        for (const spec of suite.specs) {
-+          const path = spec.file.startsWith("e2e/") // 【追加】root相対の表記を判定するメソッド
-+            ? resolve(checkoutDirectory, spec.file) // 【追加】所有checkoutからパスを解決する関数
-+            : resolve(checkoutDirectory, "e2e", spec.file); // 【追加】testDir相対または絶対パスを解決する関数
-+          const result = results.find( // 【追加】既知の必須ファイルだけを選ぶメソッド
-+            /**
-+             * 【追加】未知・checkout外・診断用ファイルは結果に含めない。
-+             */
-+            (candidate) => resolve(checkoutDirectory, candidate.path) === path, // 【追加】所有パスの照合コールバック・解決関数
-+          );
-+          if (!result) {
-+            throw new Error(FAILURE); // 【追加】未知ファイルを拒否するコンストラクター
-+          }
-+          result.passed += spec.tests.length;
-+        }
-+        visit(suite.suites ?? []); // 【追加】子suiteを再帰集計する関数
-+      }
-+    }
-+    visit(report.suites); // 【追加】全実行ファイルを集計する関数
-+    assertMvpE2eResults(results); // 【追加】必須ファイルの欠落・case0を拒否する関数
-+    return results;
-+  } catch {
-+    throw new Error(FAILURE); // 【追加】JSON原文とパスを公開しないコンストラクター
-+  }
-+}
-+
- /**
-  * guard成功後だけ専用資源を起動し、production lifecycle・TLS・実E2Eを順に実行する。
-  * migrationとサービス起動は行わず、既存server・既存build成果物を再利用しない。
-- * @param {{environment?: Record<string, string | undefined>, checkoutDirectory?: string}} [options] 明示設定。
-+ * @param {{environment?: Record<string, string | undefined>, checkoutDirectory?: string, signal?: AbortSignal, onSuite?: (result: import("../tests/mvp/suite-manifest.ts").MvpE2eSuiteResult) => void}} [options] 明示設定。
-  */
- export async function runMvpE2e(options = {}) { // この処理を定義する関数・コールバック / guard成功後だけ専用資源を起動し、production lifecycle・TLS・実E2Eを順に実行する
-   /** @type {string | undefined} */
-@@ -619,9 +678,13 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
-         () => undefined); // この処理を定義する関数・コールバック
-     }
-   }
-+  options.signal?.addEventListener("abort", interrupt, { once: true }); // 【追加】外側runnerの中断を既存の回収経路へ接続するメソッド
-   process.once("SIGINT", interrupt); // イベントを一度だけ監視するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
-   process.once("SIGTERM", interrupt); // イベントを一度だけ監視するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
-   try {
-+    if (options.signal?.aborted) {
-+      throw new Error(FAILURE); // 【追加】中断済みの実行をSDKより前に拒否するコンストラクター
-+    }
-     const configuration = requireMvpTestEnvironment(options.environment ?? process.env, checkout, randomUUID().replaceAll("-", "")); // 専用checkout・明示flag・接続先を検証する関数 / UUIDを生成する関数 / すべての一致箇所を置換するメソッド
-     if (configuration.variables.RUN_MVP_E2E !== "1" ||
-       !configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-@@ -630,6 +693,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
-       existsSync(join(checkout, ".next"))) { // ファイルの存在を調べる関数 / パスを結合する関数
-       throw new Error(FAILURE); // 固定例外のコンストラクター
-     }
-+    assertMvpE2eManifest(checkout); // 【追加】サービス起動前に全必須E2Eの実在を確認する関数
-     if (process.env.PLAYWRIGHT_BROWSERS_PATH !== undefined) {
-       throw new Error(FAILURE); // 固定例外のコンストラクター
-     }
-@@ -856,7 +920,12 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
-     });
-     children.push(browser); // 配列へ要素を追加するメソッド
-     await waitMvpChild(browser, 5 * 60000, abort.signal); // 子の失敗・signal・期限超過を固定例外にし、期限超過時は所有workerも停止する
--    const passed = assertMvpE2eReport(report.read()); // 【修正】メモリ内結果の解析・回収メソッド / 実成功・skipなしだけを許す集計関数
-+    const rawReport = report.read(); // 【追加】メモリ内結果を一度だけ取得・回収するメソッド
-+    const passed = assertMvpE2eReport(rawReport); // 【追加】E2E全件の終端成功を照合する関数
-+    const suites = getMvpE2eSuiteResults(rawReport, checkout); // 【追加】全必須ファイルと件数を照合する関数
-+    for (const suite of suites) {
-+      options.onSuite?.(suite); // 【追加】秘密を含めないファイル別件数だけを通知する関数
-+    } // 【修正】メモリ内結果の解析・回収メソッド / 実成功・skipなしだけを許す集計関数
-     assertNoMvpEgress(directory, stub); // process.exitで非同期通知が途切れても、同期記録した通信違反を成功に含めない
-     if (interrupted ||
-       application.finished()) { // 終了済み判定
-@@ -928,6 +997,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
-     if (fetchInstalled) {
-       globalThis.fetch = originalFetch; // HTTP通信を実行する関数 / 遮断適用前のHTTP通信関数
-     }
-+    options.signal?.removeEventListener("abort", interrupt); // 【追加】外側runnerの中断監視を解除するメソッド
-     process.removeListener("SIGINT", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
-     process.removeListener("SIGTERM", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
-     try {
-diff --git a/scripts/test-integration.mjs b/scripts/test-integration.mjs
-index 0d8cb14f3df5db570a0325670505dd2eb8a08088..8244488a7f524993a05b369124386736e4bbb23b 100644
---- a/scripts/test-integration.mjs
-+++ b/scripts/test-integration.mjs
-@@ -33,6 +33,8 @@ import {
- import {
-   assertMvpSuiteManifest, // 既存suiteの実在と重複を確認する関数
-   assertMvpSuiteResults, // 既存必須suiteとDB・Auth群の完了を確認する関数
-+  MVP_INTEGRATION_SUITES, // 【追加】後続F12 suiteも含む必須統合一覧
-+  MVP_CONCURRENCY_CASES, // 【追加】自然競合と注入故障の実ケース名の照合契約
-   MVP_SUITES, // 実在する既存15本の必須suite
- } from "../tests/mvp/suite-manifest";
- 
-@@ -44,6 +46,7 @@ const TIMEOUT = 15 * 60_000;
-  * Vitest子プロセスへ渡す引数と許可済み環境の契約。
-  * @typedef {object} IntegrationLaunch
-  * @property {string} checkoutDirectory .envを持たない専用checkout。
-+ * @property {AbortSignal} [signal] 外側runnerからの中断要求。
-  * @property {string} outputFile この実行専用のJSON出力先。
-  * @property {Record<string, string | undefined>} environment 許可した変数だけの辞書。
-  */
-@@ -53,6 +56,8 @@ const TIMEOUT = 15 * 60_000;
-  * @typedef {object} IntegrationOptions
-  * @property {Record<string, string | undefined>} [environment] 呼出し元の明示設定。
-  * @property {string} [checkoutDirectory] 検証対象checkout。
-+ * @property {AbortSignal} [signal] 外側runnerからの中断要求。
-+ * @property {(result: import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult) => void} [onSuite] 検証済みの安全なsuite別件数。
-  * @property {(request: IntegrationLaunch) => Promise<void>} [launch] Vitest子プロセスの完了待機。
-  */
- 
-@@ -64,40 +69,21 @@ const TIMEOUT = 15 * 60_000;
-  */
- 
- /**
-- * 既存15本に、粒度2・3で実装済みのDB・ローカルサービスsuiteだけを加える。
-+ * 【修正】既存15本と粒度2〜10の実装済みsuiteを、一つの必須manifestから取得する。
-  * @returns {import("../tests/mvp/suite-manifest.ts").MvpSuite[]} 必須suiteの一覧。
-  */
- export function getIntegrationSuites() { // 実在する統合試験の契約一覧を返す関数
--  return [
--    ...MVP_SUITES,
--    {
--      path: "tests/mvp/database-fixture.integration.test.ts",
--      flags: {
--        RUN_DB_INTEGRATION_TESTS: "1",
--      },
--      database: true,
--      auth: false,
--      requiredGroups: ["F12 DB fixture統合（専用flag未指定時はskip）"],
--    },
--    {
--      path: "tests/mvp/local-services-fixture.integration.test.ts",
--      flags: {
--        RUN_DB_INTEGRATION_TESTS: "1",
--      },
--      database: true,
--      auth: true,
--      requiredGroups: ["F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）"],
--    },
--  ];
-+  return [...MVP_INTEGRATION_SUITES]; // 【修正】実在する必須suiteを一度ずつ返す
- }
- 
- /**
-  * 個々の成功ケースから群別件数を作る。未発見・skip・失敗・壊れたJSONは許可しない。
-  * @param {import("vitest/reporters").JsonTestResults} report Vitest 4のJSON結果。
-  * @param {string} checkoutDirectory 検証checkout。
-+ * @param {(result: import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult) => void} [onSuite] 全検証後の安全な件数通知。
-  * @returns {number} 実行した成功ケースの総数。
-  */
--export function assertIntegrationReport(report, checkoutDirectory) { // 最終JSONから必須実行を検証する関数
-+export function assertIntegrationReport(report, checkoutDirectory, onSuite) { // 最終JSONから必須実行を検証する関数
-   try {
-     const suites = getIntegrationSuites(); // 必須suiteの一覧を取得する関数
-     if (
-@@ -112,7 +98,8 @@ export function assertIntegrationReport(report, checkoutDirectory) { // 最終JS
-       throw new Error(RUN_ERROR); // 秘密を含めない例外を作るコンストラクター
-     }
-     const seen = new Set(); // suiteの二重集計を防ぐ集合のコンストラクター
--    const results = [];
-+    /** @type {import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult[]} */
-+    const results = []; // 【追加】安全なsuite別件数の配列型
-     let total = 0;
-     for (const file of report.testResults) {
-       const suite = suites.find( // 絶対パスが完全一致するsuiteを探すメソッド
-@@ -163,9 +150,36 @@ export function assertIntegrationReport(report, checkoutDirectory) { // 最終JS
-           };
-         },
-       );
-+      const evidence = MVP_CONCURRENCY_CASES.find( // 【追加】当該suiteの必須競合ケースを探すメソッド
-+        /**
-+         * 【追加】実在するsuiteパスだけと照合する。
-+         */
-+        (candidate) => candidate.path === suite.path, // 【追加】証跡契約を選ぶコールバック
-+      );
-+      /**
-+       * 【追加】DB群の中の完全一致ケースを一件ずつ照合し、guardだけの成功で代用しない。
-+       * @param {readonly string[]} titles 必須の実ケース名。
-+       */
-+      function evidenceCount(titles) { // 【追加】証跡ケースの成功件数を返す関数
-+        for (const title of titles) {
-+          const matches = file.assertionResults.filter( // 【追加】DB群と実ケース名の両方で照合するメソッド
-+            /**
-+             * 【追加】guard群や同名の別群を証跡に含めない。
-+             */
-+            (test) => test.title === title && // 【追加】証跡の実ケース名を照合するコールバック
-+              suite?.requiredGroups.includes(test.ancestorTitles[0]), // 【追加】必須DBケース判定のコールバック・群照合メソッド
-+          );
-+          if (matches.length !== 1) {
-+            throw new Error(RUN_ERROR); // 【追加】自然競合・注入の欠落や重複を拒否するコンストラクター
-+          }
-+        }
-+        return titles.length;
-+      }
-       total += file.assertionResults.length;
-       results.push({ // suite別の完了件数を登録するメソッド
-         path: suite.path,
-+        natural: evidenceCount(evidence?.natural ?? []), // 【追加】自然競合の必須ケース件数を照合する関数
-+        injected: evidenceCount(evidence?.injected ?? []), // 【追加】注入障害の必須ケース件数を照合する関数
-         passed: file.assertionResults.length,
-         failed: 0,
-         skipped: 0,
-@@ -192,6 +206,10 @@ export function assertIntegrationReport(report, checkoutDirectory) { // 最終JS
-         (suite) => suite.path === result.path, // パス照合のコールバック
-       ),
-     ));
-+    assertMvpSuiteResults(results, suites); // 【追加】後続F12も含む全結果を照合する関数
-+    for (const result of results) {
-+      onSuite?.(result); // 【追加】全検証済みの件数だけを呼出し元へ通知する関数
-+    }
-     return total;
-   } catch {
-     throw new Error(RUN_ERROR); // assertion原文やJSON内容を公開しないコンストラクター
-@@ -210,6 +228,10 @@ export async function launchIntegration(request) { // Vitest子プロセスを
-      * 終了イベントまでtimerと割込み監視を保持する。
-      */
-     (accept, reject) => { // 非同期完了を制御するコールバック
-+      if (request.signal?.aborted) {
-+        reject(new Error(RUN_ERROR)); // 【追加】中断済みの起動を拒否する関数・例外コンストラクター
-+        return;
-+      }
-       const grouped = process.platform !== "win32";
-       const child = spawn(process.execPath, [ // ローカルNodeでVitestを起動する関数
-         resolve(request.checkoutDirectory, "node_modules/vitest/vitest.mjs"), // インストール済みVitestのパスを解決する関数
-@@ -266,6 +288,8 @@ export async function launchIntegration(request) { // Vitest子プロセスを
-           3_000,
-         );
-       }
-+      request.signal?.addEventListener("abort", stop, { once: true }); // 【追加】外側の中断を所有子の停止へ接続するメソッド
-+      if (request.signal?.aborted) stop(); // 【追加】起動直後に中断済みになった場合も停止する関数
-       const timer = setTimeout(stop, TIMEOUT); // 全体の実行期限を設定する関数 / 子プロセス停止関数の参照
-       process.once("SIGINT", stop); // 割込みを監視するメソッド / 子プロセス停止関数の参照
-       process.once("SIGTERM", stop); // 終了要求を監視するメソッド / 子プロセス停止関数の参照
-@@ -290,6 +314,7 @@ export async function launchIntegration(request) { // Vitest子プロセスを
-             // leaderが先に終了しても、同じ群に残ったworkerを停止させる。
-             terminate("SIGKILL"); // 登録した子プロセス群の残存を停止する関数
-           }
-+          request.signal?.removeEventListener("abort", stop); // 【追加】外側の中断監視を解除するメソッド
-           clearTimeout(timer); // 実行期限timerを解除する関数
-           clearTimeout(force); // 強制停止timerを解除する関数
-           process.removeListener("SIGINT", stop); // 割込み監視を解除するメソッド / 子プロセス停止関数の参照
-@@ -329,6 +354,7 @@ export async function runIntegration(options = {}) { // 接続前ガードから
-     ) {
-       throw new Error(RUN_ERROR); // Authを含む必須suiteのキー不足を拒否するコンストラクター
-     }
-+    assertMvpSuiteManifest(configuration.checkoutDirectory, getIntegrationSuites()); // 【修正】後続F12を含む全必須ファイルを照合する関数
-     assertMvpSuiteManifest(configuration.checkoutDirectory); // 既存manifestの実在と重複を確認する関数
-     const suites = getIntegrationSuites(); // 実行するsuiteを取得する関数
-     for (const suite of suites) {
-@@ -356,9 +382,13 @@ export async function runIntegration(options = {}) { // 接続前ガードから
-       checkoutDirectory: configuration.checkoutDirectory,
-       outputFile,
-       environment,
-+      signal: options.signal, // 【追加】外側の中断要求を起動境界へ渡す
-     });
-+    if (options.signal?.aborted) {
-+      throw new Error(RUN_ERROR); // 【追加】中断後の見かけ上の成功を拒否するコンストラクター
-+    }
-     const report = JSON.parse(readFileSync(outputFile, "utf8")); // JSON解析関数 / 自分の結果ファイルだけを読む関数
--    const passed = assertIntegrationReport(report, configuration.checkoutDirectory); // 必須suiteと群別完了を検証する関数
-+    const passed = assertIntegrationReport(report, configuration.checkoutDirectory, options.onSuite); // 必須suiteと群別完了を検証する関数
-     return {
-       suites: suites.length,
-       passed,
-diff --git a/scripts/verify-mvp.mjs b/scripts/verify-mvp.mjs
+diff --git a/docs/runbooks/mvp-verification.md b/docs/runbooks/mvp-verification.md
 new file mode 100644
-index 0000000000000000000000000000000000000000..8e5497b108e935883afb385b5525c16a1372f3ca
+index 0000000000000000000000000000000000000000..28e9ad4722957f094b1c3ad91bdf1f2ab0ff8ea0
 --- /dev/null
-+++ b/scripts/verify-mvp.mjs
-@@ -0,0 +1,708 @@
-+// scripts/verify-mvp.mjs
-+// .envなし・明示flag付きの専用checkoutでだけ全検証を順序通り実行する。
-+// @ts-check
++++ b/docs/runbooks/mvp-verification.md
+@@ -0,0 +1,728 @@
++<!-- docs/runbooks/mvp-verification.md -->
 +
-+import {
-+  randomBytes,
-+  randomUUID,
-+} from "node:crypto";
-+import {
-+  existsSync,
-+  mkdirSync,
-+  mkdtempSync,
-+  realpathSync,
-+  rmSync,
-+} from "node:fs";
-+import {
-+  tmpdir,
-+} from "node:os";
-+import {
-+  join,
-+  relative,
-+  resolve,
-+} from "node:path";
-+import {
-+  fileURLToPath,
-+  pathToFileURL,
-+} from "node:url";
-+import {
-+  requireMvpTestEnvironment, // 明示flag・使い捨て接続先・checkoutを確認する関数
-+} from "../tests/mvp/environment";
-+import {
-+  assertMvpSuiteManifest, // 必須統合suiteの実在と重複を確認する関数
-+  assertMvpSuiteResults, // 必須群と終端件数を照合する関数
-+  assertMvpE2eManifest, // 必須E2Eの実在を確認する関数
-+  assertMvpE2eResults, // 必須E2E全ファイルの終端件数を照合する関数
-+  MVP_INTEGRATION_SUITES, // 実装済みの必須統合suite一覧
-+  MVP_MIGRATION_SUITE, // 空DB・upgrade専用の必須suite
-+  MVP_CONCURRENCY_CASES, // 自然競合と故障注入を区別する実ケース名
-+} from "../tests/mvp/suite-manifest";
-+import {
-+  runIntegration, // ガード付き統合試験と所有結果ファイルの回収を行う関数
-+} from "./test-integration.mjs";
-+import {
-+  runMvpE2e, // build・TLS・fixture・E2E・回収を行う関数
-+  createMvpWorkerPreload, // threadにも適用する遮断コードを生成する関数
-+  assertNoMvpEgress, // 同期記録とstubの通信違反を拒否する関数
-+  startMvpChild, // 所有する子プロセス群を起動する関数
-+  waitMvpChild, // 異常終了・signal・timeoutを拒否する関数
-+} from "./test-e2e.mjs";
-+import {
-+  startMvpOutboundStub, // ローカル送信stubと外向き通信遮断の入口を起動する関数
-+} from "../tests/mvp/outbound-stub.mjs";
-+import {
-+  createMvpReportReader, // JSON結果をファイルへ保存せずメモリ内で解析する関数
-+} from "../tests/mvp/failure-observability.mjs";
++# F12 MVP検証：専用環境・受入matrix・残課題
 +
-+const FAILURE = "F12_MVP_FAILED";
-+const CHECKOUT = fileURLToPath(new URL("../", import.meta.url)); // checkoutのURLを解決するコンストラクター・パス変換関数
++## 1. この運用書の範囲と完了の区別
 +
-+/**
-+ * 仕様順の全段階。E2E内部の事前buildと最後のproduction buildを両方維持する。
-+ */
-+export const MVP_VERIFY_STAGES = Object.freeze([ // 順序を固定する関数
-+  "ENV",
-+  "PRISMA_VALIDATE",
-+  "PRISMA_GENERATE",
-+  "MIGRATION",
-+  "DEPLOY",
-+  "LINT",
-+  "TYPECHECK",
-+  "UNIT",
-+  "INTEGRATION",
-+  "E2E",
-+  "BUILD",
-+]);
++[F12仕様]と[粒度別計画]の粒度20を対象とする。
++実装の基準は粒度19完了コミット `22e8f4c417c286bb96ccad68252fa1f6a55b6bb1`。
++本書の作成では実DB・Auth・Storage・メール・LINEを操作せず、実行結果を作り直していない。
 +
-+/**
-+ * 検証済み件数だけを段階間で受け渡す契約。
-+ * @typedef {object} StageResult
-+ * @property {number} [passed] テスト段階の合計成功件数。
-+ * @property {(import("../tests/mvp/suite-manifest.ts").MvpSuiteResult | import("../tests/mvp/suite-manifest.ts").MvpE2eSuiteResult)[]} [suites] 秘密を含めないファイル別件数。
-+ */
++| 判定 | 根拠 | この文書での扱い |
++| --- | --- | --- |
++| patchの適用確認 | `git apply --check`、対象ファイル、差分・参照の静的照合 | 文書を適用できることの確認 |
++| ローカル自動受入 | 専用環境の `verify:mvp` 全11段階、必須suite・群・件数・回収 | 粒度19の合格記録を下記に継承 |
++| MVP全受入・本番公開 | 未確認の実機操作、実サービス、本番初期化・smoke、残課題の判断 | このpatchだけでは完了としない |
 +
-+/**
-+ * 実起動と試験用stubが共用する一段階の実行契約。環境値はログへ渡さない。
-+ * @typedef {object} VerifyRequest
-+ * @property {string} stage 固定した段階名。
-+ * @property {import("../tests/mvp/environment.ts").MvpTestEnvironment} configuration guard済み環境。
-+ * @property {Record<string, string | undefined>} environment 明示したproduction検証用環境。
-+ * @property {AbortSignal} signal 中断・timeout通知。
-+ * @property {number} timeoutMs 当該段階の期限。
-+ * @property {(release: () => Promise<void>) => void} own 所有した資源の回収登録。
-+ */
++2026-11-09に利用者から `F12_MVP_PASSED 11`、終了コード0の報告があり、
++基準コミットの本文にもfixture・build・server回収と通常Supabase復帰が記録されている。
++これは粒度19での実行記録であり、粒度20で再実行したという意味ではない。
++個別ケースの生JSON・Cookie・署名URLを証跡としてリポジトリへ追加しない。
 +
-+/**
-+ * CLIでは実行関数を差し替えず、単体試験でだけ段階の外部境界をstubする。
-+ * @typedef {object} VerifyOptions
-+ * @property {Record<string, string | undefined>} [environment] 呼出し元の明示設定。
-+ * @property {string} [checkoutDirectory] 検証checkout。
-+ * @property {AbortSignal} [signal] 呼出し元の中断。
-+ * @property {(request: VerifyRequest) => Promise<StageResult | undefined>} [execute] 試験用の段階実行境界。
-+ * @property {(message: string) => void} [emit] 固定段階名・検証済み件数だけの通知。
-+ * @property {number} [timeoutMs] 試験用の段階期限。
-+ */
++通常の `npm test` は実DB群をskipしても成功する。
++`.integration.test.ts` 内にmock群と実DB群が混在する例もあるため、
++ファイル名・総成功件数・guard単体の成功だけで実DB合格にしない。
 +
-+/**
-+ * 所有する子だけを起動し、終了・stdio・中断処理まで待つ。
-+ * @param {VerifyRequest} request 所有する段階。
-+ * @param {string} file 実行ファイル。
-+ * @param {string[]} args 引数列。
-+ * @param {Record<string, string | undefined>} environment 許可する環境。
-+ * @param {(stream: "stdout" | "stderr", chunk: Uint8Array) => void} [observe] 原文を公開しない監視器。
-+ */
-+async function command(request, file, args, environment, observe) { // 段階の子を起動して回収する関数
-+  if (request.signal.aborted ||
-+    (environment.NODE_ENV !== "test" &&
-+      environment.NODE_ENV !== "production")) {
-+    throw new Error(FAILURE); // 中断済みの起動を拒否するコンストラクター
-+  }
-+  const child = startMvpChild({ // 所有する子プロセス群を起動する関数
-+    file,
-+    args,
-+    cwd: request.configuration.checkoutDirectory,
-+    env: {
-+      ...environment,
-+      NODE_ENV: environment.NODE_ENV,
-+    },
-+    observe,
-+  });
-+  request.own(child.stop); // 所有子だけの停止を登録する関数 / 停止メソッドの参照
-+  await waitMvpChild(child, request.timeoutMs, request.signal); // 期限・signal・終了を照合する関数
++## 2. 実在する入口と合格条件
++
++[package.json]の3コマンドを使う。`verify:local` は通常開発用の別入口である。
++F12の受入コマンドへ `dotenv -e .env.local` を付けない。
++
++| コマンド | 環境・前提 | 成功時の表示 | 終了 |
++| --- | --- | --- | --- |
++| `npm run test:integration` | HTTP `http://localhost:3000`、専用DBへ既存migration適用済み、Auth・Storage起動済み | `F12 integration: 22 suites, N passed` | 成功0、失敗nonzero |
++| `npm run test:e2e` | `RUN_MVP_E2E=1`、HTTPS `https://localhost:3443`、DB適用済み、Chromium導入済み | `F12_E2E_PASSED N` | 成功0、失敗nonzero |
++| `npm run verify:mvp` | E2Eと同じ明示環境、別DB作成・回収権限も必要 | `F12_MVP_PASSED 11` | 成功0、失敗nonzero |
++
++`N`は実行時の件数であり固定の合格件数ではない。
++[manifest]が要求する統合22ファイル、先行migration1ファイル、E2E12ファイルと必須群を照合する。
++旧 `MVP_SUITES` 15本だけで統合全体の完了を判定しない。
++case0、必須ファイル／群欠落、失敗、skip、pending、合計不一致、期限超過、signal、回収失敗は合格にしない。
++CLIが捕捉した失敗は終了コード1。強制終了などではOS由来のnonzeroになる場合もある。
++
++各段階の `F12_MVP_STAGE ... START/PASSED/FAILED` と
++`F12_MVP_SUITE ... passed=... natural=... injected=...` を記録する。
++末尾の成功は回収完了後に出る。途中の `PASSED` だけで全体成功と扱わない。
++
++### 2.1 必須統合suiteの一覧
++
++以下は実装基準時点の `MVP_INTEGRATION_SUITES`。flagはrunnerが付与する。
++DB／Auth列はmanifestの要求であり、ケース数の全てが実DB／Authという意味ではない。
++
++| ファイル | 必須境界 | 必須群の完全名 |
++| --- | --- | --- |
++| [tests/club-id-integrity.integration.test.ts](../../tests/club-id-integrity.integration.test.ts) | DB | `clubId整合性` |
++| [tests/storage-deletion-jobs.integration.test.ts](../../tests/storage-deletion-jobs.integration.test.ts) | DB | `StorageDeletionJob` |
++| [tests/club-line-setting.integration.test.ts](../../tests/club-line-setting.integration.test.ts) | DB | `ClubLineSetting Repository` |
++| [tests/club-membership-repository.integration.test.ts](../../tests/club-membership-repository.integration.test.ts) | DB | `ClubMembership Repository` |
++| [tests/club-invitation-schema.integration.test.ts](../../tests/club-invitation-schema.integration.test.ts) | DB | `ClubInvitation DB制約` |
++| [tests/club-invitation-repository.integration.test.ts](../../tests/club-invitation-repository.integration.test.ts) | DB | `ClubInvitation Repository` |
++| [tests/club-invitation-acceptance-repository.integration.test.ts](../../tests/club-invitation-acceptance-repository.integration.test.ts) | DB | `招待受取人の読取Repository（ローカルDB）` |
++| [tests/club-invitation-recovery.integration.test.ts](../../tests/club-invitation-recovery.integration.test.ts) | DB | `復旧CLIと実RepositoryのDB統合` |
++| [tests/club-invitation-auth.local.integration.test.ts](../../tests/club-invitation-auth.local.integration.test.ts) | Auth | `ローカルSupabaseの招待Auth契約` |
++| [tests/club-invitation-acceptance.flow.integration.test.ts](../../tests/club-invitation-acceptance.flow.integration.test.ts) | DB・Auth | `F06実DB・実Auth（3つの実行flagがない通常実行ではskip）` |
++| [tests/club-account.flow.integration.test.ts](../../tests/club-account.flow.integration.test.ts) | DB | `F07 Action・Service・Repositoryと実DB` |
++| [tests/support-report.flow.integration.test.ts](../../tests/support-report.flow.integration.test.ts) | DB | `F08実DBフロー（専用flag未指定時はskip）` |
++| [tests/platform-support.flow.integration.test.ts](../../tests/platform-support.flow.integration.test.ts) | DB | `F09実DB統合（専用flag未指定時はskip）` |
++| [tests/event-month-copy.flow.integration.test.ts](../../tests/event-month-copy.flow.integration.test.ts) | DB | `F10専用使い捨てDB統合（flag未指定はskip）` |
++| [tests/event-practice-batch.flow.integration.test.ts](../../tests/event-practice-batch.flow.integration.test.ts) | DB | `F11専用使い捨てDB統合（flag未指定はskip）` |
++| [tests/mvp/database-fixture.integration.test.ts](../../tests/mvp/database-fixture.integration.test.ts) | DB | `F12 DB fixture統合（専用flag未指定時はskip）` |
++| [tests/mvp/local-services-fixture.integration.test.ts](../../tests/mvp/local-services-fixture.integration.test.ts) | DB・Auth | `F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）` |
++| [tests/mvp/content-tenancy.integration.test.ts](../../tests/mvp/content-tenancy.integration.test.ts) | DB | `F12 content Repositoryの実DB越境（専用flag未指定時はskip）` |
++| [tests/mvp/attachment-storage.integration.test.ts](../../tests/mvp/attachment-storage.integration.test.ts) | DB・Auth | `F12 添付の実Storage・DB・途中失敗（専用flag未指定時はskip）` |
++| [tests/mvp/line-webhook-tenancy.integration.test.ts](../../tests/mvp/line-webhook-tenancy.integration.test.ts) | DB | `F12 LINE設定・Webhookの実DBクラブ束縛（専用flag未指定時はskip）` |
++| [tests/mvp/line-delivery.integration.test.ts](../../tests/mvp/line-delivery.integration.test.ts) | DB | `F12 LINE workerの実DB並列・障害（専用flag未指定時はskip）` |
++| [tests/mvp/mail-failures.integration.test.ts](../../tests/mvp/mail-failures.integration.test.ts) | DB・Auth | `F12 Resend障害と実DB・ローカルAuth（専用flag未指定時はskip）` |
++
++別段階のmigrationは[migrations]、必須E2E12ファイルは[manifest]の `MVP_E2E_SUITES` に従う。
++
++## 3. 専用環境の契約
++
++- macOS・zsh・ローカルDockerを基準にする。他OSやCIへの移植は別途確認する。
++- 本番／通常のDB・Auth・Storage・メール宛先を使わない。架空の検証データだけを作る。
++- `.env`、`.env.local`、`.env.test*`、`.env.production*`などを専用コピーへ入れない。
++  guardはファイル名だけを検査する。`.env.example`はguard上許可されるが、以下のコピーでは省く。
++- 初期 `NODE_ENV` は `test`。productionのHTTPS・必須設定検証はrunner内部で維持する。
++- `RUN_MVP_TESTS=1`、`MVP_TEST_DISPOSABLE=1`を厳密な文字列で指定する。
++  E2E／全体実行では `RUN_MVP_E2E=1`。統合単独ではこの変数を設定しない。`0`も指定しない。
++- DBはloopbackの54322・`postgres`、Supabase APIはHTTP loopbackの54321。
++  DB URLのquery、別DB、別port、曖昧なhost表記、`PG*`等による上書きを認めない。
++- 統合のAPP originは `http://localhost:3000`、E2Eは厳密に `https://localhost:3443`。
++  NextRequestが127.0.0.1をlocalhostへ正規化するため、Origin headerもlocalhostへ揃える。
++- 元プロジェクトの`.next`・認証状態・診断用spec・`test-results`をコピーしない。
++  専用コピーで事前に `npm run build` を実行しない。既存`.next`は開始時に拒否される。
++- `node_modules`全体を元プロジェクトへのsymlinkにしない。Client生成先も専用コピーにする。
++- `NODE_OPTIONS`、`NODE_PATH`、`DOTENV_*`、`PG*`、本番配送／ログ設定を引き継がない。
++  以下では `env -i` から必要な値だけを渡す。
++
++### 3.1 依存とPlaywrightの承認範囲
++
++`@playwright/test` は粒度11で例外承認され、現在は `1.64.1` に固定されている。
++本手順でパッケージ追加・更新はしない。既存lockfileと導入済み依存を使う。
++不足や不一致があれば、勝手に `npm install`・更新で埋めず、環境整備として扱う。
++Chromium本体の取得は準備作業であり、業務通信を遮断するE2E実行とは分ける。
++
++元プロジェクトのSupabase CLI指定は `^2.101.0`。
++粒度19の専用コピーにはCLI `3.0.0`、`allowScripts`、lockfileの差が観測されたが、元へ取り込んでいない。
++合格記録に実際のCLI版を残し、異なる版での結果を同一環境と呼ばない。
++本書の新規セットアップを元のCLI条件で通し実行することは、粒度20では未実施である。
++
++## 4. 新しい専用コピーを用意する
++
++各ブロックで失敗したら次へ進まない。同じzshで続ける。
++元プロジェクトのルートで開始し、ソースの変更状態とコミットを記録する。
++未コミットの実装変更がある場合は、検証対象を確定してからコピーする。
++
++```bash
++F12_SOURCE="$PWD"
++F12_ROOT="$(mktemp -d /private/tmp/f12-mvp.XXXXXX)"
++F12_CHECKOUT="$F12_ROOT/checkout"
++F12_SUPABASE="$F12_ROOT/local-supabase"
++F12_PROJECT_ID="f12-mvp-$(openssl rand -hex 6)"
++F12_NORMAL_PROJECT_ID="arao-u12-hp"
++
++mkdir -p "$F12_CHECKOUT" "$F12_SUPABASE/supabase"
++git rev-parse HEAD > "$F12_ROOT/source-revision.txt"
++git status --short > "$F12_ROOT/source-status-before.txt"
++```
++
++`F12_NORMAL_PROJECT_ID`は元の `supabase/config.toml` のproject_idと照合する。
++通常projectと新規専用projectのIDを混同しない。
++次は追跡ファイルの現在内容だけをコピーし、環境ファイルを内容ごと読まない。
++未追跡の実装はコピー対象外なので、未コミットの新規実装を試す用途にこの手順を流用しない。
++
++```bash
++python3 - "$F12_SOURCE" "$F12_CHECKOUT" <<'PY'
++from pathlib import Path
++import shutil
++import subprocess
++import sys
++
++source = Path(sys.argv[1])  # 元プロジェクトのパスを扱う
++checkout = Path(sys.argv[2])  # 専用コピーのパスを扱う
++names = subprocess.check_output(  # Gitの追跡ファイル名だけを取得する
++    ["git", "ls-files", "-z"],
++    cwd=source,
++).decode().split("\0")  # NUL区切りの一覧を文字列へ戻す
++
++for name in filter(None, names):  # 空項目を除き追跡ファイルだけを処理する
++    relative = Path(name)  # 相対パスを扱う
++    if name == "feature.patch":
++        continue
++    if any(part.startswith(".env") for part in relative.parts):  # 環境ファイル名を除く
++        continue
++    original = source / relative
++    if original.is_symlink():  # checkout外の参照をコピーしない
++        raise SystemExit("追跡symlinkは個別確認してください")
++    target = checkout / relative
++    target.parent.mkdir(parents=True, exist_ok=True)  # コピー先の親を用意する
++    shutil.copy2(original, target)  # 現在の内容と実行属性をコピーする
++PY
++
++rsync -a \
++  --exclude='.cache/' \
++  --exclude='.vite/' \
++  "$F12_SOURCE/node_modules/" \
++  "$F12_CHECKOUT/node_modules/"
++
++cd "$F12_CHECKOUT"
++node --version
++npm ls --depth=0
++```
++
++依存の診断結果はバージョン確認に使い、エラーを自動修復しない。
++ブラウザーをデフォルトの保存先へ準備する。独自 `PLAYWRIGHT_BROWSERS_PATH` は使わない。
++
++```bash
++env -i \
++  PATH="$PATH" \
++  HOME="$HOME" \
++  ./node_modules/.bin/playwright install chromium
++
++npm run test:e2e:list
++```
++
++`test:e2e:list`は接続しない一覧確認であり、受入合格ではない。
++実E2Eは必ず専用runnerから起動する。`playwright test`の直接実行や既存serverの再利用はしない。
++
++## 5. 使い捨てローカルSupabaseを起動する
++
++[supabase/config.toml]は通常projectとLAN用Auth設定を持つため、そのまま使わない。
++以下のTOMLはファイルへ書き込むブロックであり、`[auth]`等を単独でシェルへ貼り付けない。
++`db.password`は設定しない。存在しないseedや独自メールtemplateを参照しない。
++
++```bash
++cat > "$F12_SUPABASE/supabase/config.toml" <<TOML
++project_id = "$F12_PROJECT_ID"
++
++[api]
++enabled = true
++port = 54321
++
++[db]
++port = 54322
++shadow_port = 54320
++major_version = 17
++
++[db.seed]
++enabled = false
++
++[studio]
++enabled = false
++
++[inbucket]
++enabled = true
++port = 54324
++
++[storage]
++enabled = true
++file_size_limit = "50MiB"
++
++[auth]
++enabled = true
++site_url = "https://localhost:3443"
++additional_redirect_urls = [
++  "http://localhost:3000/**",
++  "http://127.0.0.1:3000/**",
++  "https://localhost:3443/**",
++  "https://127.0.0.1:3443/**"
++]
++
++[auth.rate_limit]
++email_sent = 1000
++token_refresh = 1000
++sign_in_sign_ups = 1000
++token_verifications = 1000
++TOML
++
++# 専用workdirだけを扱う。環境変数ファイルは読み込まない。
++f12_supabase() {
++  env -i \
++    PATH="$PATH" \
++    HOME="$HOME" \
++    SUPABASE_EXPERIMENTAL_STACK=0 \
++    "$F12_CHECKOUT/node_modules/.bin/supabase" \
++    --workdir "$F12_SUPABASE" \
++    "$@"
 +}
 +
-+/**
-+ * Vitest等の結果を上限付きメモリで解析し、生出力をログやファイルへ転送しない。
-+ * @param {VerifyRequest} request 所有する段階。
-+ * @param {string[]} args Nodeへ渡す引数。
-+ * @param {Record<string, string | undefined>} environment 許可する環境。
-+ * @returns {Promise<unknown>} 検証前のJSON。
-+ */
-+async function jsonCommand(request, args, environment) { // 原文非保存の子結果取得関数
-+  const reader = createMvpReportReader( // 上限付きのメモリ集計器を作る関数
-+    /**
-+     * stderrも排出するが、原文は転送・保存しない。
-+     */
-+    () => undefined, // 原文を破棄するコールバック
-+  );
-+  await command(request, process.execPath, args, environment, reader.observe); // 所有子の起動関数 / メモリ集計メソッド
-+  return reader.read(); // JSONを解析して保持バイト列を回収するメソッド
-+}
++f12_supabase --version
++```
 +
-+/**
-+ * Vitestの全ケースを検証し、ファイル・必須群の終端件数だけへ変換する。
-+ * @param {unknown} input メモリ内のVitest JSON。
-+ * @param {string} checkoutDirectory 所有checkout。
-+ * @param {readonly import("../tests/mvp/suite-manifest.ts").MvpSuite[]} [required] 必須群がある段階の契約。
-+ * @returns {StageResult} 原文を含まない件数。
-+ */
-+export function collectMvpVitestResults(input, checkoutDirectory, required) { // unit・migration結果の検証関数
-+  try {
-+    const report = /** @type {import("vitest/reporters").JsonTestResults} */ (input); // Vitest JSON契約の型注釈
-+    if (report.success !== true ||
-+      report.numFailedTests !== 0 ||
-+      report.numFailedTestSuites !== 0 ||
-+      report.numPendingTests !== 0 ||
-+      report.numPendingTestSuites !== 0 ||
-+      report.numTodoTests !== 0 ||
-+      !Array.isArray(report.testResults) || // 配列か検証する関数
-+      report.testResults.length === 0) { // 結果配列を検証する関数
-+      throw new Error(FAILURE); // skip・失敗・case0を拒否するコンストラクター
-+    }
-+    const seen = new Set(); // ファイル重複を拒否する集合のコンストラクター
-+    const suites = [];
-+    let passed = 0;
-+    for (const file of report.testResults) {
-+      const path = relative(checkoutDirectory, file.name).split("\\").join("/"); // 所有相対パスへの変換関数・区切り変換メソッド
-+      if (path.startsWith("../") || // パスの先頭を照合するメソッド
-+        !/^(?:app|src|lib|domain|tests)\/[a-zA-Z0-9_./()[\]-]+\.(?:test|spec)\.tsx?$/u.test(path) || // 所有範囲と対象形式の判定メソッド
-+        seen.has(path) || // 登録済みの値を照合するメソッド
-+        file.status !== "passed" ||
-+        file.message !== "" ||
-+        file.assertionResults.length === 0) { // 重複を判定するメソッド
-+        throw new Error(FAILURE); // 未知ファイル・hook失敗も拒否するコンストラクター
-+      }
-+      seen.add(path); // 集計したファイルを記録するメソッド
-+      for (const item of file.assertionResults) {
-+        if (item.status !== "passed" ||
-+          item.failureMessages?.length) {
-+          throw new Error(FAILURE); // 終端成功以外を拒否するコンストラクター
-+        }
-+      }
-+      const suite = required?.find( // 必須ファイルを照合するメソッド
-+        /**
-+         * 指定された必須suiteとの完全一致だけを受け入れる。
-+         */
-+        (candidate) => candidate.path === path, // 必須パス照合のコールバック
-+      );
-+      if (required &&
-+        !suite) {
-+        throw new Error(FAILURE); // 余分なsuiteを拒否するコンストラクター
-+      }
-+      const groups = (suite?.requiredGroups ?? []).map( // 必須群の成功数へ変換するメソッド
-+        /**
-+         * guard群だけの成功をDB群の成功にしない。
-+         */
-+        (name) => ({ // 群別件数を作るコールバック
-+          name,
-+          passed: file.assertionResults.filter( // 当該最上位群だけを選ぶメソッド
-+            /**
-+             * 必須群の完全名を照合する。
-+             */
-+            (item) => item.ancestorTitles[0] === name, // 群名照合のコールバック
-+          ).length,
-+          failed: 0,
-+          skipped: 0,
-+          pending: 0,
-+        }),
-+      );
-+      suites.push({ // 安全なファイル別件数を登録するメソッド
-+        path,
-+        passed: file.assertionResults.length,
-+        failed: 0,
-+        skipped: 0,
-+        pending: 0,
-+        groups,
-+      });
-+      passed += file.assertionResults.length;
-+    }
-+    if (!Number.isSafeInteger(passed) || // 安全な整数か判定する関数
-+      passed === 0 ||
-+      report.numPassedTests !== passed ||
-+      report.numTotalTests !== passed) { // 正の安全な整数と合計一致を照合する関数
-+      throw new Error(FAILURE); // 合計不一致を拒否するコンストラクター
-+    }
-+    if (required) {
-+      assertMvpSuiteResults(suites, required); // 必須ファイル・群・終端件数を照合する関数
-+    }
-+    return {
-+      passed,
-+      suites
-+    };
-+  } catch {
-+    throw new Error(FAILURE); // JSON・assertion・パス原文を捨てるコンストラクター
-+  }
-+}
++Authの高いrate limitとHTTP許可はこの使い捨て設定だけに置く。
++HTTPは既存Auth／DB統合、HTTPSはproduction E2Eに必要で、片方だけでは両方を検証できない。
++設定変更後はCLIの案内に従って専用projectを再起動し、実際に反映された設定で実行する。
 +
-+/**
-+ * integrationのHTTP契約とE2EのHTTPS契約を、同じguard済み接続先から分ける。
-+ * @param {VerifyRequest} request 所有する段階。
-+ */
-+function integrationEnvironment(request) { // 統合試験用のHTTP環境を作る関数
-+  return {
-+    ...request.configuration.variables,
-+    RUN_MVP_E2E: undefined,
-+    APP_BASE_URL: "http://localhost:3000", // 【修正】NextRequestのloopback正規化に合わせた統合試験用origin
-+    NODE_ENV: "test",
-+    TZ: "UTC",
-+  };
-+}
++Docker Desktopを起動する。54321・54322を通常Supabaseが使っている場合は、
++次で通常projectを停止する。通常projectには `--no-backup` を付けない。
++他のprocessが使っている場合は所有者を確認し、port変更や強制終了でguardを回避しない。
 +
-+/**
-+ * 最後のproduction buildにも同じ外向き遮断を適用し、所有したbuild・stub・記録だけを回収する。
-+ * @param {VerifyRequest} request 所有する段階。
-+ */
-+async function finalBuild(request) { // 遮断付きの最終buildを実行する関数
-+  const checkout = request.configuration.checkoutDirectory;
-+  if (existsSync(join(checkout, ".next"))) { // 所有していないbuildの存在を調べる関数 / パス結合関数
-+    throw new Error(FAILURE); // 他実行の成果物を削除しないコンストラクター
-+  }
-+  const directory = realpathSync(mkdtempSync(join(tmpdir(), "mvp-verify-build-"))); // 所有領域の生成・パス結合・一時領域取得関数
-+  let ownedBuild = false;
-+  let closed = false;
-+  /** @type {Awaited<ReturnType<typeof startMvpOutboundStub>> | undefined} */
-+  let stub; // 所有stubの非同期戻り値型・未設定型
-+  /**
-+   * 初期化の途中で失敗しても、自分の資源だけを一度回収する。
-+   */
-+  async function release() { // 最終buildの所有資源を回収する関数
-+    if (closed) return;
-+    closed = true;
-+    let failed = false;
-+    try {
-+      await stub?.close(); // 所有stubを閉じるメソッド
-+    } catch {
-+      failed = true;
-+    }
-+    try {
-+      if (ownedBuild) rmSync(join(checkout, ".next"), { // この試験が所有する資源を削除する関数 / 値を連結するメソッド
-+        recursive: true,
-+        force: true
-+      }); // 所有buildだけを削除する関数 / パス結合関数
-+      rmSync(directory, { // この試験が所有する資源を削除する関数
-+        recursive: true,
-+        force: true
-+      }); // 所有記録だけを削除する関数
-+    } catch {
-+      failed = true;
-+    }
-+    if (failed) throw new Error(FAILURE); // 回収失敗を拒否するコンストラクター
-+  }
-+  request.own(release); // 回収操作を登録する関数 / 回収関数の参照
-+  try {
-+    mkdirSync(join(checkout, ".next"), { mode: 0o700 }); // build所有権を確保する関数 / パス結合関数
-+    ownedBuild = true;
-+    mkdirSync(join(directory, "tmp"), { mode: 0o700 }); // buildの一時領域を所有する生成・パス結合関数
-+    const workerPreload = await createMvpWorkerPreload(directory, checkout); // 同期遮断コードを生成する関数
-+    const owner = {
-+      runId: request.configuration.runId,
-+      secret: randomBytes(32).toString("hex"), // 私有制御secretの乱数生成・文字列化メソッド
-+    };
-+    stub = await startMvpOutboundStub({ // ローカル送信stubを起動する関数
-+      ...owner,
-+      supabaseOrigin: request.configuration.supabaseOrigin,
-+    });
-+    const environment = {
-+      ...request.environment,
-+      TMPDIR: join(directory, "tmp"), // buildの一時ファイルを所有領域へ限定するパス結合関数
-+      NODE_OPTIONS: "--import=" + pathToFileURL(join(checkout, "tests/mvp/outbound-preload.mjs")).href, // preloaderのパス結合・URL化関数
-+      MVP_E2E_PRELOAD: JSON.stringify({ // 所有する遮断契約だけをJSON化するメソッド
-+        ...owner,
-+        stubOrigin: stub.origin,
-+        supabaseOrigin: request.configuration.supabaseOrigin,
-+        checkoutDirectory: checkout,
-+        runtimeDirectory: directory,
-+        workerPreload,
-+        phase: "build",
-+      }),
-+    };
-+    await command(request, "npm", [ // 所有子プロセスの起動と終了待機を行う関数
-+      "run",
-+      "build"
-+    ], environment); // guard後の最終buildを起動する関数
-+    assertNoMvpEgress(directory, stub); // 同期記録とstubで外向き通信の違反を拒否する関数
-+  } finally {
-+    await release(); // 成否にかかわらず所有資源を回収する関数
-+  }
-+}
++```bash
++env -i \
++  PATH="$PATH" \
++  HOME="$HOME" \
++  SUPABASE_EXPERIMENTAL_STACK=0 \
++  "$F12_SOURCE/node_modules/.bin/supabase" \
++  --workdir "$F12_SOURCE" \
++  stop --project-id "$F12_NORMAL_PROJECT_ID"
++```
 +
-+/**
-+ * 実コマンド・既存runnerだけを接続し、試験時はこの段階境界を丸ごとstubする。
-+ * @param {VerifyRequest} request 所有する段階。
-+ * @returns {Promise<StageResult | undefined>} テスト段階の安全な終端件数。
-+ */
-+async function executeStage(request) { // 実際の一段階を実行する関数
-+  const checkout = request.configuration.checkoutDirectory;
-+  const node = process.execPath;
-+  const prisma = join(checkout, "node_modules/prisma/build/index.js"); // インストール済みPrisma CLIのパス結合関数
-+  const vitest = join(checkout, "node_modules/vitest/vitest.mjs"); // インストール済みVitest CLIのパス結合関数
-+  switch (request.stage) {
-+    case "ENV":
-+      await command(request, node, [join(checkout, "scripts/validate-env.mjs")], request.environment); // 本番条件の環境検証を実行する関数 / パス結合関数
-+      return;
-+    case "PRISMA_VALIDATE":
-+    case "PRISMA_GENERATE":
-+    case "DEPLOY": {
-+      const args = request.stage === "DEPLOY" ? [
-+        "migrate",
-+        "deploy"
-+      ] : [request.stage === "PRISMA_VALIDATE" ? "validate" : "generate"];
-+      await command(request, node, [ // 所有子プロセスの起動と終了待機を行う関数
-+        prisma,
-+        ...args,
-+        "--config",
-+        join(checkout, "prisma.config.ts") // 値を連結するメソッド
-+      ], request.environment); // schema検証・生成・非破壊deployを実行する関数 / パス結合関数
-+      return;
-+    }
-+    case "MIGRATION": {
-+      const input = await jsonCommand(request, [ // 別DBの空・upgrade試験を実行する関数
++通常projectが元から停止していた場合は上の停止を省く。専用projectは次で起動する。
 +
-+        vitest,
-+        "run",
-+        "--config",
-+        "vitest.config.mts",
++```bash
++# 起動時に表示され得るキーをログへ転送しない。
++f12_supabase start >/dev/null 2>&1
++F12_START_EXIT=$?
++printf '専用Supabase起動終了コード: %s\n' "$F12_START_EXIT"
++```
 +
-+        MVP_MIGRATION_SUITE.path,
-+        "--reporter=json",
-+        "--no-file-parallelism",
++0の場合だけ続行する。`db start`だけではAuth・Storageの準備にならない。
++失敗した場合はproject ID・CLI版・終了コードを記録し、生の設定・キーを共有しない。
 +
-+      ], {
-+        ...integrationEnvironment(request), // 既存HTTP契約の環境生成関数
-+        ...MVP_MIGRATION_SUITE.flags,
-+        PATH: process.env.PATH,
-+        HOME: process.env.HOME,
-+      });
-+      return collectMvpVitestResults(input, checkout, [MVP_MIGRATION_SUITE]); // 実DB必須群を照合する関数
-+    }
-+    case "LINT":
-+    case "TYPECHECK":
-+      await command(request, "npm", [ // 所有子プロセスの起動と終了待機を行う関数
-+        "run",
-+        request.stage === "LINT" ? "lint" : "typecheck"
-+      ], request.environment); // 既存の検証コマンドを実行する関数
-+      return;
-+    case "UNIT": {
-+      const input = await jsonCommand(request, [ // unit専用分類でJSONを取得する関数
++## 6. 接続情報をメモリ内だけで渡す
 +
-+        vitest,
-+        "run",
-+        "--config",
-+        "vitest.mvp-unit.config.mts",
-+        "--reporter=json",
++専用workdirのstatusを取得する。JSONを表示・ファイル保存・`eval`しない。
++必要なキーがない場合、別projectのキーや本番キーで補わない。
 +
-+      ], {
-+        PATH: process.env.PATH,
-+        HOME: process.env.HOME,
-+        NODE_ENV: "test",
-+        TZ: "UTC",
-+      });
-+      return collectMvpVitestResults(input, checkout); // case0・skip・失敗を拒否する関数
-+    }
-+    case "INTEGRATION": {
-+      /** @type {import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult[]} */
-+      const suites = []; // 安全なsuite別証跡件数の配列型
-+      const result = await runIntegration({ // 実装済み統合入口を再利用する関数
-+        environment: integrationEnvironment(request), // HTTP契約へ切り替える関数
-+        checkoutDirectory: checkout,
-+        signal: request.signal,
-+        /**
-+         * 全結果の検証に成功した件数だけを保持し、runnerの回収後に公開する。
-+         */
-+        onSuite: (suite) => { // 入力を受け取り操作・照合するコールバック
-+          suites.push(suite); // 検証結果または回収操作を配列へ登録するメソッド
-+        }, // 安全な結果を保持するコールバック・登録メソッド
-+      });
-+      return {
-+        passed: result.passed,
-+        suites
-+      };
-+    }
-+    case "E2E": {
-+      /** @type {import("../tests/mvp/suite-manifest.ts").MvpE2eSuiteResult[]} */
-+      const suites = []; // E2Eファイル別の成功件数型
-+      const result = await runMvpE2e({ // 既存の事前build・HTTPS・fixture・回収を維持する関数
-+        environment: { ...request.configuration.variables },
-+        checkoutDirectory: checkout,
-+        signal: request.signal,
-+        /**
-+         * 秘密やテストタイトルを含めず、全必須ファイルの件数だけを保持する。
-+         */
-+        onSuite: (suite) => { // 入力を受け取り操作・照合するコールバック
-+          suites.push(suite); // 検証結果または回収操作を配列へ登録するメソッド
-+        }, // 安全なE2E結果を保持するコールバック・登録メソッド
-+      });
-+      return {
-+        passed: result.passed,
-+        suites
-+      };
-+    }
-+    case "BUILD":
-+      await finalBuild(request); // 最終のproduction buildと所有資源回収を行う関数
-+      return;
-+    default:
-+      throw new Error(FAILURE); // 未定義の段階を拒否するコンストラクター
-+  }
-+}
++```bash
++set +x
++unset F12_DB_URL F12_API_URL F12_ANON_KEY F12_SERVICE_ROLE_KEY
++F12_STATUS_JSON="$(f12_supabase status -o json 2>/dev/null)"
 +
-+/**
-+ * 外部境界が返した件数も再検証し、必須suite・case0・skipの見逃しを防ぐ。
-+ * @param {string} stage 段階名。
-+ * @param {StageResult | undefined} result 段階の結果。
-+ */
-+function validateStageResult(stage, result) { // 段階結果の契約を検証する関数
-+  if (![
-+    "MIGRATION",
-+    "UNIT",
-+    "INTEGRATION",
-+    "E2E"
-+  ].includes(stage)) return; // テスト段階を選ぶメソッド
-+  if (!result ||
-+    !Number.isSafeInteger(result.passed) || // 安全な整数か判定する関数
-+    !result.passed ||
-+    result.passed < 0 || // 正の安全な整数を検証する関数
-+    !result.suites?.length) {
-+    throw new Error(FAILURE); // 空・未完了を拒否するコンストラクター
-+  }
-+  let total = 0;
-+  const seen = new Set(); // 二重集計を拒否する集合コンストラクター
-+  for (const suite of result.suites) {
-+    if (!/^(?:app|src|lib|domain|tests|e2e)\/[a-zA-Z0-9_./()[\]-]+\.(?:test|spec)\.tsx?$/u.test(suite.path) || // 所有範囲の結果パスだけを許すメソッド
-+      suite.path.includes("..") || // 親ディレクトリ移動を拒否するメソッド
-+      seen.has(suite.path) || // 登録済みの値を照合するメソッド
-+      !Number.isSafeInteger(suite.passed) || // 安全な整数か判定する関数
-+      suite.passed <= 0 || // 重複と成功件数を照合するメソッド・関数
-+      suite.failed !== 0 ||
-+      suite.skipped !== 0 ||
-+      suite.pending !== 0) {
-+      throw new Error(FAILURE); // skip・失敗・未完了を拒否するコンストラクター
-+    }
-+    seen.add(suite.path); // 集計したファイルを記録するメソッド
-+    total += suite.passed;
-+  }
-+  if (total !== result.passed) throw new Error(FAILURE); // 合計不一致を拒否するコンストラクター
-+  if (stage === "E2E") {
-+    assertMvpE2eResults(result.suites); // 全必須E2Eを照合する関数
-+  } else if (stage !== "UNIT") {
-+    const suites = /** @type {import("../tests/mvp/suite-manifest.ts").MvpSuiteResult[]} */ (result.suites); // DB群別の結果型注釈
-+    assertMvpSuiteResults(suites, stage === "MIGRATION" ? [MVP_MIGRATION_SUITE] : MVP_INTEGRATION_SUITES); // 必須DB群を照合する関数
-+    if (stage === "INTEGRATION") {
-+      for (const evidence of MVP_CONCURRENCY_CASES) {
-+        const suite = /** @type {import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult | undefined} */ (result.suites.find( // 競合証跡付きの結果型注釈 / 対象ファイル取得メソッド
-+          /**
-+           * 自然競合と注入ケースを持つ対象ファイルだけを選ぶ。
-+           */
-+          (candidate) => candidate.path === evidence.path, // 証跡対象を選ぶコールバック
-+        ));
-+        if (!suite ||
-+          suite.natural !== evidence.natural.length ||
-+          suite.injected !== evidence.injected.length) {
-+          throw new Error(FAILURE); // guardだけの成功や分類欠落を拒否するコンストラクター
-+        }
-+      }
-+    }
-+  }
-+}
-+
-+/**
-+ * 接続前ガード、全段階、失敗伝播、signal、所有資源の回収を一つの入口へまとめる。
-+ * @param {VerifyOptions} [options] 明示環境と試験用境界。
-+ */
-+export async function runMvpVerification(options = {}) { // 全必須検証を順序通り集約する関数
-+  const controller = new AbortController(); // 全体の中断通知を生成するコンストラクター
-+  /** @type {(() => Promise<void>)[]} */
-+  const resources = []; // 所有回収関数の配列型
-+  const summaries = [];
-+  /**
-+   * 自分の段階だけを中断し、通常環境のserverやデータには触れない。
-+   */
-+  function interrupt() { // 全体中断を通知する関数
-+    controller.abort(); // 中断signalを発火するメソッド
-+  }
-+  process.once("SIGINT", interrupt); // 割込みを登録するメソッド / 中断関数の参照
-+  process.once("SIGTERM", interrupt); // 終了要求を登録するメソッド / 中断関数の参照
-+  options.signal?.addEventListener("abort", interrupt, { once: true }); // 呼出し元の中断を登録するメソッド
-+  /**
-+   * 固定メッセージか検証済みパス・件数だけを出力する。
-+   * @param {string} message 検証済み通知。
-+   */
-+  function emit(message) { // 秘密を含めない通知関数
-+    if (options.emit) options.emit(message); // 試験の通知境界を呼ぶ関数
-+    else console.log(message); // 固定の段階と件数だけを出力するメソッド
-+  }
-+  try {
-+    const variables = options.environment ?? process.env;
-+    if (options.signal?.aborted ||
-+      variables.RUN_MVP_TESTS !== "1" ||
-+      variables.MVP_TEST_DISPOSABLE !== "1" ||
-+      variables.RUN_MVP_E2E !== "1") {
-+      throw new Error(FAILURE); // URLやSDKの評価前にflagを拒否するコンストラクター
-+    }
-+    const checkout = options.checkoutDirectory ?? CHECKOUT;
-+    const configuration = requireMvpTestEnvironment(variables, checkout, randomUUID().replaceAll("-", "")); // 専用環境の確認関数 / 実行IDの生成・整形メソッド
-+    if (!configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
-+      !configuration.variables.SUPABASE_SERVICE_ROLE_KEY ||
-+      realpathSync(join(checkout, "node_modules")) !== join(configuration.checkoutDirectory, "node_modules") || // 別checkoutの依存ルートを拒否する実在パス・結合関数
-+      existsSync(join(checkout, ".next"))) { // 既存buildの存在を調べる関数 / パス結合関数
-+      throw new Error(FAILURE); // 不足キー・他実行のbuildを拒否するコンストラクター
-+    }
-+    assertMvpSuiteManifest(checkout, [ // 必須suiteの契約と実在を検証する関数
-+      ...MVP_INTEGRATION_SUITES,
-+      MVP_MIGRATION_SUITE
-+    ]); // 全DB試験の実在・重複を確認する関数
-+    assertMvpE2eManifest(checkout); // 全E2Eの実在を確認する関数
-+    const environment = {
-+      ...configuration.variables,
-+      NODE_ENV: "production",
-+      TZ: "UTC",
-+      NEXT_TELEMETRY_DISABLED: "1",
-+      CHECKPOINT_DISABLE: "1",
-+      PRISMA_HIDE_UPDATE_MESSAGE: "1",
-+      npm_config_update_notifier: "false",
-+      PATH: process.env.PATH,
-+      HOME: process.env.HOME,
-+      WEBSITE_ADMIN_USER_IDS: randomUUID(), // build用の架空管理者UUIDを生成する関数
-+      FORM_LOG_HASH_SALT: randomBytes(32).toString("hex"), // build用の架空saltを生成・文字列化するメソッド
-+      LINE_CREDENTIAL_ENCRYPTION_KEY: randomBytes(32).toString("base64"), // build用の架空暗号鍵を生成・文字列化するメソッド
-+      CRON_SECRET: randomBytes(32).toString("hex"), // build用の架空Cron認証値を生成・文字列化するメソッド
-+      RESEND_API_KEY: "re_F12_FAKE_NEVER_SEND",
-+      MAIL_FROM_ADDRESS: "from@example.test",
-+      ADMIN_EMAIL: "platform@example.test",
-+    };
-+    if (options.timeoutMs !== undefined &&
-+      (!Number.isSafeInteger(options.timeoutMs) || // 安全な整数か判定する関数
-+        options.timeoutMs <= 0)) { // 試験用期限を検証する関数
-+      throw new Error(FAILURE); // 不正な期限を拒否するコンストラクター
-+    }
-+    for (const stage of MVP_VERIFY_STAGES) {
-+      requireMvpTestEnvironment(configuration.variables, checkout, configuration.runId); // 後から置かれた.env等も段階ごとに拒否する関数
-+      if (controller.signal.aborted) throw new Error(FAILURE); // 中断後の次段階を拒否するコンストラクター
-+      const current = new AbortController(); // 当該段階の中断を生成するコンストラクター
-+      /**
-+       * 全体中断を現在の段階へ伝え、段階終了時に監視を解除できるようにする。
-+       */
-+      function abortCurrent() { // 現在の段階へ中断を伝える関数
-+        current.abort(); // 当該段階の中断メソッド
-+      }
-+      controller.signal.addEventListener("abort", abortCurrent, { once: true }); // 中断監視メソッド / 中断関数の参照
-+      const timeoutMs = options.timeoutMs ?? (stage === "E2E" ? 30 * 60000 : stage === "INTEGRATION" ? 20 * 60000 : 10 * 60000);
-+      const timer = setTimeout( // 当該段階の期限を登録する関数
-+        /**
-+         * timeoutも同じsignal・回収経路へ渡す。
-+         */
-+        () => current.abort(), // 期限切れを通知するコールバック・メソッド
-+        timeoutMs,
-+      );
-+      /** @type {Promise<StageResult | undefined> | undefined} */
-+      let execution; // 現在の実行の非同期結果型・未設定型
-+      /** @type {(() => void) | undefined} */
-+      let abortStage; // 中断待機を解除する関数型・未設定型
++# 値はコマンド置換の中でだけ受け取り、画面やファイルへ出さない。
++f12_status_value() {
++  printf '%s' "$F12_STATUS_JSON" |
++    node -e '
++      const fs = require("node:fs"); // 標準のファイル読取機能を取得する
 +      try {
-+        emit(`F12_MVP_STAGE ${stage} START`); // 固定した段階を通知する関数
-+        execution = Promise.resolve().then( // 実段階の結果を保持するメソッド
-+          /**
-+           * 起動直前にも中断を確認し、試験用または本物の段階を開始する。
-+           */
-+          async () => { // 段階開始のコールバック
-+            if (current.signal.aborted) throw new Error(FAILURE); // 中断済みの開始を拒否するコンストラクター
-+            return await (options.execute ?? executeStage)({ // 試験境界または実段階を実行する関数
-+              stage,
-+              configuration,
-+              environment,
-+              signal: current.signal,
-+              timeoutMs,
-+              /**
-+               * この実行で所有した回収操作だけを登録する。
-+               */
-+              own: (release) => { // 入力を受け取り操作・照合するコールバック
-+                resources.push(release); // 検証結果または回収操作を配列へ登録するメソッド
-+              }, // 回収操作を保持するコールバック・配列登録メソッド
-+            });
-+          },
-+        );
-+        const canceled = new Promise( // 無応答の試験境界も期限で拒否するPromiseコンストラクター
-+          /**
-+           * 中断の通知だけを待ち、例外原文を保持しない。
-+           */
-+          (_, reject) => { // 中断待機のコールバック
-+            /**
-+             * 現在の段階の中断を固定例外へ変換する。
-+             */
-+            abortStage = () => reject(new Error(FAILURE)); // 中断失敗のコールバック・通知関数・例外コンストラクター
-+            current.signal.addEventListener("abort", abortStage, { once: true }); // 中断を登録するメソッド
-+            if (current.signal.aborted) abortStage(); // 中断済みの場合も拒否する関数
-+          },
-+        );
-+        const result = await Promise.race([ // 最初に終端した非同期結果を受け取るメソッド
-+          execution,
-+          canceled
-+        ]); // 実完了または中断を待つメソッド
-+        if (current.signal.aborted) throw new Error(FAILURE); // timeout後の見かけ上の成功を拒否するコンストラクター
-+        validateStageResult(stage, result); // 必須suite・群・件数を照合する関数
-+        for (const suite of result?.suites ?? []) {
-+          const evidence = /** @type {Partial<import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult>} */ (suite); // 任意の証跡件数の型注釈
-+          emit(`F12_MVP_SUITE ${suite.path} passed=${suite.passed} natural=${evidence.natural ?? 0} injected=${evidence.injected ?? 0}`); // 安全なsuite別件数を通知する関数
-+        }
-+        summaries.push({ // 検証結果または回収操作を配列へ登録するメソッド
-+          stage,
-+          passed: result?.passed ?? 0
-+        }); // 段階の成功件数だけを登録するメソッド
-+        emit(`F12_MVP_STAGE ${stage} PASSED`); // 固定の成功段階を通知する関数
++        const value = JSON.parse(fs.readFileSync(0, "utf8"))[process.argv[1]]; // stdinのJSONから指定値だけを取り出す
++        if (typeof value !== "string" || !value) throw new Error(); // 不足値を拒否する
++        process.stdout.write(value); // 呼出し元のコマンド置換へだけ値を返す
 +      } catch {
-+        current.abort(); // 所有段階を中断するメソッド
-+        if (!options.execute &&
-+          execution) {
-+          await execution.catch( // 本物のrunnerではfixtureの回収完了まで待つメソッド
-+            /**
-+             * 内側runnerの固定失敗を受け取り、回収完了後に外側の失敗を返す。
-+             */
-+            () => undefined, // 原文を破棄するコールバック
-+          );
-+        }
-+        emit(`F12_MVP_STAGE ${stage} FAILED`); // 固定の失敗段階を通知する関数
-+        throw new Error(FAILURE); // 原文を含めない例外コンストラクター
-+      } finally {
-+        if (abortStage) current.signal.removeEventListener("abort", abortStage); // 中断待機を解除するメソッド
-+        controller.signal.removeEventListener("abort", abortCurrent); // 当該段階の中断監視を解除するメソッド
-+        clearTimeout(timer); // 当該段階の期限を解除する関数
++        console.error("F12_STATUS_VALUE_FAILED"); // 秘密を含めない固定失敗を出す
++        process.exitCode = 1;
 +      }
-+    }
-+    return { stages: summaries };
-+  } catch {
-+    throw new Error(FAILURE); // 入力・SDK・SQL・assertionの原文を捨てるコンストラクター
-+  } finally {
-+    let failed = false;
-+    for (const release of resources.reverse()) { // 所有順を逆転するメソッド
-+      try {
-+        await release(); // この実行だけの回収関数
-+      } catch {
-+        failed = true;
-+      }
-+    }
-+    process.removeListener("SIGINT", interrupt); // 全体中断監視を解除するメソッド / 中断関数の参照
-+    process.removeListener("SIGTERM", interrupt); // 終了監視を解除するメソッド / 中断関数の参照
-+    options.signal?.removeEventListener("abort", interrupt); // 呼出し元の監視を解除するメソッド
-+    if (failed) throw new Error(FAILURE); // cleanup失敗を全体失敗にするコンストラクター
-+  }
++    ' "$1"
 +}
 +
-+if (process.argv[1] &&
-+  pathToFileURL(resolve(process.argv[1])).href === import.meta.url) { // 直接CLI起動を照合するパス解決・URL化関数
-+  try {
-+    const result = await runMvpVerification(); // guard付きの全検証を実行する関数
-+    console.log("F12_MVP_PASSED", result.stages.length); // 全段階と回収の成功後だけを通知するメソッド
-+  } catch {
-+    console.error(FAILURE); // 固定の失敗コードだけを通知するメソッド
-+    process.exitCode = 1;
-+  }
-+}
-diff --git a/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts b/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
-index ad0d9d745c5092142227613c2a546bf5204632bc..3059b2ff4e6d1d3fce76c65b3efd4f8d27c2775c 100644
---- a/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
-+++ b/src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
-@@ -44,10 +44,35 @@ const TRANSACTION_OPTIONS = {//トランザクションの実行の際の追加
-   timeout: 30000,//トランザクション処理の制限時間（30秒）
- };
- 
-+/**
-+ * 【追加】PrismaのP2034と、実DBで確認したadapterの40001競合だけを再試行対象にする。
-+ * 接続断や結果不明の例外は、名前やSQLSTATEだけで再試行しない。
-+ */
-+function isRetryableBatchConflict(error: unknown): boolean { // 【追加】有限再試行できる競合かを判定する関数 / 未確定の例外型 / 真偽値型
-+  if (error instanceof Prisma.PrismaClientKnownRequestError) { // 【追加】Prisma既知例外の実行時型を判定するコンストラクター
-+    return error.code === "P2034";
-+  }
-+  if (
-+    !(error instanceof Error) || // 【追加】Errorの実体を確認するコンストラクター
-+    error.name !== "DriverAdapterError"
-+  ) {
-+    return false;
-+  }
-+  const cause = error.cause;
-+  return (
-+    typeof cause === "object" &&
-+    cause !== null &&
-+    "kind" in cause &&
-+    cause.kind === "TransactionWriteConflict" &&
-+    "originalCode" in cause &&
-+    cause.originalCode === "40001"
-+  );
++F12_API_URL="$(f12_status_value API_URL)" &&
++F12_DB_URL="$(f12_status_value DB_URL)" &&
++F12_ANON_KEY="$(f12_status_value ANON_KEY)" &&
++F12_SERVICE_ROLE_KEY="$(f12_status_value SERVICE_ROLE_KEY)" &&
++printf 'F12設定取得OK\n'
++
++unset F12_STATUS_JSON
++
++# HTTPのDB／Auth統合用。RUN_MVP_E2Eは未設定のままにする。
++f12_test_env() {
++  env -i \
++    PATH="$PATH" \
++    HOME="$HOME" \
++    NODE_ENV=test \
++    TZ=UTC \
++    RUN_MVP_TESTS=1 \
++    MVP_TEST_DISPOSABLE=1 \
++    DATABASE_URL="$F12_DB_URL" \
++    NEXT_PUBLIC_SUPABASE_URL="$F12_API_URL" \
++    NEXT_PUBLIC_SUPABASE_ANON_KEY="$F12_ANON_KEY" \
++    SUPABASE_SERVICE_ROLE_KEY="$F12_SERVICE_ROLE_KEY" \
++    APP_BASE_URL=http://localhost:3000 \
++    "$@"
 +}
 +
- /**
-  * callback内の検証で全件rollback（エラーなどで処理を始める前の綺麗な状態に戻す）を要求するときだけ使う
-  */
--class BatchRollbackError extends Error {} 
-+class BatchRollbackError extends Error {} // 【追加】全件rollbackを指示する内部例外クラス / 例外基底型
- 
- /**
-  * DB更新前・再送照合前に、DBから現在の所属・本人・クラブ情報を取得し、管理者ロール・利用可能プランを検証する。
-@@ -159,7 +184,7 @@ function eventData( // 選択日を固定列の一括作成データへ変換す
-       /**
-        * 現在の候補日とサーバー生成値を対応付ける。
-        */
--      (candidate) => [candidate.date, candidate] as const, 
-+      (candidate) => [candidate.date, candidate] as const, // 【追加】日付と候補の組を返すコールバック / 読取専用tupleの型アサーション
-     ),
-   );
-   const data: Prisma.ClubEventCreateManyInput[] = []; // 戻り値の箱を作成する（複数いれれる）
-@@ -199,9 +224,9 @@ function eventData( // 選択日を固定列の一括作成データへ変換す
- 
- /**
-  * 定期練習を一括作成して、その『完了記録』をDBに安全に保存する関数（作成イベントは下書きとしてDBに保存）
-- * P2034は初回後最大3回だけ再試行し、P2002後は再認可と記録照合だけを行う。
-+ * 【修正】P2034・実測したadapterの40001競合は初回後最大3回再試行し、P2002後は再認可と記録照合だけを行う。
-  */
--export async function createEventPracticeBatch( 
-+export async function createEventPracticeBatch( // 【追加】再認可・完了記録照合・一体保存と有限再試行を行う関数
-   scope: EventPracticeBatchFingerprintScope, // 認可済みクラブ・実行所属・Auth本人の識別情報型
-   input: EventPracticeBatchInput, //定期練習の共通入力値に選択日と操作識別子を加えた実行入力。
- ): Promise<EventPracticeBatchResult> { // 固定の保存結果を返す非同期型
-@@ -233,8 +258,10 @@ export async function createEventPracticeBatch(
-   while (true) {//ループ処理
-     let attemptedWrite = false;//DBに書き込んだかを記録するフラグ
-     try {
--      return await prisma.$transaction( 
--
-+      return await prisma.$transaction( // 【追加】下書き群と完了記録を同一transactionで確定するメソッド
-+        /**
-+         * 【追加】最新認可・記録・previewを確認し、選択した下書き群と完了記録を一体保存する。
-+         */
-         async (transaction): Promise<EventPracticeBatchResult> => { //定期練習の保存結果の型
-           if (!await isCurrentActor(transaction, actorScope)) { // 最新所属・本人・クラブ・管理権限・プランを検証する関数
-             return { outcome: "FORBIDDEN" };
-@@ -322,14 +349,14 @@ export async function createEventPracticeBatch(
-       if (error instanceof BatchRollbackError) { //callback内の検証で全件rollback（エラーなどで処理を始める前の綺麗な状態に戻す）を要求するときだけ使う
-         return { outcome: "CREATE_FAILED" };
-       }
--      if (error instanceof Prisma.PrismaClientKnownRequestError) { // Prisma既知エラー型の判定
--        if (error.code === "P2034") {
--          if (retries < MAX_TRANSACTION_RETRIES) {// トランザクションの最大再試行回数（3回）より少ない場合は以下
--            retries += 1;
--            continue;
--          }
--          return { outcome: "RESULT_UNKNOWN" };//多い場合はこれ
-+      if (isRetryableBatchConflict(error)) { // 【追加】P2034と実測したadapterの40001競合だけを判定する関数
-+        if (retries < MAX_TRANSACTION_RETRIES) { // 【修正】既存の初回後最大3回という上限を維持する
-+          retries += 1;
-+          continue;
-         }
-+        return { outcome: "RESULT_UNKNOWN" }; // 【修正】上限到達後は結果不明として同じ操作の再確認へ戻す
-+      }
-+      if (error instanceof Prisma.PrismaClientKnownRequestError) { // Prisma既知エラー型の判定
-         if (
-           error.code === "P2002" &&
-           attemptedWrite &&//DBに書き込んだかを記録するフラグ
-diff --git a/tests/event-practice-batch-mutation-repository.test.ts b/tests/event-practice-batch-mutation-repository.test.ts
-index 90cb3b63d9385441738ba2ddd52bb338a56c0090..54f59359245ded133f7958e9dbf47ebfcf72f482 100644
---- a/tests/event-practice-batch-mutation-repository.test.ts
-+++ b/tests/event-practice-batch-mutation-repository.test.ts
-@@ -229,6 +229,21 @@ function databaseError(code: string) { // Prisma既知エラーfixtureを作る
-   });
- }
- 
-+/**
-+ * 【追加】自然なPostgreSQL競合で観測したadapter例外の形を、秘密を持つ架空値で再現する。
-+ */
-+function driverWriteConflict(): Error { // 【追加】adapterの競合例外fixtureを作る関数 / 例外型
-+  const error = new Error(PRIVATE, { // 【追加】原文を外へ出さないことも検証する例外コンストラクター
-+    cause: {
-+      kind: "TransactionWriteConflict",
-+      originalCode: "40001",
-+      originalMessage: PRIVATE,
-+    },
-+  });
-+  error.name = "DriverAdapterError";
-+  return error;
++# 共通の許可設定に、E2E専用flagとHTTPS originだけを重ねる。
++f12_e2e_env() {
++  f12_test_env env \
++    RUN_MVP_E2E=1 \
++    APP_BASE_URL=https://localhost:3443 \
++    "$@"
 +}
 +
- /**
-  * consoleの出力だけを抑え、spyによる呼出しの検出を可能にする。
-  */
-@@ -482,7 +497,7 @@ it.each(["id", "clubId", "userId", "status", "role", "plan"])("最新所属の%s
-     } else if (field === "status") {
-       actor!.status = "WITHDRAWN";
-     } else {
--      actor![field as "id" | "clubId" | "userId"] = OTHER;
-+      actor![field as "id" | "clubId" | "userId"] = OTHER; // 【追加】認可識別子の許可キーへ絞るリテラル型アサーション
-     }
-     expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
-     expect(mocks.ledger).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-@@ -887,3 +902,106 @@ it.each(["clubId", "status", "genre", "content", "returnTo"])("未許可項目%s
-     expect(mocks.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
-   },
- );
++cd "$F12_CHECKOUT"
++f12_e2e_env node --import tsx --input-type=module <<'JS'
++import { requireMvpTestEnvironment } from "./tests/mvp/environment.ts"; // 接続前guardを読み込む
++requireMvpTestEnvironment(process.env, process.cwd(), "a".repeat(32)); // 明示設定とcheckoutだけを検証する
++console.log("F12_PREFLIGHT_OK"); // 返却された秘密を表示せず成功だけを出す
++JS
 +
++test ! -e "$F12_CHECKOUT/.next"
++lsof -nP -iTCP:3000 -sTCP:LISTEN
++lsof -nP -iTCP:3443 -sTCP:LISTEN
++```
 +
-+it("adapterの40001競合はrollback後に再認可し、一度分だけ保存する", // 【追加】自然競合と同じ例外形の試験を登録する関数
-+  /**
-+   * 【追加】P2034へ変換されない競合でも、同じ入力を再確認して重複保存しない。
-+   */
-+  async () => { // 【追加】adapter競合の再試行を確認するコールバック
-+    mocks.insert.mockRejectedValueOnce(driverWriteConflict()); // 【追加】一度だけ競合させるメソッド / 実測したadapter例外のfixture生成関数
-+    const result = await createEventPracticeBatch(SCOPE, input()); // 【追加】定期練習を冪等に一括保存する関数 / 保存入力fixtureの生成関数
-+    expect(result.outcome).toBe("CREATED"); // 【追加】結果を検証する関数・比較メソッド
-+    expect(mocks.transaction).toHaveBeenCalledTimes(2); // 【追加】初回と再試行だけであることを検証する関数・回数比較メソッド
-+    expect(mocks.actor).toHaveBeenCalledTimes(2); // 【追加】再試行時の認可確認を検証する関数・回数比較メソッド
-+    expect(inserted).toHaveLength(1); // 【追加】保存が一度分であることを検証する関数・件数比較メソッド
-+    expect(ledger).not.toBeNull(); // 【追加】完了記録の存在を検証する関数・比較メソッド
-+  },
-+);
++`F12設定取得OK`、`F12_PREFLIGHT_OK`と既存build不在を確認する。
++`lsof`は何も表示されず終了1なら待受なし。待受がある場合、所有を確認してから進める。
++preflightはDBへ接続しない。起動・migrationの所有確認を代替するものではない。
 +
-+it("adapterの40001競合が続いても初回後3回で打ち切り、部分保存しない", // 【追加】再試行上限の試験を登録する関数
-+  /**
-+   * 【追加】競合エラーを無限に再送せず、既存と同じ有限上限で結果不明へ戻す。
-+   */
-+  async () => { // 【追加】adapter競合の上限を確認するコールバック
-+    mocks.insert.mockRejectedValue(driverWriteConflict()); // 【追加】すべての保存試行を競合させるメソッド / adapter例外のfixture生成関数
-+    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ // 【追加】保存処理の結果を検証する関数・構造比較メソッド / 保存関数・入力生成関数
-+      outcome: "RESULT_UNKNOWN",
-+    });
-+    expect(mocks.transaction).toHaveBeenCalledTimes(4); // 【追加】初回と最大3回の再試行を検証する関数・回数比較メソッド
-+    expect(mocks.actor).toHaveBeenCalledTimes(4); // 【追加】各回の認可確認を検証する関数・回数比較メソッド
-+    expect(inserted).toEqual([]); // 【追加】部分保存がないことを検証する関数・構造比較メソッド
-+    expect(ledger).toBeNull(); // 【追加】完了記録を残さないことを検証する関数・比較メソッド
-+  },
-+);
++## 7. 実行順と単独実行
 +
-+it("adapterの40001競合後に所属が失効したら再保存しない", // 【追加】再試行時認可の試験を登録する関数
-+  /**
-+   * 【追加】rollback後の最新所属を確認し、失効した権限で保存を継続しない。
-+   */
-+  async () => { // 【追加】競合後の所属失効を確認するコールバック
-+    mocks.insert.mockRejectedValueOnce(driverWriteConflict()); // 【追加】最初の保存だけを競合させるメソッド / adapter例外fixtureの生成関数
-+    afterRollback =
-+      /**
-+       * 【追加】別transactionによる所属失効を再試行前に反映する。
-+       */
-+      () => { // 【追加】再認可前に所属を失効させるコールバック
-+        actor!.status = "WITHDRAWN";
-+      };
-+    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ // 【追加】再認可の結果を検証する関数・構造比較メソッド / 保存関数・入力生成関数
-+      outcome: "FORBIDDEN",
-+    });
-+    expect(mocks.insert).toHaveBeenCalledTimes(1); // 【追加】再保存しないことを検証する関数・回数比較メソッド
-+    expect(inserted).toEqual([]); // 【追加】部分保存がないことを検証する関数・構造比較メソッド
-+    expect(ledger).toBeNull(); // 【追加】完了記録を残さないことを検証する関数・比較メソッド
-+  },
-+);
++### 7.1 全体実行
 +
-+it.each([ // 【追加】再試行対象外の例外をパラメーター別に登録するメソッド
-+  "different-code",
-+  "different-kind",
-+  "different-name",
-+  "missing-code",
-+  "plain-object",
-+] as const)( // 【追加】例外形の固定値を表す読取専用リテラル型
-+  "adapter例外に似た%sは自動再試行しない",
-+  /**
-+   * 【追加】実測したError・名前・種別・SQLSTATEの組合せ以外を広く再送しない。
-+   */
-+  async (mode) => { // 【追加】再試行対象外の例外を検証するコールバック
-+    const failure = driverWriteConflict(); // 【追加】adapter競合を模す例外fixtureの生成関数
-+    if (mode === "different-code") {
-+      Reflect.set(failure, "cause", { // 【追加】接続断を表す異なるSQLSTATEへ置き換える関数
-+        kind: "TransactionWriteConflict",
-+        originalCode: "08006",
-+      });
-+    } else if (mode === "different-kind") {
-+      Reflect.set(failure, "cause", { // 【追加】競合以外の種別へ置き換える関数
-+        kind: "ConnectionClosed",
-+        originalCode: "40001",
-+      });
-+    } else if (mode === "different-name") {
-+      failure.name = "UnrecognizedError";
-+    } else if (mode === "missing-code") {
-+      Reflect.set(failure, "cause", { // 【追加】SQLSTATEのない例外へ置き換える関数
-+        kind: "TransactionWriteConflict",
-+      });
-+    }
-+    const rejected = mode === "plain-object" ? {
-+      name: "DriverAdapterError",
-+      cause: {
-+        kind: "TransactionWriteConflict",
-+        originalCode: "40001",
-+      },
-+    } : failure;
-+    mocks.insert.mockRejectedValue(rejected); // 【追加】再試行対象外の保存失敗を設定するメソッド
-+    const result = await createEventPracticeBatch(SCOPE, input()); // 【追加】定期練習の保存関数 / 保存入力fixtureの生成関数
-+    expect(result).toEqual({ // 【追加】不明な保存障害の固定結果を検証する関数・構造比較メソッド
-+      outcome: "RESULT_UNKNOWN",
-+    });
-+    expect(mocks.transaction).toHaveBeenCalledTimes(1); // 【追加】自動再試行がないことを検証する関数・回数比較メソッド
-+    expect(inserted).toEqual([]); // 【追加】部分保存がないことを検証する関数・構造比較メソッド
-+    expect(ledger).toBeNull(); // 【追加】完了記録を残さないことを検証する関数・比較メソッド
-+    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 【追加】秘密原文の非含有を検証する関数・JSON化メソッド・含有比較メソッド
-+  },
-+);
-diff --git a/tests/mvp/integration-runner.test.ts b/tests/mvp/integration-runner.test.ts
-index 396f55bb87caee1bd5f8b0b88880b9d28f34e89e..f36ec265bcda622980c9d1d8c06599de18a5a549 100644
---- a/tests/mvp/integration-runner.test.ts
-+++ b/tests/mvp/integration-runner.test.ts
-@@ -38,6 +38,7 @@ import {
-   runIntegration, // 実行前ガードからJSON検証と削除までを行う関数
- } from "../../scripts/test-integration.mjs";
- import {
-+  MVP_CONCURRENCY_CASES, // 【追加】実DBの自然競合・注入障害の必須ケース名
-   MVP_SUITES, // 既存15本の必須suite
- } from "./suite-manifest";
- import unitConfig from "../../vitest.mvp-unit.config.mjs"; // 既存設定を継承したunit専用設定
-@@ -167,19 +168,33 @@ function report(): JsonTestResults { // 架空結果生成関数 / VitestのJSON
-       message: "",
-       startTime: 1,
-       endTime: 2,
--      assertionResults: suite.requiredGroups.map( // 必須群の結果を作るメソッド
-+      assertionResults: suite.requiredGroups.flatMap( // 必須群の結果を作るメソッド
-         /**
-          * JSON reporterのancestorTitlesに対応する群名を保持する。
-          */
--        (name) => ({ // 架空の成功ケースを作るコールバック
--          ancestorTitles: [name],
--          fullName: `${name} succeeds`,
--          title: "succeeds",
--          status: "passed" as const, // ケース成功状態のリテラル型
--          meta: {},
--          failureMessages: [],
--          tags: [],
--        }),
-+        (name) => { // 【修正】各必須群の実ケース契約に合わせるコールバック
-+          const evidence = MVP_CONCURRENCY_CASES.find( // 【追加】対象suiteの実ケースを取得するメソッド
-+            /**
-+             * 【追加】架空結果にも実在する必須ケース名を使う。
-+             */
-+            (candidate) => candidate.path === suite.path, // 【追加】対象パス照合コールバック
-+          );
-+          const titles = evidence ? [...evidence.natural, ...evidence.injected] : ["succeeds"];
-+          return titles.map( // 【追加】実ケース名をJSON結果へ変換するメソッド
-+            /**
-+             * 【追加】guardだけの架空成功で必須ケースを代用しない。
-+             */
-+            (title) => ({ // 【追加】架空の成功結果を生成するコールバック
-+              ancestorTitles: [name],
-+              fullName: `${name} ${title}`,
-+              title,
-+              status: "passed" as const, // 【追加】ケース成功状態のリテラル型
-+              meta: {},
-+              failureMessages: [],
-+              tags: [],
-+            }),
-+          );
-+        },
-       ),
-     }),
-   );
-@@ -321,7 +336,7 @@ it("環境ファイルや必須suiteの欠落があれば起動しない", // 
-   },
- );
- 
--it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用flagだけを渡す", // 試験を登録する関数
-+it("既存15本と実装済みF12の7本を一度だけ必須とし、許可変数と専用flagだけを渡す", // 試験を登録する関数
-   /**
-    * ガード後の起動・結果検証・一時JSON削除までを本物のファイル操作で確認する。
-    */
-@@ -337,8 +352,8 @@ it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用f
-       launch, // 起動代替関数の参照
-     });
-     expect(result).toEqual({ // 期待値生成関数 / 成功件数の比較メソッド
--      suites: 17,
--      passed: 17,
-+      suites: getIntegrationSuites().length, // 【修正】実在する必須suite一覧取得関数
-+      passed: report().numTotalTests, // 【修正】必須証跡を含む架空結果の生成関数
-     });
-     expect(launch).toHaveBeenCalledTimes(1); // 期待値生成関数 / 起動回数の検証メソッド
-     const child = launch.mock.calls[0][0].environment;
-@@ -357,7 +372,7 @@ it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用f
-        * 同じsuiteを二度起動する計画になっていないことを確認する。
-        */
-       (suite) => suite.path, // suiteパス抽出のコールバック
--    )).size).toBe(17); // 件数を比較するメソッド
-+    )).size).toBe(getIntegrationSuites().length); // 件数を比較するメソッド
-     expect(existsSync(outputs[0])).toBe(false); // 期待値生成関数 / 結果資源存在の判定関数 / 削除済み状態の比較メソッド
-   },
- );
-@@ -471,7 +486,7 @@ it("成功JSONと必須群の対応を直接検証し、F12の実DB群欠落も
-    * 既存manifestだけでなく、追加済みF12の実接続群も必須にする。
-    */
-   () => { // F12群の検証コールバック
--    expect(assertIntegrationReport(report(), checkout)).toBe(17); // 期待値生成関数 / 結果検証関数 / 架空JSON生成関数 / 件数比較メソッド
-+    expect(assertIntegrationReport(report(), checkout)).toBe(report().numTotalTests); // 期待値生成関数 / 結果検証関数 / 架空JSON生成関数 / 件数比較メソッド
-     const value = report(); // 架空JSONを生成する関数
-     value.testResults[16].assertionResults[0].ancestorTitles = ["guard only"];
-     expect( // 期待値を作る関数
-@@ -504,7 +519,7 @@ it("専用設定は既存aliasを維持し、unitとintegrationを分け、フ
-       throw new Error("Expected synchronous config"); // 設定型の不一致を検出する例外コンストラクター
-     }
-     expect(config.resolve).toEqual(baseConfig.resolve); // 期待値生成関数 / alias維持の比較メソッド
--    expect(config.test?.include).toHaveLength(17); // 期待値生成関数 / suite件数の比較メソッド
-+    expect(config.test?.include).toHaveLength(getIntegrationSuites().length); // 期待値生成関数 / suite件数の比較メソッド
-     expect(config.test?.fileParallelism).toBe(false); // 期待値生成関数 / ファイル間直列の比較メソッド
-     expect(config.test?.maxWorkers).toBe(1); // 期待値生成関数 / worker件数の比較メソッド
-     expect(config.test?.pool).toBe("forks"); // 期待値生成関数 / 独立worker設定の比較メソッド
-@@ -614,3 +629,90 @@ it("割込み後にleaderが先に終了しても、同じ群のworkerを停止
-     expect(vi.getTimerCount()).toBe(0); // 期待値生成関数 / 残存timer取得関数 / timer解除の比較メソッド
-   },
- );
++```bash
++f12_e2e_env npm run verify:mvp
++F12_MVP_EXIT=$?
++printf '終了コード: %s\n' "$F12_MVP_EXIT"
++```
 +
++[verify-runner]の `MVP_VERIFY_STAGES` が以下の順序を固定する。
 +
-+it("検証済みのsuite別件数で自然競合と注入を分け、結果原文を通知しない", // 【追加】ケース登録関数
-+  /**
-+   * 【追加】全結果の照合後だけ安全な証跡件数を渡す。
-+   */
-+  async () => { // 【追加】安全な件数通知の検証コールバック
-+    const onSuite = vi.fn(); // 【追加】通知境界のmock生成関数
-+    await runIntegration({ // 【追加】guard付き統合入口の実行関数
-+      environment: environment(), // 【追加】架空設定生成関数
-+      checkoutDirectory: checkout,
-+      launch: successfulLaunch, // 【追加】架空JSONだけを書く起動代替関数
-+      onSuite, // 【追加】安全な通知mock関数
-+    });
-+    expect(onSuite).toHaveBeenCalledTimes(getIntegrationSuites().length); // 【追加】全必須suiteの通知件数を照合する関数・一覧取得・比較メソッド
-+    const results = onSuite.mock.calls.map( // 【追加】通知結果だけを取り出すメソッド
-+      /**
-+       * 【追加】検証済みのDTOだけを調べる。
-+       */
-+      (call) => call[0], // 【追加】通知引数取得コールバック
-+    );
-+    for (const evidence of MVP_CONCURRENCY_CASES) {
-+      const result = results.find( // 【追加】証跡対象を探すメソッド
-+        /**
-+         * 【追加】F10・F11・LINE workerの対象パスを照合する。
-+         */
-+        (suite) => suite.path === evidence.path, // 【追加】パス照合コールバック
-+      );
-+      expect(result.natural).toBe(evidence.natural.length); // 【追加】自然競合件数を照合する関数・比較メソッド
-+      expect(result.injected).toBe(evidence.injected.length); // 【追加】注入障害件数を照合する関数・比較メソッド
-+    }
-+    expect(JSON.stringify(results).includes(PRIVATE)).toBe(false); // 【追加】秘密非通知を検証する関数・JSON化・含有・比較メソッド
-+  },
-+);
++| 段階 | 実装・返却 | DB・資源への作用 |
++| --- | --- | --- |
++| ENV | `runMvpVerification` → [guard]の `requireMvpTestEnvironment`、既存 `scripts/validate-env.mjs` | URL評価／SDKより前のguard。本番条件は架空の配送・暗号・Cron設定で検証 |
++| PRISMA_VALIDATE | `executeStage` → Prisma validate | schema検証 |
++| PRISMA_GENERATE | `executeStage` → Prisma generate | 専用コピーのClient生成。型チェックより先 |
++| MIGRATION | [migrations] → [migration-DB]の計画・作成・deploy・cleanup | runIdに束縛した別DBで空DB／旧データupgradeを検証し、所有DBだけ回収 |
++| DEPLOY | `executeStage` → Prisma migrate deploy | fixture用の専用postgresへ既存履歴を適用。新migration作成・resetはしない |
++| LINT | 既存lint script | 静的検査 |
++| TYPECHECK | 既存typecheck script | 型検査 |
++| UNIT | `vitest.mvp-unit.config.mts`、`collectMvpVitestResults` | 実DB flag・接続情報を渡さずJSONをメモリ集計。integrationファイルは除外 |
++| INTEGRATION | [integration-runner]の `runIntegration` | 全22suiteと必須DB／Auth群、自然競合／注入を照合。試験ごとの所有fixtureを作成・回収 |
++| E2E | [e2e-runner]の `runMvpE2e` | 事前production build、Auth／DB／PDF seed、HTTPSとNext、Chromium、回収 |
++| BUILD | `finalBuild` | 最後にもproduction build。所有した.next・stub・記録・一時領域を回収 |
 +
-+it.each(["natural", "injected"] as const)( // 【追加】証跡欠落別のケース登録メソッド・リテラル型アサーション
-+  "%sの実ケースが欠落した結果をguard成功で代用しない",
-+  /**
-+   * 【追加】DB群名だけが残った結果でも、必須の競合ケースがなければ拒否する。
-+   */
-+  (kind) => { // 【追加】証跡欠落の検証コールバック
-+    const value = report(); // 【追加】架空JSON生成関数
-+    const evidence = MVP_CONCURRENCY_CASES[0];
-+    const file = value.testResults.find( // 【追加】対象ファイルを選ぶメソッド
-+      /**
-+       * 【追加】F10の実DB群を対象にする。
-+       */
-+      (item) => item.name === resolve(checkout, evidence.path), // 【追加】所有ファイルの照合コールバック・解決関数
-+    )!;
-+    const item = file.assertionResults.find( // 【追加】必須ケースだけを選ぶメソッド
-+      /**
-+       * 【追加】自然または注入の一件だけを変更する。
-+       */
-+      (test) => test.title === evidence[kind][0], // 【追加】実ケース名の照合コールバック
-+    )!;
-+    item.title = "guard-only";
-+    expect( // 【追加】証跡欠落の拒否を検証する関数
-+      /**
-+       * 【追加】件数と群名が正しい偽の完了を渡す。
-+       */
-+      () => assertIntegrationReport(value, checkout), // 【追加】結果検証のコールバック・関数
-+    ).toThrow(RUN_ERROR); // 【追加】固定失敗の比較メソッド
-+  },
-+);
++MIGRATIONの空／upgrade試験と、通常fixture用postgresへのDEPLOYは別の作業である。
++E2E内部の事前buildと最後のbuildを両方行う。
++高速化のために片方を削ったり、HTTPS／認可条件を緩めたりしない。
++`F12_MVP_PASSED 11`と終了0を両方確認する。
 +
-+it("外側AbortSignalも子の停止・待機・固定失敗へ伝播する", // 【追加】ケース登録関数
-+  /**
-+   * 【追加】実プロセスを起動せず、既存signal経路の所有子停止を確認する。
-+   */
-+  async () => { // 【追加】外側signalの検証コールバック
-+    const controller = new AbortController(); // 【追加】試験用中断のコンストラクター
-+    const child = Object.assign(new EventEmitter(), { pid: 12345 }); // 【追加】架空子イベントの生成・属性設定関数
-+    boundary.spawn.mockReturnValue(child); // 【追加】子プロセスを置き換えるメソッド
-+    const kill = vi.spyOn(process, "kill").mockReturnValue(true); // 【追加】実OS通知を置き換える関数・メソッド
-+    const pending = launchIntegration({ // 【追加】既存の期限付き起動関数
-+      checkoutDirectory: checkout,
-+      outputFile: join(checkout, "results.json"), // 【追加】架空結果先の結合関数
-+      environment: environment(), // 【追加】架空設定生成関数
-+      signal: controller.signal,
-+    });
-+    const rejected = expect(pending).rejects.toThrow(RUN_ERROR); // 【追加】固定失敗の期待値関数・比較メソッド
-+    controller.abort(); // 【追加】外側の中断メソッド
-+    expect(kill).toHaveBeenCalledWith(-12345, "SIGTERM"); // 【追加】所有プロセス群への停止を検証する関数・比較メソッド
-+    child.emit("close", 0, null); // 【追加】停止後の見かけ上の正常終了を通知するメソッド
-+    await rejected;
-+  },
-+);
-diff --git a/tests/mvp/outbound-harness.test.ts b/tests/mvp/outbound-harness.test.ts
-index c6039f31b368cdbe7754dfbc141b6e435a9dd8af..6da87923d73fb8b1ba69e14121467860093a3dd3 100644
---- a/tests/mvp/outbound-harness.test.ts
-+++ b/tests/mvp/outbound-harness.test.ts
-@@ -46,6 +46,7 @@ import {
-   transpileModule,
- } from "typescript";
- import {
-+  getMvpE2eSuiteResults, // 【追加】全必須E2Eをファイル別の安全な件数へ集約する関数
-   assertMvpE2eReport, // Playwright JSONで実成功・skipなしを検証する関数
-   assertNoMvpEgress, // 同期記録とstubで通信違反を検出する関数
-   createMvpCertificate, // 所有一時領域でTLS証明書を生成する関数
-@@ -62,6 +63,9 @@ import {
-   startMvpOutboundStub, // 当該runの送信stubとbrowser proxyを起動する関数
- } from "./outbound-stub.mjs";
- import verifyMvpE2eOwner from "./outbound-stub.mjs"; // 所有runの準備完了を確認するglobal setup関数
-+import {
-+  MVP_E2E_SUITES, // 【追加】全必須E2Eファイルの一覧
-+} from "./suite-manifest";
- const ROOT = resolve(import.meta.dirname, "../.."); // 絶対パスを解決する関数
- const RUN_ID = "a".repeat(32); // 文字列を指定回数繰り返すメソッド
- const PRIVATE = "F12_FAKE_PRIVATE_NEVER_LOG";
-@@ -1027,3 +1031,90 @@ for (const channel of ["resend", "line", "storage"] as const) { // 【追加】
-     },
-   );
- }
++### 7.2 integration／E2Eだけを実行する場合
 +
++単独入口はmigrationやSupabase起動を行わない。
++同じ専用DBでDEPLOYまで成功済みなら、その状態を使う。
++新しい専用DBへ単独実行する場合だけ、上記guard成功と所有確認の後に以下を行う。
 +
-+/**
-+ * 【追加】全必須E2Eファイルを含む架空JSONを作り、ブラウザーや実DBは起動しない。
-+ */
-+function completeE2eReport() { // 【追加】必須ファイル別の架空結果生成関数
-+  const report = successfulReport(); // 【追加】成功ケースのJSON生成関数
-+  return {
-+    ...report,
-+    stats: {
-+      ...report.stats,
-+      expected: MVP_E2E_SUITES.length,
-+    },
-+    suites: MVP_E2E_SUITES.map( // 【追加】実在ファイルの結果へ変換するメソッド
-+      /**
-+       * 【追加】実reporterと同じtestDir相対のファイル名で成功結果を作る。
-+       */
-+      (path) => ({ // 【追加】ファイル別の架空suite生成コールバック
-+        file: path.slice("e2e/".length), // 【追加】testDir相対名を取得するメソッド
-+        specs: [{
-+          file: path.slice("e2e/".length), // 【追加】実specの所属ファイル名を取得するメソッド
-+          tests: report.suites[0].specs[0].tests,
-+        }],
-+      }),
-+    ),
-+  };
-+}
++```bash
++# 専用postgresへ既存履歴だけを適用する。通常DBへは実行しない。
++f12_test_env ./node_modules/.bin/prisma migrate deploy \
++  --config ./prisma.config.ts >/dev/null 2>&1
++F12_DEPLOY_EXIT=$?
++printf '専用DB deploy終了コード: %s\n' "$F12_DEPLOY_EXIT"
++```
 +
-+it("総件数だけでなく全必須E2Eファイルの成功件数を照合する", // 【追加】ケース登録関数
-+  /**
-+   * 【追加】ファイル別の安全なDTOだけを返すことを確認する。
-+   */
-+  () => { // 【追加】全必須E2Eの結果検証コールバック
-+    const results = getMvpE2eSuiteResults(completeE2eReport(), ROOT); // 【追加】必須ファイル照合関数 / 架空JSON生成関数
-+    expect(results.map( // 【追加】安全なパスだけを比較する期待値関数・変換メソッド
-+      /**
-+       * 【追加】結果のパスだけを取り出す。
-+       */
-+      (result) => result.path, // 【追加】パス取得コールバック
-+    )).toEqual(MVP_E2E_SUITES); // 【追加】全必須ファイルの比較メソッド
-+    expect(results.every( // 【追加】件数が正しいことを検証する期待値関数・全件判定メソッド
-+      /**
-+       * 【追加】各ファイルが一件の終端成功であることを照合する。
-+       */
-+      (result) => result.passed === 1 && result.failed === 0 && result.skipped === 0, // 【追加】終端成功の照合コールバック
-+    )).toBe(true); // 【追加】件数の比較メソッド
-+  },
-+);
++終了0を確認してから、必要な入口を一つ選ぶ。
 +
-+it.each(["missing", "unknown", "case0"] as const)( // 【追加】必須E2Eの不完了別ケース登録メソッド・リテラル型アサーション
-+  "E2Eの%sは残りが全成功でも拒否する",
-+  /**
-+   * 【追加】総件数の整合性がある結果でも、manifest欠落を見逃さない。
-+   */
-+  (mode) => { // 【追加】不完了の検証コールバック
-+    const report = completeE2eReport(); // 【追加】架空の全成功JSON生成関数
-+    if (mode === "unknown") report.suites[0].specs[0].file = "unknown.spec.ts";
-+    else {
-+      report.stats.expected--;
-+      if (mode === "missing") report.suites.pop(); // 【追加】必須ファイルを欠落させるメソッド
-+      else report.suites[0].specs = [];
-+    }
-+    expect( // 【追加】不完了の拒否を検証する関数
-+      /**
-+       * 【追加】case0や未知のファイルを集約境界へ渡す。
-+       */
-+      () => getMvpE2eSuiteResults(report, ROOT), // 【追加】拒否を確認するコールバック・集約関数
-+    ).toThrow("F12_E2E_FAILED"); // 【追加】固定失敗の比較メソッド
-+  },
-+);
++```bash
++f12_test_env npm run test:integration
++F12_INTEGRATION_EXIT=$?
++printf '統合終了コード: %s\n' "$F12_INTEGRATION_EXIT"
++```
 +
-+it("外側から中断済みのE2EをSDKより前に拒否し、中断監視を残さない", // 【追加】ケース登録関数
-+  /**
-+   * 【追加】guard失敗と独立して、既存回収経路へ外側signalを接続する契約を確認する。
-+   */
-+  async () => { // 【追加】外側中断の検証コールバック
-+    const controller = new AbortController(); // 【追加】試験用中断のコンストラクター
-+    controller.abort(); // 【追加】起動前に中断するメソッド
-+    const before = process.listenerCount("SIGTERM"); // 【追加】開始前の監視件数取得メソッド
-+    await expect(runMvpE2e({ // 【追加】起動拒否を検証する関数 / guard付きE2E実行関数
-+      environment: {},
-+      checkoutDirectory: ROOT,
-+      signal: controller.signal,
-+    })).rejects.toThrow("F12_E2E_FAILED"); // 【追加】固定失敗の比較メソッド
-+    expect(process.listenerCount("SIGTERM")).toBe(before); // 【追加】監視解除を検証する関数・件数取得・比較メソッド
-+  },
-+);
-diff --git a/tests/mvp/suite-manifest.ts b/tests/mvp/suite-manifest.ts
-index 8f0b673f84dc04e206f8b430c3f648af1d6fe146..a481d99c79ef166c6c915539246404034c48d7fc 100644
---- a/tests/mvp/suite-manifest.ts
-+++ b/tests/mvp/suite-manifest.ts
-@@ -231,6 +231,226 @@ export const MVP_SUITES: readonly MvpSuite[] = [ // 既存必須suiteの読取
-   },
- ];
- 
-+/**
-+ * 【追加】粒度4〜10までに実在した統合suiteを、既存15本と重複せず一度ずつ必須化する。
-+ * 空DB・upgrade検証は先行migration段階の専用suiteで実行する。
-+ */
-+export const MVP_INTEGRATION_SUITES: readonly MvpSuite[] = [ // 【追加】統合段階全体の読取専用suite契約型
-+  ...MVP_SUITES,
-+  {
-+    path: "tests/mvp/database-fixture.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F12 DB fixture統合（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/local-services-fixture.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: true,
-+    requiredGroups: [
-+      "F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/content-tenancy.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F12 content Repositoryの実DB越境（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/attachment-storage.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: true,
-+    requiredGroups: [
-+      "F12 添付の実Storage・DB・途中失敗（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/line-webhook-tenancy.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F12 LINE設定・Webhookの実DBクラブ束縛（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/line-delivery.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: false,
-+    requiredGroups: [
-+      "F12 LINE workerの実DB並列・障害（専用flag未指定時はskip）",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/mail-failures.integration.test.ts",
-+    flags: {
-+      RUN_DB_INTEGRATION_TESTS: "1",
-+    },
-+    database: true,
-+    auth: true,
-+    requiredGroups: [
-+      "F12 Resend障害と実DB・ローカルAuth（専用flag未指定時はskip）",
-+    ],
-+  },
-+];
++```bash
++f12_e2e_env npm run test:e2e
++F12_E2E_EXIT=$?
++printf 'E2E終了コード: %s\n' "$F12_E2E_EXIT"
++```
 +
-+/**
-+ * 【追加】通常postgresを破壊せず、予約した別DBで空・旧データの履歴を検証するsuite。
-+ */
-+export const MVP_MIGRATION_SUITE: MvpSuite = { // 【追加】先行migration段階のsuite契約型
-+  path: "tests/mvp/migrations.integration.test.ts",
-+  flags: {
-+    RUN_DB_INTEGRATION_TESTS: "1",
-+  },
-+  database: true,
-+  auth: false,
-+  requiredGroups: [
-+    "F12 空DB・旧データDBのmigration統合（専用flag未指定時はskip）",
-+  ],
-+};
++単独2入口の成功だけでは、先行migration・unit・最後のbuildを含む全体成功にならない。
++`prisma migrate status`の終了1を、常に未適用という意味で扱わない。接続・権限障害も区別する。
++`migrate dev`、`migrate reset`、本番seed、一般的なDB全削除はこの手順に含めない。
 +
-+/**
-+ * 【追加】実装済みのE2Eファイルを一度ずつ必須化し、未発見・case0を完了にしない。
-+ */
-+export const MVP_E2E_SUITES: readonly string[] = [ // 【追加】必須E2Eの読取専用相対パス配列型
-+  "e2e/account-children.spec.ts",
-+  "e2e/action-boundaries.spec.ts",
-+  "e2e/authorization.spec.ts",
-+  "e2e/event-month-copy.spec.ts",
-+  "e2e/event-practice-batch.spec.ts",
-+  "e2e/events.spec.ts",
-+  "e2e/failure-observability.spec.ts",
-+  "e2e/line-settings.spec.ts",
-+  "e2e/members-invitations.spec.ts",
-+  "e2e/notices.spec.ts",
-+  "e2e/smoke.spec.ts",
-+  "e2e/support-platform.spec.ts",
-+];
++## 8. seed・通信・回収の境界
 +
-+/**
-+ * 【追加】自然競合と故障注入の証跡として、実在する実DBケース名を別々に照合する契約。
-+ */
-+export const MVP_CONCURRENCY_CASES: readonly { // 【追加】並列・注入の必須証跡を表す読取専用契約型
-+  path: string; // 【追加】対象suiteの文字列型
-+  natural: readonly string[]; // 【追加】自然競合の実ケース名の配列型
-+  injected: readonly string[]; // 【追加】注入障害の実ケース名の配列型
-+}[] = [
-+  {
-+    path: "tests/event-month-copy.flow.integration.test.ts",
-+    natural: [
-+      "同requestIdの実並列送信は1群・1記録となり、同じ入力で確定結果を確認できる",
-+      "異なるrequestIdの実並列操作でも古いpreviewから重複群を黙って作らない",
-+    ],
-+    injected: [
-+      "P2034注入後はrollbackして有限再試行し、作成は一度だけになる",
-+      "P2034の上限後は結果不明とし、同一入力で確認・replayできる",
-+    ],
-+  },
-+  {
-+    path: "tests/event-practice-batch.flow.integration.test.ts",
-+    natural: [
-+      "同一操作IDの実並列送信は1組だけ保存し、同じ入力で完了を確認できる",
-+      "異なる操作IDで同じpreviewを実並列保存すると片方はPREVIEW_CHANGEDとなる",
-+    ],
-+    injected: [
-+      "注入P2034は有限回再試行し、rollback後の1組だけを保存する",
-+      "注入P2034が上限に達したら結果不明とし、同じ入力の再送で確認する",
-+    ],
-+  },
-+  {
-+    path: "tests/mvp/line-delivery.integration.test.ts",
-+    natural: [
-+      "同じdeliveryIdへ自然並列に2 workerを実行しても、送信stubは1回だけになる",
-+    ],
-+    injected: [
-+      "rejectedの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
-+      "networkの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
-+      "timeoutの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
-+    ],
-+  },
-+];
++[db-fixture]の `planMvpDatabaseFixture` は接続前にIDと保存行を計画し、
++`seedMvpDatabaseFixture` が一体保存、`cleanupMvpDatabaseFixture` が所有台帳の範囲だけを削除する。
++AのOWNER／COACH／OFFICER／MEMBER、BのOWNER／MEMBER、独立PlatformAdminを用意する。
++B MEMBERはA OWNERと同じ本人であり、複数所属の検証になる。既存の本番本人をupsertしない。
 +
-+/**
-+ * 【追加】必須suiteの成功件数と、実在ケース名で照合した自然競合・注入故障の証跡件数。
-+ */
-+export type MvpIntegrationSuiteResult = MvpSuiteResult & { // 【追加】suite完了契約と証跡件数の交差型
-+  natural: number; // 【追加】自然競合の必須ケース成功件数の数値型
-+  injected: number; // 【追加】故障注入の必須ケース成功件数の数値型
-+};
++[local-services]の `planMvpLocalServicesFixture` → `seedMvpLocalServicesFixture` は
++Auth、DB、private PDFを準備する。実行ごとのpassword・Cookie・鍵はメモリと所有一時領域だけに保持する。
++E2EはUI → 実Action／Route → Service → Repository → 専用DBを通す。
++実Auth・Storage SDKはローカルAPIへ、Resend・LINEの受付は実行所有のstubへ接続する。
++受付成功を、受信者への配送完了や実LINE／Resend疎通と読み替えない。
 +
-+/**
-+ * 【追加】E2Eのファイル別結果を、秘密・タイトルを含まない終端件数で表す契約。
-+ */
-+export type MvpE2eSuiteResult = MvpCaseCounts & { // 【追加】ケース件数契約とファイル別契約の交差型
-+  path: string; // 【追加】必須E2Eの相対パス文字列型
-+};
++| 境界 | 実装・保証 |
++| --- | --- |
++| server側・worker thread | [preload]と `createMvpWorkerPreload`。未知の外向き通信を拒否し同期違反記録も照合 |
++| browser側 | [Playwright設定]の所有proxy、service worker禁止、Chromium一系統 |
++| HTTPS | `createMvpCertificate`・`startMvpTls`。当該runの証明書とpinで3443から内部Nextへ中継。OSのCA storeは変更しない |
++| 生出力・故障応答 | [observability]のsentinel照合、[secret-e2e]のDTO／HTML／許可DB列／stdout／stderr検証 |
++| 認証状態 | trace・video・screenshot・認証状態ファイルの永続化を無効化。Playwright Node／ChromiumへService Roleを渡さない |
 +
-+/**
-+ * 【追加】E2Eの実在・通常ファイル・所有checkout配下を、本文を読まずに確認する。
-+ */
-+export function assertMvpE2eManifest(checkoutDirectory: string): void { // 【追加】E2E一覧の検証関数 / checkout文字列型 / 戻り値なしの型
-+  try {
-+    const root = realpathSync(checkoutDirectory); // 【追加】所有checkoutの実在パスを解決する関数
-+    for (const path of MVP_E2E_SUITES) {
-+      const file = realpathSync(resolve(root, path)); // 【追加】実在パスの解決・結合関数
-+      if (
-+        !file.startsWith(`${root}${sep}`) || // 【追加】checkout配下の判定メソッド
-+        !statSync(file).isFile() // 【追加】ファイル情報取得関数・通常ファイル判定メソッド
-+      ) { // 【追加】所有範囲と通常ファイルの判定メソッド・関数
-+        throw new Error(MANIFEST_ERROR); // 【追加】対象外を固定例外で拒否するコンストラクター
-+      }
-+    }
-+  } catch {
-+    throw new Error(MANIFEST_ERROR); // 【追加】パス原文を捨てるコンストラクター
-+  }
-+}
++Service Roleは親runner・専用Next・実Auth／Storage統合試験Nodeで必要になる。
++架空LINE暗号鍵など、runnerがその実行用に生成した値と本番資格情報を混同しない。
++integrationは各suiteのローカル限定guard・SDK境界stubを使う。
++E2Eのpreload／proxyによる遮断を、全integrationやOS全体のfirewall保証として説明しない。
++Docker image・Chromiumの事前取得は準備通信であり、実サービスへの業務送信とは別である。
 +
-+/**
-+ * 【追加】全必須E2Eファイルに終端成功があり、失敗・skip・未完了・余分な結果がないことを照合する。
-+ */
-+export function assertMvpE2eResults(results: readonly MvpE2eSuiteResult[]): void { // 【追加】E2E完了契約の検証関数 / 読取専用結果型 / 戻り値なしの型
-+  try {
-+    if (results.length !== MVP_E2E_SUITES.length) {
-+      throw new Error(MANIFEST_ERROR); // 【追加】欠落を拒否するコンストラクター
-+    }
-+    const seen = new Set<string>(); // 【追加】結果重複の集合コンストラクター / 文字列型
-+    for (const result of results) {
-+      if (
-+        !MVP_E2E_SUITES.includes(result.path) || // 【追加】必須パスの含有判定メソッド
-+        seen.has(result.path) // 【追加】集計済みパスの判定メソッド
-+      ) { // 【追加】登録済みパスと重複を照合するメソッド
-+        throw new Error(MANIFEST_ERROR); // 【追加】二重集計を拒否するコンストラクター
-+      }
-+      assertCompletedCases(result); // 【追加】case0・skip・失敗を拒否する関数
-+      seen.add(result.path); // 【追加】集計済みパスを記録するメソッド
-+    }
-+  } catch {
-+    throw new Error(MANIFEST_ERROR); // 【追加】入力原文を捨てるコンストラクター
-+  }
-+}
++integrationの集計JSONは、既存runnerが所有一時領域にだけ作成し、finallyで削除する。
++E2Eと全体入口のunit／migration結果はメモリ内で集計する。生reportを元ソースへ持ち帰らない。
 +
- /**
-  * 重複・空manifest・不正flag・存在しないsuiteを実行前に拒否する。
-  * ファイル本文やSDKは読まない。checkout外へのsymlinkも対象にしない。
-@@ -247,7 +467,7 @@ export function assertMvpSuiteManifest( // suite一覧の実在と契約を検
-     const paths = new Set<string>(); // 試験パスの重複を検出する集合のコンストラクター / 文字列型
-     for (const suite of suites) {
-       if (
--        !/^tests\/[a-z0-9.-]+\.test\.ts$/u.test(suite.path) || // 既存suiteの相対パス書式を検証するメソッド
-+        !/^tests\/(?:mvp\/)?[a-z0-9.-]+\.test\.ts$/u.test(suite.path) || // 既存suiteの相対パス書式を検証するメソッド
-         suite.path.includes("..") || // 親への移動を検出するメソッド
-         paths.has(suite.path) || // 同じsuiteの重複を検出するメソッド
-         (
-@@ -322,9 +542,10 @@ function assertCompletedCases(counts: MvpCaseCounts): void { // ケース件数
-  */
- export function assertMvpSuiteResults( // 必須suiteと群別結果を照合する関数
-   results: readonly MvpSuiteResult[], // 実行結果の読取専用配列型
-+  suites: readonly MvpSuite[] = MVP_SUITES, // 【追加】今回照合する必須suiteの読取専用契約型
- ): void { // 戻り値を使わない型
-   try {
--    if (results.length !== MVP_SUITES.length) {
-+    if (suites.length === 0 || results.length !== suites.length) {
-       throw new Error(MANIFEST_ERROR); // suite欠落や余分な結果を拒否するコンストラクター
-     }
-     const paths = new Set<string>(); // 結果パスの重複を検出する集合のコンストラクター / 文字列型
-@@ -333,7 +554,7 @@ export function assertMvpSuiteResults( // 必須suiteと群別結果を照合す
-         throw new Error(MANIFEST_ERROR); // 二重集計を固定例外で拒否するコンストラクター
-       }
-       paths.add(result.path); // 集計したパスを記録するメソッド
--      const suite = MVP_SUITES.find( // manifestから対象suiteを探すメソッド
-+      const suite = suites.find( // manifestから対象suiteを探すメソッド
-         /**
-          * 実在を確認した相対パスとの完全一致を調べる。
-          */
-diff --git a/tests/mvp/verify-mvp.test.ts b/tests/mvp/verify-mvp.test.ts
-new file mode 100644
-index 0000000000000000000000000000000000000000..40d14aa7769eaa68417de96793eefd1da871e74d
---- /dev/null
-+++ b/tests/mvp/verify-mvp.test.ts
-@@ -0,0 +1,828 @@
-+// tests/mvp/verify-mvp.test.ts
-+// 架空checkoutと段階stubだけで、順序・必須suite・中断・所有資源の回収を検証する。
++正常終了でも次の回収条件を記録する。
 +
-+import {
-+  existsSync,
-+  mkdirSync,
-+  mkdtempSync,
-+  realpathSync,
-+  rmSync,
-+  unlinkSync,
-+  writeFileSync,
-+} from "node:fs";
-+import {
-+  tmpdir,
-+} from "node:os";
-+import {
-+  dirname,
-+  join,
-+} from "node:path";
-+import {
-+  NextRequest, // 【追加】実行環境のURL正規化を再現する要求クラス
-+} from "next/server";
-+import {
-+  afterEach,
-+  beforeEach,
-+  expect,
-+  it,
-+  vi,
-+} from "vitest";
-+import {
-+  collectMvpVitestResults, // Vitestの終端成功・必須群を安全な件数へ変換する関数
-+  MVP_VERIFY_STAGES, // 仕様順に固定した全検証段階
-+  runMvpVerification, // guard・順序・失敗伝播・回収を集約する関数
-+} from "../../scripts/verify-mvp.mjs";
-+import type {
-+  StageResult, // 段階が返す安全な件数の型
-+  VerifyRequest, // 段階の実行・中断・所有回収の型
-+} from "../../scripts/verify-mvp.mjs";
-+import {
-+  MVP_CONCURRENCY_CASES, // 実ケース名で区別する自然競合と注入の証跡
-+  MVP_E2E_SUITES, // 全必須E2Eファイル
-+  MVP_INTEGRATION_SUITES, // 全必須統合suite
-+  MVP_MIGRATION_SUITE, // 先行する空DB・upgrade試験
-+} from "./suite-manifest";
-+import packageJson from "../../package.json"; // 既存コマンドと新しい専用入口の定義
++- `runMvpE2e`は所有する子process群、TLS、stubを停止し、
++  `cleanupMvpLocalServicesFixture`、DB切断、所有.next／一時領域の削除を行う。
++- local fixtureは所有prefix内の追加PDFを発見し、登録物・DB・所有確認できたAuth・新規の空bucketを補償する。
++  共有／既存bucketや所有が不明な資源は消さない。
++- cleanup reportの `remaining.authUsers`、`storageObjects`、`buckets`、`database`に残存・未確認があれば失敗。
++  列挙不能も回収済みと扱わない。報告はrunIdと件数に限定する。
++- migrationは管理台帳とDB側の所有記録を照合する。任意名のDBをDROPしない。
++- 既存F06 flowはAuthユーザーをsuite後に残し、使い捨て環境の処分で扱う設計である。
++  全体成功とSupabase projectの処分は別の完了作業として記録する。
 +
-+const PRIVATE = "F12_FAKE_SECRET_NEVER_LOG";
-+const FAILURE = "F12_MVP_FAILED";
-+const forbidden = vi.hoisted( // import前にSDK評価の拒否境界を作る関数
-+  /**
-+   * SDKやdotenvの評価を実通信前に検出する。
-+   */
-+  () => vi.fn( // 拒否mockの生成コールバック・関数
-+    /**
-+     * 実DB・Auth・Storageの初期化を許可しない。
-+     */
-+    () => { // 入力を受け取り操作・照合するコールバック
-+      throw new Error("SDK_EVALUATED"); // 原文を含めない例外コンストラクター
-+    }, // 拒否コールバック・例外コンストラクター
-+  ),
-+);
-+const native = vi.hoisted( // 段階内部の起動境界を準備する関数
-+  /**
-+   * 実コマンドの組立てを通しながら、実子・DB・ネットワークだけを置き換える。
-+   */
-+  () => ({ // native境界のmock生成コールバック
-+    child: vi.fn(), // 子起動mockの生成関数
-+    integration: vi.fn(), // 統合入口mockの生成関数
-+    e2e: vi.fn(), // E2E入口mockの生成関数
-+    preload: vi.fn(), // 遮断ファイル生成mockの生成関数
-+    stub: vi.fn(), // 所有stub生成mockの生成関数
-+  }),
-+);
-+vi.mock("../../scripts/test-e2e.mjs", // 子起動・E2E・preloadだけを置き換える関数
-+  /**
-+   * 集約・子終了待機・通信違反検査は本物を使う。
-+   */
-+  async (importOriginal) => ({ // 実モジュールを部分置換するコールバック
-+    ...await importOriginal<typeof import("../../scripts/test-e2e.mjs")>(), // 実モジュール読込関数 / モジュール契約型
-+    startMvpChild: native.child, // 子起動mock関数
-+    runMvpE2e: native.e2e, // E2E実行mock関数
-+    createMvpWorkerPreload: native.preload, // 遮断ファイル生成mock関数
-+  }),
-+);
-+vi.mock("../../scripts/test-integration.mjs", // 統合入口を置き換える関数
-+  /**
-+   * 実SDKを起動する統合段階だけを安全な件数へ置き換える。
-+   */
-+  async (importOriginal) => ({ // 実モジュールを部分置換するコールバック
-+    ...await importOriginal<typeof import("../../scripts/test-integration.mjs")>(), // 実モジュール読込関数 / モジュール契約型
-+    runIntegration: native.integration, // 統合入口mock関数
-+  }),
-+);
-+vi.mock("./outbound-stub.mjs", // 最終buildのstub境界だけを置き換える関数
-+  /**
-+   * 最終buildの回収コードを本物のまま、実ポートを開かない。
-+   */
-+  async (importOriginal) => ({ // 実モジュールを部分置換するコールバック
-+    ...await importOriginal<typeof import("./outbound-stub.mjs")>(), // 実モジュール読込関数 / モジュール契約型
-+    startMvpOutboundStub: native.stub, // 所有stub生成mock関数
-+  }),
-+);
++## 9. 失敗・中断時の扱い
 +
-+vi.mock("dotenv/config", forbidden); // dotenvの評価を拒否する関数
-+vi.mock("@prisma/client", forbidden); // DB SDKの評価を拒否する関数
-+vi.mock("@prisma/adapter-pg", forbidden); // DB adapterの評価を拒否する関数
-+vi.mock("@supabase/supabase-js", forbidden); // Auth・Storage SDKの評価を拒否する関数
++| 停止位置 | 確認すること | 避ける操作 |
++| --- | --- | --- |
++| 段階表示前 | flag、.env系ファイル名、既存.next、キーの有無、依存root、manifest実在 | .env内容・URL・キーをログへ出す／guardを削る |
++| ENV／Prisma | 明示したtest環境、production用架空設定、schema／Client生成の順序 | 本番NODE_ENVを入口へ渡す／依存を自動更新する |
++| MIGRATION／DEPLOY | 専用project、固定port、DB作成権限、所有台帳、履歴 | status=1を無条件許可／通常postgresをresetする |
++| UNIT | unit専用分類、guard／集計試験、case0・skip・合計 | 通常npm testのskip込み成功で置き換える |
++| INTEGRATION | 失敗した必須ファイル・DB群、実失敗と集計失敗の区別 | 全体を成功するまで繰り返す／自然競合を障害注入で代替する |
++| E2E | browser導入、3000／3443、HTTPS入口、AuthのHTTP／HTTPS allowlist、外向き違反件数 | 既存server再利用／ignoreHTTPSErrorsで全面回避／生report公開 |
++| 最後のBUILD | E2E後にもbuildしたか、所有.nextと通信違反、回収 | E2Eの事前build成功だけで完了する |
++| signal／timeout／cleanup | 子の終了、所有資源、残存・未確認件数 | SIGKILL後の回収を推測／全volume・Auth・bucketの一括削除 |
 +
-+let checkout: string; // 所有する架空checkoutの文字列型
-+let messages: string[]; // 安全な通知を保持する配列型
-+let calls: string[]; // 開始された段階名の配列型
++失敗後は、固定した段階名、終了コード、manifest内のファイル名、成功／失敗／skip件数だけを共有する。
++Cookie、token、署名URL、LINE資格情報、個人情報、SQL／SDK原文、JSON／HTMLの生保存は避ける。
++固定失敗だけで個別suiteを特定できない場合は、原文を公開しない診断を別途準備する。
++本番ソースへ診断printを入れず、診断ファイルはcommitしない。
 +
-+/**
-+ * 実際のprocess.envを使わず、専用HTTPS条件の架空設定を作る。
-+ */
-+function environment(): Record<string, string | undefined> { // 架空設定生成関数 / 環境変数辞書型
-+  return {
-+    RUN_MVP_TESTS: "1",
-+    MVP_TEST_DISPOSABLE: "1",
-+    RUN_MVP_E2E: "1",
-+    NODE_ENV: "test",
-+    DATABASE_URL: `postgresql://fixture:${PRIVATE}@127.0.0.1:54322/postgres`,
-+    NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321",
-+    APP_BASE_URL: "https://localhost:3443",
-+    NEXT_PUBLIC_SUPABASE_ANON_KEY: "fake-anon",
-+    SUPABASE_SERVICE_ROLE_KEY: "fake-service",
-+    RESEND_API_KEY: PRIVATE,
-+    LINE_CHANNEL_ACCESS_TOKEN: PRIVATE,
-+    AXIOM_TOKEN: PRIVATE,
-+  };
-+}
++`Ctrl-C`は失敗として扱い、所有子とfixtureの回収完了を確認する。
++強制終了で台帳を失った場合、同じrunの所有が確認できる範囲だけを調べ、
++不明なものは「残存・未確認、削除保留」と記録する。試験を再開して未回収を隠さない。
++使い捨てproject自体の所有を確認できれば、そのprojectの停止・処分へ進む。
++通常DB、通常Auth、共有Storageを復旧用の代替fixtureにしない。
 +
-+/**
-+ * 全必須suiteとDB群・自然競合・注入ケースが成功した架空の安全な件数を作る。
-+ */
-+function completed(stage: string): StageResult | undefined { // 段階結果生成関数 / 固定段階の文字列型 / 結果型・未設定型
-+  if (![
-+    "MIGRATION",
-+    "UNIT",
-+    "INTEGRATION",
-+    "E2E"
-+  ].includes(stage)) return; // テスト段階を判定するメソッド
-+  const required = stage === "INTEGRATION" ? MVP_INTEGRATION_SUITES : [MVP_MIGRATION_SUITE];
-+  const suites = stage === "E2E" ? MVP_E2E_SUITES.map( // E2Eファイル別の架空成功を作るメソッド
-+    /**
-+     * 全必須ファイルに実ケース一件の成功を置く。
-+     */
-+    (path) => ({ // 入力を受け取り操作・照合するコールバック
-+      path,
-+      passed: 1,
-+      failed: 0,
-+      skipped: 0,
-+      pending: 0
-+    }), // 架空E2E結果を作るコールバック
-+  ) : stage === "UNIT" ? [{
-+    path: "tests/fixture.test.ts",
-+    passed: 1,
-+    failed: 0,
-+    skipped: 0,
-+    pending: 0,
-+    groups: [],
-+  }] : required.map( // DB群の架空成功を作るメソッド
-+    /**
-+     * 必須群と証跡件数を実在manifestから作る。
-+     */
-+    (suite) => { // 統合結果生成のコールバック
-+      const evidence = MVP_CONCURRENCY_CASES.find( // 実ケースの証跡契約を取得するメソッド
-+        /**
-+         * 対象のsuiteだけを選ぶ。
-+         */
-+        (item) => item.path === suite.path, // 証跡のパス照合コールバック
-+      );
-+      const passed = Math.max(1, (evidence?.natural.length ?? 0) + (evidence?.injected.length ?? 0)); // 正の架空成功数を作る関数
-+      return {
-+        path: suite.path,
-+        passed,
-+        failed: 0,
-+        skipped: 0,
-+        pending: 0,
-+        natural: evidence?.natural.length ?? 0,
-+        injected: evidence?.injected.length ?? 0,
-+        groups: suite.requiredGroups.map( // 必須群の件数を作るメソッド
-+          /**
-+           * guardではなくDB群の成功を含める。
-+           */
-+          (name) => ({ // 入力を受け取り操作・照合するコールバック
-+            name,
-+            passed,
-+            failed: 0,
-+            skipped: 0,
-+            pending: 0
-+          }), // 架空群別結果生成コールバック
-+        ),
-+      };
-+    },
-+  );
-+  return {
-+    suites,
-+    passed: suites.reduce( // ファイル別成功数を合計するメソッド
-+      /**
-+       * 実行件数とファイル別件数を一致させる。
-+       */
-+      (sum, suite) => sum + suite.passed, // 合計件数生成コールバック
-+      0,
-+    ),
-+  };
-+}
++## 10. 受入matrix
 +
-+/**
-+ * 実プロセスの代わりに段階名だけを記録する。
-+ */
-+async function execute(request: VerifyRequest): Promise<StageResult | undefined> { // 試験用段階実行関数 / 段階契約型 / 非同期結果型
-+  calls.push(request.stage); // 開始した段階を記録するメソッド
-+  return completed(request.stage); // 架空の終端件数を作る関数
-+}
++状態の **R19** は、上記基準コミットと利用者の全11段階成功報告に結び付く自動suiteの根拠を示す。
++この文書で個々のテストを再実行した印ではない。
++**静的** はコード対応のみ、**未確認** は実行記録または対象の実装が確認できない範囲を示す。
 +
-+/**
-+ * 通知は文字列だけを保持し、要求・設定全体をコンソールへ渡さない。
-+ */
-+function emit(message: string): void { // 安全な通知を保持する関数 / 文字列型 / 戻り値なしの型
-+  messages.push(message); // 通知を保持するメソッド
-+}
++### 10.1 F12の実装範囲・受入条件
 +
-+beforeEach( // 各ケースの準備登録関数
-+  /**
-+   * 本文を実行しない架空ファイルと、独立したnode_modules名だけを用意する。
-+   */
-+  () => { // 架空資源の準備コールバック
-+    checkout = realpathSync(mkdtempSync(join(tmpdir(), "f12-verify-test-"))); // 一時領域の生成・結合・取得関数
-+    mkdirSync(join(checkout, "node_modules")); // 独立した依存ルート名の作成・結合関数
-+    for (const path of [
-+      ...MVP_INTEGRATION_SUITES.map( // 必須suiteパスへの変換メソッド
-+        /**
-+         * 統合ファイル名だけを準備対象にする。
-+         */
-+        (suite) => suite.path, // suiteパス取得コールバック
-+      ),
-+      MVP_MIGRATION_SUITE.path,
-+      ...MVP_E2E_SUITES
-+    ]) {
-+      const file = join(checkout, path); // 架空ファイルのパス結合関数
-+      mkdirSync(dirname(file), { recursive: true }); // 親ディレクトリの生成・取得関数
-+      writeFileSync(file, "// fixture only"); // 架空本文を書き込む関数
-+    }
-+    calls = [];
-+    messages = [];
-+    vi.clearAllMocks(); // ケースごとの呼出し記録を初期化する関数
-+  },
-+);
++| F12項目 | 実装・unit等 | 実DB／実ブラウザーの根拠 | 状態・限界 |
++| --- | --- | --- | --- |
++| 範囲1 DB基盤 | [guard]、[db-fixture]、[integration-runner] | [db-fixture-DB]、[local-services-DB]、必須DB群 | R19。guard単体成功だけでDB合格にしない |
++| 範囲2 E2E基盤 | [Playwright設定]、[e2e-runner]、[harness-unit] | [smoke-E2E]、必須12ファイル | R19。Chromiumのみ |
++| 範囲3 テナント・role・複数所属・Platform seed | [db-fixture]、[local-services] | [auth-E2E]、[support-E2E] | R19。B MEMBERはA OWNERと同一人物 |
++| 範囲4 外部境界 | [preload]、[observability]、[harness-unit] | [attachment-DB]、[line-worker-DB]、[mail-DB]、[secret-E2E] | R19。LINE／Resendの本番配送は対象外 |
++| 範囲5 空DB migration | [migration-DB]、[migrations] | 予約した別DBで既存全履歴をdeploy | R19。通常postgresのresetではない |
++| 範囲6 旧データupgrade | [migration-DB]、[migrations] | 旧履歴prefix・fixtureから残りを適用し履歴／checksum／データ保持を照合 | R19。本番データのコピーではない |
++| 範囲7 越境10種 | 次のID表 | [content-DB]、[line-binding-DB]、[direct-action]等 | R19。エラー応答と対象外DB非更新を併せて確認 |
++| 範囲8 role越権 | [role-unit]、[plan-unit] | [auth-E2E]、[members-E2E]、[line-E2E]、[support-E2E] | R19。最新DBによるCookie再認可を含む |
++| 範囲9 最後のOWNER | [membership-DB] | 最後のACTIVE OWNER拒否・2 OWNER並列降格、[members-E2E] | R19 |
++| 範囲9 招待二重承諾 | [invitation-DB] | 同一招待2並行、取消・再送・期限処理との競合、[members-E2E] | R19 |
++| 範囲9 LINE並列 | [line-worker-DB] | 同deliveryIdの自然並列2 workerで受付stub1回 | R19。期限切れ再claim上限は残課題 |
++| 範囲9 Storage lease復旧 | [storage-job-DB] | 並列claim1件、期限切れPROCESSING再取得、失敗後COMPLETED | R19。ここでのStorage SDKはmock |
++| 範囲10 外部障害とDB | [mail-DB]、[attachment-DB]、[line-worker-DB] | [events-E2E]、[notices-E2E]、[secret-E2E] | R19。補償・rollback・FAILED状態を区別 |
++| 範囲11 3つのscript | [package.json]、[manifest] | 第2節の3入口と正／異常終了の集計 | R19 |
++| 範囲12 実行順 | [verify-runner]、[verify-unit] | 全11段階と二度のproduction build | R19。粒度20の再実行なし |
++| 受入：重要条件の自動化 | 本表のsuiteとmanifest | 必須DB群とE2Eファイルを集計で強制 | R19。手動残件を無言で合格にしない |
++| 受入：A→B主要ID拒否 | 次のID表 | DBと実Cookieによる直接Action／Route | R19 |
++| 受入：MEMBER管理Action拒否 | [direct-action]、[members-E2E]、[line-E2E] | 正規OWNERの要求をMEMBER Cookieで再送して非更新を確認 | R19 |
++| 受入：STARTER拒否・STANDARD許可・PRO保留 | [plan-unit]、[auth-E2E] | Page／直接URL、既存Cookie後のプラン変更 | R19。PROを利用可能にしない |
++| 受入：全チェックとproduction build | [verify-runner] | `F12_MVP_PASSED 11`・終了0・回収記録 | R19。本番公開可否とは分ける |
 +
-+afterEach( // 各ケースの回収登録関数
-+  /**
-+   * SDKの未評価と秘密非出力を検証し、このケースの一時領域だけを削除する。
-+   */
-+  () => { // 検証と回収のコールバック
-+    try {
-+      expect(forbidden).not.toHaveBeenCalled(); // SDK未評価の期待値関数・比較メソッド
-+      expect(messages.join("\n").includes(PRIVATE)).toBe(false); // 原文非出力の期待値関数・連結・含有・比較メソッド
-+    } finally {
-+      vi.useRealTimers(); // 偽時計を解除する関数
-+      vi.restoreAllMocks(); // 置換を解除する関数
-+      rmSync(checkout, { // この試験が所有する資源を削除する関数
-+        recursive: true,
-+        force: true
-+      }); // このケースの一時領域を削除する関数
-+    }
-+  },
-+);
++### 10.2 10種の越境ID
 +
-+it("環境→Prisma検証・生成→migration・deploy→lint→型→unit→統合→E2E→buildの順を守る", // ケース登録関数
-+  /**
-+   * 全段階とproduction条件・安全なsuite別件数を確認する。
-+   */
-+  async () => { // 正常順序の検証コールバック
-+    const result = await runMvpVerification({ // 全検証を段階stubで実行する関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      /**
-+       * guard後に許可設定だけが渡され、HTTPSと本番検証条件を維持することを確認する。
-+       */
-+      execute: async (request) => { // 段階の検証コールバック
-+        expect(request.environment.NEXT_TELEMETRY_DISABLED).toBe("1"); // buildの計測通信を無効にする期待値関数・比較メソッド
-+        expect(request.environment.CHECKPOINT_DISABLE).toBe("1"); // Prisma更新確認を抑止する期待値関数・比較メソッド
-+        expect(request.environment.NODE_ENV).toBe("production"); // 本番検証を維持する期待値関数・比較メソッド
-+        expect(request.environment.APP_BASE_URL).toBe("https://localhost:3443"); // HTTPSを維持する期待値関数・比較メソッド
-+        expect(request.environment.RESEND_API_KEY === PRIVATE).toBe(false); // 実配送設定の非継承を検証する関数・比較メソッド
-+        expect(request.environment.AXIOM_TOKEN).toBeUndefined(); // 実ログ設定の非継承を検証する関数・比較メソッド
-+        expect(request.environment.LINE_CHANNEL_ACCESS_TOKEN).toBeUndefined(); // 実LINE設定の非継承を検証する関数・比較メソッド
-+        return execute(request); // 架空段階を実行する関数
-+      },
-+    });
-+    expect(calls).toEqual(MVP_VERIFY_STAGES); // 仕様順の期待値関数・比較メソッド
-+    expect(calls.indexOf("PRISMA_GENERATE") < calls.indexOf("TYPECHECK")).toBe(true); // 型チェック前生成を検証する関数・位置取得・比較メソッド
-+    expect(calls.indexOf("E2E") < calls.indexOf("BUILD")).toBe(true); // 事前buildを含むE2E後にもbuildする検証関数・位置取得・比較メソッド
-+    expect(result.stages).toHaveLength(MVP_VERIFY_STAGES.length); // 全段階完了を検証する関数・比較メソッド
-+    expect(messages.some( // 自然・注入を別々に報告することを検証する関数・検索メソッド
-+      /**
-+       * F10の明示した自然競合と注入証跡を同じ数へ混ぜない。
-+       */
-+      (line) => line.includes("event-month-copy.flow") && // 入力を受け取り操作・照合するコールバック / 固定値の含有を検証するメソッド
-+        line.includes("natural=2 injected=2"), // 安全な通知の照合コールバック・含有メソッド
-+    )).toBe(true); // 証跡通知の比較メソッド
-+  },
-+);
++| ID／値 | 入替・期待結果 | 根拠 |
++| --- | --- | --- |
++| clubSlug | 実在B・未知slugでA権限を使えない | [auth-E2E]、[content-DB]、[members-E2E] |
++| eventId | B／非公開／対象外イベントの読取・更新・削除を拒否 | [content-DB]、[events-E2E]、[direct-action] |
++| noticeId | B／非公開／対象外お知らせの読取・更新・削除を拒否 | [content-DB]、[notices-E2E]、[direct-action] |
++| attachmentId | B・DRAFT・対象外添付へ署名を発行しない | [attachment-DB]、[events-E2E]、[notices-E2E] |
++| membershipId | B所属や別本人の所属更新を拒否 | [membership-DB]、[members-E2E]、[direct-action] |
++| childId | 他保護者の子を更新せず、本人の正規操作は成功 | [account-E2E]、[direct-action] |
++| targetId | BのLINE宛先をA OWNER／B MEMBERのCookieで更新しない | [line-binding-DB]、[line-E2E]、[direct-action] |
++| invitation token | B slug、旧token、他人Cookieとの組合せで承諾しない | [invitation-DB]、[members-E2E]、[direct-action] |
++| webhookKey | A/Bのkey・署名・destination・登録tokenを混ぜても対象を作らない | [line-binding-DB]、[line-E2E] |
++| hidden clubId | hidden値・bind値・request本文を改変しても認可contextのクラブ外へ書かない | [account-E2E]、[events-E2E]、[notices-E2E]、[direct-action] |
 +
-+it.each(MVP_VERIFY_STAGES)( // 各段階の失敗ケース登録メソッド
-+  "%sが失敗したら後続を起動せず、所有資源を逆順に回収する",
-+  /**
-+   * 外部例外の原文やcauseを伝播させず、当該段階で止める。
-+   */
-+  async (failedStage) => { // 失敗段階別の検証コールバック
-+    const released: string[] = []; // 回収順序の配列型
-+    await expect(runMvpVerification({ // 固定失敗を検証する関数 / 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      /**
-+       * 開始前に回収を登録し、指定段階だけを失敗させる。
-+       */
-+      execute: async (request) => { // 失敗注入のコールバック
-+        calls.push(request.stage); // 開始段階の記録メソッド
-+        request.own( // 所有資源の回収を登録する関数
-+          /**
-+           * 自分の段階の資源だけを回収したと記録する。
-+           */
-+          async () => { // 入力を受け取り操作・照合するコールバック
-+            released.push(request.stage); // 検証結果または回収操作を配列へ登録するメソッド
-+          }, // 回収コールバック・記録メソッド
-+        );
-+        if (request.stage === failedStage) throw new Error(PRIVATE); // 架空の秘密例外コンストラクター
-+        return completed(request.stage); // 架空結果生成関数
-+      },
-+    })).rejects.toThrow(FAILURE); // 固定失敗の比較メソッド
-+    const expected = MVP_VERIFY_STAGES.slice(0, MVP_VERIFY_STAGES.indexOf(failedStage) + 1); // 実行してよい段階への部分列取得・位置取得メソッド
-+    expect(calls).toEqual(expected); // 後続非起動の検証関数・比較メソッド
-+    expect(released).toEqual([...expected].reverse()); // 所有資源の逆順回収を検証する関数・反転・比較メソッド
-+  },
-+);
++### 10.3 role・plan・本人の状態
 +
-+it.each([ // パラメーターごとの試験を登録するメソッド
-+  "RUN_MVP_TESTS",
-+  "MVP_TEST_DISPOSABLE",
-+  "RUN_MVP_E2E"
-+])( // 明示flag別のケース登録メソッド
-+  "%s不足ではURL getterも段階も評価しない",
-+  /**
-+   * 接続情報に触れる前に専用の全flagを要求する。
-+   */
-+  async (field) => { // flag別の検証コールバック
-+    const variables = environment(); // 架空設定生成関数
-+    variables[field] = "0";
-+    const getter = vi.fn( // 接続情報の評価検出mock生成関数
-+      /**
-+       * flag不足の段階では呼ばれるべきでない。
-+       */
-+      () => { // 入力を受け取り操作・照合するコールバック
-+        throw new Error(PRIVATE); // 原文を含めない例外コンストラクター
-+      }, // 評価拒否のコールバック・例外コンストラクター
-+    );
-+    Object.defineProperty(variables, "DATABASE_URL", { get: getter }); // URLを遅延評価に置き換える関数
-+    await expect(runMvpVerification({ // 期待値を検証する関数 / 全検証段階を順に実行して回収する関数
-+      environment: variables,
-+      checkoutDirectory: checkout,
-+      execute,
-+      emit
-+    })).rejects.toThrow(FAILURE); // guard失敗の検証関数・実行関数・比較メソッド
-+    expect(getter).not.toHaveBeenCalled(); // URL非評価の検証関数・比較メソッド
-+    expect(calls).toEqual([]); // 段階非起動の検証関数・比較メソッド
-+  },
-+);
++| 条件 | 期待する境界 | 根拠 |
++| --- | --- | --- |
++| A OWNER／COACH／OFFICER | 会員導線と対応するcontent管理を許可。OWNER専用管理と分ける | [auth-E2E]、[members-E2E]、[line-E2E] |
++| A MEMBER | 対象の公開contentと本人／子ども操作。管理画面・管理Actionを拒否 | [auth-E2E]、[account-E2E]、[direct-action] |
++| B OWNER／A OWNER兼B MEMBER | B自身のroleで判定し、AのOWNER権限をBへ持ち込まない | [auth-E2E]、[line-E2E] |
++| INVITED／SUSPENDED／WITHDRAWN | 認証できてもクラブ利用は不可。古いCookieでも最新所属を再確認 | [auth-E2E] |
++| STANDARD→STARTER／PRO | 既存Cookieがあっても最新プランで利用拒否 | [plan-unit]、[auth-E2E] |
++| 独立Platform DEVELOPER／SUPPORT | 正規Platform入口から報告を確認。所属のないクラブ管理は不可 | [auth-E2E]、[support-E2E]、[line-E2E] |
++| 一般OWNER／MEMBER | Platform内部メモ更新を拒否 | [support-E2E]、[auth-E2E] |
++| 最後のACTIVE OWNER | 降格・停止・退会と並列操作でもOWNERを0人にしない | [membership-DB]、[members-E2E] |
 +
-+it.each([ // パラメーターごとの試験を登録するメソッド
-+  "MIGRATION",
-+  "UNIT",
-+  "INTEGRATION",
-+  "E2E"
-+])( // テスト段階別のケース登録メソッド
-+  "%sのcase0を成功にしない",
-+  /**
-+   * コマンドの終了0だけでは合格にしない。
-+   */
-+  async (stage) => { // case0の検証コールバック
-+    await expect(runMvpVerification({ // 拒否を検証する関数 / 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      /**
-+       * 指定段階だけ実ケースなしとして返す。
-+       */
-+      execute: async (request) => request.stage === stage ? { // 入力を受け取り操作・照合するコールバック
-+        passed: 0,
-+        suites: []
-+      } : execute(request), // case0注入コールバック・通常段階実行関数
-+    })).rejects.toThrow(FAILURE); // 固定失敗の比較メソッド
-+  },
-+);
++### 10.4 自然競合・注入・機密非出力
 +
-+it.each([ // パラメーターごとの試験を登録するメソッド
-+  "missing",
-+  "skip",
-+  "failed",
-+  "pending",
-+  "guard-only",
-+  "evidence",
-+  "total"
-+] as const)( // 不完了種別のケース登録メソッド・リテラル型アサーション
-+  "統合結果の%sを拒否し、E2Eへ進まない",
-+  /**
-+   * 必須群・ケース件数・自然競合と注入の証跡を独立して検証する。
-+   */
-+  async (mode) => { // 不完了種別の検証コールバック
-+    await expect(runMvpVerification({ // 不完了を検証する関数 / 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      /**
-+       * 成功DTOの指定箇所だけを壊す。
-+       */
-+      execute: async (request) => { // 不完了を注入するコールバック
-+        const result = await execute(request); // 架空段階実行関数
-+        if (request.stage !== "INTEGRATION" ||
-+          !result?.suites) return result;
-+        if (mode === "missing") result.suites.pop(); // 必須suiteを欠落させるメソッド
-+        else if (mode === "skip") result.suites[0].skipped = 1;
-+        else if (mode === "failed") result.suites[0].failed = 1;
-+        else if (mode === "pending") result.suites[0].pending = 1;
-+        else if (mode === "total") result.passed = 9999;
-+        else if (mode === "guard-only") Reflect.set(result.suites[0], "groups", []); // 必須DB群だけを欠落させるメソッド
-+        else {
-+          const target = result.suites.find( // 証跡対象suiteを選ぶメソッド
-+            /**
-+             * F10の自然競合だけを未実施にする。
-+             */
-+            (suite) => suite.path === MVP_CONCURRENCY_CASES[0].path, // パス照合コールバック
-+          );
-+          Reflect.set(target!, "natural", 0); // 自然競合の証跡だけを欠落させるメソッド
-+        }
-+        return result;
-+      },
-+    })).rejects.toThrow(FAILURE); // 固定失敗の比較メソッド
-+    expect(calls.includes("E2E")).toBe(false); // 後続非起動の検証関数・含有・比較メソッド
-+  },
-+);
++| 種類 | 根拠と確認範囲 | 記録 |
++| --- | --- | --- |
++| F10自然競合 | [F10-DB]の同requestId・異requestIdの実並列 | `natural=2` |
++| F10障害注入 | 同ファイルのP2034後rollback／有限再試行／上限 | `injected=2` |
++| F11自然競合 | [F11-DB]の同操作ID・異操作IDの実並列 | `natural=2`。異IDはCREATEDとPREVIEW_CHANGED |
++| F11障害注入 | 同ファイルの注入P2034正常復帰／上限 | `injected=2` |
++| LINE自然競合 | [line-worker-DB]の同deliveryIdへの2 worker | `natural=1` |
++| LINE障害注入 | rejected／network／timeoutの正規化と終端状態 | `injected=3`。実通信timeout実装とは別 |
++| 二重承諾・OWNER・Storage claim | [invitation-DB]、[membership-DB]、[storage-job-DB] | 上記natural件数に合算しない。別ケースの根拠を残す |
++| HTTP改変 | [direct-action]で正規要求のID・Cookie・Originを置換 | 応答コードだけでなくDB／Storage／受付非更新を確認 |
++| 秘密sentinel | [secret-E2E]、[observability]、[observability-unit] | DTO・HTML・許可DB列・stdout／stderrへ原文を出さない |
 +
-+it.each([ // パラメーターごとの試験を登録するメソッド
-+  "missing",
-+  "skip",
-+  "unknown"
-+] as const)( // E2E未完了種別のケース登録メソッド・リテラル型アサーション
-+  "E2Eの%sを成功にしない",
-+  /**
-+   * 総件数が正でも、必須ファイルの欠落を合格にしない。
-+   */
-+  async (mode) => { // E2E境界の検証コールバック
-+    await expect(runMvpVerification({ // 未完了を検証する関数 / 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      /**
-+       * E2Eの安全な件数だけを変更する。
-+       */
-+      execute: async (request) => { // E2E結果を変更するコールバック
-+        const result = await execute(request); // 架空段階実行関数
-+        if (request.stage !== "E2E" ||
-+          !result?.suites) return result;
-+        if (mode === "skip") result.suites[0].skipped = 1;
-+        else if (mode === "unknown") result.suites[0].path = "e2e/unknown.spec.ts";
-+        else {
-+          result.suites.pop(); // 必須ファイルを欠落させるメソッド
-+          result.passed = result.suites.length;
-+        }
-+        return result;
-+      },
-+    })).rejects.toThrow(FAILURE); // 固定失敗の比較メソッド
-+    expect(calls.includes("BUILD")).toBe(false); // 最終build非起動の検証関数・含有・比較メソッド
-+  },
-+);
++自然競合のケース名と必須DB群の一致は `MVP_CONCURRENCY_CASES` で強制される。
++注入試験が通っても自然競合の成功へ代用しない。
++F11のadapter `40001`は基準コミットで既存の有限再試行へ接続済み。
++[F11-repository]の `isRetryableBatchConflict` と[F11-unit]の再認可・上限・対象外例外を根拠にする。
 +
-+it("期限超過では無応答の段階も拒否し、所有回収を実行する", // ケース登録関数
-+  /**
-+   * stubがsignalを無視しても、外側の期限で止める。
-+   */
-+  async () => { // timeout検証コールバック
-+    vi.useFakeTimers(); // 試験時計を使う関数
-+    const release = vi.fn( // 回収mockの生成関数
-+      /**
-+       * 所有資源の回収完了を再現する。
-+       */
-+      async () => undefined, // 非同期回収のコールバック
-+    );
-+    const pending = runMvpVerification({ // 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      timeoutMs: 50,
-+      /**
-+       * unit段階で返答を止め、回収だけ登録する。
-+       */
-+      execute: async (request) => { // 無応答を作るコールバック
-+        calls.push(request.stage); // 開始段階を記録するメソッド
-+        if (request.stage !== "UNIT") return completed(request.stage); // 通常結果生成関数
-+        request.own(release); // 所有回収を登録する関数
-+        return new Promise<never>( // 完了しない結果のPromiseコンストラクター・到達不能型
-+          /**
-+           * 実通信なしで無応答だけを再現する。
-+           */
-+          () => undefined, // 無応答のコールバック
-+        );
-+      },
-+    });
-+    const rejected = expect(pending).rejects.toThrow(FAILURE); // 固定失敗の期待値関数・比較メソッド
-+    await vi.advanceTimersByTimeAsync(60); // 期限を進める関数
-+    await rejected;
-+    expect(release).toHaveBeenCalledOnce(); // 回収実行の検証関数・比較メソッド
-+    expect(calls.includes("INTEGRATION")).toBe(false); // 後続非起動の検証関数・含有・比較メソッド
-+  },
-+);
++### 10.5 既存F10／F11運用書との対応
 +
-+it("signal中断後は次段階へ進まず、登録したSIGINT・SIGTERM監視を解除する", // ケース登録関数
-+  /**
-+   * 実OS signalをVitestへ送らず、外側のAbortSignalで同じ中断経路を確認する。
-+   */
-+  async () => { // signal検証コールバック
-+    const controller = new AbortController(); // 外側中断のコンストラクター
-+    const beforeInt = process.listenerCount("SIGINT"); // 開始前の監視件数取得メソッド
-+    const beforeTerm = process.listenerCount("SIGTERM"); // 開始前の監視件数取得メソッド
-+    const released = vi.fn( // 回収mockの生成関数
-+      /**
-+       * 所有回収の完了を再現する。
-+       */
-+      async () => undefined, // 回収コールバック
-+    );
-+    const pending = runMvpVerification({ // 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      signal: controller.signal,
-+      /**
-+       * 統合段階で中断し、後続が始まらないことを確認する。
-+       */
-+      execute: async (request) => { // 中断注入のコールバック
-+        calls.push(request.stage); // 段階開始の記録メソッド
-+        if (request.stage !== "INTEGRATION") return completed(request.stage); // 架空結果生成関数
-+        request.own(released); // 所有回収を登録する関数
-+        controller.abort(); // 外側の中断を通知するメソッド
-+        return completed(request.stage); // 中断後の見かけ上の成功を返す関数
-+      },
-+    });
-+    await expect(pending).rejects.toThrow(FAILURE); // 中断拒否の検証関数・比較メソッド
-+    expect(released).toHaveBeenCalledOnce(); // 回収実行の検証関数・比較メソッド
-+    expect(calls.includes("E2E")).toBe(false); // 後続非起動の検証関数・含有・比較メソッド
-+    expect(process.listenerCount("SIGINT")).toBe(beforeInt); // 監視解除の期待値関数・件数取得・比較メソッド
-+    expect(process.listenerCount("SIGTERM")).toBe(beforeTerm); // 監視解除の期待値関数・件数取得・比較メソッド
-+  },
-+);
++[F10-runbook]・[F11-runbook]の手動表は、作成当時の未確認欄を一括更新しない。
++以下はF12で追加された自動確認の代表的対応で、全条件・全端末の手動受入完了を意味しない。
 +
-+it("cleanup失敗も全体成功にせず、残りの所有回収は続ける", // ケース登録関数
-+  /**
-+   * 最後のbuildまで成功しても回収失敗を隠さない。
-+   */
-+  async () => { // 回収失敗の検証コールバック
-+    const released: string[] = []; // 回収記録の配列型
-+    await expect(runMvpVerification({ // 回収失敗の検証関数 / 全検証実行関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 通知保持関数
-+      /**
-+       * 二つの所有回収を登録し、一つだけを失敗させる。
-+       */
-+      execute: async (request) => { // 回収失敗注入のコールバック
-+        if (request.stage === "ENV") {
-+          request.own( // 所有回収の登録関数
-+            /**
-+             * 他の回収失敗後にも実行される正常回収。
-+             */
-+            async () => { // 入力を受け取り操作・照合するコールバック
-+              released.push("first"); // 検証結果または回収操作を配列へ登録するメソッド
-+            }, // 回収コールバック・記録メソッド
-+          );
-+          request.own( // 所有回収の登録関数
-+            /**
-+             * 秘密原文を含む架空の回収失敗を注入する。
-+             */
-+            async () => { // 入力を受け取り操作・照合するコールバック
-+              released.push("second"); // 回収順序を記録するメソッド
-+              throw new Error(PRIVATE); // 回収失敗を再現するコンストラクター
-+            }, // 失敗回収のコールバック・記録メソッド・例外コンストラクター
-+          );
-+        }
-+        return execute(request); // 通常段階の実行関数
-+      },
-+    })).rejects.toThrow(FAILURE); // 固定失敗の比較メソッド
-+    expect(released).toEqual([ // 構造の一致を検証するメソッド / 期待値を検証する関数
-+      "second",
-+      "first"
-+    ]); // 回収継続の検証関数・比較メソッド
-+  },
-+);
++| 手動表の観点 | F12で追跡できる自動根拠 | 残る確認 |
++| --- | --- | --- |
++| M01／M02 ロール・入口 | [auth-E2E]、各[F10-E2E]／[F11-E2E]、既存role unit | 機能別の全role・端末組合せを一括完了にしない |
++| 月初末・閏日・DST・既存一致 | [F10-DB]、[F11-DB]、[F10-E2E]、[F11-E2E] | 各手動表の全入力組合せは個別に記録 |
++| M10上限（F11）／M03上限（F10） | F11の31件・32件、F10の100件・101件をDBで照合 | DB上限確認を全件数の実ブラウザー操作と混同しない |
++| M11／M12 二重送信・応答喪失 | 両E2Eの連打・同payload／requestId再送、両DBの実並列 | payloadを失った後の運用照会は既存運用書に従う |
++| M13保存後の再検証失敗 | 両E2EのneedsReloadと保存ボタン非表示 | 本番障害の再現は別環境・別承認 |
++| H01／H02 直接POST・改変 | 各E2Eの実Action再送、[direct-action]の共通境界 | 個別機能・経路の対応を記録し、共通試験で全件を代用しない |
++| H03外部Origin・Proxy | 共通content ActionのOrigin試験 | F10／F11個別経路・本番Proxy条件の実確認は未確認 |
++| M15操作・読み上げ | UIの表示・操作に関する自動試験は存在 | 実機のキーボード、フォーカス、読み上げ、狭い画面の受入は未確認 |
 +
-+it.each([ // パラメーターごとの試験を登録するメソッド
-+  "env",
-+  "missing-db",
-+  "missing-e2e",
-+  "existing-build"
-+] as const)( // 起動前の拒否ケース登録メソッド・リテラル型アサーション
-+  "%sがあれば段階を開始しない",
-+  /**
-+   * 試験本文・SDKの評価より前にcheckoutの条件を確認する。
-+   */
-+  async (mode) => { // 起動前拒否の検証コールバック
-+    if (mode === "env") writeFileSync(join(checkout, ".env.local"), PRIVATE); // 架空環境ファイルの作成・パス結合関数
-+    else if (mode === "missing-db") unlinkSync(join(checkout, MVP_INTEGRATION_SUITES[0].path)); // 架空必須ファイルの削除・結合関数
-+    else if (mode === "missing-e2e") unlinkSync(join(checkout, MVP_E2E_SUITES[0])); // 架空必須ファイルの削除・結合関数
-+    else mkdirSync(join(checkout, ".next")); // 既存build名の作成・結合関数
-+    await expect(runMvpVerification({ // 期待値を検証する関数 / 全検証段階を順に実行して回収する関数
-+      environment: environment(), // 架空設定を生成する関数
-+      checkoutDirectory: checkout,
-+      execute,
-+      emit
-+    })).rejects.toThrow(FAILURE); // 起動拒否の検証関数・実行・設定生成関数・比較メソッド
-+    expect(calls).toEqual([]); // 段階非起動の検証関数・比較メソッド
-+    if (mode === "existing-build") expect(existsSync(join(checkout, ".next"))).toBe(true); // 既存成果物の非削除を検証する関数・存在判定・結合・比較メソッド
-+  },
-+);
++## 11. 回収確認・通常環境への復帰
 +
-+/**
-+ * Vitest reporterの最小成功結果を架空checkout内のパスで作る。
-+ */
-+function vitestResult() { // 架空のVitest結果を作る関数
-+  return {
-+    success: true,
-+    numFailedTests: 0,
-+    numFailedTestSuites: 0,
-+    numPendingTests: 0,
-+    numPendingTestSuites: 0,
-+    numTodoTests: 0,
-+    numPassedTests: 1,
-+    numTotalTests: 1,
-+    testResults: [{
-+      name: join(checkout, "tests/fixture.test.ts"), // 所有パスの結合関数
-+      status: "passed",
-+      message: "",
-+      assertionResults: [{
-+        status: "passed",
-+        title: "fixture",
-+        ancestorTitles: [] as string[], // 群名の文字列配列型
-+        failureMessages: [] as string[], // 架空の失敗原文を注入する配列型アサーション
-+      }],
-+    }],
-+  };
-+}
++成功・失敗とも、専用serverとbuildの所有状態を先に確認する。
++通常の開発serverが3000を使っている場合は、そのserverと専用serverを区別する。
 +
-+it.each([ // パラメーターごとの試験を登録するメソッド
-+  "zero",
-+  "skip",
-+  "failure",
-+  "hook",
-+  "unknown",
-+  "total"
-+] as const)( // JSONの拒否ケース登録メソッド・リテラル型アサーション
-+  "Vitest JSONの%sを固定例外で拒否する",
-+  /**
-+   * 終了0や成功フラグだけを信用しない。
-+   */
-+  (mode) => { // JSONの検証コールバック
-+    const value = vitestResult(); // 架空JSON生成関数
-+    if (mode === "zero") value.testResults = [];
-+    else if (mode === "skip") value.testResults[0].assertionResults[0].status = "pending";
-+    else if (mode === "failure") value.testResults[0].assertionResults[0].failureMessages = [PRIVATE];
-+    else if (mode === "hook") value.testResults[0].message = PRIVATE;
-+    else if (mode === "unknown") value.testResults[0].name = "/outside/fixture.test.ts";
-+    else value.numTotalTests = 999;
-+    expect( // 拒否を検証する関数
-+      /**
-+       * 不正JSONを解析境界へ渡す。
-+       */
-+      () => collectMvpVitestResults(value, checkout), // 結果検証のコールバック・関数
-+    ).toThrow(FAILURE); // 固定失敗の比較メソッド
-+  },
-+);
++```bash
++test ! -e "$F12_CHECKOUT/.next" && printf '専用build回収OK\n'
++lsof -nP -iTCP:3000 -sTCP:LISTEN
++lsof -nP -iTCP:3443 -sTCP:LISTEN
++```
 +
-+it("Vitest結果の安全な件数と新しいpackage入口を確認し、既存verifyは維持する", // ケース登録関数
-+  /**
-+   * 新入口だけを追加し、通常verifyの互換性を維持する。
-+   */
-+  () => { // 結果と入口の検証コールバック
-+    expect(collectMvpVitestResults(vitestResult(), checkout).passed).toBe(1); // 安全な件数を検証する関数・結果検証・生成・比較メソッド
-+    expect(packageJson.scripts["verify:mvp"]).toBe("node --import tsx scripts/verify-mvp.mjs"); // 新入口を検証する関数・比較メソッド
-+    expect(packageJson.scripts["test:e2e"]).toBe("node --import tsx scripts/test-e2e.mjs"); // ガード付きE2E入口を検証する関数・比較メソッド
-+    expect(packageJson.scripts.verify).toContain("npm run test && npm run build"); // 既存verify維持の検証関数・比較メソッド
-+  },
-+);
++この実行で作ったproject ID・workdirと一致し、通常projectとは異なることを確認する。
++`--no-backup`を付けるのは、この使い捨てprojectだけである。
 +
++```bash
++f12_supabase stop --project-id "$F12_PROJECT_ID" --no-backup
 +
-+it("実段階のコマンド引数・HTTP/HTTPS分離・最終build回収を起動stubで確認する", // ケース登録関数
-+  /**
-+   * 段階executeを丸ごと置き換えず、既存runnerへの委譲とCLI引数を確認する。
-+   */
-+  async () => { // 実段階の組立てを検証するコールバック
-+    const events: string[] = []; // 実行順序の配列型
-+    const closed = vi.fn( // stubの回収mockを作る関数
-+      /**
-+       * 所有stubの停止完了を再現する。
-+       */
-+      async () => undefined, // 停止のコールバック
-+    );
-+    native.stub.mockResolvedValue({ // 私有stubを置き換えるメソッド
-+      origin: "http://127.0.0.1:45678",
-+      close: closed, // 停止mock関数
-+      /**
-+       * 外向き違反がない件数だけを返す。
-+       */
-+      status: () => ({ // 入力を受け取り操作・照合するコールバック
-+        violations: 0,
-+        requests: 0
-+      }), // 安全な件数を返すコールバック
-+    });
-+    native.preload.mockImplementation( // 同期記録だけを準備する置換メソッド
-+      /**
-+       * 最終buildの実回収経路で使う所有領域だけへ架空記録を書く。
-+       */
-+      async (directory: string) => { // 遮断準備のコールバック / 所有領域の文字列型
-+        writeFileSync(join(directory, "violations.log"), ""); // 所有記録の書込・パス結合関数
-+        return join(directory, "worker-preload.cjs"); // 所有workerパスの結合関数
-+      },
-+    );
-+    native.child.mockImplementation( // 実子を起動しない置換メソッド
-+      /**
-+       * JSONを返す段階だけ架空結果を監視器へ送り、終了0とstdio完了を再現する。
-+       */
-+      (request: Parameters<typeof import("../../scripts/test-e2e.mjs").startMvpChild>[0]) => { // 子起動代替コールバック / 実起動関数から得る要求型
-+        events.push(request.args.join(" ")); // CLI引数の順序を記録するメソッド
-+        if (request.args.includes("--reporter=json")) { // JSON段階を判定するメソッド
-+          const report = vitestResult(); // 架空JSON生成関数
-+          if (request.args.includes(MVP_MIGRATION_SUITE.path)) { // migration段階を判定するメソッド
-+            report.testResults[0].name = join(checkout, MVP_MIGRATION_SUITE.path); // 所有suiteのパス結合関数
-+            report.testResults[0].assertionResults[0].ancestorTitles = [...MVP_MIGRATION_SUITE.requiredGroups];
-+          }
-+          request.observe?.("stdout", Buffer.from(JSON.stringify(report))); // JSONを監視器へ渡す関数 / バイト列生成・JSON化メソッド
-+        }
-+        return {
-+          exit: Promise.resolve({ // 非同期成功の結果を作るメソッド
-+            code: 0,
-+            signal: null
-+          }), // stdio完了を再現するメソッド
-+          /**
-+           * 既に回収済みの架空子だけを表す。
-+           */
-+          finished: () => true, // 終了判定コールバック
-+          /**
-+           * 実OS操作をせず、所有子の回収完了を表す。
-+           */
-+          stop: async () => undefined, // 子停止コールバック
-+        };
-+      },
-+    );
-+    native.integration.mockImplementation( // 既存統合入口の境界を置き換えるメソッド
-+      /**
-+       * guard済みHTTP環境で全必須群の成功を返す。
-+       */
-+      async (options) => { // 統合入口代替コールバック
-+        expect(options.environment.RUN_MVP_E2E).toBeUndefined(); // HTTP契約を検証する関数・比較メソッド
-+        const confirmationRequest = new NextRequest( // 【追加】招待確認Routeに渡す要求を再現するコンストラクター
-+          new URL("/auth/confirm", options.environment.APP_BASE_URL), // 【追加】統合試験用originから要求URLを作るコンストラクター
-+          {
-+            method: "POST",
-+            headers: {
-+              origin: options.environment.APP_BASE_URL,
-+            },
-+          },
-+        );
-+        expect(new URL(confirmationRequest.url).origin).toBe( // 【追加】Nextによる正規化後も同一originであることを検証する関数・URLコンストラクター・比較メソッド
-+          confirmationRequest.headers.get("origin"), // 【追加】送信するoriginを取得するメソッド
-+        );
-+        expect(options.environment.APP_BASE_URL).toBe("http://localhost:3000"); // ローカルAuthの既存条件を検証する関数・比較メソッド
-+        const result = completed("INTEGRATION")!; // 架空の全統合結果生成関数
-+        for (const suite of result.suites!) options.onSuite(suite); // 安全な件数を通知する関数
-+        return {
-+          passed: result.passed,
-+          suites: result.suites!.length
-+        };
-+      },
-+    );
-+    native.e2e.mockImplementation( // 既存E2E入口の境界を置き換えるメソッド
-+      /**
-+       * 事前production buildを含む既存E2E入口を一度使う。
-+       */
-+      async (options) => { // E2E入口代替コールバック
-+        expect(options.environment.APP_BASE_URL).toBe("https://localhost:3443"); // 本番HTTPS条件の期待値関数・比較メソッド
-+        events.push("E2E_INTERNAL_BUILD"); // 既存E2Eの事前build境界を記録するメソッド
-+        const result = completed("E2E")!; // 架空の全E2E結果生成関数
-+        for (const suite of result.suites!) options.onSuite(suite); // 安全な件数を通知する関数
-+        return { passed: result.passed };
-+      },
-+    );
-+    const result = await runMvpVerification({ // 実段階を組み立てる全検証関数
-+      environment: environment(), // 架空設定生成関数
-+      checkoutDirectory: checkout,
-+      emit, // 安全な通知保持関数
-+    });
-+    expect(result.stages).toHaveLength(MVP_VERIFY_STAGES.length); // 全段階を検証する関数・比較メソッド
-+    const commands = native.child.mock.calls.map( // 実起動要求を取り出すメソッド
-+      /**
-+       * コマンド引数だけを照合する。
-+       */
-+      (call) => call[0], // 起動要求取得コールバック
-+    );
-+    expect(commands.some( // 非破壊deployだけを使うことを検証する関数・検索メソッド
-+      /**
-+       * 通常postgresへresetやdevを実行しない。
-+       */
-+      (request) => request.args.includes("migrate") && // 入力を受け取り操作・照合するコールバック / 固定値の含有を検証するメソッド
-+        request.args.includes("deploy"), // CLI引数を照合するコールバック・含有メソッド
-+    )).toBe(true); // 非破壊deployの比較メソッド
-+    expect(commands.some( // 破壊的コマンド非使用を検証する関数・検索メソッド
-+      /**
-+       * resetを実コマンドへ含めない。
-+       */
-+      (request) => request.args.includes("reset"), // コマンド照合コールバック・含有メソッド
-+    )).toBe(false); // 非使用の比較メソッド
-+    expect(events.indexOf("E2E_INTERNAL_BUILD") < events.lastIndexOf("run build")).toBe(true); // 二段階buildの順序を検証する関数・位置取得・比較メソッド
-+    expect(native.integration).toHaveBeenCalledOnce(); // 既存統合入口再利用の期待値関数・比較メソッド
-+    expect(native.e2e).toHaveBeenCalledOnce(); // 既存E2E入口再利用の期待値関数・比較メソッド
-+    expect(closed).toHaveBeenCalledOnce(); // 私有stub回収の期待値関数・比較メソッド
-+    expect(existsSync(join(checkout, ".next"))).toBe(false); // 所有build回収の期待値関数・存在判定・結合・比較メソッド
-+  },
-+);
++# 残存を調べる場合も、このprojectのlabelだけに限定する。
++docker ps -a \
++  --filter "label=com.supabase.cli.project=$F12_PROJECT_ID" \
++  --format '{{.Names}}'
++docker volume ls \
++  --filter "label=com.supabase.cli.project=$F12_PROJECT_ID" \
++  --format '{{.Name}}'
++
++unset F12_ANON_KEY F12_SERVICE_ROLE_KEY F12_DB_URL F12_API_URL F12_STATUS_JSON
++```
++
++通常Supabaseを本書で停止した場合だけ、次の起動を行う。元から停止していた場合は起動を省く。
++
++```bash
++cd "$F12_SOURCE"
++env -i \
++  PATH="$PATH" \
++  HOME="$HOME" \
++  SUPABASE_EXPERIMENTAL_STACK=0 \
++  ./node_modules/.bin/supabase \
++  --workdir "$F12_SOURCE" \
++  start >/dev/null 2>&1
++F12_NORMAL_START_EXIT=$?
++printf '通常Supabase起動終了コード: %s\n' "$F12_NORMAL_START_EXIT"
++```
++
++通常起動を行った場合は終了0を確認する。元プロジェクトで最終差分を確認する。
++
++```bash
++cd "$F12_SOURCE"
++git status --short > "$F12_ROOT/source-status-after.txt"
++diff -u "$F12_ROOT/source-status-before.txt" "$F12_ROOT/source-status-after.txt"
++git diff --check -- . ':!feature.patch'
++git status --short
++```
++
++残るcontainer・volumeがあればproject所有・用途を確認し、未確認なら削除を保留する。
++`docker system prune`や全volume削除で片付けない。
++status比較は変更一覧の比較であり、ファイル内容が完全一致する証明ではない。
++コピー後に元ソースを編集した場合は、検証した版との対応を改めて確認する。
++専用コピーのpackage.json・lockfile・生成Clientを元へ戻さない。
++
++今回の対象ファイルだけを選んでstageし、検証したcommit・環境・結果・回収・残課題を記録してcommit／pushする。
++文書のpatch検証と、過去の実DB／E2E合格を別の実行として記録する。
++`.env`、証明書秘密鍵、trace、report、診断scriptをcommit対象へ含めない。
++
++## 12. 結果台帳と引継ぎ
++
++新しい実行では下表を埋める。件数・revision・runId・CLI／Node／browser／DB版・終了コードだけを記録し、
++URL、資格情報、本文、個人情報、生reportを添付しない。未実行は空欄のままにせず明記する。
++
++| 項目 | 継承した記録／今回の状態 | 次回記録するもの |
++| --- | --- | --- |
++| 実装基準 | `22e8f4c`、2026-11-09 | コピー元revision、変更有無、実行日・担当 |
++| 通し結果 | 利用者報告・commit本文で `F12_MVP_PASSED 11`、終了0 | 全段階の固定表示と終了コード |
++| unit | 粒度19追加修正時に129ファイル・4,252件成功を確認 | 実行時の件数、失敗／skip、所要時間 |
++| integration | 同修正時に22ファイル・619件成功、skipなし | 全ファイル・必須群、自然／注入の件数 |
++| F11競合修正 | 実DB51件を3回成功。全統合も成功 | 実エラー形・有限再試行・DB非重複の根拠 |
++| migration／E2E／最後のbuild | 全11段階成功報告に含まれる。個別生reportはrepoに保存しない | 個別件数と回収結果の安全な要約 |
++| 専用環境処分・通常復帰 | 基準commit本文に確認記録あり | project ID、残存件数、未確認、通常起動終了コード |
++| 粒度20 | 静的照合とpatch適用確認のみ。実DB／E2E再実行なし | 文書patchのcheck・stat・対象ファイル |
++| 本書の新規セットアップ | 未実行。元のCLI条件での再現性は未確認 | CLI版、設定差、fresh環境での通し結果 |
++| SDK・実サービス | ローカルAuth／Storageと受付stubの範囲でR19 | LINE／Resend本番最小疎通はF13で別途確認 |
++| browser・DB範囲 | Chromium・ローカルPostgreSQLの自動受入 | 他browser、実機、本番DBupgradeは未確認 |
++
++残課題を「テストがあるから解決済み」にしない。以下はF13の粒度計画作成・見直し時の引継ぎ項目とする。
++本粒度ではF13の文書や実装を変更しない。引継ぎ時に担当・期限・採否・公開判断への影響を記録する。
++
++| ID | 未解決／未確認 | 根拠・次の判断 |
++| --- | --- | --- |
++| F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する |
++| F13-LINE-TIMEOUT | 実LINE通信を一定時間で打ち切る機能は未実装 | [LINE-api]のfetch、[line-worker-DB]はTimeoutError注入。実timeoutと結果不明／重複防止の扱いを別patchで検討する |
++| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する |
++| F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない |
++| MANUAL-ACCEPTANCE | 既存運用書の実機・アクセシビリティ・Proxy条件 | 第10.5節と既存手動表へ、実施結果／保留理由を対応付ける |
++
++解決済みの粒度19修正は、統合originのlocalhost統一と、F11の確認済みadapter競合の有限再試行である。
++LINEの再claim上限・実timeoutの未実装と混同しない。
++LINE workerの一回の取得limitも、同一deliveryの再claim回数上限とは別である。
++
++<!-- 以下は実在するコード・試験・既存運用書への参照。 -->
++[F12仕様]: ../implementation/phases/F12.md
++[粒度別計画]: ../implementation/phases/F12-granular-plan.md
++[package.json]: ../../package.json
++[supabase/config.toml]: ../../supabase/config.toml
++[guard]: ../../tests/mvp/environment.ts
++[manifest]: ../../tests/mvp/suite-manifest.ts
++[integration-runner]: ../../scripts/test-integration.mjs
++[e2e-runner]: ../../scripts/test-e2e.mjs
++[verify-runner]: ../../scripts/verify-mvp.mjs
++[verify-unit]: ../../tests/mvp/verify-mvp.test.ts
++[db-fixture]: ../../tests/mvp/database-fixture.ts
++[db-fixture-DB]: ../../tests/mvp/database-fixture.integration.test.ts
++[local-services]: ../../tests/mvp/local-services-fixture.ts
++[local-services-DB]: ../../tests/mvp/local-services-fixture.integration.test.ts
++[migration-DB]: ../../tests/mvp/migration-databases.ts
++[migrations]: ../../tests/mvp/migrations.integration.test.ts
++[Playwright設定]: ../../playwright.config.mts
++[preload]: ../../tests/mvp/outbound-preload.mjs
++[harness-unit]: ../../tests/mvp/outbound-harness.test.ts
++[observability]: ../../tests/mvp/failure-observability.mjs
++[observability-unit]: ../../tests/mvp/failure-observability.test.ts
++[smoke-E2E]: ../../e2e/smoke.spec.ts
++[auth-E2E]: ../../e2e/authorization.spec.ts
++[events-E2E]: ../../e2e/events.spec.ts
++[notices-E2E]: ../../e2e/notices.spec.ts
++[account-E2E]: ../../e2e/account-children.spec.ts
++[members-E2E]: ../../e2e/members-invitations.spec.ts
++[line-E2E]: ../../e2e/line-settings.spec.ts
++[support-E2E]: ../../e2e/support-platform.spec.ts
++[direct-action]: ../../e2e/action-boundaries.spec.ts
++[secret-E2E]: ../../e2e/failure-observability.spec.ts
++[F10-E2E]: ../../e2e/event-month-copy.spec.ts
++[F11-E2E]: ../../e2e/event-practice-batch.spec.ts
++[F10-DB]: ../../tests/event-month-copy.flow.integration.test.ts
++[F11-DB]: ../../tests/event-practice-batch.flow.integration.test.ts
++[F11-repository]: ../../src/infrastructure/prisma/repositories/event-practice-batch-mutation-repository.ts
++[F11-unit]: ../../tests/event-practice-batch-mutation-repository.test.ts
++[membership-DB]: ../../tests/club-membership-repository.integration.test.ts
++[invitation-DB]: ../../tests/club-invitation-acceptance-repository.integration.test.ts
++[storage-job-DB]: ../../tests/storage-deletion-jobs.integration.test.ts
++[content-DB]: ../../tests/mvp/content-tenancy.integration.test.ts
++[attachment-DB]: ../../tests/mvp/attachment-storage.integration.test.ts
++[line-binding-DB]: ../../tests/mvp/line-webhook-tenancy.integration.test.ts
++[line-worker-DB]: ../../tests/mvp/line-delivery.integration.test.ts
++[mail-DB]: ../../tests/mvp/mail-failures.integration.test.ts
++[role-unit]: ../../tests/club-membership-authorization.test.ts
++[plan-unit]: ../../domain/club/plan-features.test.ts
++[LINE-worker]: ../../src/application/club/line/send-pending-line-deliveries.ts
++[LINE-api]: ../../src/infrastructure/line/line-messaging-api.ts
++[F10-runbook]: event-month-copy.md
++[F11-runbook]: event-practice-batch.md
