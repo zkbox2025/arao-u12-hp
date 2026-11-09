@@ -977,3 +977,53 @@ it.each([ // 試験ケースを登録する関数 / パラメーター別試験�
        */
       () => assertMvpE2eReport(report)).toThrow("F12_E2E_FAILED"); // この処理を定義する関数・コールバック / Playwright JSONで実成功・skipなしを検証する関数 / 固定例外を検証するメソッド
   });
+
+for (const channel of ["resend", "line", "storage"] as const) { // 【追加】検証する故障境界のリテラル型アサーション
+  it(`${channel}の実SDK境界へ当該runのsentinelを注入し、注入件数はresetでも消さない`, // 【追加】ケース登録関数
+    /**
+     * 【追加】秘密ではない架空値だけを故障応答へ渡し、SDKが受け取った事実を終了コードで確認する。
+     */
+    async () => { // 【追加】実SDK経路の検証コールバック
+      const sentinel = `F12_FAKE_SENTINEL_${RUN_ID}_${channel}`;
+      stub.registerFixture({}, ["clubs/" + CLUB + "/"]); // 【追加】所有Storage prefixを登録するメソッド
+      const configured = await control({ // 【追加】同一runの認証付き制御関数
+        action: "configure",
+        channel,
+        mode: "server-error",
+        sentinel,
+        ...(channel === "storage" ? {
+          method: "POST",
+          path: STORAGE_PATH,
+        } : {}),
+      });
+      expect(configured.ok).toBe(true); // 【追加】故障設定の受付を検証する関数・比較メソッド
+      const source = channel === "resend" ? [
+        'import {Resend} from "resend";',
+        'const client=new Resend("re_F12_FAKE_NEVER_SEND");',
+        'const result=await client.emails.send({from:"from@example.test",to:"to@example.test",subject:"fixture",html:"fixture"});',
+        `process.exit(result.error?.message===${JSON.stringify(sentinel)}?0:1);`, // 【追加】架空値だけをJSON化するメソッド
+      ] : channel === "storage" ? [
+        'import {createClient} from "@supabase/supabase-js";',
+        'const client=createClient("http://127.0.0.1:54321","F12_FAKE_INVALID_KEY");',
+        `const result=await client.storage.from(${JSON.stringify(CLUB_ATTACHMENT_BUCKET)}).upload(${JSON.stringify(STORAGE_PATH.split(`/${CLUB_ATTACHMENT_BUCKET}/`)[1])},new Uint8Array([1]),{contentType:"application/pdf"});`, // 【追加】固定bucket・所有pathだけをJSON化・抽出するメソッド
+        `process.exit(result.error?.message===${JSON.stringify(sentinel)}?0:1);`, // 【追加】架空値だけをJSON化するメソッド
+      ] : [
+        'const response=await fetch("https://api.line.me/v2/bot/message/push",{method:"POST",body:JSON.stringify({to:"F12_FAKE",messages:[]})});',
+        `process.exit((await response.json()).message===${JSON.stringify(sentinel)}?0:1);`, // 【追加】架空値だけをJSON化するメソッド
+      ];
+      const result = await probe(source.join("\n")); // 【追加】実Node・preloader・SDK経路の検証関数 / 起動コード連結メソッド
+      expect(result.code === 0 && result.output === "" && result.error === "").toBe(true); // 【追加】原文を表示しない受領証拠を検証する関数・比較メソッド
+      const first = await (await control({ action: "read" })).json(); // 【追加】私有件数を取得する関数・JSON取得メソッド
+      expect(first.faults[channel]).toBe(1); // 【追加】実注入件数を検証する関数・比較メソッド
+      await control({ action: "reset" }); // 【追加】通常のケース回収を実行する関数
+      const after = await (await control({ action: "read" })).json(); // 【追加】reset後の件数を取得する関数・JSON取得メソッド
+      expect(after.faults[channel]).toBe(1); // 【追加】注入証拠が消えないことを検証する関数・比較メソッド
+      expect((await control({ // 【追加】別runの値の拒否を検証する関数 / 私有制御関数
+        action: "configure",
+        channel,
+        mode: "server-error",
+        sentinel: "F12_FAKE_SENTINEL_" + "b".repeat(32) + "_" + channel, // 【追加】別runの架空値を作るメソッド
+      })).status).toBe(400); // 【追加】不正な故障原文を拒否する比較メソッド
+    },
+  );
+}

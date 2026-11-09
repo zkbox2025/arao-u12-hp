@@ -1,1524 +1,1865 @@
-diff --git a/e2e/event-month-copy.spec.ts b/e2e/event-month-copy.spec.ts
+diff --git a/e2e/action-boundaries.spec.ts b/e2e/action-boundaries.spec.ts
 new file mode 100644
-index 0000000..9f7a86a
+index 0000000000000000000000000000000000000000..4b233a56fe3eab91ef95a0d97681916b7dc38874
 --- /dev/null
-+++ b/e2e/event-month-copy.spec.ts
-@@ -0,0 +1,676 @@
-+// e2e/event-month-copy.spec.ts
-+// F12粒度17：実ブラウザーのUI受入。DB上限・自然並列・rollbackは既存flow試験を使う。
-+import type {
-+  ClubEvent,
-+} from "@prisma/client";
-+import type {
-+  Page,
-+  Request as BrowserRequest,
-+  Route,
-+} from "@playwright/test";
++++ b/e2e/action-boundaries.spec.ts
+@@ -0,0 +1,444 @@
++// e2e/action-boundaries.spec.ts
++// 正規UIの成功を対照に、同じbuildの実Actionを直接POSTして境界と副作用を照合する。
++
 +import {
-+  test, // 実Auth・所有クラブ・専用DB・独立contextを提供するcontent専用fixture
-+  expect, // content専用fixtureと同じPlaywrightの期待値検証API
-+} from "./content-fixtures";
-+import type {
-+  ContentScenario, // 独立contextでcontentを操作する契約型
++  randomUUID,
++} from "node:crypto";
++import {
++  test as contentTest, // 実Cookie・content・private Storageを所有するfixture
++  expect, // 同じPlaywrightの期待値検証関数
 +} from "./content-fixtures";
 +import {
-+  parseEventMonthCopyFormData as parseSaveForm, // 保存FormDataの構造と値を検証する関数
-+} from "../domain/club/event/event-month-copy-form";
++  test, // LINE設定と報告回収台帳を持つ実Cookie fixture
++  operationsControl, // 認証付き私有stubを制御する関数
++} from "./operations-fixtures";
++import {
++  invite, // 正規OWNERフォームから招待し受付を照合する関数
++  invitationLink, // 所有stubから宛先・クラブの一致するURLを取得する関数
++} from "./member-fixtures";
++import {
++  captureAction, // 正規UIのActionを実行前に捕捉する関数
++  editAction, // 実要求の業務項目・明示bindを厳密に差し替える関数
++  postAction, // 選択本人の実Cookieで同じHTTPS入口へ再送する関数
++  actionState, // 所有DB・Storage・配送の比較用hashを取得する関数
++  safeBoundary, // 例外原文を固定コードへ変換する関数
++} from "./action-requests";
++import {
++  createMvpFixturePdf, // 小さな架空PDFをメモリ上で生成する関数
++} from "../tests/mvp/local-services-fixture";
 +
-+/**
-+ * このケースが所有するイベントの初期値。日時はUTCの固定文字列で指定する。
-+ */
-+type Seed = { // イベント準備入力の型
-+  suffix: string; // ケース固有の題名へ追加する文字列型
-+  start: string; // UTC開始日時の文字列型
-+  end: string | null; // UTC終了日時または未設定の型
-+  status?: "DRAFT" | "PUBLISHED"; // 準備する公開状態の型
-+  practice?: boolean; // F11の固定保存列を使うか示す真偽値型
-+  meeting?: string; // UTC集合日時の文字列型
-+};
-+
-+/**
-+ * 既存content fixtureに、当該ケースのseedと生成行の読取だけを加えた契約。
-+ */
-+type BatchScenario = ContentScenario & { // content操作と一括作成確認をまとめる型
-+  month: string; // 表示対象月の文字列型
-+  seed: (input: Seed) => Promise<string>; // 所有イベントを準備しIDを返す関数型 / 非同期文字列型
-+  generated: () => Promise<ClubEvent[]>; // seedを除いた生成イベントを返す関数型 / DBイベント配列の非同期型
-+};
-+
-+/**
-+ * ガード済み所有クラブだけに準備し、題名prefixの行と当該月の新しい完了記録を回収する。
-+ * 認可fixtureの業務DB非更新契約は使わず、content fixtureの実ログインを再利用する。
-+ */
-+async function scenario( // ケース専用の準備・検証・回収を実行する関数
-+  content: ContentScenario, // 所有DBと実画面の契約型
-+  month: string, // 対象月の文字列型
-+  check: (batch: BatchScenario) => Promise<void>, // 所有シナリオを検証する関数型 / 非同期完了型
-+  timezone = "Asia/Tokyo",
-+): Promise<void> { // 非同期完了型
-+  test.setTimeout(90_000); // 準備・障害再送・回収を含めたケース期限を設定するメソッド
-+  const { database, data } = content;
-+  const clubId = data.clubs.a.id;
-+  const scope = {
-+    clubId,
-+    targetMonth: month,
-+    executedByMembershipId: data.actors.aOwner.membershipId,
-+  };
-+  const seeds: string[] = []; // このケースが登録したseed IDの文字列配列型
-+  let original: {
-+    timezone: string; // 文字列型
-+    updatedAt: Date // 日時型
-+  } | undefined; // 復元用のtimezone文字列・更新日時型 / 未設定の型
-+  const previous = new Set<string>(); // 既存完了記録のIDを保持する文字列集合のコンストラクター
-+  let prepared = false;
-+  try {
-+    original = await database.club.findFirstOrThrow({ // 所有クラブの復元値を取得するメソッド
-+      where: {
-+        id: clubId,
-+        slug: data.clubs.a.slug
-+      },
-+      select: {
-+        timezone: true,
-+        updatedAt: true
-+      },
-+    });
-+    for (const row of await database.clubEventBatchOperation.findMany({ // 所有月の既存記録を取得するメソッド
-+      where: scope,
-+      select: { id: true },
-+    })) {
-+      previous.add(row.id); // 既存記録を回収対象から除く集合メソッド
-+    }
-+    prepared = true;
-+    await database.club.update({ // 当該所有クラブの表示timezoneを準備するメソッド
-+      where: { id: clubId },
-+      data: { timezone },
-+    });
-+    await check({ // 所有する画面・DBだけを検証する関数
-+      ...content,
-+      month,
-+      /**
-+       * prefixと所有クラブ・実行所属を固定して、確認に必要な最小イベントを準備する。
-+       */
-+      async seed(input) { // イベント準備の非同期メソッド
-+        const row = await database.clubEvent.create({ // 所有するイベントを一件作るメソッド
-+          data: {
-+            clubId,
-+            createdByMembershipId: data.actors.aOwner.membershipId,
-+            title: content.title + input.suffix,
-+            content: input.practice ? null : "F12架空の複製本文",
-+            genre: input.practice ? "PRACTICE" : "PRACTICE_GAME",
-+            targetRoles: ["OWNER"],
-+            status: input.status ?? "PUBLISHED",
-+            startAt: new Date(input.start), // 固定UTC日時のコンストラクター
-+            endAt: input.end === null ? null : new Date(input.end), // 未設定または固定UTC日時のコンストラクター
-+            meetingAt: input.meeting ? new Date(input.meeting) : null, // 固定UTC集合日時のコンストラクター
-+          },
-+          select: { id: true },
-+        });
-+        seeds.push(row.id); // このケースが所有するseed IDを登録するメソッド
-+        return row.id;
-+      },
-+      /**
-+       * このケースのprefixを持ち、直接準備したID以外の保存行だけを照合する。
-+       */
-+      async generated() { // 画面操作が新規作成したイベントを取得するメソッド
-+        return database.clubEvent.findMany({ // 所有クラブ・prefix・seed除外で行を取得するメソッド
-+          where: {
-+            clubId,
-+            title: { startsWith: content.title },
-+            id: { notIn: seeds },
-+          },
-+          orderBy: { startAt: "asc" },
-+        });
-+      },
-+    });
-+  } catch {
-+    throw new Error("F12_BATCH_UI_FAILED"); // SQL・payload・秘密を含めない固定例外のコンストラクター
-+  } finally {
-+    if (prepared &&
-+      original) {
-+      try {
-+        const records = await database.clubEventBatchOperation.findMany({ // 同じ所有scopeの終了記録を取得するメソッド
-+          where: scope,
-+          select: { id: true },
-+        });
-+        const owned = records.filter( // 準備前から存在した記録を除くメソッド
-+          /**
-+           * このケース中に追加された、同クラブ・月・所属の記録だけを回収する。
-+           */
-+          (row) => !previous.has(row.id), // 所有記録の判定コールバック / 既存IDの照合メソッド
-+        );
-+        await database.$transaction([ // イベント・記録の回収とtimezone復元を一体で実行するメソッド
-+          database.clubEvent.deleteMany({ // 当該クラブとランダムprefixのイベントだけを回収するメソッド
-+            where: {
-+              clubId,
-+              title: { startsWith: content.title }
-+            },
-+          }),
-+          database.clubEventBatchOperation.deleteMany({ // このケースで追加した完了記録だけを回収するメソッド
-+            where: {
-+              ...scope,
-+              id: {
-+                in: owned.map( // 所有記録からIDを抽出するメソッド
-+                  /**
-+                   * 回収する記録のIDだけを取り出す。
-+                   */
-+                  (row) => row.id, // 記録IDを抽出するコールバック
-+                ),
-+              },
-+            },
-+          }),
-+          database.club.update({ // 元のtimezoneと更新日時を復元するメソッド
-+            where: { id: clubId },
-+            data: original,
-+          }),
-+        ]);
-+      } catch {
-+        throw new Error("F12_BATCH_UI_CLEANUP_FAILED"); // 回収失敗を原文なしで通知する例外のコンストラクター
-+      }
-+    }
-+  }
-+}
-+
-+/**
-+ * 保存列・実行者・完了記録を照合し、関連行や配送の作成を許さない。
-+ */
-+async function saved( // 生成結果と通知非実行を検証する関数
-+  batch: BatchScenario, // 一括作成確認用の契約型
-+  count: number, // 期待件数の数値型
-+  operation: "COPY_PREVIOUS_MONTH" | "CREATE_PRACTICE_BATCH", // 完了記録の操作種別型
-+): Promise<void> { // 非同期完了型
-+  const rows = await batch.generated(); // seedを除く生成イベントの取得関数
-+  expect(rows.length).toBe(count); // 期待値生成関数 / 生成件数の比較メソッド
-+  const ids = [];
-+  for (const row of rows) {
-+    ids.push(row.id); // 生成行の所有IDを登録するメソッド
-+    expect(row.status).toBe("DRAFT"); // 期待値生成関数 / 下書き固定の比較メソッド
-+    expect(row.createdByMembershipId === batch.data.actors.aOwner.membershipId).toBe(true); // 期待値生成関数 / 実行所属の一致検証メソッド
-+    expect(row.firstPublishedAt === null && // 期待値を生成する関数
-+      row.readRequiredAt === null).toBe(true); // 期待値生成関数 / 公開関連日時の未設定検証メソッド
-+    expect(row.updatedByMembershipId === batch.data.actors.aOwner.membershipId).toBe(true); // 【修正】期待値生成関数 / 更新者が今回の実行所属であることを検証するメソッド
-+  }
-+  const where = {
-+    clubId: batch.data.clubs.a.id,
-+    eventId: { in: ids }
-+  };
-+  expect(await batch.database.clubEventAttachment.count({ where })).toBe(0); // 期待値生成関数 / 所有添付件数の取得・比較メソッド
-+  expect(await batch.database.clubEventRead.count({ where })).toBe(0); // 期待値生成関数 / 所有既読件数の取得・比較メソッド
-+  expect(await batch.database.clubEventMemo.count({ where })).toBe(0); // 期待値生成関数 / 所有メモ件数の取得・比較メソッド
-+  expect(await batch.database.clubLineDelivery.count({ where })).toBe(0); // 期待値生成関数 / 所有LINE履歴件数の取得・比較メソッド
-+  const receipts = await batch.database.clubEventBatchOperation.findMany({ // 所有クラブ・対象月・実行所属で完了記録を読むメソッド
-+    where: {
-+      clubId: batch.data.clubs.a.id,
-+      targetMonth: batch.month,
-+      executedByMembershipId: batch.data.actors.aOwner.membershipId,
-+      operation,
-+    },
-+  });
-+  expect(receipts.length).toBe(1); // 期待値生成関数 / 完了記録の一件性検証メソッド
-+  expect(receipts[0].createdCount).toBe(count); // 期待値生成関数 / 記録と生成件数の一致検証メソッド
-+  const status = await batch.control({ action: "status" }) as { requests: number }; // 所有stubの制御関数 / 配送要求件数の応答型
-+  expect(status.requests).toBe(0); // 期待値生成関数 / 外部配送要求なしの検証メソッド
-+}
-+
-+/**
-+ * Actionのmultipartから業務FormDataだけを正規化し、前回state・署名付きbound値は比較・表示しない。
-+ */
-+async function businessPayload(request: BrowserRequest): Promise<string> { // 実ブラウザー要求型 / 業務入力を比較用文字列へ変換する非同期関数
-+  const bytes = request.postDataBuffer(); // 要求本文をメモリ内で取得するメソッド
-+  if (!bytes) {
-+    throw new Error("F12_BATCH_PAYLOAD_FAILED"); // 本文なしを固定コードで拒否する例外のコンストラクター
-+  }
-+  const form = await new Request("http://localhost/", { // multipart解析専用の標準Requestコンストラクター（通信しない）
-+    method: "POST",
-+    headers: { "content-type": request.headers()["content-type"] }, // 元要求の境界headerを取得するメソッド
-+    body: new Uint8Array(bytes), // 本文を独立したバイト配列へ複製するコンストラクター
-+  }).formData(); // multipartをフォーム値へ解析するメソッド
-+  const entries: string[][] = []; // 項目名と文字列値の比較用配列型
-+  for (const [name, value] of form.entries()) { // 符号化されたフォーム項目を列挙するメソッド
-+    const key = name.replace(/^_?\d+_/u, ""); // ReactのFormData接頭番号だけを除くメソッド
-+    if (key === "requestId" ||
-+      key === "previewFingerprint" ||
-+      key === "targetMonth" ||
-+      key === "selectedEventIds" ||
-+      key === "selectedDates" ||
-+      key === "title" ||
-+      key === "startTime" ||
-+      key === "endTime" ||
-+      key === "periodStart" ||
-+      key === "periodEnd" ||
-+      key === "weekdays" ||
-+      key === "location" ||
-+      key === "meetingTime" ||
-+      key === "meetingLocation" ||
-+      key === "targetRoles") {
-+      if (typeof value !== "string") {
-+        throw new Error("F12_BATCH_PAYLOAD_FAILED"); // File混入を固定コードで拒否する例外のコンストラクター
-+      }
-+      entries.push([key, value]); // 比較する業務値だけを登録するメソッド
-+    }
-+  }
-+  expect(entries.filter( // 期待値生成関数 / 操作ID項目だけを選ぶメソッド
-+    /**
-+     * 部分比較だけで再送一致と誤判定しないよう、操作IDの存在を必須にする。
-+     */
-+    ([key]) => key === "requestId", // 操作IDを判定するコールバック
-+  ).length).toBe(1); // 操作IDの一意な存在を検証するメソッド
-+  expect(entries.filter( // 期待値生成関数 / 照合値項目だけを選ぶメソッド
-+    /**
-+     * preview照合値も保存FormDataに含まれることを確認する。
-+     */
-+    ([key]) => key === "previewFingerprint", // 照合値を判定するコールバック
-+  ).length).toBe(1); // 照合値の一意な存在を検証するメソッド
-+  entries.sort( // フォーム項目の順序に依存しない比較にするメソッド
-+    /**
-+     * 項目名と値の順序を固定する。
-+     */
-+    (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)), // 並べ替えコールバック / 配列の直列化関数 / 文字列比較メソッド
-+  );
-+  return JSON.stringify(entries); // 比較値だけをメモリ上で直列化する関数
-+}
-+
-+/**
-+ * 実保存成功応答を確認した後、needsReloadのAction結果だけをブラウザーへ注入する。
-+ * Next内部の再検証失敗そのものは注入しない。Flight形状が変わったら固定エラーで失敗する。
-+ */
-+async function savedResponse( // 実保存後にneedsReload結果を注入する関数
-+  route: Route, // 要求捕捉の型
-+  batch: BatchScenario, // 所有する一括作成確認の契約型
-+  practice: boolean, // 定期練習の保存か示す真偽値型
-+): Promise<void> { // 非同期完了型
-+  const response = await route.fetch({ maxRedirects: 0 }); // 実Actionへ送信し、redirect先へ自動再送しないメソッド
-+  const redirect = response.headers()["x-action-redirect"]; // 実Actionの成功遷移headerを取得するメソッド
-+  const destination = batch.path("events", "", "a", true); // 所有クラブのパスを生成する関数
-+  expect(typeof redirect === "string" && // 期待値を生成する関数
-+    redirect.startsWith(destination + "?")).toBe(true); // 期待値生成関数 / 同クラブ一覧への成功遷移の照合・比較メソッド
-+  await saved(batch, 1, practice ? "CREATE_PRACTICE_BATCH" : "COPY_PREVIOUS_MONTH"); // 実保存結果と関連行非作成を検証する関数
-+  const match = /^0:(\{[^\n]*\})$/mu.exec(await response.text()); // Flightのルート行だけを取得する正規表現メソッド / 本文をメモリへ取得するメソッド
-+  if (!match) {
-+    throw new Error("F12_BATCH_FLIGHT_CHANGED"); // 未知のFlight形式を拒否する固定例外のコンストラクター
-+  }
-+  const root = JSON.parse(match[1]); // 実応答のルートとbuild IDをメモリ上で解析する関数
-+  if (!root ||
-+    typeof root.b !== "string") {
-+    throw new Error("F12_BATCH_FLIGHT_CHANGED"); // build ID未確認を拒否する固定例外のコンストラクター
-+  }
-+  const form = new FormData(); // 実送信した保存入力を復元するフォームコンストラクター
-+  const entries = JSON.parse(await businessPayload(route.request())) as string[][]; // 要求取得メソッド / 業務入力の正規化関数 / JSON解析関数 / 文字列配列型
-+  for (const [key, value] of entries) {
-+    form.append(key, value); // 実送信した業務項目を復元するメソッド
-+  }
-+  const parsed = parseSaveForm(form); // 実保存入力の構造と値を検証する関数
-+  if (!parsed.success) {
-+    throw new Error("F12_BATCH_PAYLOAD_FAILED"); // 不正な保存入力の注入を拒否する固定例外のコンストラクター
-+  }
-+  const state = {
-+    status: "success",
-+    outcome: "CREATED",
-+    values: parsed.data,
-+    requestId: parsed.data.requestId,
-+    fieldErrors: {},
-+    formError: null,
-+    data: {
-+      targetMonth: batch.month,
-+      createdCount: 1,
-+      needsReload: true
-+    },
-+  };
-+  await route.fulfill({ // 実保存済みの画面へ、再保存禁止を確認する限定応答を返すメソッド
-+    status: 200,
-+    headers: {
-+      "content-type": "text/x-component",
-+      "cache-control": "no-store"
-+    },
-+    body: "0:" + JSON.stringify({ // 値をメモリ上でJSONへ直列化する関数
-+      b: root.b,
-+      a: state,
-+      f: ""
-+    }) + "\n", // 同一buildのFlightルートを直列化する関数
-+  });
-+}
-+
-+/**
-+ * 実POSTだけを同一origin・pathに限定し、先読みや他ページの通信を捕捉しない。
-+ */
-+function actionPath(page: Page): (url: URL) => boolean { // 実画面型 / URL照合関数型 / URL型 / 真偽値型
-+  const current = new URL(page.url()); // 現在URLの取得メソッド / URL解析のコンストラクター
++for (const kind of ["events", "notice"] as const) { // content種別を限定するリテラル型アサーション
 +  /**
-+   * queryの内部RSC値は限定せず、originとpathを固定する。
++   * 正規作成・更新と、別Cookie・ID・添付・Origin・Action識別子の拒否を別々に照合する。
 +   */
-+  return (url) => url.origin === current.origin && // 同一originを確認するURL照合コールバック
-+    url.pathname === current.pathname; // URL照合のコールバック
-+}
-+
-+/**
-+ * 表示月と異なる一覧フィルターからも、前月全ジャンルのpreviewへ入る。
-+ */
-+async function openCopy(batch: BatchScenario): Promise<void> { // 所有シナリオ型 / preview入口を操作する非同期関数
-+  await batch.admin.goto(batch.path("events", `?month=${batch.month}&status=PUBLISHED&genre=PRACTICE`, "a", true)); // 管理一覧へ移動するメソッド / 所有パスの生成関数
-+  await batch.admin.getByRole("link", { // roleと名前で要素を選ぶメソッド
-+    name: "前月の予定を複製",
-+    exact: true
-+  }).click(); // 入口リンクを選ぶ・操作するメソッド
-+  await expect(batch.admin.getByRole("heading", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+    name: "前月予定の複製",
-+    exact: true
-+  })).toBeVisible(); // 期待値生成関数 / 見出しを選ぶ・表示を検証するメソッド
-+  expect(new URL(batch.admin.url()).searchParams.get("month")).toBe(batch.month); // 期待値生成関数 / URL取得・解析・月取得・比較メソッド
-+}
-+
-+/**
-+ * F10運用書M04・M05・M08・M09・M14：月末補正、両公開状態、除外、既存一致と明示選択。
-+ */
-+test("F10 表示月の入口・Tokyo月末補正・既存一致を確認し、明示選択だけDRAFT保存する", // 実ブラウザーケースを登録する関数
-+  /**
-+   * 公開状態・日時だけを変えた所有seedから、画面のpreviewと実保存列を確認する。
-+   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
-+      /**
-+       * 元行と一致先は変更せず、選んだ元行のコピーだけが増えることを検証する。
-+       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        const source = await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-clamp",
-+          start: "2028-01-30T15:00:00Z",
-+          end: "2028-01-30T16:00:00Z"
-+        }); // 公開済み月末予定の準備関数
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-clamp",
-+          start: "2028-02-28T15:00:00Z",
-+          end: "2028-02-28T16:00:00Z",
-+          status: "DRAFT"
-+        }); // コピー先と完全一致する下書きの準備関数
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-draft",
-+          start: "2028-01-10T00:00:00Z",
-+          end: null,
-+          status: "DRAFT"
-+        }); // 前月の下書き予定の準備関数
-+        await batch.seed({ // 前月下書きのコピー先と完全一致する公開予定を準備する関数
-+          suffix: "-draft",
-+          start: "2028-02-10T00:00:00Z",
-+          end: null,
-+          status: "PUBLISHED"
-+        });
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-invalid",
-+          start: "2028-01-15T00:00:00Z",
-+          end: "2028-01-14T00:00:00Z"
-+        }); // 期間逆転の除外予定を準備する関数
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-continuing",
-+          start: "2027-12-31T00:00:00Z",
-+          end: "2028-01-10T00:00:00Z"
-+        }); // 前々月開始の候補外予定の準備関数
-+        const before = await batch.database.clubEvent.findFirstOrThrow({ // 元の保存列と更新日時を取得するメソッド
-+          where: {
-+            clubId: batch.data.clubs.a.id,
-+            id: source
-+          },
-+        });
-+        await openCopy(batch); // 実一覧の表示月からpreviewへ入る関数
-+        const page = batch.admin;
-+        await expect(page.getByText("既存予定と完全一致（初期未選択・明示選択可能）", { exact: true })).toHaveCount(2); // 期待値生成関数 / 一致説明を選ぶ・件数を検証するメソッド
-+        const clamp = page.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
-+          name: batch.title + "-clamp",
-+          exact: true
-+        }); // 題名に対応する候補checkboxを選ぶメソッド
-+        await expect(clamp).not.toBeChecked(); // 期待値生成関数 / 一致候補の初期未選択を検証するメソッド
-+        await expect(page.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+          name: batch.title + "-draft",
-+          exact: true
-+        })).not.toBeChecked(); // 期待値生成関数 / 前月下書きと公開予定の一致による初期未選択を検証するメソッド
-+        await expect(page.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+          name: batch.title + "-invalid",
-+          exact: true
-+        })).toBeDisabled(); // 期待値生成関数 / 逆転候補の選択不可を検証するメソッド
-+        await expect(page.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+          name: batch.title + "-continuing",
-+          exact: true
-+        })).toHaveCount(0); // 期待値生成関数 / 開始月が異なる予定の除外を検証するメソッド
-+        const details = clamp.locator(".."); // checkboxの候補行を取得するメソッド
-+        await expect(details).toContainText("2028/02/29"); // 期待値生成関数 / 閏年の月末表示を検証するメソッド
-+        await expect(details).toContainText("GMT+09:00"); // 期待値生成関数 / 現地offset表示を検証するメソッド
-+        await expect(details).toContainText("月末補正: 開始・終了"); // 期待値生成関数 / 補正対象の表示を検証するメソッド
-+        await page.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
-+          name: batch.title + "-draft",
-+          exact: true
-+        }).uncheck(); // 保存しない候補を選ぶ・解除するメソッド
-+        await clamp.focus(); // 正規候補へキーボードfocusを移すメソッド
-+        await page.keyboard.press("Space"); // キーボードで既存一致候補を明示選択するメソッド
-+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / preview時点のDB非作成を検証するメソッド / 生成行の取得関数
-+        await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+          name: "選択した予定を下書きで複製",
-+          exact: true
-+        }).click(); // 正規の保存ボタンを選ぶ・操作するメソッド
-+        await expect(page).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=event-month-copied&toastId=[0-9a-f-]+$/u); // 期待値生成関数 / 固定管理一覧遷移を検証するメソッド
-+        await expect(page.getByText("前月の予定を下書きとして複製しました。", { exact: true })).toBeVisible(); // 期待値生成関数 / 固定toastを選ぶ・表示を検証するメソッド
-+        await saved(batch, 1, "COPY_PREVIOUS_MONTH"); // 生成行・完了記録・関連行非作成の検証関数
-+        const [created] = await batch.generated(); // 画面で生成した一件を取得する関数
-+        expect(created.startAt.toISOString()).toBe("2028-02-28T15:00:00.000Z"); // 期待値生成関数 / UTC日時の変換・比較メソッド
-+        expect(created.endAt?.toISOString()).toBe("2028-02-28T16:00:00.000Z"); // 期待値生成関数 / UTC終了日時の変換・比較メソッド
-+        expect(created.genre).toBe(before.genre); // 期待値生成関数 / 一覧フィルターと異なる元ジャンルの保持を検証するメソッド
-+        expect(created.content === before.content).toBe(true); // 期待値生成関数 / 元本文の複製一致を原文非出力で検証するメソッド
-+        const after = await batch.database.clubEvent.findFirstOrThrow({ // 保存後の元行を取得するメソッド
-+          where: {
-+            clubId: batch.data.clubs.a.id,
-+            id: source
-+          },
-+        });
-+        expect(JSON.stringify(after) === JSON.stringify(before)).toBe(true); // 期待値生成関数 / 元行の直列化関数 / 元行非更新の比較メソッド
-+      });
-+  });
-+for (const item of [
-+  {
-+    month: "2026-03",
-+    start: "2026-02-08T07:30:00Z",
-+    end: "2026-02-08T08:30:00Z"
-+  },
-+  {
-+    month: "2026-11",
-+    start: "2026-10-01T05:30:00Z",
-+    end: "2026-10-01T06:30:00Z"
-+  },
-+]) {
-+  /**
-+   * F10運用書M07：現地日付を次月へ移した際のDST gapとfoldを選択不可にする。
-+   */
-+  test(`F10 ${item.month} NYのgap・fold候補は理由付きで除外され保存できない`, // DST対象ごとにケースを登録する関数
++  contentTest(`${kind}の実POSTはMEMBER・他クラブ・関連ID・Originの境界を維持する`, // E2E登録関数
 +    /**
-+     * sourceでは有効な日時を、コピー先で曖昧または存在しない日時へ移す。
++     * 正規画面が生成したbindとnonceを使い、拒否前後のDB・Storage・送信記録を比較する。
 +     */
-+    async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+      await scenario(content, item.month, // ケース専用の準備・回収関数
++    async ({ content }) => { // 所有contentの検証コールバック
++      contentTest.setTimeout(90000); // 複数の正規HTTP操作の期限を設定するメソッド
++      await safeBoundary( // 秘密を含めない例外境界関数
 +        /**
-+         * ブラウザーに選択不可と理由を表示し、保存記録を作らないことを確認する。
++         * 二クラブの資源を区別し、正規UIが成功する同一入力で境界を検証する。
 +         */
-+        async (batch) => { // 所有シナリオの検証コールバック
-+          await batch.seed({ // 所有イベントを準備する関数
-+            suffix: "-dst",
-+            start: item.start,
-+            end: item.end
-+          }); // DST境界へ移す元予定の準備関数
-+          await openCopy(batch); // 実一覧からpreviewへ入る関数
-+          await expect(batch.admin.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: batch.title + "-dst",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / DST候補の選択不可を検証するメソッド
-+          await expect(batch.admin.getByText("除外: 存在しない、または曖昧な現地時刻のため変換できません。", { exact: true })).toBeVisible(); // 期待値生成関数 / 除外理由を選ぶ・表示を検証するメソッド
-+          await expect(batch.admin.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書きで複製",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / 全件除外時の保存不可を検証するメソッド
-+          expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / DB非作成の検証メソッド
-+        }, "America/New_York");
-+    });
-+}
-+
-+/**
-+ * F10運用書M11・M12：連続submitと実保存後の応答喪失を再現し、同じ操作を再確認する。
-+ */
-+test("F10 連打を抑止し、応答喪失後も同payload・requestIdだけを再送して増やさない", // 実通信障害ケースを登録する関数
-+  /**
-+   * 初回ActionはDBまで完了させてからブラウザー側の応答だけを切断する。
-+   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
-+      /**
-+       * pending中の再送を止め、結果不明時の選択・ID固定とreplayを確認する。
-+       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-retry",
-+          start: "2028-01-10T00:00:00Z",
-+          end: null
-+        }); // 一件だけ複製する元予定の準備関数
-+        await openCopy(batch); // 実一覧からpreviewへ入る関数
-+        const page = batch.admin;
-+        const match = actionPath(page); // 同一origin・pathだけを捕捉する関数
-+        let calls = 0;
-+        let first = "";
-+        let release!: () => void; // 初回要求を解放する関数型
-+        const gate = new Promise<void>( // 初回要求を保留するPromiseコンストラクター / 完了型
-+          /**
-+           * pendingの検証後にだけ通信を進める。
-+           */
-+          (resolve) => { release = resolve; }, // 解放関数を保持するコールバック
-+        );
-+        await page.route(match, // 同じ保存Actionだけを捕捉するメソッド
-+          /**
-+           * 実DBへ初回送信し、その結果を捨てる。再送要求は元のActionへ通す。
-+           */
-+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
-+            try {
-+              if (route.request().method() !== "POST") { // 要求の取得・HTTP methodの照合メソッド
-+                await route.continue(); // 対象外要求をそのまま送るメソッド
-+                return;
-+              }
-+              calls += 1;
-+              const input = await businessPayload(route.request()); // 要求取得メソッド / 業務payloadの正規化関数
-+              if (calls === 1) {
-+                first = input;
-+                await gate;
-+                const response = await route.fetch({ maxRedirects: 0 }); // 実ActionをDB保存まで実行するメソッド
-+                expect(Boolean(response.headers()["x-action-redirect"])).toBe(true); // 期待値生成関数 / 応答header取得メソッド / 真偽変換関数 / 成功遷移確認メソッド
-+                await saved(batch, 1, "COPY_PREVIOUS_MONTH"); // 切断前の実保存完了を検証する関数
-+                await route.abort("failed"); // 保存済み応答だけを喪失させるメソッド
-+              } else {
-+                expect(input === first).toBe(true); // 期待値生成関数 / requestId・選択・照合値を含む同一payloadの比較メソッド
-+                await route.continue(); // 同じ操作を実Actionへ再送するメソッド
-+              }
-+            } catch {
-+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
++        async () => { // 操作・比較のコールバック
++          const { admin, member, foreignAdmin, database, data } = content;
++          const foreignId = randomUUID(); // 所有するB親IDを生成する関数
++          const attachmentId = randomUUID(); // 所有するB添付IDを生成する関数
++          const foreignPath = `clubs/${data.clubs.b.id}/${kind === "events" ? "events" : "notices"}/${foreignId}/${attachmentId}.pdf`;
++          try {
++            const parent = {
++              id: foreignId,
++              clubId: data.clubs.b.id,
++              title: "F12境界B",
++              content: "F12架空本文",
++              targetRoles: ["MEMBER" as const], // 対象roleのリテラル型アサーション
++              createdByMembershipId: data.actors.bOwner.membershipId,
++            };
++            const attachment = {
++              id: attachmentId,
++              clubId: data.clubs.b.id,
++              fileName: "foreign.pdf",
++              storagePath: foreignPath,
++              mimeType: "application/pdf",
++              sizeBytes: 100,
++            };
++            if (kind === "events") {
++              await database.clubEvent.create({ // 所有Bの試験用親行を作成するメソッド
++                data: {
++                  ...parent,
++                  startAt: new Date("2026-06-10T00:00:00Z"), // 試験日時のコンストラクター
++                },
++              });
++              await database.clubEventAttachment.create({ // Bの関連IDを準備するメソッド
++                data: {
++                  ...attachment,
++                  eventId: foreignId
++                },
++              });
++            } else {
++              await database.clubNotice.create({ data: parent }); // 所有Bの試験用親行を作成するメソッド
++              await database.clubNoticeAttachment.create({ // Bの関連IDを準備するメソッド
++                data: {
++                  ...attachment,
++                  noticeId: foreignId
++                },
++              });
 +            }
-+          });
-+        try {
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書きで複製",
-+            exact: true
-+          }).evaluate( // 保存ボタンを選ぶ・実DOMで操作するメソッド
-+            /**
-+             * 同一イベントターンに2回submitし、同期refでの連打防止を確認する。
-+             */
-+            (button: HTMLButtonElement) => { // ブラウザー内のコールバック / ボタン要素型
-+              button.form!.requestSubmit(button); // 実フォームのsubmitイベントを送るメソッド
-+              button.form!.requestSubmit(button); // 同じイベントターンでもう一度submitするメソッド
++            await content.prepare(kind); // Aの正規新規フォームを準備する関数
++            await admin.locator('input[type="file"]').setInputFiles({ // 正規PDF入力を選択・設定するメソッド
++              name: "owned.pdf",
++              mimeType: "application/pdf",
++              buffer: Buffer.from(createMvpFixturePdf()), // PDFのバイト列変換関数 / 架空PDF生成関数
 +            });
-+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "確認・処理中…",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / pendingボタンの選択・無効化検証メソッド
-+        } finally {
-+          release(); // 検証失敗時も保留要求を解放する関数
-+        }
-+        try {
-+          await expect(page.getByText("新しい操作を始める前に、同じ入力で保存結果を確認してください。", { exact: true })).toBeVisible(); // 期待値生成関数 / 結果不明時の案内を選ぶ・表示を検証するメソッド
-+          await expect(page.getByRole("link", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "選択を変更・previewを再取得（新しい操作）",
-+            exact: true
-+          })).toHaveCount(0); // 期待値生成関数 / 新操作リンクを選ぶ・非表示を検証するメソッド
-+          await expect(page.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: batch.title + "-retry",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / 送信済み選択の固定を検証するメソッド
-+          expect(calls).toBe(1); // 期待値生成関数 / 連打時の要求一件性を検証するメソッド
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "同じ選択・操作IDで再送して確認",
-+            exact: true
-+          }).click(); // 同じ操作の再確認ボタンを選ぶ・操作するメソッド
-+          await expect(page).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=event-month-copied&toastId=[0-9a-f-]+$/u); // 期待値生成関数 / replay成功後の固定遷移を検証するメソッド
-+          expect(calls).toBe(2); // 期待値生成関数 / 初回と明示再確認だけの要求件数を検証するメソッド
-+          await saved(batch, 1, "COPY_PREVIOUS_MONTH"); // replayで生成行と完了記録が増えないことを検証する関数
-+        } finally {
-+          await page.unroute(match); // 所有する要求捕捉だけを解除するメソッド
-+        }
-+      });
-+  });
-+
-+/**
-+ * F10運用書M13：実保存後にneedsReload結果を注入し、再保存せず一覧へ戻すUIを確認する。
-+ */
-+test("F10 保存済みneedsReload応答では保存ボタンを消し、月別一覧の再読込だけを案内する", // 保存済みUIのケースを登録する関数
-+  /**
-+   * サーバー再検証失敗の内部注入ではなく、実保存後のClient境界を検証する。
-+   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
-+      /**
-+       * 成功データを持つ応答を受け取っても保存を再実行しないことを確認する。
-+       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-saved",
-+          start: "2028-01-10T00:00:00Z",
-+          end: null
-+        }); // 複製する一件の元予定の準備関数
-+        await openCopy(batch); // 実一覧からpreviewへ入る関数
-+        const page = batch.admin;
-+        const match = actionPath(page); // 所有Actionのpath照合関数
-+        let calls = 0;
-+        await page.route(match, // 所有保存要求だけを捕捉するメソッド
-+          /**
-+           * 保存要求以外はそのまま通し、実保存成功後にだけneedsReload結果を注入する。
-+           */
-+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
-+            try {
-+              if (route.request().method() !== "POST") { // 要求取得・HTTP method照合メソッド
-+                await route.continue(); // 保存以外の要求を通すメソッド
-+                return;
-+              }
-+              calls += 1;
-+              await savedResponse(route, batch, false); // 実保存とneedsReload応答を接続する関数
-+            } catch {
-+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
++            await content.save(); // 正規UIからDB・Storageへ保存する関数
++            const id = await content.identify(kind); // 正規保存の親IDを照合する関数
++            await member.goto(content.path(kind)); // A MEMBERのCookieを持つ画面を開くメソッド / 所有URL生成関数
++            await foreignAdmin.goto(content.path(kind, "", "b")); // B OWNERの画面を開くメソッド / 所有URL生成関数
++            await admin.goto(content.path(kind, `/${id}/edit`, "a", true)); // 正規更新画面を開くメソッド / 所有URL生成関数
++            await admin.locator('input[name="title"]').fill(content.title + "更新"); // 正規の変更値を入力するメソッド
++            const action = await captureAction(admin, // 実UIのPOSTを捕捉する関数
++              /**
++               * 正規保存ボタンだけを操作し、Action識別子をハードコードしない。
++               */
++              () => admin.getByRole("button", { // 入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
++                name: "保存する",
++                exact: true
++              }).click(), // ボタン選択・操作のコールバック
++            );
++            const clubs = [data.clubs.a.id, data.clubs.b.id];
++            const before = await actionState(database, clubs, await content.control({ action: "read" })); // 所有範囲比較関数 / 私有stub参照関数
++            for (const actor of [member, foreignAdmin]) {
++              const result = await postAction(actor, action); // 別Cookieの直接POST関数
++              expect(result.redirected).toBe(false); // 成功遷移がないことを検証する関数・メソッド
++              expect(await actionState(database, clubs, await content.control({ action: "read" }))).toBe(before); // 非更新比較関数 / 私有参照関数 / 期待値・比較メソッド
 +            }
-+          });
-+        try {
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書きで複製",
-+            exact: true
-+          }).click(); // 正規保存ボタンを選ぶ・操作するメソッド
-+          await expect(page.getByRole("status").filter({ hasText: "保存済みです（1件）" })).toBeVisible(); // 期待値生成関数 / 保存済みstatusを選ぶ・絞る・表示検証するメソッド
-+          const copyForm = page.locator("form").filter({ // 【修正】フォームを選ぶメソッド / 複製候補を持つフォームだけへ絞るメソッド
-+            has: page.getByRole("group", { // 【修正】複製候補のfieldsetを選ぶメソッド
-+              name: "複製する予定",
-+              exact: true,
-+            }),
-+          });
-+          await expect(copyForm).toHaveCount(1); // 【追加】期待値生成関数 / 検証対象フォームの一件性を確認するメソッド
-+          await expect(copyForm.locator('button[type="submit"]')).toHaveCount(0); // 【修正】期待値生成関数 / 複製フォーム内の保存ボタンだけを選ぶ・非表示検証するメソッド
-+          await page.getByRole("link", { // roleと名前で要素を選ぶメソッド
-+            name: "月別管理ページを再読み込み",
-+            exact: true
-+          }).click(); // 再保存を伴わない一覧リンクを選ぶ・操作するメソッド
-+          await expect(page).toHaveURL(batch.session.appOrigin + batch.path("events", "?month=2028-02&status=ALL", "a", true)); // 期待値生成関数 / 所有パス生成関数 / 対象月一覧への遷移検証メソッド
-+          expect(calls).toBe(1); // 期待値生成関数 / 一覧へ戻っても保存要求が増えないことを検証するメソッド
-+          await saved(batch, 1, "COPY_PREVIOUS_MONTH"); // 保存件数・完了記録の非増加を検証する関数
-+        } finally {
-+          await page.unroute(match); // 当該要求捕捉だけを解除するメソッド
-+        }
-+      });
-+  });
-diff --git a/e2e/event-practice-batch.spec.ts b/e2e/event-practice-batch.spec.ts
-new file mode 100644
-index 0000000..3724122
---- /dev/null
-+++ b/e2e/event-practice-batch.spec.ts
-@@ -0,0 +1,836 @@
-+// e2e/event-practice-batch.spec.ts
-+// F12粒度17：実ブラウザーのUI受入。DB上限・自然並列・rollbackは既存flow試験を使う。
-+import type {
-+  ClubEvent,
-+} from "@prisma/client";
-+import type {
-+  Page,
-+  Request as BrowserRequest,
-+  Route,
-+} from "@playwright/test";
-+import {
-+  test, // 実Auth・所有クラブ・専用DB・独立contextを提供するcontent専用fixture
-+  expect, // content専用fixtureと同じPlaywrightの期待値検証API
-+} from "./content-fixtures";
-+import type {
-+  ContentScenario, // 独立contextでcontentを操作する契約型
-+} from "./content-fixtures";
-+import {
-+  parseEventPracticeBatchFormData as parseSaveForm, // 保存FormDataの構造と値を検証する関数
-+} from "../domain/club/event/event-practice-batch-form";
-+
-+/**
-+ * このケースが所有するイベントの初期値。日時はUTCの固定文字列で指定する。
-+ */
-+type Seed = { // イベント準備入力の型
-+  suffix: string; // ケース固有の題名へ追加する文字列型
-+  start: string; // UTC開始日時の文字列型
-+  end: string | null; // UTC終了日時または未設定の型
-+  status?: "DRAFT" | "PUBLISHED"; // 準備する公開状態の型
-+  practice?: boolean; // F11の固定保存列を使うか示す真偽値型
-+  meeting?: string; // UTC集合日時の文字列型
-+};
-+
-+/**
-+ * 既存content fixtureに、当該ケースのseedと生成行の読取だけを加えた契約。
-+ */
-+type BatchScenario = ContentScenario & { // content操作と一括作成確認をまとめる型
-+  month: string; // 表示対象月の文字列型
-+  seed: (input: Seed) => Promise<string>; // 所有イベントを準備しIDを返す関数型 / 非同期文字列型
-+  generated: () => Promise<ClubEvent[]>; // seedを除いた生成イベントを返す関数型 / DBイベント配列の非同期型
-+};
-+
-+/**
-+ * ガード済み所有クラブだけに準備し、題名prefixの行と当該月の新しい完了記録を回収する。
-+ * 認可fixtureの業務DB非更新契約は使わず、content fixtureの実ログインを再利用する。
-+ */
-+async function scenario( // ケース専用の準備・検証・回収を実行する関数
-+  content: ContentScenario, // 所有DBと実画面の契約型
-+  month: string, // 対象月の文字列型
-+  check: (batch: BatchScenario) => Promise<void>, // 所有シナリオを検証する関数型 / 非同期完了型
-+  timezone = "Asia/Tokyo",
-+): Promise<void> { // 非同期完了型
-+  test.setTimeout(90_000); // 準備・障害再送・回収を含めたケース期限を設定するメソッド
-+  const { database, data } = content;
-+  const clubId = data.clubs.a.id;
-+  const scope = {
-+    clubId,
-+    targetMonth: month,
-+    executedByMembershipId: data.actors.aOwner.membershipId,
-+  };
-+  const seeds: string[] = []; // このケースが登録したseed IDの文字列配列型
-+  let original: {
-+    timezone: string; // 文字列型
-+    updatedAt: Date // 日時型
-+  } | undefined; // 復元用のtimezone文字列・更新日時型 / 未設定の型
-+  const previous = new Set<string>(); // 既存完了記録のIDを保持する文字列集合のコンストラクター
-+  let prepared = false;
-+  try {
-+    original = await database.club.findFirstOrThrow({ // 所有クラブの復元値を取得するメソッド
-+      where: {
-+        id: clubId,
-+        slug: data.clubs.a.slug
-+      },
-+      select: {
-+        timezone: true,
-+        updatedAt: true
-+      },
-+    });
-+    for (const row of await database.clubEventBatchOperation.findMany({ // 所有月の既存記録を取得するメソッド
-+      where: scope,
-+      select: { id: true },
-+    })) {
-+      previous.add(row.id); // 既存記録を回収対象から除く集合メソッド
-+    }
-+    prepared = true;
-+    await database.club.update({ // 当該所有クラブの表示timezoneを準備するメソッド
-+      where: { id: clubId },
-+      data: { timezone },
-+    });
-+    await check({ // 所有する画面・DBだけを検証する関数
-+      ...content,
-+      month,
-+      /**
-+       * prefixと所有クラブ・実行所属を固定して、確認に必要な最小イベントを準備する。
-+       */
-+      async seed(input) { // イベント準備の非同期メソッド
-+        const row = await database.clubEvent.create({ // 所有するイベントを一件作るメソッド
-+          data: {
-+            clubId,
-+            createdByMembershipId: data.actors.aOwner.membershipId,
-+            title: content.title + input.suffix,
-+            content: input.practice ? null : "F12架空の複製本文",
-+            genre: input.practice ? "PRACTICE" : "PRACTICE_GAME",
-+            targetRoles: ["OWNER"],
-+            status: input.status ?? "PUBLISHED",
-+            startAt: new Date(input.start), // 固定UTC日時のコンストラクター
-+            endAt: input.end === null ? null : new Date(input.end), // 未設定または固定UTC日時のコンストラクター
-+            meetingAt: input.meeting ? new Date(input.meeting) : null, // 固定UTC集合日時のコンストラクター
-+          },
-+          select: { id: true },
-+        });
-+        seeds.push(row.id); // このケースが所有するseed IDを登録するメソッド
-+        return row.id;
-+      },
-+      /**
-+       * このケースのprefixを持ち、直接準備したID以外の保存行だけを照合する。
-+       */
-+      async generated() { // 画面操作が新規作成したイベントを取得するメソッド
-+        return database.clubEvent.findMany({ // 所有クラブ・prefix・seed除外で行を取得するメソッド
-+          where: {
-+            clubId,
-+            title: { startsWith: content.title },
-+            id: { notIn: seeds },
-+          },
-+          orderBy: { startAt: "asc" },
-+        });
-+      },
-+    });
-+  } catch {
-+    throw new Error("F12_BATCH_UI_FAILED"); // SQL・payload・秘密を含めない固定例外のコンストラクター
-+  } finally {
-+    if (prepared &&
-+      original) {
-+      try {
-+        const records = await database.clubEventBatchOperation.findMany({ // 同じ所有scopeの終了記録を取得するメソッド
-+          where: scope,
-+          select: { id: true },
-+        });
-+        const owned = records.filter( // 準備前から存在した記録を除くメソッド
-+          /**
-+           * このケース中に追加された、同クラブ・月・所属の記録だけを回収する。
-+           */
-+          (row) => !previous.has(row.id), // 所有記録の判定コールバック / 既存IDの照合メソッド
-+        );
-+        await database.$transaction([ // イベント・記録の回収とtimezone復元を一体で実行するメソッド
-+          database.clubEvent.deleteMany({ // 当該クラブとランダムprefixのイベントだけを回収するメソッド
-+            where: {
-+              clubId,
-+              title: { startsWith: content.title }
-+            },
-+          }),
-+          database.clubEventBatchOperation.deleteMany({ // このケースで追加した完了記録だけを回収するメソッド
-+            where: {
-+              ...scope,
-+              id: {
-+                in: owned.map( // 所有記録からIDを抽出するメソッド
-+                  /**
-+                   * 回収する記録のIDだけを取り出す。
-+                   */
-+                  (row) => row.id, // 記録IDを抽出するコールバック
-+                ),
-+              },
-+            },
-+          }),
-+          database.club.update({ // 元のtimezoneと更新日時を復元するメソッド
-+            where: { id: clubId },
-+            data: original,
-+          }),
-+        ]);
-+      } catch {
-+        throw new Error("F12_BATCH_UI_CLEANUP_FAILED"); // 回収失敗を原文なしで通知する例外のコンストラクター
-+      }
-+    }
-+  }
-+}
-+
-+/**
-+ * 保存列・実行者・完了記録を照合し、関連行や配送の作成を許さない。
-+ */
-+async function saved( // 生成結果と通知非実行を検証する関数
-+  batch: BatchScenario, // 一括作成確認用の契約型
-+  count: number, // 期待件数の数値型
-+  operation: "COPY_PREVIOUS_MONTH" | "CREATE_PRACTICE_BATCH", // 完了記録の操作種別型
-+): Promise<void> { // 非同期完了型
-+  const rows = await batch.generated(); // seedを除く生成イベントの取得関数
-+  expect(rows.length).toBe(count); // 期待値生成関数 / 生成件数の比較メソッド
-+  const ids = [];
-+  for (const row of rows) {
-+    ids.push(row.id); // 生成行の所有IDを登録するメソッド
-+    expect(row.status).toBe("DRAFT"); // 期待値生成関数 / 下書き固定の比較メソッド
-+    expect(row.createdByMembershipId === batch.data.actors.aOwner.membershipId).toBe(true); // 期待値生成関数 / 実行所属の一致検証メソッド
-+    expect(row.firstPublishedAt === null && // 期待値を生成する関数
-+      row.readRequiredAt === null).toBe(true); // 期待値生成関数 / 公開関連日時の未設定検証メソッド
-+    expect(row.updatedByMembershipId === batch.data.actors.aOwner.membershipId).toBe(true); // 【修正】期待値生成関数 / 更新者が今回の実行所属であることを検証するメソッド
-+  }
-+  const where = {
-+    clubId: batch.data.clubs.a.id,
-+    eventId: { in: ids }
-+  };
-+  expect(await batch.database.clubEventAttachment.count({ where })).toBe(0); // 期待値生成関数 / 所有添付件数の取得・比較メソッド
-+  expect(await batch.database.clubEventRead.count({ where })).toBe(0); // 期待値生成関数 / 所有既読件数の取得・比較メソッド
-+  expect(await batch.database.clubEventMemo.count({ where })).toBe(0); // 期待値生成関数 / 所有メモ件数の取得・比較メソッド
-+  expect(await batch.database.clubLineDelivery.count({ where })).toBe(0); // 期待値生成関数 / 所有LINE履歴件数の取得・比較メソッド
-+  const receipts = await batch.database.clubEventBatchOperation.findMany({ // 所有クラブ・対象月・実行所属で完了記録を読むメソッド
-+    where: {
-+      clubId: batch.data.clubs.a.id,
-+      targetMonth: batch.month,
-+      executedByMembershipId: batch.data.actors.aOwner.membershipId,
-+      operation,
-+    },
-+  });
-+  expect(receipts.length).toBe(1); // 期待値生成関数 / 完了記録の一件性検証メソッド
-+  expect(receipts[0].createdCount).toBe(count); // 期待値生成関数 / 記録と生成件数の一致検証メソッド
-+  const status = await batch.control({ action: "status" }) as { requests: number }; // 所有stubの制御関数 / 配送要求件数の応答型
-+  expect(status.requests).toBe(0); // 期待値生成関数 / 外部配送要求なしの検証メソッド
-+}
-+
-+/**
-+ * Actionのmultipartから業務FormDataだけを正規化し、前回state・署名付きbound値は比較・表示しない。
-+ */
-+async function businessPayload(request: BrowserRequest): Promise<string> { // 実ブラウザー要求型 / 業務入力を比較用文字列へ変換する非同期関数
-+  const bytes = request.postDataBuffer(); // 要求本文をメモリ内で取得するメソッド
-+  if (!bytes) {
-+    throw new Error("F12_BATCH_PAYLOAD_FAILED"); // 本文なしを固定コードで拒否する例外のコンストラクター
-+  }
-+  const form = await new Request("http://localhost/", { // multipart解析専用の標準Requestコンストラクター（通信しない）
-+    method: "POST",
-+    headers: { "content-type": request.headers()["content-type"] }, // 元要求の境界headerを取得するメソッド
-+    body: new Uint8Array(bytes), // 本文を独立したバイト配列へ複製するコンストラクター
-+  }).formData(); // multipartをフォーム値へ解析するメソッド
-+  const entries: string[][] = []; // 項目名と文字列値の比較用配列型
-+  for (const [name, value] of form.entries()) { // 符号化されたフォーム項目を列挙するメソッド
-+    const key = name.replace(/^_?\d+_/u, ""); // ReactのFormData接頭番号だけを除くメソッド
-+    if (key === "requestId" ||
-+      key === "previewFingerprint" ||
-+      key === "targetMonth" ||
-+      key === "selectedEventIds" ||
-+      key === "selectedDates" ||
-+      key === "title" ||
-+      key === "startTime" ||
-+      key === "endTime" ||
-+      key === "periodStart" ||
-+      key === "periodEnd" ||
-+      key === "weekdays" ||
-+      key === "location" ||
-+      key === "meetingTime" ||
-+      key === "meetingLocation" ||
-+      key === "targetRoles") {
-+      if (typeof value !== "string") {
-+        throw new Error("F12_BATCH_PAYLOAD_FAILED"); // File混入を固定コードで拒否する例外のコンストラクター
-+      }
-+      entries.push([key, value]); // 比較する業務値だけを登録するメソッド
-+    }
-+  }
-+  expect(entries.filter( // 期待値生成関数 / 操作ID項目だけを選ぶメソッド
-+    /**
-+     * 部分比較だけで再送一致と誤判定しないよう、操作IDの存在を必須にする。
-+     */
-+    ([key]) => key === "requestId", // 操作IDを判定するコールバック
-+  ).length).toBe(1); // 操作IDの一意な存在を検証するメソッド
-+  expect(entries.filter( // 期待値生成関数 / 照合値項目だけを選ぶメソッド
-+    /**
-+     * preview照合値も保存FormDataに含まれることを確認する。
-+     */
-+    ([key]) => key === "previewFingerprint", // 照合値を判定するコールバック
-+  ).length).toBe(1); // 照合値の一意な存在を検証するメソッド
-+  entries.sort( // フォーム項目の順序に依存しない比較にするメソッド
-+    /**
-+     * 項目名と値の順序を固定する。
-+     */
-+    (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)), // 並べ替えコールバック / 配列の直列化関数 / 文字列比較メソッド
-+  );
-+  return JSON.stringify(entries); // 比較値だけをメモリ上で直列化する関数
-+}
-+
-+/**
-+ * 実保存成功応答を確認した後、needsReloadのAction結果だけをブラウザーへ注入する。
-+ * Next内部の再検証失敗そのものは注入しない。Flight形状が変わったら固定エラーで失敗する。
-+ */
-+async function savedResponse( // 実保存後にneedsReload結果を注入する関数
-+  route: Route, // 要求捕捉の型
-+  batch: BatchScenario, // 所有する一括作成確認の契約型
-+  practice: boolean, // 定期練習の保存か示す真偽値型
-+): Promise<void> { // 非同期完了型
-+  const response = await route.fetch({ maxRedirects: 0 }); // 実Actionへ送信し、redirect先へ自動再送しないメソッド
-+  const redirect = response.headers()["x-action-redirect"]; // 実Actionの成功遷移headerを取得するメソッド
-+  const destination = batch.path("events", "", "a", true); // 所有クラブのパスを生成する関数
-+  expect(typeof redirect === "string" && // 期待値を生成する関数
-+    redirect.startsWith(destination + "?")).toBe(true); // 期待値生成関数 / 同クラブ一覧への成功遷移の照合・比較メソッド
-+  await saved(batch, 1, practice ? "CREATE_PRACTICE_BATCH" : "COPY_PREVIOUS_MONTH"); // 実保存結果と関連行非作成を検証する関数
-+  const match = /^0:(\{[^\n]*\})$/mu.exec(await response.text()); // Flightのルート行だけを取得する正規表現メソッド / 本文をメモリへ取得するメソッド
-+  if (!match) {
-+    throw new Error("F12_BATCH_FLIGHT_CHANGED"); // 未知のFlight形式を拒否する固定例外のコンストラクター
-+  }
-+  const root = JSON.parse(match[1]); // 実応答のルートとbuild IDをメモリ上で解析する関数
-+  if (!root ||
-+    typeof root.b !== "string") {
-+    throw new Error("F12_BATCH_FLIGHT_CHANGED"); // build ID未確認を拒否する固定例外のコンストラクター
-+  }
-+  const form = new FormData(); // 実送信した保存入力を復元するフォームコンストラクター
-+  const entries = JSON.parse(await businessPayload(route.request())) as string[][]; // 要求取得メソッド / 業務入力の正規化関数 / JSON解析関数 / 文字列配列型
-+  for (const [key, value] of entries) {
-+    form.append(key, value); // 実送信した業務項目を復元するメソッド
-+  }
-+  const parsed = parseSaveForm(form); // 実保存入力の構造と値を検証する関数
-+  if (!parsed.success) {
-+    throw new Error("F12_BATCH_PAYLOAD_FAILED"); // 不正な保存入力の注入を拒否する固定例外のコンストラクター
-+  }
-+  const state = {
-+    status: "success",
-+    outcome: "CREATED",
-+    values: parsed.data,
-+    requestId: parsed.data.requestId,
-+    fieldErrors: {},
-+    formError: null,
-+    data: {
-+      targetMonth: batch.month,
-+      createdCount: 1,
-+      needsReload: true
-+    },
-+  };
-+  await route.fulfill({ // 実保存済みの画面へ、再保存禁止を確認する限定応答を返すメソッド
-+    status: 200,
-+    headers: {
-+      "content-type": "text/x-component",
-+      "cache-control": "no-store"
-+    },
-+    body: "0:" + JSON.stringify({ // 値をメモリ上でJSONへ直列化する関数
-+      b: root.b,
-+      a: state,
-+      f: ""
-+    }) + "\n", // 同一buildのFlightルートを直列化する関数
-+  });
-+}
-+
-+/**
-+ * 実POSTだけを同一origin・pathに限定し、先読みや他ページの通信を捕捉しない。
-+ */
-+function actionPath(page: Page): (url: URL) => boolean { // 実画面型 / URL照合関数型 / URL型 / 真偽値型
-+  const current = new URL(page.url()); // 現在URLの取得メソッド / URL解析のコンストラクター
-+  /**
-+   * queryの内部RSC値は限定せず、originとpathを固定する。
-+   */
-+  return (url) => url.origin === current.origin && // 同一originを確認するURL照合コールバック
-+    url.pathname === current.pathname; // URL照合のコールバック
-+}
-+
-+/**
-+ * 表示月の一覧入口から、指定した現地日付・曜日・時刻を正規入力欄へ設定する。
-+ */
-+async function openPractice( // 実一覧から定期練習の入力を準備する関数
-+  batch: BatchScenario, // 所有シナリオ型
-+  options: {
-+    end?: string; // 文字列型
-+    startTime?: string; // 文字列型
-+    endTime?: string; // 文字列型
-+    weekday?: string; // 文字列型
-+    meeting?: string; // 文字列型
-+    day?: string // 文字列型
-+  } = {}, // 日付・時刻・曜日の任意指定型
-+): Promise<void> { // 非同期完了型
-+  const page = batch.admin;
-+  await page.goto(batch.path("events", `?month=${batch.month}&status=PUBLISHED`, "a", true)); // 管理一覧へ移動するメソッド / 所有パスの生成関数
-+  await page.getByRole("link", { // roleと名前で要素を選ぶメソッド
-+    name: "定期練習を一括作成",
-+    exact: true
-+  }).click(); // 表示月の入口を選ぶ・操作するメソッド
-+  await expect(page.getByRole("heading", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+    name: "定期練習の一括作成",
-+    exact: true
-+  })).toBeVisible(); // 期待値生成関数 / 入力画面の見出しを選ぶ・表示検証するメソッド
-+  expect(new URL(page.url()).searchParams.get("month")).toBe(batch.month); // 期待値生成関数 / URL取得・解析・対象月取得・比較メソッド
-+  const day = options.day ?? "01";
-+  await page.getByLabel("期間開始日（必須）", { exact: true }).fill(`${batch.month}-${day}`); // 開始日を選ぶ・入力するメソッド
-+  await page.getByLabel("期間終了日（必須）", { exact: true }).fill(options.end ?? `${batch.month}-${day}`); // 終了日を選ぶ・入力するメソッド
-+  await page.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
-+    name: options.weekday ?? "火曜日",
-+    exact: true
-+  }).check(); // 現地曜日を選ぶ・指定するメソッド
-+  await page.getByLabel("タイトル（必須）", { exact: true }).fill(batch.title + "-practice"); // 所有prefixの題名を選ぶ・入力するメソッド
-+  await page.getByLabel("開始時刻（必須）", { exact: true }).fill(options.startTime ?? "00:00"); // 現地開始時刻を選ぶ・入力するメソッド
-+  await page.getByLabel("終了時刻（必須・同日）", { exact: true }).fill(options.endTime ?? "01:00"); // 現地終了時刻を選ぶ・入力するメソッド
-+  if (options.meeting) {
-+    await page.getByLabel("集合時刻（任意・同日）", { exact: true }).fill(options.meeting); // 現地集合時刻を選ぶ・入力するメソッド
-+  }
-+}
-+
-+/**
-+ * 正規previewボタンから最新候補のfieldset表示まで待つ。
-+ */
-+async function preview(batch: BatchScenario): Promise<void> { // 所有シナリオ型 / previewを表示する非同期関数
-+  await batch.admin.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+    name: "作成予定をpreviewする",
-+    exact: true
-+  }).click(); // previewボタンを選ぶ・送信するメソッド
-+  await expect(batch.admin.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+    name: "作成する日を選択",
-+    exact: true
-+  })).toBeVisible(); // 期待値生成関数 / 最新候補のfieldsetを選ぶ・表示検証するメソッド
-+}
-+
-+/**
-+ * F11運用書M01・M04・M06・M07・M14：月初・閏日・既存一致・集合警告と固定DRAFT保存。
-+ */
-+test("F11 Tokyoの月初・閏日と既存一致の初期未選択を確認し、明示した2日だけ保存する", // 実ブラウザー受入ケースを登録する関数
-+  /**
-+   * UTCでは前日の予定と一致先を準備し、現地日付で選択して保存する。
-+   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
-+      /**
-+       * 公開済み・下書きの双方との一致と、生成後のUTC日時を照合する。
-+       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-practice",
-+          start: "2028-01-31T15:00:00Z",
-+          end: "2028-01-31T16:00:00Z",
-+          meeting: "2028-01-31T15:30:00Z",
-+          practice: true
-+        }); // 月初候補と完全一致する公開予定の準備関数
-+        await batch.seed({ // 所有イベントを準備する関数
-+          suffix: "-practice",
-+          start: "2028-02-28T15:00:00Z",
-+          end: "2028-02-28T16:00:00Z",
-+          meeting: "2028-02-28T15:30:00Z",
-+          status: "DRAFT",
-+          practice: true
-+        }); // 閏日候補と完全一致する下書きの準備関数
-+        await openPractice(batch, { // 実一覧から定期練習入力を準備する関数
-+          end: "2028-02-29",
-+          meeting: "00:30"
-+        }); // 月初から月末までの共通入力を準備する関数
-+        const page = batch.admin;
-+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / preview前の生成行取得関数 / DB非作成の検証メソッド
-+        await preview(batch); // 正規previewを送信する関数
-+        await expect(page.getByText("候補件数: 5 / 選択可能: 5", { exact: true })).toBeVisible(); // 期待値生成関数 / 閏月の曜日件数を選ぶ・表示検証するメソッド
-+        const group = page.getByRole("group", { // roleと名前で要素を選ぶメソッド
-+          name: "作成する日を選択",
-+          exact: true
-+        }); // 候補選択fieldsetを取得するメソッド
-+        const first = group.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
-+          name: "2028-02-01：" + batch.title + "-practice",
-+          exact: true
-+        }); // 月初候補のcheckboxを選ぶメソッド
-+        const last = group.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
-+          name: "2028-02-29：" + batch.title + "-practice",
-+          exact: true
-+        }); // 閏日候補のcheckboxを選ぶメソッド
-+        await expect(first).not.toBeChecked(); // 期待値生成関数 / 公開済み一致の初期未選択を検証するメソッド
-+        await expect(last).not.toBeChecked(); // 期待値生成関数 / 下書き一致の初期未選択を検証するメソッド
-+        await expect(first.locator("..")).toContainText("2028/02/01 00:00 GMT+09:00"); // 期待値生成関数 / 候補行取得メソッド / 月初の現地日時表示を検証するメソッド
-+        await expect(last.locator("..")).toContainText("集合時刻が開始時刻より後です。"); // 期待値生成関数 / 候補行取得メソッド / 警告付き選択可の説明を検証するメソッド
-+        for (const box of await group.getByRole("checkbox").all()) { // 候補checkboxを列挙するメソッド
-+          await box.uncheck(); // 初期選択されていた他の日を解除するメソッド
-+        }
-+        await first.focus(); // 月初候補へキーボードfocusを移すメソッド
-+        await page.keyboard.press("Space"); // 月初の既存一致候補をキーボードで明示選択するメソッド
-+        await last.check(); // 閏日の既存一致候補も明示選択するメソッド
-+        await expect(page.getByText("選択件数: 2", { exact: true })).toBeVisible(); // 期待値生成関数 / 明示選択件数を選ぶ・表示検証するメソッド
-+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / preview段階の生成行取得関数 / DB非作成の検証メソッド
-+        await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+          name: "選択した予定を下書き作成",
-+          exact: true
-+        }).click(); // 保存ボタンを選ぶ・実Actionへ送信するメソッド
-+        await expect(page).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=event-practice-batch-created&toastId=[0-9a-f-]+$/u); // 期待値生成関数 / 固定管理一覧遷移を検証するメソッド
-+        await expect(page.getByText("定期練習の予定を下書きとして作成しました。", { exact: true })).toBeVisible(); // 期待値生成関数 / 固定toastを選ぶ・表示検証するメソッド
-+        await saved(batch, 2, "CREATE_PRACTICE_BATCH"); // 完了記録と関連行非作成を確認する関数
-+        const rows = await batch.generated(); // 保存した2日のDB行を取得する関数
-+        expect(rows[0].startAt.toISOString()).toBe("2028-01-31T15:00:00.000Z"); // 期待値生成関数 / 月初開始UTCへの変換・比較メソッド
-+        expect(rows[1].startAt.toISOString()).toBe("2028-02-28T15:00:00.000Z"); // 期待値生成関数 / 閏日開始UTCへの変換・比較メソッド
-+        for (const row of rows) {
-+          expect(row.genre).toBe("PRACTICE"); // 期待値生成関数 / 練習ジャンル固定を検証するメソッド
-+          expect(row.content === null && // 期待値を生成する関数
-+            row.belongings === null &&
-+            row.notes === null).toBe(true); // 期待値生成関数 / 未入力列の未設定を検証するメソッド
-+          expect(row.isAllDay).toBe(false); // 期待値生成関数 / 時刻指定固定を検証するメソッド
-+          expect(row.endAt!.getTime() - row.startAt.getTime()).toBe(3_600_000); // 期待値生成関数 / 開始・終了の時刻取得メソッド / 経過一時間の比較メソッド
-+          expect(row.meetingAt!.getTime() - row.startAt.getTime()).toBe(1_800_000); // 期待値生成関数 / 集合・開始の時刻取得メソッド / 警告付き集合時刻の保持を検証するメソッド
-+        }
-+      });
-+  });
-+
-+/**
-+ * F11運用書M08・M11：preview連打・遅い旧応答・入力変更直後の旧保存を実イベントで拒否する。
-+ */
-+test("F11 遅い旧previewを破棄し、入力変更と同時に古い保存フォームをsubmitしても保存しない", // 入力競合のブラウザーケースを登録する関数
-+  /**
-+   * 正規Actionの応答だけを保留し、入力変更通知のrevision制御を実DOMで検証する。
-+   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
-+      /**
-+       * 旧応答の到着後も候補を適用せず、新previewだけを表示する。
-+       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await openPractice(batch); // 単一日の共通入力を準備する関数
-+        const page = batch.admin;
-+        const match = actionPath(page); // 所有Actionだけを捕捉する照合関数
-+        let calls = 0;
-+        let release!: () => void; // 応答保留の解放関数型
-+        const gate = new Promise<void>( // 応答保留用のPromiseコンストラクター / 完了型
-+          /**
-+           * 共通入力の変更を終えてから旧応答を返す。
-+           */
-+          (resolve) => { release = resolve; }, // 解放関数を保持するコールバック
-+        );
-+        await page.route(match, // 所有preview要求だけを捕捉するメソッド
-+          /**
-+           * previewの実応答を取得し、ブラウザーへ戻す時点だけを遅らせる。
-+           */
-+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
-+            try {
-+              if (route.request().method() !== "POST") { // 要求取得・HTTP method照合メソッド
-+                await route.continue(); // 対象外要求を通すメソッド
-+                return;
-+              }
-+              calls += 1;
-+              const response = await route.fetch({ maxRedirects: 0 }); // 実previewを取得するメソッド
-+              await gate;
-+              await route.fulfill({ response }); // 同じ実応答を変更せず返すメソッド
-+            } catch {
-+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
++            const idAttack = await editAction(action, {}, [id, foreignId]); // 明示bindの親IDだけを変更する関数
++            const attachmentAttack = await editAction(action, { deleteAttachmentIds: attachmentId }); // A親へB添付IDを混ぜる関数
++            for (const attack of [idAttack, attachmentAttack]) {
++              const result = await postAction(admin, attack); // 正規OWNERのまま関連IDを改変する関数
++              expect(result.redirected).toBe(false); // アプリscope拒否を検証する関数・メソッド
++              expect(await actionState(database, clubs, await content.control({ action: "read" }))).toBe(before); // 所有範囲の非更新比較関数 / 私有参照関数 / 期待値・比較メソッド
 +            }
-+          });
-+        try {
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "作成予定をpreviewする",
-+            exact: true
-+          }).evaluate( // 正規previewボタンを選ぶ・実DOMで操作するメソッド
-+            /**
-+             * React再描画より前の連続submitでもpreview要求を一件に抑える。
-+             */
-+            (button: HTMLButtonElement) => { // DOM操作コールバック / ボタン要素型
-+              button.form!.requestSubmit(button); // 正規submitイベントを送るメソッド
-+              button.form!.requestSubmit(button); // 同じイベントターンで再送を試すメソッド
-+            });
-+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "previewを作成中…",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / pendingボタンを選ぶ・無効化検証するメソッド
-+          await page.getByLabel("タイトル（必須）", { exact: true }).fill(batch.title + "-changed"); // 応答待ち中の共通入力を変更するメソッド
-+        } finally {
-+          release(); // 失敗時も保留応答を解放する関数
-+        }
-+        try {
-+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "作成予定をpreviewする",
-+            exact: true
-+          })).toBeEnabled(); // 期待値生成関数 / 旧応答完了後の再preview可能性を検証するメソッド
-+          await expect(page.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "作成する日を選択",
-+            exact: true
-+          })).toHaveCount(0); // 期待値生成関数 / 遅い旧候補の非適用を検証するメソッド
-+          expect(calls).toBe(1); // 期待値生成関数 / preview連打の要求一件性を検証するメソッド
-+        } finally {
-+          await page.unroute(match); // 保留用の要求捕捉を解除するメソッド
-+        }
-+        await preview(batch); // 現在の入力で新しいpreviewを作る関数
-+        let stalePosts = 0;
-+        /**
-+         * 入力変更直後の旧保存が遅れてDBへ届く場合も、POSTの発生そのもので検出する。
-+         */
-+        function countStale(request: BrowserRequest) { // 旧保存の要求件数を記録する関数 / 実ブラウザー要求型
-+          if (
-+            request.method() === "POST" && // 要求のHTTP methodを取得するメソッド
-+            match(new URL(request.url())) // 所有pathの照合関数 / 要求URL取得メソッド / URL解析コンストラクター
-+          ) {
-+            stalePosts += 1;
++            const origin = await postAction(admin, action, { origin: "https://attacker.invalid" }); // 通信先を変えずOriginだけを変える関数
++            expect(origin.status >= 400 && // 期待値を検証する関数
++              !origin.redirected).toBe(true); // OriginのHTTP拒否を検証する関数・メソッド
++            expect(await actionState(database, clubs, await content.control({ action: "read" }))).toBe(before); // DB・Storage・送信の非更新比較関数 / 私有参照関数 / 期待値・比較メソッド
++            const invalid = await postAction(admin, action, { invalidateAction: true }); // 業務scope拒否と別のAction解決失敗を作る関数
++            expect(invalid.status >= 400 && // 期待値を検証する関数
++              !invalid.redirected).toBe(true); // framework拒否の状態を検証する関数・メソッド
++            expect(await actionState(database, clubs, await content.control({ action: "read" }))).toBe(before); // 非更新比較関数 / 私有参照関数 / 期待値・比較メソッド
++            const ownedAttachment = kind === "events"
++              ? await database.clubEventAttachment.findFirstOrThrow({ // 所有行を取得し不存在を拒否するメソッド
++                where: {
++                  clubId: data.clubs.a.id,
++                  eventId: id
++                }
++              }) // 正規添付の取得メソッド
++              : await database.clubNoticeAttachment.findFirstOrThrow({ // 所有行を取得し不存在を拒否するメソッド
++                where: {
++                  clubId: data.clubs.a.id,
++                  noticeId: id
++                }
++              }); // 正規添付の取得メソッド
++            const valid = await editAction(action, { // 正規Actionの業務値・明示bindを編集する関数
++              clubId: data.clubs.b.id,
++              deleteAttachmentIds: ownedAttachment.id,
++            }); // hidden clubIdを混ぜても正規A操作になることを検証する関数
++            await postAction(admin, valid); // 正規Cookie・bindの成功対照を実行する関数
++            const updated = kind === "events"
++              ? await database.clubEvent.findUniqueOrThrow({ where: { id } }) // 正規更新後の親取得メソッド
++              : await database.clubNotice.findUniqueOrThrow({ where: { id } }); // 正規更新後の親取得メソッド
++            expect(updated.clubId === data.clubs.a.id && // 期待値を検証する関数
++              updated.title === content.title + "更新").toBe(true); // server由来scopeの維持を検証する関数・メソッド
++            const remaining = kind === "events"
++              ? await database.clubEventAttachment.count({ // 所有条件の件数を取得するメソッド
++                where: {
++                  id: ownedAttachment.id,
++                  clubId: data.clubs.a.id
++                }
++              }) // 正規添付の削除後件数取得メソッド
++              : await database.clubNoticeAttachment.count({ // 所有条件の件数を取得するメソッド
++                where: {
++                  id: ownedAttachment.id,
++                  clubId: data.clubs.a.id
++                }
++              }); // 正規添付の削除後件数取得メソッド
++            expect(remaining).toBe(0); // 正当な添付削除対照の期待値関数・比較メソッド
++          } finally {
++            if (kind === "events") {
++              await database.clubEvent.deleteMany({ // 所有条件に合う行だけを回収するメソッド
++                where: {
++                  id: foreignId,
++                  clubId: data.clubs.b.id
++                }
++              }); // 所有B試験親だけを回収するメソッド
++            } else {
++              await database.clubNotice.deleteMany({ // 所有条件に合う行だけを回収するメソッド
++                where: {
++                  id: foreignId,
++                  clubId: data.clubs.b.id
++                }
++              }); // 所有B試験親だけを回収するメソッド
++            }
++            await database.storageDeletionJob.deleteMany({ // 所有条件に合う行だけを回収するメソッド
++              where: {
++                clubId: data.clubs.b.id,
++                storagePath: foreignPath
++              }
++            }); // 作成した架空pathのjobだけを回収するメソッド
 +          }
-+        }
-+        page.on("request", countStale); // 要求イベントの監視メソッド / 旧保存POSTを数える関数
-+        try {
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書き作成",
-+            exact: true
-+          }).evaluate( // 保存ボタンを選ぶ・実DOMで操作するメソッド
-+            /**
-+             * Reactの変更通知を送った直後、古いフォームの参照から同期的に保存を試す。
-+             */
-+            (button: HTMLButtonElement) => { // 入力と保存競合のコールバック / ボタン要素型
-+              const input = document.querySelector<HTMLInputElement>('input[name="title"]')!; // 入力欄の取得メソッド / HTML入力要素型
-+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; // native値setterを取得するメソッド / HTML入力要素のコンストラクター
-+              setter.call(input, input.value + "-latest"); // Reactが追跡する実入力値をnative setterで更新するメソッド
-+              input.dispatchEvent(new Event("input", { bubbles: true })); // Reactへ入力変更を通知するメソッド / DOMイベントのコンストラクター
-+              button.form!.requestSubmit(button); // 変更直後に旧フォームから正規submitを試すメソッド
-+            });
-+          await expect(page.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "作成する日を選択",
-+            exact: true
-+          })).toHaveCount(0); // 期待値生成関数 / 入力変更後の旧preview非表示を検証するメソッド
-+          expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / 旧previewによるDB非作成を検証するメソッド
-+          expect(await batch.database.clubEventBatchOperation.count({ // 期待値生成関数 / 完了記録の件数取得メソッド
-+            where: {
-+              clubId: batch.data.clubs.a.id,
-+              targetMonth: batch.month
-+            },
-+          })).toBe(0); // 旧操作が保存されていないことを検証するメソッド
-+          expect(stalePosts).toBe(0); // 期待値生成関数 / 旧previewからのPOST非発生を検証するメソッド
-+        } finally {
-+          page.off("request", countStale); // 要求イベントの監視解除メソッド / 旧保存POSTを数える関数
-+        }
-+      });
-+  });
-+for (const item of [
-+  {
-+    month: "2026-03",
-+    day: "08",
-+    start: "02:30",
-+    end: "03:30",
-+    reason: "存在しない現地時刻のため作成できません。"
-+  },
-+  {
-+    month: "2026-11",
-+    day: "01",
-+    start: "01:30",
-+    end: "02:30",
-+    reason: "曖昧な現地時刻のため作成できません。"
-+  },
-+]) {
-+  /**
-+   * F11運用書M05・M06：gap／foldを理由付きで除外し、全件除外時は保存できない。
-+   */
-+  test(`F11 ${item.month} NYのDST除外日は選択できず全件除外で保存を止める`, // DST条件ごとのケースを登録する関数
-+    /**
-+     * 現地日時の不正を翌日や他offsetへ補正せず表示することを確認する。
-+     */
-+    async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+      await scenario(content, item.month, // ケース専用の準備・回収関数
-+        /**
-+         * 生成不能な候補にcheckboxと理由を表示し、DBへ保存しない。
-+         */
-+        async (batch) => { // 所有シナリオの検証コールバック
-+          await openPractice(batch, { // 実一覧から定期練習入力を準備する関数
-+            day: item.day,
-+            weekday: "日曜日",
-+            startTime: item.start,
-+            endTime: item.end
-+          }); // DST日の共通入力を準備する関数
-+          await preview(batch); // 正規previewを作る関数
-+          await expect(batch.admin.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "作成する日を選択",
-+            exact: true
-+          }).getByRole("checkbox")).toBeDisabled(); // 期待値生成関数 / 候補fieldset・checkboxを選ぶ・無効化検証するメソッド
-+          await expect(batch.admin.getByText(item.reason, { exact: true })).toBeVisible(); // 期待値生成関数 / DST除外理由を選ぶ・表示検証するメソッド
-+          await expect(batch.admin.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書き作成",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / 全件除外時の保存不可を検証するメソッド
-+          expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / DB非作成の検証メソッド
-+        }, "America/New_York");
-+    });
++        },
++      );
++    },
++  );
 +}
 +
 +/**
-+ * F11運用書M09：preview後の最新timezone変更を実保存で検出し、再previewへ戻せる。
++ * 正規の会員role更新要求にB所属IDを混ぜても、A OWNERにB操作権限を与えない。
 + */
-+test("F11 preview後のtimezone変更は実Actionで拒否され、保存せず入力へ戻れる", // 最新設定照合のケースを登録する関数
++test("membershipIdの改変とMEMBER Cookieを拒否し、正規OWNERの更新は成功する", // E2E登録関数
 +  /**
-+   * 他タブの設定変更に相当する所有クラブ更新を行い、古いpreviewで保存を試す。
++   * 正規のダイアログから要求を取得し、同じ入力とnonceの成功を最後に確認する。
 +   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
++  async ({ operations: scenario }) => { // 所有操作の検証コールバック
++    await safeBoundary( // 固定例外境界関数
 +      /**
-+       * PREVIEW_CHANGED時に新規保存を行わず、安全なpreview作り直しを許す。
++       * 別クラブ所属ID・別roleのCookieと正規操作を比較する。
 +       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await openPractice(batch); // 単一日の共通入力を準備する関数
-+        await preview(batch); // Tokyoのpreviewを作る関数
-+        await batch.database.club.update({ // 他操作に相当する所有クラブのtimezone変更メソッド
-+          where: { id: batch.data.clubs.a.id },
-+          data: { timezone: "America/New_York" },
-+        });
-+        await batch.admin.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+          name: "選択した予定を下書き作成",
++      async () => { // 操作と照合のコールバック
++        const { admin, member, database, data } = scenario;
++        await member.goto(`/club/${data.clubs.a.slug}/account`); // 比較するMEMBER画面を開くメソッド
++        await admin.goto(`/club/${data.clubs.a.slug}/admin/members`); // 正規会員管理画面を開くメソッド
++        await admin.locator("li").filter({ hasText: data.users.aMember.email }).getByRole("button", { // roleと表示名で要素を選ぶメソッド / 条件に合う要素を選ぶメソッド / フォーム・要素を選ぶメソッド
++          name: "権限・状態を変更",
 +          exact: true
-+        }).click(); // 古いpreviewの保存を実Actionへ送るメソッド
-+        await expect(batch.admin.getByRole("alert").filter({ hasText: "候補が変更されました。previewを作成し直してください。" })).toBeVisible(); // 期待値生成関数 / 変更検出のalertを選ぶ・絞る・表示検証するメソッド
-+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / 拒否時のDB非作成を検証するメソッド
-+        await batch.admin.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+          name: "入力を変更してpreviewを作成し直す",
-+          exact: true
-+        }).click(); // 安全な入力変更ボタンを選ぶ・操作するメソッド
-+        await expect(batch.admin.getByLabel("タイトル（必須）", { exact: true })).toBeEnabled(); // 期待値生成関数 / 入力欄の再操作可を検証するメソッド
-+      });
-+  });
-+
-+/**
-+ * F11運用書M11・M12：連続submitと実保存後の応答喪失を再現し、同じ操作を再確認する。
-+ */
-+test("F11 連打を抑止し、応答喪失後も同payload・requestIdだけを再送して増やさない", // 実通信障害ケースを登録する関数
-+  /**
-+   * 初回ActionはDBまで完了させてからブラウザー側の応答だけを切断する。
-+   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
-+      /**
-+       * pending中の再送を止め、結果不明時の選択・ID固定とreplayを確認する。
-+       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await openPractice(batch); // 単一日の共通入力を準備する関数
-+        await preview(batch); // 正規previewを表示する関数
-+        const page = batch.admin;
-+        const match = actionPath(page); // 同一origin・pathだけを捕捉する関数
-+        let calls = 0;
-+        let first = "";
-+        let release!: () => void; // 初回要求を解放する関数型
-+        const gate = new Promise<void>( // 初回要求を保留するPromiseコンストラクター / 完了型
++        }).click(); // 対象会員行の選択・操作メソッド
++        const dialog = admin.getByRole("dialog"); // 正規編集ダイアログを選ぶメソッド
++        await dialog.locator('select[name="role"]').selectOption("COACH"); // 正規の変更を入力するメソッド
++        const action = await captureAction(admin, // 実Action捕捉関数
 +          /**
-+           * pendingの検証後にだけ通信を進める。
++           * 正規ダイアログの保存を発行する。
 +           */
-+          (resolve) => { release = resolve; }, // 解放関数を保持するコールバック
++          () => dialog.getByRole("button", { // 入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
++            name: "変更を保存する",
++            exact: true
++          }).click(), // ボタン選択・操作のコールバック
 +        );
-+        await page.route(match, // 同じ保存Actionだけを捕捉するメソッド
-+          /**
-+           * 実DBへ初回送信し、その結果を捨てる。再送要求は元のActionへ通す。
-+           */
-+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
-+            try {
-+              if (route.request().method() !== "POST") { // 要求の取得・HTTP methodの照合メソッド
-+                await route.continue(); // 対象外要求をそのまま送るメソッド
-+                return;
-+              }
-+              calls += 1;
-+              const input = await businessPayload(route.request()); // 要求取得メソッド / 業務payloadの正規化関数
-+              if (calls === 1) {
-+                first = input;
-+                await gate;
-+                const response = await route.fetch({ maxRedirects: 0 }); // 実ActionをDB保存まで実行するメソッド
-+                expect(Boolean(response.headers()["x-action-redirect"])).toBe(true); // 期待値生成関数 / 応答header取得メソッド / 真偽変換関数 / 成功遷移確認メソッド
-+                await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // 切断前の実保存完了を検証する関数
-+                await route.abort("failed"); // 保存済み応答だけを喪失させるメソッド
-+              } else {
-+                expect(input === first).toBe(true); // 期待値生成関数 / requestId・選択・照合値を含む同一payloadの比較メソッド
-+                await route.continue(); // 同じ操作を実Actionへ再送するメソッド
-+              }
-+            } catch {
-+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
-+            }
-+          });
-+        try {
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書き作成",
-+            exact: true
-+          }).evaluate( // 保存ボタンを選ぶ・実DOMで操作するメソッド
-+            /**
-+             * 同一イベントターンに2回submitし、同期refでの連打防止を確認する。
-+             */
-+            (button: HTMLButtonElement) => { // ブラウザー内のコールバック / ボタン要素型
-+              button.form!.requestSubmit(button); // 実フォームのsubmitイベントを送るメソッド
-+              button.form!.requestSubmit(button); // 同じイベントターンでもう一度submitするメソッド
-+            });
-+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "保存結果を確認中…",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / pendingボタンの選択・無効化検証メソッド
-+        } finally {
-+          release(); // 検証失敗時も保留要求を解放する関数
-+        }
-+        try {
-+          await expect(page.getByText("結果が不明です。新しい操作を作らず、同じ選択・操作IDで再確認してください。", { exact: true })).toBeVisible(); // 期待値生成関数 / 結果不明時の案内を選ぶ・表示を検証するメソッド
-+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "入力を変更してpreviewを作成し直す",
-+            exact: true
-+          })).toHaveCount(0); // 期待値生成関数 / 新操作リンクを選ぶ・非表示を検証するメソッド
-+          await expect(page.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
-+            name: "2028-02-01：" + batch.title + "-practice",
-+            exact: true
-+          })).toBeDisabled(); // 期待値生成関数 / 送信済み選択の固定を検証するメソッド
-+          expect(calls).toBe(1); // 期待値生成関数 / 連打時の要求一件性を検証するメソッド
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "同じ選択・操作IDで再確認する",
-+            exact: true
-+          }).click(); // 同じ操作の再確認ボタンを選ぶ・操作するメソッド
-+          await expect(page).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=event-practice-batch-created&toastId=[0-9a-f-]+$/u); // 期待値生成関数 / replay成功後の固定遷移を検証するメソッド
-+          expect(calls).toBe(2); // 期待値生成関数 / 初回と明示再確認だけの要求件数を検証するメソッド
-+          await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // replayで生成行と完了記録が増えないことを検証する関数
-+        } finally {
-+          await page.unroute(match); // 所有する要求捕捉だけを解除するメソッド
-+        }
-+      });
-+  });
++        const clubs = [data.clubs.a.id, data.clubs.b.id];
++        const before = await actionState(database, clubs, await operationsControl(scenario, { action: "read" })); // 非更新比較関数 / 私有制御参照関数
++        await postAction(member, action); // MEMBER Cookieで直接POSTする関数
++        expect(await actionState(database, clubs, await operationsControl(scenario, { action: "read" }))).toBe(before); // 非更新比較関数 / 私有制御関数 / 期待値・比較メソッド
++        await postAction(admin, await editAction(action, {}, [data.actors.aMember.membershipId, data.actors.bOwner.membershipId])); // 他クラブIDへの編集・再送関数
++        expect(await actionState(database, clubs, await operationsControl(scenario, { action: "read" }))).toBe(before); // 非更新比較関数 / 私有制御関数 / 期待値・比較メソッド
++        await postAction(admin, action); // 正規OWNERの成功対照を送信する関数
++        const saved = await database.clubMembership.findUniqueOrThrow({ where: { id: data.actors.aMember.membershipId } }); // 正規更新結果取得メソッド
++        expect(saved.role).toBe("COACH"); // role更新の成功を検証する関数・比較メソッド
++      },
++    );
++  },
++);
 +
 +/**
-+ * F11運用書M13：実保存後にneedsReload結果を注入し、再保存せず一覧へ戻すUIを確認する。
++ * 子どもの明示bindとhidden値を同時改変しても、他の保護者の子を変更できない。
 + */
-+test("F11 保存済みneedsReload応答では保存ボタンを消し、月別一覧の再読込だけを案内する", // 保存済みUIのケースを登録する関数
++test("childIdの一致だけで保護者確認を省略せず、本人の子だけを更新する", // E2E登録関数
 +  /**
-+   * サーバー再検証失敗の内部注入ではなく、実保存後のClient境界を検証する。
++   * 正規の本人編集と、別保護者IDの一貫した改ざんを対照にする。
 +   */
-+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
-+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
++  async ({ operations: scenario }) => { // 所有操作の検証コールバック
++    await safeBoundary( // 固定例外境界関数
 +      /**
-+       * 成功データを持つ応答を受け取っても保存を再実行しないことを確認する。
++       * 同じフォームのbound・hidden childIdを変え、親scopeの拒否を確かめる。
 +       */
-+      async (batch) => { // 所有シナリオの検証コールバック
-+        await openPractice(batch); // 単一日の共通入力を準備する関数
-+        await preview(batch); // 正規previewを表示する関数
-+        const page = batch.admin;
-+        const match = actionPath(page); // 所有Actionのpath照合関数
-+        let calls = 0;
-+        await page.route(match, // 所有保存要求だけを捕捉するメソッド
-+          /**
-+           * 保存要求以外はそのまま通し、実保存成功後にだけneedsReload結果を注入する。
-+           */
-+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
-+            try {
-+              if (route.request().method() !== "POST") { // 要求取得・HTTP method照合メソッド
-+                await route.continue(); // 保存以外の要求を通すメソッド
-+                return;
-+              }
-+              calls += 1;
-+              await savedResponse(route, batch, true); // 実保存とneedsReload応答を接続する関数
-+            } catch {
-+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
-+            }
-+          });
++      async () => { // 検証コールバック
++        const { admin, database, data } = scenario;
++        const own = { id: randomUUID() }; // 所有する試験用子どもIDの生成関数
++        const foreign = { id: randomUUID() }; // 所有する別保護者の子どもIDの生成関数
 +        try {
-+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
-+            name: "選択した予定を下書き作成",
-+            exact: true
-+          }).click(); // 正規保存ボタンを選ぶ・操作するメソッド
-+          await expect(page.getByRole("status").filter({ hasText: "1件を下書きで作成済みです。再保存しないでください。" })).toBeVisible(); // 期待値生成関数 / 保存済みstatusを選ぶ・絞る・表示検証するメソッド
-+          await expect(page.getByRole("button", { name: /下書き作成|同じ選択・操作IDで再確認する/u })).toHaveCount(0); // 期待値生成関数 / 保存ボタンを選ぶ・非表示検証するメソッド
-+          await page.getByRole("link", { // roleと名前で要素を選ぶメソッド
-+            name: "対象月の管理一覧を開く",
-+            exact: true
-+          }).click(); // 再保存を伴わない一覧リンクを選ぶ・操作するメソッド
-+          await expect(page).toHaveURL(batch.session.appOrigin + batch.path("events", "?month=2028-02&status=ALL", "a", true)); // 期待値生成関数 / 所有パス生成関数 / 対象月一覧への遷移検証メソッド
-+          expect(calls).toBe(1); // 期待値生成関数 / 一覧へ戻っても保存要求が増えないことを検証するメソッド
-+          await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // 保存件数・完了記録の非増加を検証する関数
++          await database.child.create({ // 当該ケースの本人の子どもを準備するメソッド
++            data: {
++              id: own.id,
++              parentId: data.users.aOwner.id,
++              name: "F12本人",
++              grade: "ELEMENTARY_3",
++              clubMemberships: {
++                create: {
++                  clubId: data.clubs.a.id,
++                },
++              },
++            },
++          });
++          await database.child.create({ // 当該ケースの別保護者の子どもを準備するメソッド
++            data: {
++              id: foreign.id,
++              parentId: data.users.aMember.id,
++              name: "F12別保護者",
++              grade: "ELEMENTARY_3",
++              clubMemberships: {
++                create: {
++                  clubId: data.clubs.a.id,
++                },
++              },
++            },
++          });
++          await admin.goto(`/club/${data.clubs.a.slug}/account`); // 正規アカウント画面を開くメソッド
++          const form = admin.locator("li").filter({ has: admin.locator(`input[name="childId"][value="${own.id}"]`) }).locator("form").filter({ has: admin.locator('select[name="grade"]') }); // 本人編集フォームの選択・絞込みメソッド
++          await form.locator('input[name="name"]').fill("F12本人更新"); // 正規入力を設定するメソッド
++          const action = await captureAction(admin, // 正規POST捕捉関数
++            /**
++             * 通常と同じ確認ダイアログから保存する。
++             */
++            async () => { // 正規確認操作のコールバック
++              await form.getByRole("button", { // roleと表示名で要素を選ぶメソッド
++                name: "確認して保存",
++                exact: true
++              }).click(); // 確認画面の選択・操作メソッド
++              await admin.getByRole("dialog").getByRole("button", { // roleと表示名で要素を選ぶメソッド
++                name: "保存する",
++                exact: true
++              }).click(); // 実POSTを発行する選択・操作メソッド
++            },
++          );
++          const clubs = [data.clubs.a.id, data.clubs.b.id];
++          const before = await actionState(database, clubs, await operationsControl(scenario, { action: "read" })); // 比較値取得関数 / 私有stub参照関数
++          const attack = await editAction(action, { childId: foreign.id }, [own.id, foreign.id]); // boundとhiddenを同時に変更する関数
++          await postAction(admin, attack); // 別保護者IDの直接POST関数
++          expect(await actionState(database, clubs, await operationsControl(scenario, { action: "read" }))).toBe(before); // 非更新比較関数 / 私有制御関数 / 期待値・比較メソッド
++          await postAction(admin, action); // 本人の正規更新対照を送信する関数
++          expect((await database.child.findUniqueOrThrow({ where: { id: own.id } })).name === "F12本人更新").toBe(true); // 本人の子の取得・更新検証メソッド / 期待値関数
 +        } finally {
-+          await page.unroute(match); // 当該要求捕捉だけを解除するメソッド
++          await database.child.deleteMany({ // このケースが予約した子どもだけを回収するメソッド
++            where: {
++              OR: [
++                {
++                  id: own.id,
++                  parentId: data.users.aOwner.id
++                },
++                {
++                  id: foreign.id,
++                  parentId: data.users.aMember.id
++                },
++              ],
++            },
++          });
 +        }
++      },
++    );
++  },
++);
++
++/**
++ * 通知先IDと、画面にない通知先クラブをOWNERの実要求で差し替える。
++ */
++test("targetIdをBへ改変したLINE設定ActionはBを変更しない", // E2E登録関数
++  /**
++   * 両クラブに所有通知先を用意し、正規A通知先の更新だけを許可する。
++   */
++  async ({ operations: scenario }) => { // 所有操作の検証コールバック
++    await safeBoundary( // 固定例外境界関数
++      /**
++       * 正規のLINE設定画面からbind済み通知先IDを取得する。
++       */
++      async () => { // 検証コールバック
++        const { admin, database, data } = scenario;
++        const ids = {
++          a: randomUUID(), // 試験資源のUUIDを生成する関数
++          b: randomUUID() // 試験資源のUUIDを生成する関数
++        }; // 所有通知先IDの生成関数
++        for (const club of ["a", "b"] as const) { // クラブキーのリテラル型アサーション
++          await database.clubLineTarget.create({ // 専用fixture設定に所有通知先を作るメソッド
++            data: {
++              id: ids[club],
++              clubId: data.clubs[club].id,
++              lineSettingId: scenario.line[club].id,
++              lineGroupId: "F12_FAKE_GROUP_" + ids[club],
++              targetRoles: ["MEMBER"],
++              isEnabled: true,
++            },
++          });
++        }
++        await admin.goto(`/club/${data.clubs.a.slug}/admin/settings/line`); // 正規設定画面を開くメソッド
++        const form = admin.locator('form:has(input[name="targetName"])'); // 正規通知先フォームを選ぶメソッド
++        await form.locator('input[name="targetName"]').fill("F12境界更新"); // 正規の変更を入力するメソッド
++        const action = await captureAction(admin, // 正規POST捕捉関数
++          /**
++           * 正規の設定保存Actionを発行する。
++           */
++          () => form.getByRole("button", { // 入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
++            name: "設定を保存する",
++            exact: true
++          }).click(), // ボタン選択・操作コールバック
++        );
++        const clubs = [data.clubs.a.id, data.clubs.b.id];
++        const before = await actionState(database, clubs, await operationsControl(scenario, { action: "read" })); // 比較関数 / 私有stub参照関数
++        await postAction(admin, await editAction(action, {}, [ids.a, ids.b])); // B通知先IDへの編集・直接POST関数
++        expect(await actionState(database, clubs, await operationsControl(scenario, { action: "read" }))).toBe(before); // 非更新比較関数 / 私有制御関数 / 期待値・比較メソッド
++        await postAction(admin, action); // 正規A通知先更新対照を送信する関数
++        expect((await database.clubLineTarget.findUniqueOrThrow({ where: { id: ids.a } })).targetName).toBe("F12境界更新"); // 正規結果取得・比較メソッド / 期待値関数
++      },
++    );
++  },
++);
++
++/**
++ * 実招待のcontext・tokenを書き換えた要求は、本人の正規承諾と分けて検証する。
++ */
++test("招待contextIdとtokenの改ざんは所属を作らず、正規の実Cookieだけが承諾できる", // E2E登録関数
++  /**
++   * 既存会員の正規招待入口を使い、生tokenやCookieは出力しない。
++   */
++  async ({ operations: scenario }) => { // 所有操作の検証コールバック
++    test.setTimeout(60000); // 招待の複数実操作の期限を設定するメソッド
++    await safeBoundary( // 固定例外境界関数
++      /**
++       * Bへ未所属のA MEMBERを招待し、正規nonceでの承諾を対照にする。
++       */
++      async () => { // 招待検証コールバック
++        const { foreignAdmin, member, database, data } = scenario;
++        await invite(scenario, foreignAdmin, "b", data.users.aMember.email); // B OWNERから既存会員へ正規招待する関数
++        const link = await invitationLink(scenario, data.users.aMember.email, "b", "existing"); // 正規URLをメモリへ取得する関数
++        await member.goto(link); // 正規のcontext Cookieを生成する入口へ移動するメソッド
++        const action = await captureAction(member, // 承諾の実POST捕捉関数
++          /**
++           * 正規の既存アカウント用承諾を発行する。
++           */
++          () => member.getByRole("button", { // 入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
++            name: "招待を承諾する",
++            exact: true
++          }).click(), // 正規ボタン選択・操作コールバック
++        );
++        const clubs = [data.clubs.a.id, data.clubs.b.id];
++        const before = await actionState(database, clubs, await operationsControl(scenario, { action: "read" })); // 非更新比較関数 / 私有参照関数
++        await postAction(member, await editAction(action, { contextId: randomUUID() })); // contextIdの改変・UUID生成・再送関数
++        expect(await actionState(database, clubs, await operationsControl(scenario, { action: "read" }))).toBe(before); // 非更新比較関数 / 私有制御関数 / 期待値・比較メソッド
++        const cookies = await member.context().cookies(); // 正規Cookieをメモリへ退避する取得メソッド
++        const context = cookies.find( // 招待context Cookieだけを選ぶメソッド
++          /**
++           * Auth Cookieを変更せず招待のcontextだけを検証する。
++           */
++          (cookie) => cookie.name === "club-invitation-context", // 招待Cookie選択コールバック
++        );
++        expect(Boolean(context)).toBe(true); // 対象Cookieの存在を検証する関数・真偽値変換・比較メソッド
++        const decoded = JSON.parse(Buffer.from(context!.value, "base64url").toString("utf8")); // 実contextをメモリ内で解析する関数・復号・文字列化メソッド
++        expect(typeof decoded.tokenHash === "string").toBe(true); // 実contextのtoken契約を検証する関数・比較メソッド
++        decoded.tokenHash = "0".repeat(64); // 架空の不正tokenへ置換するメソッド
++        await member.context().addCookies([{ // Authは維持して招待Cookieだけを差し替えるメソッド
++          ...context!,
++          value: Buffer.from(JSON.stringify(decoded)).toString("base64url"), // 改変contextを符号化する関数・JSON化・文字列化メソッド
++        }]);
++        await postAction(member, action); // token改変要求の直接POST関数
++        expect(await actionState(database, clubs, await operationsControl(scenario, { action: "read" }))).toBe(before); // 非更新比較関数 / 私有制御関数 / 期待値・比較メソッド
++        await member.context().addCookies(cookies); // 正規contextをメモリから戻すメソッド
++        await postAction(member, action); // 正規本人の承諾対照を送信する関数
++        expect(await database.clubMembership.count({ // 期待値を検証する関数 / 所有条件の件数を取得するメソッド
++          where: {
++            clubId: data.clubs.b.id,
++            userId: data.users.aMember.id,
++            status: "ACTIVE"
++          }
++        })).toBe(1); // 正規所属の作成を検証する取得・比較メソッド / 期待値関数
++      },
++    );
++  },
++);
+diff --git a/e2e/action-requests.ts b/e2e/action-requests.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..02f921ff75266604af8170a1bb2301271f94dd8c
+--- /dev/null
++++ b/e2e/action-requests.ts
+@@ -0,0 +1,323 @@
++// e2e/action-requests.ts
++// 正規画面のAction ID・bind・Cookieをディスクへ保存せず、同じHTTPS入口へだけ再送する。
++
++import {
++  createHash,
++} from "node:crypto";
++import type {
++  Page,
++  Request as BrowserRequest,
++} from "@playwright/test";
++import type {
++  PrismaClient,
++} from "@prisma/client";
++
++const FAILURE = "F12_ACTION_BOUNDARY_FAILED";
++
++/**
++ * 実画面で生成された要求をメモリ内でだけ保持する再送契約。
++ */
++export type CapturedAction = { // 正規Action要求の契約型
++  url: string; // 同じOriginの送信先文字列型
++  headers: Record<string, string>; // Cookieを含まない要求header辞書型
++  body: Buffer; // メモリ内の要求バイト列型
++};
++
++/**
++ * 実POSTのAction headerと本文を取得し、Cookie・Host・長さは再送時のcontextに任せる。
++ */
++function captured(request: BrowserRequest): CapturedAction { // 正規要求の抽出関数 / browser要求型 / 再送契約型
++  const headers = request.headers(); // 実際の要求headerを取得するメソッド
++  const body = request.postDataBuffer(); // 要求本文をバイト列で取得するメソッド
++  if (!headers["next-action"] ||
++    !body) {
++    throw new Error(FAILURE); // 原文を含めない例外コンストラクター
++  }
++  for (const key of ["cookie", "host", "content-length"]) {
++    delete headers[key];
++  }
++  return {
++    url: request.url(), // 正規の送信先を取得するメソッド
++    headers,
++    body,
++  };
++}
++
++/**
++ * UIが発行した一つのActionを捕捉し、元のPOSTは実行せず、待機とrouteを必ず解除する。
++ */
++export async function captureAction( // 実UIの要求を捕捉する関数
++  page: Page, // 正規フォームを表示する画面型
++  submit: () => Promise<unknown>, // 正規ボタンを押す非同期関数型
++): Promise<CapturedAction> { // メモリ内要求の非同期型
++  const address = new URL(page.url()); // 現在の送信先を解析するコンストラクター / URL取得メソッド
++  if (address.origin !== "https://localhost:3443") {
++    throw new Error(FAILURE); // 専用HTTPS入口以外の捕捉を拒否するコンストラクター
++  }
++  let timer: ReturnType<typeof setTimeout> | undefined; // 待機timerの戻り値型・未設定型
++  /**
++   * 捕捉前の初期状態では何も通知しない。Promiseの準備時に通知先を設定する。
++   */
++  let accept: (value: CapturedAction) => void = () => undefined; // 要求を通知する関数型 / 捕捉要求型 / 初期コールバック
++  const pending = new Promise<CapturedAction>( // 要求の到着を待つPromiseコンストラクター / 捕捉要求型
++    /**
++     * 要求到着と固定期限の失敗だけを呼出し元へ通知する。
++     */
++    (resolve, reject) => { // Promiseの準備コールバック
++      accept = resolve; // 成功通知関数を保持する
++      timer = setTimeout( // 期限timerを登録する関数
++        /**
++         * 要求が取得できなければ原文なしで失敗する。
++         */
++        () => reject(new Error(FAILURE)), // 固定失敗を通知するコールバック / 例外コンストラクター
++        15000,
++      );
++    },
++  );
++  /**
++   * 同じ画面・Originの正規Action一件だけを選ぶ。
++   */
++  const matches = (url: URL) => url.origin === address.origin && // 入力を受け取り操作・照合するコールバック / URLの参照型
++    url.pathname === address.pathname; // URL判定コールバック / URL型
++  /**
++   * 捕捉するAction以外の通信は継続し、元のActionだけを通信前に中止する。
++   */
++  const handler: Parameters<Page["route"]>[1] = async (route) => { // route引数型から取得する型 / 画面型 / 捕捉コールバック
++    const request = route.request(); // 捕捉した要求を取得するメソッド
++    if (request.method() !== "POST" || // HTTP操作を取得するメソッド
++      !request.headers()["next-action"]) { // HTTP操作・header取得メソッド
++      await route.continue(); // Action以外を継続するメソッド
++      return;
++    }
++    const value = captured(request); // 実要求の抽出関数
++    await route.abort(); // 元の変更を実行させないメソッド
++    accept(value); // 捕捉成功を通知する関数
++  };
++  try {
++    await page.route(matches, handler); // 捕捉経路を登録するメソッド / URL判定関数 / 捕捉関数
++    const [value] = await Promise.all([pending, submit()]); // 要求とUI操作を待つメソッド / 正規送信関数
++    return value;
++  } catch {
++    throw new Error(FAILURE); // 秘密を含む要求や例外を公開しないコンストラクター
++  } finally {
++    clearTimeout(timer); // 待機を解除する関数
++    await page.unroute(matches, handler); // 登録した捕捉だけを解除するメソッド / URL判定関数 / 捕捉関数
++  }
++}
++
++/**
++ * FormData内の業務項目を差し替え、明示bindのroot第2引数だけを元IDとの完全一致で改変する。
++ * 【修正】FormDataに含まれるprogressive enhancement用のopaque metadataは編集しない。
++ * 暗号化されたclosureは復号せず、変更対象を見つけられない形式は固定エラーで止める。
++ */
++export async function editAction( // 実要求の業務項目と明示bindを編集する関数
++  action: CapturedAction, // メモリ内の正規要求型
++  fields: Record<string, string> = {}, // 差し替える業務項目辞書型
++  binding?: readonly [string, string], // 元ID・改変IDを表す読取専用tuple型
++): Promise<CapturedAction> { // 編集済み要求の非同期型
++  try {
++    const request = new Request(action.url, { // 通信せずmultipartを解析する要求コンストラクター
++      method: "POST",
++      headers: action.headers,
++      body: new Uint8Array(action.body), // 本文バイト列を複製するコンストラクター
++    });
++    let form = await request.formData(); // 【修正】実際のmultipartを解析するメソッド
++    const nonces = [...form.keys()].filter( // 項目名を列挙して正規nonceを選ぶメソッド
++      /**
++       * Reactの実際のprefixを保ったまま業務FormDataの名前を特定する。
++       */
++      (key) => /^(?:_?\d+_)?requestId$/u.test(key), // 正規nonce名を判定するコールバック / 正規表現メソッド
++    );
++    if (nonces.length !== 1) {
++      throw new Error(FAILURE); // 未対応形式を黙って通さないコンストラクター
++    }
++    const prefix = nonces[0].slice(0, -"requestId".length); // 実要求から業務prefixを抽出するメソッド
++    const editedForm = new FormData(); // 【修正】ReactのFormDataグループ順を保持して再構築するコンストラクター
++    let inserted = false;
++    for (const [name, value] of form.entries()) { // 【修正】元のwire順序で項目を列挙するメソッド
++      if (name.startsWith(prefix)) { // 【修正】選択した業務FormDataのグループだけを選ぶメソッド
++        if (!inserted) {
++          for (const [field, replacement] of Object.entries(fields)) { // 【修正】差し替える項目を同じグループの先頭へ挿入する関数
++            editedForm.append(prefix + field, replacement); // 【修正】別FormDataの後ろへ追加せず正しい位置へ設定するメソッド
++          }
++          inserted = true;
++        }
++        if (Object.hasOwn(fields, name.slice(prefix.length))) { // 【修正】置換対象の元項目だけを省く所有判定関数・部分文字列取得メソッド
++          continue;
++        }
++      }
++      editedForm.append(name, value); // 【修正】opaque metadata・PDF・複数roleを元の順序で保持するメソッド
++    }
++    form = editedForm;
++    if (binding) {
++      const raw = form.get("0"); // 【修正】Reactが送るAction引数のrootモデルだけを取得するメソッド
++      if (typeof raw !== "string") {
++        throw new Error(FAILURE); // 【修正】未知のwire形式を拒否するコンストラクター
++      }
++      const argumentsModel: unknown = JSON.parse(raw); // 【修正】root引数だけを解析するメソッド / 未確定型
++      if (
++        !Array.isArray(argumentsModel) || // 【修正】引数列であることを検証する関数
++        argumentsModel.length !== 4 ||
++        typeof argumentsModel[0] !== "string" ||
++        argumentsModel[1] !== binding[0] ||
++        typeof argumentsModel[3] !== "string" ||
++        !/^\$K[0-9a-f]+$/u.test(argumentsModel[3]) // 【修正】最後の引数が業務FormData参照であることを検証するメソッド
++      ) {
++        throw new Error(FAILURE); // 【修正】対象外のbindや暗号化closureを黙って置換しないコンストラクター
++      }
++      argumentsModel[1] = binding[1];
++      form.set("0", JSON.stringify(argumentsModel)); // 【修正】第2引数だけを再符号化する設定・JSON化メソッド
++
++    }
++    const rebuilt = new Request(action.url, { // 通信しないHTTP要求のコンストラクター
++      method: "POST",
++      body: form
++    }); // multipartを再符号化する要求コンストラクター
++    return {
++      ...action,
++      headers: {
++        ...action.headers,
++        "content-type": rebuilt.headers.get("content-type")!, // 新しいboundaryを取得するメソッド
++      },
++      body: Buffer.from(await rebuilt.arrayBuffer()), // 再符号化バイト列の生成関数 / 本文取得メソッド
++    };
++  } catch {
++    throw new Error(FAILURE); // FormData・bind・tokenの原文を捨てるコンストラクター
++  }
++}
++
++/**
++ * 選択した本人の実Cookieを使い、同じHTTPS入口へだけ要求を直接POSTする。
++ */
++export async function postAction( // Cookie・Originを分離して再送する関数
++  page: Page, // 実Cookieを保持する画面型
++  action: CapturedAction, // 正規または編集済み要求型
++  options: { // 項目ごとの値を定義するオブジェクト型
++    origin?: string; // 文字列型
++    sentinel?: string; // 文字列型
++    invalidateAction?: boolean // 真偽値型
++  } = {}, // 再送条件型
++) {
++  try {
++    if (new URL(action.url).origin !== "https://localhost:3443" ||
++      new URL(action.url).origin !== new URL(page.url()).origin) { // 送信先と本人画面を解析するコンストラクター / URL取得メソッド
++      throw new Error(FAILURE); // 別Originへの転送を拒否するコンストラクター
++    }
++    const headers = { ...action.headers };
++    if (options.origin) {
++      headers.origin = options.origin;
++    }
++    if (options.invalidateAction) {
++      headers["next-action"] = headers["next-action"].slice(0, -1) + // 実IDの末尾だけを改変するメソッド
++        (headers["next-action"].endsWith("0") ? "1" : "0"); // 確実に別IDにするメソッド
++    }
++    const response = await page.context().request.fetch(action.url, { // 実contextのCookieを使う取得・HTTP要求メソッド
++      method: "POST",
++      headers,
++      data: action.body,
++      maxRedirects: 0,
++      timeout: 15000,
++    });
++    try {
++      const text = await response.text(); // DTO・RSCをメモリ内だけへ取得するメソッド
++      return {
++        status: response.status(), // HTTP状態だけを取得するメソッド
++        redirected: Boolean(response.headers()["x-action-redirect"] || // 値を真偽値へ変換する関数 / 実要求または応答のheaderを取得するメソッド
++          response.headers().location), // 遷移headerを取得するメソッド / 真偽値変換関数
++        exposed: options.sentinel ? text.includes(options.sentinel) : false, // sentinelの含有だけを返すメソッド
++      };
++    } finally {
++      await response.dispose(); // 応答原文を保持するリソースを回収するメソッド
++    }
++  } catch {
++    throw new Error(FAILURE); // CookieやRSCを失敗表示へ載せないコンストラクター
++  }
++}
++
++/**
++ * 二つの所有クラブの変更対象とStorage object・送信件数をhash化し、拒否前後だけ比較する。
++ */
++export async function actionState( // 副作用の比較用hashを取得する関数
++  database: PrismaClient, // guard済みのDB client型
++  clubIds: string[], // 所有クラブIDの配列型
++  stub: unknown, // 私有stubの未確定応答型
++): Promise<string> { // 比較用hashの非同期文字列型
++  const where = { clubId: { in: clubIds } };
++  const ordered = { id: "asc" } as const; // 一定順序を指定するリテラル型アサーション
++  const rows = await Promise.all([ // 所有範囲の参照結果をまとめて待つメソッド
++    database.clubEvent.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // イベント取得メソッド
++    database.clubNotice.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // お知らせ取得メソッド
++    database.clubEventAttachment.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 添付取得メソッド
++    database.clubNoticeAttachment.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 添付取得メソッド
++    database.clubMembership.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 所属取得メソッド
++    database.childClubMembership.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered,
++      include: { child: true }
++    }), // 子どもと在籍取得メソッド
++    database.clubInvitation.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 招待取得メソッド
++    database.clubLineTarget.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 通知先取得メソッド
++    database.clubLineDelivery.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 配送結果取得メソッド
++    database.storageDeletionJob.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 削除job取得メソッド
++    database.supportReport.findMany({ // 所有条件で複数行を取得するメソッド
++      where,
++      orderBy: ordered
++    }), // 報告取得メソッド
++    database.$queryRaw<{ // 所有prefixに限定した固定SQL参照メソッド / 対象値を並べる配列型 / 項目ごとの値を定義するオブジェクト型
++      name: string; // 文字列型
++      metadata: unknown // 未確定の入力型
++    }[]>`SELECT name, metadata FROM storage.objects WHERE name LIKE ANY(${clubIds.map( // Storage参照メソッド / 結果行型 / 所有prefixへの変換メソッド
++      /**
++       * 所有クラブのprefixだけをSQLパラメーターへ渡す。
++       */
++      (id) => `clubs/${id}/%`, // 所有prefix生成コールバック
++    )}::text[]) ORDER BY name`,
++  ]);
++  const state = stub as { // 項目ごとの値を定義するオブジェクト型
++    records: unknown[]; // 対象値を並べる配列型 / 未確定の入力型
++    storageChecks: unknown[] // 対象値を並べる配列型 / 未確定の入力型
++  }; // 私有応答の参照用型アサーション
++  if (!Array.isArray(state.records) || // 配列か検証する関数
++    !Array.isArray(state.storageChecks)) { // 配列契約を検証する関数
++    throw new Error(FAILURE); // 応答契約違反を拒否するコンストラクター
++  }
++  return createHash("sha256").update(JSON.stringify([rows, state.records, state.storageChecks])).digest("hex"); // hash生成関数 / 入力・JSON化・終端メソッド
++}
++
++/**
++ * 標準の失敗表示に要求・token・SQL値を含めず、固定したケース名だけを残す。
++ */
++export async function safeBoundary(operation: () => Promise<void>): Promise<void> { // 検証の例外境界関数 / 非同期処理関数型 / 完了型
++  try {
++    await operation(); // 検証処理を実行する関数
++  } catch {
++    throw new Error(FAILURE); // 元例外・causeを保持しないコンストラクター
++  }
++}
+diff --git a/e2e/failure-observability.spec.ts b/e2e/failure-observability.spec.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2df406f6fa705ad7b15a9d02c39098de0be09661
+--- /dev/null
++++ b/e2e/failure-observability.spec.ts
+@@ -0,0 +1,243 @@
++// e2e/failure-observability.spec.ts
++// 架空sentinelを実SDKの故障応答に入れ、Action・HTML・許可DB列・親監視の検出件数を照合する。
++
++import {
++  test as contentTest, // contentとStorageを所有する実Cookie fixture
++  expect, // 同じPlaywrightの期待値検証関数
++} from "./content-fixtures";
++import {
++  test, // 報告IDの回収台帳を持つ実Cookie fixture
++  operationsControl, // 同一runの私有stubを制御する関数
++  reserveSupportReport, // 正規フォームの報告IDを送信前に回収登録する関数
++} from "./operations-fixtures";
++import {
++  captureAction, // 正規UIのAction要求を捕捉する関数
++  postAction, // 同一入口へ再送し本文のsentinel含有だけを返す関数
++  safeBoundary, // 失敗原文を固定コードへ変換する関数
++} from "./action-requests";
++import {
++  mvpFailureSentinel, // 実行ID・境界に束縛した架空sentinelを作る関数
++} from "../tests/mvp/failure-observability.mjs";
++import {
++  createMvpFixturePdf, // 小さな架空PDFをメモリ上で作る関数
++} from "../tests/mvp/local-services-fixture";
++import {
++  CLUB_ATTACHMENT_BUCKET, // クラブ添付PDFを保存するprivate bucket名
++} from "../src/infrastructure/storage/club-attachment-storage-constants";
++
++/**
++ * 認証済み私有応答から注入件数と出力検出件数だけを取り、監視器なしを成功にしない。
++ */
++function evidence( // 故障注入・非出力の証拠を抽出する関数
++  input: unknown, // 私有応答の未確定型
++  channel: "resend" | "line" | "storage", // 故障境界の型
++): number { // 注入済み件数の数値型
++  const value = input as { // 私有応答の最小構造への型アサーション
++    faults?: Record<string, number>; // 故障件数の辞書型
++    fixture?: { // 項目ごとの値を定義するオブジェクト型
++      observability?: { // 項目ごとの値を定義するオブジェクト型
++        stdout: number; // 数値型
++        stderr: number // 数値型
++      }
++    }; // 親の出力監視件数型
++  };
++  const counts = value.fixture?.observability;
++  if (!counts ||
++    counts.stdout !== 0 ||
++    counts.stderr !== 0 ||
++    !Number.isSafeInteger(value.faults?.[channel])) { // 件数が提供されていることを検証する関数
++    throw new Error("F12_OBSERVABILITY_EVIDENCE_FAILED"); // 原文を含めない固定例外コンストラクター
++  }
++  return value.faults![channel];
++}
++
++for (const channel of ["storage", "line"] as const) { // 故障境界を限定するリテラル型アサーション
++  /**
++   * 実Storage・LINE SDKが架空sentinelを受け取った後も、アプリの公開情報とDBには出さない。
++   */
++  contentTest(`${channel}故障のsentinelはRSC・HTML・DB・子の出力に出ない`, // E2E登録関数
++    /**
++     * 正常系対照と故障注入件数を確認し、validationだけで終わる偽の成功を防ぐ。
++     */
++    async ({ content }) => { // 所有contentの検証コールバック
++      contentTest.setTimeout(90000); // 複数の実操作の期限を設定するメソッド
++      await safeBoundary( // 固定例外境界関数
++        /**
++         * 正規UIから同じSDK境界を通し、故障後の実DB状態と非反射を比較する。
++         */
++        async () => { // 操作・検証のコールバック
++          const { admin, database, data } = content;
++          await content.prepare("events"); // 正規新規フォームを準備する関数
++          if (channel === "storage") {
++            await admin.locator('input[name="attachmentFiles"]').setInputFiles({ // PDF選択・設定メソッド
++              name: "control.pdf",
++              mimeType: "application/pdf",
++              buffer: Buffer.from(createMvpFixturePdf()), // PDFバイト列の生成関数 / 架空PDF生成関数
++            });
++          } else {
++            await admin.locator('input[name="status"][value="PUBLISHED"]').check(); // 正規公開を選択するメソッド
++            await admin.locator('input[name="shouldNotifyLine"]').check(); // LINE通知を選択するメソッド
++            await admin.locator(`input[name="lineTargetIds"][value="${content.targetId}"]`).check(); // 所有通知先を選ぶメソッド
++          }
++          await content.save(); // 正常系の正規保存を行う関数
++          const controlId = await content.identify("events"); // 正常系保存をDBで照合する関数
++          if (channel === "line") {
++            await expect.poll( // workerの正常終端を待つ検証メソッド
++              /**
++               * 同じ通知先・親の正常配送結果だけを待つ。
++               */
++              async () => (await database.clubLineDelivery.findFirst({ // 入力を受け取り操作・照合するコールバック / 所有条件で一行を取得するメソッド
++                where: {
++                  clubId: data.clubs.a.id,
++                  eventId: controlId
++                }
++              }))?.status, // 正常配送を取得するコールバック・メソッド
++            ).toBe("SENT"); // 正常受付を検証するメソッド
++          } else {
++            expect(await database.clubEventAttachment.count({ // 期待値を検証する関数 / 所有条件の件数を取得するメソッド
++              where: {
++                clubId: data.clubs.a.id,
++                eventId: controlId
++              }
++            })).toBe(1); // 正常添付保存の件数取得・比較メソッド / 期待値関数
++          }
++          const sentinel = mvpFailureSentinel(content.session.runId, channel); // 同一runの架空sentinelを作る関数
++          const before = evidence(await content.control({ action: "read" }), channel); // 出力監視・注入件数の照合関数 / 私有参照関数
++          await content.control({ // 所有送信またはStorage prefixだけに故障を設定する関数
++            action: "configure",
++            channel,
++            mode: "server-error",
++            sentinel,
++            ...(channel === "storage" ? {
++              method: "POST",
++              match: "prefix",
++              path: `/storage/v1/object/${CLUB_ATTACHMENT_BUCKET}/clubs/${data.clubs.a.id}/events/`,
++            } : {}),
++          });
++          await content.prepare("events"); // 新しい正規nonceのフォームを準備する関数
++          const title = content.title + "故障";
++          await admin.locator('input[name="title"]').fill(title); // 故障対象だけを識別する架空題名を入力するメソッド
++          if (channel === "storage") {
++            await admin.locator('input[name="attachmentFiles"]').setInputFiles({ // PDF選択・設定メソッド
++              name: "failure.pdf",
++              mimeType: "application/pdf",
++              buffer: Buffer.from(createMvpFixturePdf()), // PDFバイト列の生成関数 / 架空PDF生成関数
++            });
++          } else {
++            await admin.locator('input[name="status"][value="PUBLISHED"]').check(); // 公開状態を選ぶメソッド
++            await admin.locator('input[name="shouldNotifyLine"]').check(); // 通知を有効にするメソッド
++            await admin.locator(`input[name="lineTargetIds"][value="${content.targetId}"]`).check(); // 正規通知先を選ぶメソッド
++          }
++          const action = await captureAction(admin, // 正規POST捕捉関数
++            /**
++             * 正規保存ボタンから実Action要求を得る。
++             */
++            () => admin.getByRole("button", { // 入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
++              name: "保存する",
++              exact: true
++            }).click(), // ボタン選択・操作コールバック
++          );
++          const result = await postAction(admin, action, { sentinel }); // ActionのDTO・RSCをメモリだけで点検する関数
++          expect(result.exposed).toBe(false); // 応答原文の非反射を検証する関数・比較メソッド
++          if (channel === "storage") {
++            expect(await database.clubEvent.count({ // 期待値を検証する関数 / 所有条件の件数を取得するメソッド
++              where: {
++                clubId: data.clubs.a.id,
++                title
++              }
++            })).toBe(0); // upload失敗時のDB非作成を照合する関数・取得・比較メソッド
++          } else {
++            const id = await content.identify("events", title); // 故障時も保存された親を照合する関数
++            await expect.poll( // 非同期workerの故障終端を待つメソッド
++              /**
++               * 当該親と所有クラブの配送行だけを待つ。
++               */
++              async () => (await database.clubLineDelivery.findFirst({ // 入力を受け取り操作・照合するコールバック / 所有条件で一行を取得するメソッド
++                where: {
++                  clubId: data.clubs.a.id,
++                  eventId: id
++                }
++              }))?.status, // 配送終端を取得するコールバック・メソッド
++            ).toBe("FAILED"); // 故障の終端状態を検証するメソッド
++          }
++          const details = await database.clubLineDelivery.findMany({ // 所有配送の許可エラー列だけを取得するメソッド
++            where: { clubId: data.clubs.a.id },
++            select: {
++              errorCode: true,
++              errorDetail: true
++            },
++          });
++          const jobs = await database.storageDeletionJob.findMany({ // 所有jobの許可エラー列だけを取得するメソッド
++            where: { clubId: data.clubs.a.id },
++            select: { lastError: true },
++          });
++          expect(JSON.stringify([details, jobs]).includes(sentinel)).toBe(false); // DB列の非保存を検証する関数 / JSON化・含有・比較メソッド
++          await admin.reload(); // HTML・初期RSCを再取得するメソッド
++          expect((await admin.content()).includes(sentinel)).toBe(false); // HTMLの非反射を検証する関数 / HTML取得・含有・比較メソッド
++          expect(evidence(await content.control({ action: "read" }), channel)).toBe(before + 1); // 実注入と出力件数を照合する関数 / 私有参照関数 / 期待値・比較メソッド
++        },
++      );
++    },
++  );
++}
++
++/**
++ * Resendの実SDKに架空の故障本文を返し、受付を残しつつ公開情報は固定コードに限定する。
++ */
++test("Resend故障のsentinelは報告DTO・HTML・許可DB列・stdout・stderrへ出ない", // E2E登録関数
++  /**
++   * 同じ報告フローの正常通知と失敗通知を分け、固定エラーと出力監視器を確認する。
++   */
++  async ({ operations: scenario }) => { // 所有操作の検証コールバック
++    test.setTimeout(60000); // 二回の正規受付の期限を設定するメソッド
++    await safeBoundary( // 固定例外境界関数
++      /**
++       * 全ての報告IDを保存前に回収台帳へ登録し、原文はメモリ内で照合する。
++       */
++      async () => { // 報告の操作・照合コールバック
++        const { member, database, data } = scenario;
++        const sentinel = mvpFailureSentinel(scenario.session.runId, "resend"); // 当該runの架空値生成関数
++        const before = evidence(await operationsControl(scenario, { action: "read" }), "resend"); // 出力監視・注入証拠の照合関数 / 私有制御関数
++        for (const mode of ["success", "server-error"] as const) { // 正常・故障モードのリテラル型アサーション
++          await operationsControl(scenario, { // 同じrunの私有stubを制御する関数
++            action: "configure",
++            channel: "resend",
++            mode,
++            sentinel
++          }); // 認証付き制御関数
++          await member.goto(`/club/${data.clubs.a.slug}/account`); // 正規報告画面へ移動するメソッド
++          const form = member.locator('form:has(textarea[name="message"])'); // 正規報告フォームを選ぶメソッド
++          await form.locator('select[name="category"]').selectOption("BUG"); // 正規種別を選択するメソッド
++          await form.locator('textarea[name="message"]').fill("F12架空障害報告"); // 架空本文を入力するメソッド
++          const id = await reserveSupportReport(scenario, member, "a"); // 回収対象の正規nonceを記録する関数
++          await form.getByRole("button", { // roleと表示名で要素を選ぶメソッド
++            name: "確認して送信",
++            exact: true
++          }).click(); // 確認ダイアログを開く選択・操作メソッド
++          const action = await captureAction(member, // 実POST捕捉関数
++            /**
++             * 正規ダイアログの確定ボタンから実要求を取得する。
++             */
++            () => member.getByRole("dialog").getByRole("button", { // 入力を受け取り操作・照合するコールバック / roleと表示名で要素を選ぶメソッド
++              name: "送信する",
++              exact: true
++            }).click(), // ダイアログ・ボタン選択・操作コールバック
++          );
++          expect((await postAction(member, action, { sentinel })).exposed).toBe(false); // DTO・RSC点検関数 / 非反射を検証する関数・比較メソッド
++          const saved = await database.supportReport.findUniqueOrThrow({ where: { id } }); // 所有報告結果を取得するメソッド
++          expect(saved.clubId === data.clubs.a.id && // 期待値を検証する関数
++            saved.status === "OPEN").toBe(true); // 受付保持を検証する関数・比較メソッド
++          expect(saved.notifyError).toBe(mode === "success" ? null : "EMAIL_SEND_RESULT_UNKNOWN"); // 【修正】503は受付結果不明として記録する現行仕様の期待値関数・比較メソッド
++          expect(saved.notifiedAt !== null).toBe(mode === "success"); // 通知受付の有無を検証する関数・比較メソッド
++          expect(JSON.stringify({ // 期待値を検証する関数 / 値をJSON化するメソッド
++            notifyError: saved.notifyError,
++            internalNote: saved.internalNote
++          }).includes(sentinel)).toBe(false); // 許可DB列を検証する関数 / JSON化・含有・比較メソッド
++          await member.reload(); // 初期HTMLを再取得するメソッド
++          expect((await member.content()).includes(sentinel)).toBe(false); // HTML非反射を検証する関数 / 取得・含有・比較メソッド
++        }
++        expect(evidence(await operationsControl(scenario, { action: "read" }), "resend")).toBe(before + 1); // 実SDK故障注入と出力監視を検証する関数 / 私有制御関数 / 期待値・比較メソッド
++      },
++    );
++  },
++);
+diff --git a/scripts/test-e2e.mjs b/scripts/test-e2e.mjs
+index a598f1d8db57a37200b8f3b39f7d29a5aae509fb..cc95319022e284a50757cac55576b0b58849fe35 100644
+--- a/scripts/test-e2e.mjs
++++ b/scripts/test-e2e.mjs
+@@ -45,6 +45,10 @@ import {
+   ownMvpServer, // 所有serverと接続の回収関数を作る関数
+   startMvpOutboundStub, // 当該runの送信stubとbrowser proxyを起動する関数
+ } from "../tests/mvp/outbound-stub.mjs";
++import {
++  createMvpReportReader, // 【追加】PlaywrightのJSONをファイルへ保存せずメモリ内で解析する関数
++  createMvpOutputObserver, // 【追加】子の出力原文を保存せずsentinel検出件数だけを保持する関数
++} from "../tests/mvp/failure-observability.mjs";
+ const FAILURE = "F12_E2E_FAILED";
+ const CHECKOUT = fileURLToPath(new URL("../", import.meta.url)); // URLをファイルパスへ変換する関数 / URLを解析・構築するコンストラクター
+ /**
+@@ -101,7 +105,7 @@ export function assertNoMvpEgress(directory, stub) { // この処理を定義す
+  */
+ /**
+  * 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する。
+- * @param {{file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv}} request 起動要求。
++ * @param {{file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, observe?: (stream: "stdout" | "stderr", chunk: Uint8Array) => void}} request 起動要求。
+  * @returns {MvpChild} 終了と停止だけを公開するハンドル。
+  */
+ export function startMvpChild(request) { // この処理を定義する関数・コールバック / 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
+@@ -111,11 +115,29 @@ export function startMvpChild(request) { // この処理を定義する関数・
+     env: request.env,
+     detached: grouped,
+     shell: false,
+-    stdio: "ignore",
++    stdio: request.observe ? ["ignore", "pipe", "pipe"] : "ignore", // 【追加】監視対象の出力だけをメモリへ渡す
+   });
+   let ended = false;
+   let failed = false;
+   let reaped = false;
++  if (request.observe) {
++    for (const stream of ["stdout", "stderr"]) {
++      child[/** @type {"stdout" | "stderr"} */ (stream)]?.on("data", // 【追加】出力系統を限定する型注釈 / 生出力を転送せず受け取るメソッド
++        /**
++         * 【追加】出力を照合器へ渡し、監視失敗を子の失敗に変換する。
++         * @param {Buffer} chunk 今回受け取った出力バイト列。
++         */
++        (chunk) => { // 【追加】原文を保存しない監視コールバック
++          try {
++            request.observe?.(/** @type {"stdout" | "stderr"} */ (stream), chunk); // 【追加】検出件数を更新する関数 / 出力系統の型注釈
++          } catch {
++            failed = true;
++            kill("SIGKILL"); // 【追加】監視不能になった所有子を停止する関数
++          }
++        });
++    }
++  }
++
+   const exit = new Promise( // 非同期結果を扱うPromise
+     /**
+      * 子とstdioの終了まで待ち、OS例外の原文は保持しない。
+@@ -578,6 +600,8 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+   let fetchInstalled = false;
+   let interrupted = false;
+   let ownBuild = false;
++  /** @type {ReturnType<typeof createMvpOutputObserver> | undefined} */
++  let outputObserver; // 【追加】終了時まで共有する監視器の戻り値型・未設定型
+   /** @type {(() => Promise<void>) | undefined} */
+   let releaseBackend;
+   const checkout = options.checkoutDirectory ?? CHECKOUT;
+@@ -711,7 +735,9 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+       runtimeDirectory: directory,
+       workerPreload,
+     };
++    outputObserver = createMvpOutputObserver(owner.runId); // 【追加】当該runの出力監視器を作る関数
+     const build = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
++      observe: outputObserver.observe, // 【追加】stdout・stderrを原文非保存の照合器へ渡す関数
+       file: "npm",
+       args: [
+         "run",
+@@ -751,6 +777,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+     }
+     stub.registerFixture({ // seedした当該runのIDと認証情報を、制御secretで守る一時メモリへ登録する
+       database: fixture.database,
++      observability: outputObserver.counts, // 【追加】私有制御口では検出件数だけを公開する
+       credentials
+     }, Object.values(fixture.database.clubs).map( // オブジェクトを扱う組込みAPI / 値を列挙するメソッド / 各要素を変換するメソッド
+       /**
+@@ -760,6 +787,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+     await database.$queryRawUnsafe("SELECT 1"); // 固定SQLで専用DBへ疎通確認するメソッド
+     await releaseBackend(); // 所有するbackend予約を解放する関数
+     const application = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
++      observe: outputObserver.observe, // 【追加】stdout・stderrを原文非保存の照合器へ渡す関数
+       file: process.execPath,
+       args: [
+         join(checkout, "tests/mvp/next-e2e-server.mjs"), // 【修正】公開Originを保つ専用production serverのパスを作る関数
+@@ -791,8 +819,9 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+       certificatePin: certificate.pin,
+       browserExecutable,
+     };
+-    const output = join(directory, "result.json"); // パスを結合する関数
++    const report = createMvpReportReader(outputObserver.observe); // 【追加】失敗時の要求・Cookieを結果ファイルへ残さない集計器生成関数 / 出力監視メソッド
+     const browser = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
++      observe: report.observe, // 【追加】stdout・stderrを原文非保存の照合器へ渡す関数
+       file: process.execPath,
+       args: [
+         join(checkout, "node_modules/@playwright/test/cli.js"), // パスを結合する関数
+@@ -823,12 +852,11 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+         TMPDIR: join(directory, "tmp"), // パスを結合する関数
+         HOME: process.env.HOME,
+         NODE_EXTRA_CA_CERTS: certificate.certFile,
+-        PLAYWRIGHT_JSON_OUTPUT_FILE: output,
+       },
+     });
+     children.push(browser); // 配列へ要素を追加するメソッド
+     await waitMvpChild(browser, 5 * 60000, abort.signal); // 子の失敗・signal・期限超過を固定例外にし、期限超過時は所有workerも停止する
+-    const passed = assertMvpE2eReport(JSON.parse(readFileSync(output, "utf8"))); // JSON結果から実成功だけを数え、skip・期待失敗・retry・hook失敗を完了に含めない / JSONを解析するメソッド / 指定したファイルを読む関数
++    const passed = assertMvpE2eReport(report.read()); // 【修正】メモリ内結果の解析・回収メソッド / 実成功・skipなしだけを許す集計関数
+     assertNoMvpEgress(directory, stub); // process.exitで非同期通知が途切れても、同期記録した通信違反を成功に含めない
+     if (interrupted ||
+       application.finished()) { // 終了済み判定
+@@ -902,6 +930,11 @@ export async function runMvpE2e(options = {}) { // この処理を定義する
+     }
+     process.removeListener("SIGINT", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
+     process.removeListener("SIGTERM", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
++    try {
++      outputObserver?.finish(); // 【追加】stdioの回収後にも遅延出力の漏えいを検証するメソッド
++    } catch {
++      cleanupFailed = true;
++    }
+     if (cleanupFailed) {
+       throw new Error(FAILURE); // 固定例外のコンストラクター
+     }
+diff --git a/tests/mvp/action-requests.test.ts b/tests/mvp/action-requests.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..4c9a7a6e60b3a305a164ce9c62b82d46e4b4da96
+--- /dev/null
++++ b/tests/mvp/action-requests.test.ts
+@@ -0,0 +1,253 @@
++// tests/mvp/action-requests.test.ts
++// 導入済みReactのencodeReplyを使い、実multipartのファイル・重複項目・bindを検証する。
++
++import {
++  execFileSync, // 【追加】DBを使わない実React codec検証用Nodeを起動する関数
++} from "node:child_process";
++import {
++  createRequire,
++} from "node:module";
++import {
++  expect,
++  it,
++} from "vitest";
++import {
++  editAction, // 実要求の業務項目・明示bindだけを編集する関数
++  safeBoundary, // 秘密を含む例外を固定コードへ変換する関数
++  type CapturedAction, // メモリ内だけで保持する正規Action要求の型
++} from "../../e2e/action-requests";
++
++const require = createRequire(import.meta.url); // 導入済みNextのReact encoderを読み込む関数
++const { encodeReply } = require("next/dist/compiled/react-server-dom-webpack/client.node") as { // 導入済み実装を取得する関数 / encoder契約の型アサーション
++  encodeReply: (values: unknown[]) => Promise<FormData>; // 実multipartを生成する非同期関数型
++};
++
++/**
++ * 架空データだけを導入済みReactで符号化し、要求のwire契約を作る。
++ */
++async function fixture(): Promise<CapturedAction> { // 架空要求生成関数 / 非同期要求型
++  const data = new FormData(); // 業務FormDataのコンストラクター
++  data.set("requestId", "00000000-0000-4000-8000-000000000001"); // 正規nonce相当の架空値設定メソッド
++  data.set("title", "owned-idを含む本文"); // IDの部分一致置換を検出する値の設定メソッド
++  data.append("targetRoles", "OWNER"); // 重複する業務値を追加するメソッド
++  data.append("targetRoles", "MEMBER"); // 重複する業務値を追加するメソッド
++  data.set("attachmentFiles", new File(["fixture-pdf"], "test.pdf", { type: "application/pdf" })); // 架空ファイルの生成・設定メソッド
++  const body = await encodeReply(["club-slug", "owned-id", { requestId: "nonce" }, data]); // 導入済みReactの実encoder関数
++  const request = new Request("https://localhost:3443/owned", {
++    method: "POST",
++    body
++  }); // 通信しない要求コンストラクター
++  return {
++    url: request.url,
++    headers: {
++      "content-type": request.headers.get("content-type")!, // 実boundary取得メソッド
++      "next-action": "fixture-action-id",
++    },
++    body: Buffer.from(await request.arrayBuffer()), // wireバイト列取得・生成関数
++  };
++}
++
++it("実React multipartのbound IDと業務項目だけを変更し、PDFと複数roleは保持する", // ケース登録関数
++  /**
++   * 自前の偽wire形式だけを通す試験にせず、インストール版Reactの形式を使う。
++   */
++  async () => { // 実wire編集の検証コールバック
++    const original = await fixture(); // 架空要求生成関数
++    const edited = await editAction(original, { clubId: "foreign-club" }, ["owned-id", "foreign-id"]); // 対象IDと業務値の編集関数
++    const form = await new Request(edited.url, { // 通信しないHTTP要求のコンストラクター
++      method: "POST",
++      headers: edited.headers,
++      body: new Uint8Array(edited.body) // バイト配列を生成するコンストラクター
++    }).formData(); // 通信なしのmultipart解析コンストラクター・メソッド / バイト配列生成関数
++    expect(form.get("_1_clubId")).toBe("foreign-club"); // 実prefixを含む編集値の取得・検証・比較メソッド
++    expect(form.getAll("_1_targetRoles")).toEqual(["OWNER", "MEMBER"]); // 重複値の取得・検証・比較メソッド
++    expect(form.get("_1_title")).toBe("owned-idを含む本文"); // 部分一致非置換を検証する取得・比較メソッド / 期待値関数
++    expect(await (form.get("_1_attachmentFiles") as File).text()).toBe("fixture-pdf"); // PDFの保持を検証する関数 / File型の注釈・取得・本文・比較メソッド
++    expect(JSON.parse(String(form.get("0")))[1]).toBe("foreign-id"); // 明示bindの改変を検証する関数 / JSON解析・文字列化・取得・比較メソッド
++    expect(edited.headers["next-action"]).toBe(original.headers["next-action"]); // Action ID非ハードコードを検証する関数・比較メソッド
++    expect(original.body.equals(edited.body)).toBe(false); // 元要求の非変更を検証する関数・バイト列比較メソッド
++  },
++);
++
++it("未知wire・見つからないbind・未対応の引数列は秘密原文を捨てて拒否する", // ケース登録関数
++  /**
++   * 改ざんを実行せず正規要求を再送してしまう偽陽性を防ぐ。
++   */
++  async () => { // 拒否境界の検証コールバック
++    const original = await fixture(); // 架空要求生成関数
++    await expect(editAction(original, {}, ["not-present", "foreign"])).rejects.toThrow("F12_ACTION_BOUNDARY_FAILED"); // 不明bindの拒否を検証する関数・編集関数・比較メソッド
++    await expect(editAction({ // 期待値を検証する関数 / 正規Actionの業務値・明示bindを編集する関数
++      ...original,
++      body: Buffer.from("FAKE_PRIVATE") // 入力をバイト列へ複製する関数
++    })).rejects.toThrow("F12_ACTION_BOUNDARY_FAILED"); // 不明wireの拒否を検証する関数・編集・バイト列生成関数・比較メソッド
++    const duplicate = new FormData(); // 【修正】未対応の引数列を持つFormDataのコンストラクター
++    duplicate.set("_1_requestId", "nonce"); // 業務nonce設定メソッド
++    duplicate.set("0", JSON.stringify(["same", "same"])); // 【修正】未対応の引数列をJSON化・設定するメソッド
++    const request = new Request(original.url, { // 通信しないHTTP要求のコンストラクター
++      method: "POST",
++      body: duplicate
++    }); // 通信しない要求コンストラクター
++    await expect(editAction({ // 【修正】未対応の引数列の拒否を検証する関数 / 要求編集関数
++      ...original,
++      headers: {
++        ...original.headers,
++        "content-type": request.headers.get("content-type")! // 名前に対応する値を取得するメソッド
++      }, // 実boundaryを取得するメソッド
++      body: Buffer.from(await request.arrayBuffer()), // wire生成関数 / 本文取得メソッド
++    }, {}, ["same", "foreign"])).rejects.toThrow("F12_ACTION_BOUNDARY_FAILED"); // 固定例外の比較メソッド
++  },
++);
++
++it("安全な例外境界は元のmessageとcauseを公開しない", // ケース登録関数
++  /**
++   * SQL・Cookie・RSCを含む失敗でも、Playwrightへは固定コードだけを渡す。
++   */
++  async () => { // 例外非公開の検証コールバック
++    try {
++      await safeBoundary( // 原文を捨てる関数
++        /**
++         * 秘密相当の架空例外を注入する。
++         */
++        async () => { throw new Error("FAKE_PRIVATE"); }, // 失敗コールバック / 架空例外コンストラクター
++      );
++      throw new Error("EXPECTED_FAILURE"); // 見逃しを検出するコンストラクター
++    } catch (error) {
++      expect(error instanceof Error && // 期待値を検証する関数
++        error.message === "F12_ACTION_BOUNDARY_FAILED" &&
++        error.cause === undefined).toBe(true); // 固定例外・causeなしを検証する関数 / 例外型の絞込み・比較メソッド
++    }
++  },
++);
++
++
++/**
++ * 【追加】Reactがprogressive enhancement用に生成する、実フォームmetadataの契約。
++ */
++type FixtureFormAction = { // 【追加】試験用フォームmetadataの型
++  name: string; // 【追加】Reactが生成したhidden項目名の文字列型
++  data: FormData; // 【追加】Reactが生成したopaque metadataの型
++};
++
++/**
++ * 【追加】導入済みReactに登録した架空Server Actionの、フォーム符号化に必要な最小契約。
++ */
++type FixtureReference = { // 【追加】架空Action参照の契約型
++  bind: (receiver: null, ...values: string[]) => FixtureReference; // 【追加】引数を束縛する関数型 / 同じ参照契約型
++  $$FORM_ACTION: (prefix: string) => FixtureFormAction; // 【追加】フォームmetadataを生成する関数型 / metadata契約型
++};
++
++it("同じIDを含む実Reactフォームmetadataを保持し、rootの業務引数だけを改変する", // 【追加】回帰ケース登録関数
++  /**
++   * 【追加】実際のReact参照から生成したmetadataを要求へ含め、全JSON置換への回帰を防ぐ。
++   */
++  async () => { // 【追加】実multipartの境界を照合するコールバック
++    const { registerServerReference } = require("next/dist/compiled/react-server-dom-webpack/client.node") as { // 【追加】導入済みReactの参照登録関数 / 最小契約への型アサーション
++      registerServerReference: (reference: () => void, id: string) => FixtureReference; // 【追加】架空関数を登録する関数型 / 登録済み参照の型
++    };
++    const reference = registerServerReference( // 【追加】実Reactへ架空Actionを登録する関数
++      /**
++       * 【追加】符号化だけに使い、通信やDB操作を行わない架空Action。
++       */
++      () => undefined, // 【追加】副作用を持たないコールバック
++      "fixture-action-id",
++    ).bind(null, "club-slug", "owned-id"); // 【追加】実画面と同じ明示bindのメソッド
++    let metadata: FixtureFormAction | undefined; // 【追加】符号化が完了したmetadataの型・未設定型
++    for (let attempt = 0; attempt < 3; attempt++) {
++      try {
++        metadata = reference.$$FORM_ACTION("fixture"); // 【追加】導入済みReactのフォーム符号化メソッド
++        break;
++      } catch (pending) {
++        if (
++          typeof pending !== "object" ||
++          pending === null ||
++          typeof Reflect.get(pending, "then") !== "function" // 【追加】Reactの待機thenableだけを照合するメソッド
++        ) {
++          throw new Error("FIXTURE_FAILED"); // 【追加】原文を公開しない固定例外コンストラクター
++        }
++        await (pending as Promise<unknown>); // 【追加】符号化の非同期完了を待つ型アサーション
++      }
++    }
++    if (!metadata) {
++      throw new Error("FIXTURE_FAILED"); // 【追加】符号化未完了を拒否するコンストラクター
++    }
++    const original = await fixture(); // 【追加】正規要求の架空生成関数
++    const form = await new Request(original.url, { // 【追加】通信しない要求コンストラクター
++      method: "POST",
++      headers: original.headers,
++      body: new Uint8Array(original.body), // 【追加】元要求のバイト列を複製するコンストラクター
++    }).formData(); // 【追加】元multipartを解析するメソッド
++    for (const [name, value] of metadata.data.entries()) { // 【追加】実Reactのopaque項目を列挙するメソッド
++      form.set("_1_" + name, value); // 【追加】業務FormData内の実metadataを保持する設定メソッド
++    }
++    form.set("_1_" + metadata.name, ""); // 【追加】実ReactのAction参照名を保持する設定メソッド
++    const encoded = new Request(original.url, { // 【追加】metadata付きmultipartを生成するコンストラクター
++      method: "POST",
++      body: form,
++    });
++    const complete = {
++      ...original,
++      headers: {
++        ...original.headers,
++        "content-type": encoded.headers.get("content-type")!, // 【追加】再符号化boundaryを取得するメソッド
++      },
++      body: Buffer.from(await encoded.arrayBuffer()), // 【追加】元要求を再符号化する生成関数・取得メソッド
++    };
++    const edited = await editAction(complete, {}, ["owned-id", "foreign-id"]); // 【追加】rootの対象引数だけを編集する関数
++    const after = await new Request(edited.url, { // 【追加】編集結果を解析する要求コンストラクター
++      method: "POST",
++      headers: edited.headers,
++      body: new Uint8Array(edited.body), // 【追加】編集後バイト列のコンストラクター
++    }).formData(); // 【追加】編集結果のmultipart解析メソッド
++    expect(JSON.parse(String(after.get("0")))[1]).toBe("foreign-id"); // 【追加】rootだけの改変を照合する関数 / JSON解析・文字列化・値取得・比較メソッド
++    let metadataMatches = 0;
++    for (const [name, value] of metadata.data.entries()) { // 【追加】opaque metadataを再照合する列挙メソッド
++      expect(after.get("_1_" + name) === value).toBe(true); // 【追加】原文を表示せず保持を照合する関数 / 項目取得・比較メソッド
++      if (typeof value === "string" && value.includes("owned-id")) { // 【追加】元IDを持つmetadataが実際にあることを調べるメソッド
++        metadataMatches++;
++      }
++    }
++    expect(metadataMatches > 0).toBe(true); // 【追加】単なるmetadata不在による成功を防ぐ検証関数・比較メソッド
++  },
++);
++
++
++it("遅延FormDataが後続しても、追加した業務フィールドを実React decoderが受け取る", // 【追加】wire順序の回帰ケース登録関数
++  /**
++   * 【追加】React server条件の子で実encoder・decoderを使い、末尾追記の見かけ上の成功を防ぐ。
++   */
++  () => { // 【追加】実codec経路を照合するコールバック
++    const helper = new URL("../../e2e/action-requests.ts", import.meta.url).href; // 【追加】当該checkoutのヘルパーを指すURLコンストラクター
++    const source = [
++      'import {createRequire} from "node:module";',
++      'const require=createRequire(import.meta.url);',
++      'const {encodeReply}=require("next/dist/compiled/react-server-dom-webpack/client.node");',
++      'const {decodeReply}=require("next/dist/compiled/react-server-dom-webpack/server.node");',
++      `const {editAction}=await import(${JSON.stringify(helper)});`, // 【追加】所有ヘルパーのURLだけをJSON化するメソッド
++      'const main=new FormData(); main.set("requestId","fake-nonce"); main.set("title","fixture");',
++      'const other=new FormData(); other.set("other","fixture-other");',
++      'const wire=await encodeReply(["slug","owned-id",{deferred:Promise.resolve(other)},main]);',
++      'const request=new Request("https://localhost:3443/owned",{method:"POST",body:wire});',
++      'const captured={url:request.url,headers:{"content-type":request.headers.get("content-type"),"next-action":"fixture"},body:Buffer.from(await request.arrayBuffer())};',
++      'const changed=await editAction(captured,{deleteAttachmentIds:"foreign-id"});',
++      'const multipart=await new Request(changed.url,{method:"POST",headers:changed.headers,body:new Uint8Array(changed.body)}).formData();',
++      'const decoded=await decodeReply(multipart,{});',
++      'if(decoded[3].get("deleteAttachmentIds")!=="foreign-id"||decoded[3].get("title")!=="fixture"||(await decoded[2].deferred).get("other")!=="fixture-other")process.exit(1);',
++      'process.stdout.write("GROUP_ORDER_OK");',
++    ].join("\n"); // 【追加】架空入力だけの検証コードを連結するメソッド
++    const result = execFileSync(process.execPath, [ // 【追加】実React codecの隔離Nodeを起動する関数
++      "--conditions=react-server",
++      "--import", "tsx",
++      "--input-type=module",
++      "-e", source,
++    ], {
++      cwd: process.cwd(), // 【追加】同じcheckoutを取得するメソッド
++      env: {
++        PATH: process.env.PATH,
++        NODE_ENV: "test",
++      },
++      stdio: ["ignore", "pipe", "pipe"],
++      timeout: 10000,
++    });
++    expect(result.toString("utf8")).toBe("GROUP_ORDER_OK"); // 【追加】原文を含まない固定結果を照合する関数 / 文字列化・比較メソッド
++  },
++);
+diff --git a/tests/mvp/failure-observability.mjs b/tests/mvp/failure-observability.mjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d4bf5ebe45b8b8e4bb6e4dcd16f129ece10b36a
+--- /dev/null
++++ b/tests/mvp/failure-observability.mjs
+@@ -0,0 +1,117 @@
++// tests/mvp/failure-observability.mjs
++// 生の出力を返さず、実行ごとの架空sentinelが出力された回数だけを保持する。
++// @ts-check
++
++/**
++ * 実行IDと外部境界に束縛した、実資格情報ではない検出用文字列を作る。
++ * @param {string} runId 予約済み実行ID。
++ * @param {"resend" | "line" | "storage"} channel 故障境界。
++ */
++export function mvpFailureSentinel(runId, channel) { // 架空sentinelを生成する関数
++  if (!/^[0-9a-f]{32}$/u.test(runId) || // 実行IDの書式を調べるメソッド
++    !["resend", "line", "storage"].includes(channel)) { // 故障境界を照合するメソッド
++    throw new Error("F12_OBSERVABILITY_FAILED"); // 原文を含めない例外コンストラクター
++  }
++  return `F12_FAKE_SENTINEL_${runId}_${channel}`;
++}
++
++/**
++ * stdoutとstderrを別々に走査し、chunk境界の照合に必要な末尾だけをメモリに保持する。
++ * @param {string} runId 予約済み実行ID。
++ */
++export function createMvpOutputObserver(runId) { // 出力監視器を生成する関数
++  const needles = ["resend", "line", "storage"].map( // 境界ごとの照合値へ変換するメソッド
++    /**
++     * 検証済み境界だけを、ASCIIの照合用バイト列へ変換する。
++     */
++    (channel) => Buffer.from(mvpFailureSentinel(runId, /** @type {"resend" | "line" | "storage"} */(channel))), // 照合用バイト列の生成関数 / 架空sentinel生成関数 / 境界型の注釈
++  );
++  const maximum = Math.max(...needles.map( // 最大照合長を求める関数 / 長さへ変換するメソッド
++    /**
++     * chunkを跨ぐ照合に必要な長さを返す。
++     */
++    (needle) => needle.length, // 長さ取得のコールバック
++  ));
++  const counts = {
++    stdout: 0,
++    stderr: 0
++  };
++  const tails = {
++    stdout: Buffer.alloc(0), // 架空バイト列を作る関数
++    stderr: Buffer.alloc(0) // 架空バイト列を作る関数
++  }; // 空のバイト列を生成する関数
++  return {
++    counts,
++    /**
++     * 原文を公開せず、stream内の完全一致を数え、保持量を最大sentinel長未満に制限する。
++     * @param {"stdout" | "stderr"} stream 出力系統。
++     * @param {Uint8Array} chunk 破棄前の出力バイト列。
++     */
++    observe(stream, chunk) { // 出力の照合と件数更新を行うメソッド
++      const previous = tails[stream].length;
++      const bytes = Buffer.concat([tails[stream], Buffer.from(chunk)]); // chunk境界を結合する関数 / バイト列生成関数
++      for (const needle of needles) {
++        let index = bytes.indexOf(needle); // 完全一致位置を検索するメソッド
++        while (index !== -1) {
++          if (index + needle.length > previous) {
++            counts[stream]++;
++          }
++          index = bytes.indexOf(needle, index + needle.length); // 次の重複しない出現を検索するメソッド
++        }
++      }
++      tails[stream] = Buffer.from(bytes.subarray(-(maximum - 1))); // 小さい末尾だけを複製する関数 / 部分列を取得するメソッド
++    },
++    /**
++     * 子プロセスのstdio終了後にも漏えいを失敗にし、記録した末尾を破棄する。
++     */
++    finish() { // 監視の終端を検証するメソッド
++      tails.stdout = Buffer.alloc(0); // 保持していた末尾を破棄する関数
++      tails.stderr = Buffer.alloc(0); // 保持していた末尾を破棄する関数
++      if (counts.stdout !== 0 ||
++        counts.stderr !== 0) {
++        throw new Error("F12_OBSERVABILITY_FAILED"); // 原文を含めない固定例外コンストラクター
++      }
++    },
++  };
++}
++
++/**
++ * PlaywrightのJSON結果をファイルへ書かず、上限付きメモリで一度だけ解析する。
++ * @param {(stream: "stdout" | "stderr", chunk: Uint8Array) => void} observe 漏えい検出器。
++ */
++export function createMvpReportReader(observe) { // 秘密を含み得る結果をディスクへ残さない集計器生成関数
++  /** @type {Buffer[]} */
++  const chunks = []; // 結果バイト列の一時配列型
++  let size = 0;
++  return {
++    /**
++     * 両系統を検出器へ渡し、JSONが出るstdoutだけを最大16MiBまで一時保持する。
++     * @param {"stdout" | "stderr"} stream 出力系統。
++     * @param {Uint8Array} chunk 出力バイト列。
++     */
++    observe(stream, chunk) { // 件数監視と結果収集のメソッド
++      observe(stream, chunk); // 原文非公開の検出器へ渡す関数
++      if (stream === "stdout") {
++        size += chunk.byteLength;
++        if (size > 16 * 1024 * 1024) {
++          chunks.length = 0;
++          throw new Error("F12_REPORT_FAILED"); // 上限超過を固定例外にするコンストラクター
++        }
++        chunks.push(Buffer.from(chunk)); // 所有バイト列だけをメモリへ複製するメソッド・関数
++      }
++    },
++    /**
++     * stdio終了後のJSONを解析し、成功・失敗にかかわらず保持したバイト列を回収する。
++     * @returns {unknown} 内容を検証する前の結果。
++     */
++    read() { // 生バイト列を公開しない結果解析メソッド
++      try {
++        return JSON.parse(Buffer.concat(chunks).toString("utf8")); // メモリ内JSONの結合・文字列化・解析メソッド
++      } catch {
++        throw new Error("F12_REPORT_FAILED"); // raw JSONを含めない固定例外コンストラクター
++      } finally {
++        chunks.length = 0;
++      }
++    },
++  };
++}
+diff --git a/tests/mvp/failure-observability.test.ts b/tests/mvp/failure-observability.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2aa933fb04e85748626b6cb6daf277c806e0d418
+--- /dev/null
++++ b/tests/mvp/failure-observability.test.ts
+@@ -0,0 +1,144 @@
++// tests/mvp/failure-observability.test.ts
++// 実DB・SDK通信なしで、出力の境界跨ぎ・系統分離・監視失敗を検証する。
++
++import {
++  expect,
++  it,
++} from "vitest";
++import {
++  createMvpOutputObserver, // 原文を公開せず架空sentinelの出力件数だけを保持する関数
++  mvpFailureSentinel, // 実行IDと境界に束縛した架空sentinelの生成関数
++} from "./failure-observability.mjs";
++import {
++  startMvpChild, // 所有子プロセス群を起動する関数
++  waitMvpChild, // 子の失敗・期限・終了を照合する関数
++} from "../../scripts/test-e2e.mjs";
++
++const RUN = "a".repeat(32); // 架空実行IDを生成するメソッド
++
++it("全chunk境界で検出でき、前の末尾にある同じ出現を二重集計しない", // ケース登録関数
++  /**
++   * すべての分割位置で同じsentinelを一度だけ検出する。
++   */
++  () => { // 境界分割の検証コールバック
++    for (const channel of ["resend", "line", "storage"] as const) { // 境界キーのリテラル型アサーション
++      const text = mvpFailureSentinel(RUN, channel); // 架空値生成関数
++      for (let split = 0;split <= text.length;split++) {
++        const monitor = createMvpOutputObserver(RUN); // 出力監視器生成関数
++        monitor.observe("stdout", Buffer.from(text.slice(0, split))); // 出力を照合するメソッド / バイト列生成関数 / 分割メソッド
++        monitor.observe("stdout", Buffer.from(text.slice(split))); // 出力を照合するメソッド / バイト列生成関数 / 分割メソッド
++        monitor.observe("stdout", Buffer.from("ordinary log")); // 後続出力を照合するメソッド / バイト列生成関数
++        expect(monitor.counts).toEqual({ // 構造を比較するメソッド / 期待値を検証する関数
++          stdout: 1,
++          stderr: 0
++        }); // 検出件数の検証関数・比較メソッド
++        expect(JSON.stringify(monitor)).not.toContain(text); // 原文が公開値にないことを検証する関数 / JSON化・含有判定メソッド
++        expect( // 固定終端エラーを検証する関数
++          /**
++           * 検出した漏えいを成功扱いにしない。
++           */
++          () => monitor.finish(), // 終端照合のコールバック・メソッド
++        ).toThrow("F12_OBSERVABILITY_FAILED"); // 固定例外の比較メソッド
++      }
++    }
++  },
++);
++
++it("異なるstreamを結合せず、大量の通常出力後もstderr漏えいを数える", // ケース登録関数
++  /**
++   * ログの量やstdout・stderrの交錯で見逃しや偽陽性が起きないことを確認する。
++   */
++  () => { // 出力系統の検証コールバック
++    const monitor = createMvpOutputObserver(RUN); // 出力監視器生成関数
++    const text = mvpFailureSentinel(RUN, "line"); // 架空値生成関数
++    monitor.observe("stdout", Buffer.from(text.slice(0, 20))); // 系統別照合メソッド / バイト列生成関数 / 分割メソッド
++    monitor.observe("stderr", Buffer.from(text.slice(20))); // 系統別照合メソッド / バイト列生成関数 / 分割メソッド
++    expect(monitor.counts).toEqual({ // 構造を比較するメソッド / 期待値を検証する関数
++      stdout: 0,
++      stderr: 0
++    }); // 偽陽性がないことを検証する関数・比較メソッド
++    monitor.observe("stderr", Buffer.alloc(1024 * 1024, 120)); // 通常出力の照合メソッド / 架空バイト列生成関数
++    monitor.observe("stderr", Buffer.from(text + text)); // 複数出現の照合メソッド / バイト列生成関数
++    expect(monitor.counts).toEqual({ // 構造を比較するメソッド / 期待値を検証する関数
++      stdout: 0,
++      stderr: 2
++    }); // 件数の検証関数・比較メソッド
++  },
++);
++
++it("実際の子のstdout・stderrを転送せず監視し、終了後の検出も失敗にする", // ケース登録関数
++  /**
++   * 親runnerと同じpipe経路で、子の最後の出力まで監視する。
++   */
++  async () => { // 所有子プロセスの検証コールバック
++    const monitor = createMvpOutputObserver(RUN); // 出力監視器生成関数
++    const sentinel = mvpFailureSentinel(RUN, "storage"); // 架空値生成関数
++    const child = startMvpChild({ // 所有子を起動する関数
++      file: process.execPath,
++      args: ["-e", `process.stdout.write(${JSON.stringify(sentinel)}); process.stderr.write(${JSON.stringify(sentinel)});`], // 架空値だけを起動用文字列へ変換するメソッド
++      cwd: process.cwd(), // 現在の試験領域を取得するメソッド
++      env: { NODE_ENV: "test" },
++      observe: monitor.observe, // 原文を転送しない出力監視メソッド
++    });
++    try {
++      await waitMvpChild(child, 5000); // stdio終了まで待つ関数
++      expect(monitor.counts).toEqual({ // 構造を比較するメソッド / 期待値を検証する関数
++        stdout: 1,
++        stderr: 1
++      }); // 両系統の検出を検証する関数・比較メソッド
++      expect( // 固定エラーを検証する関数
++        /**
++         * 終了直前の出力も検出して失敗にする。
++         */
++        () => monitor.finish(), // 終端照合のコールバック・メソッド
++      ).toThrow("F12_OBSERVABILITY_FAILED"); // 固定例外の比較メソッド
++    } finally {
++      await child.stop(); // 所有子だけを回収するメソッド
++    }
++  },
++);
++
++it("通常出力だけなら終端が成功し、不正runは固定例外で拒否する", // ケース登録関数
++  /**
++   * 非検出の正常系と、監視不能な入力の拒否を確認する。
++   */
++  () => { // 正常系と入力境界の検証コールバック
++    const monitor = createMvpOutputObserver(RUN); // 出力監視器生成関数
++    monitor.observe("stdout", Buffer.from("ready")); // 通常出力照合メソッド / バイト列生成関数
++    expect(monitor.finish()).toBeUndefined(); // 正常終端を検証する関数・終端照合・比較メソッド
++    expect( // 不正入力を検証する関数
++      /**
++       * 実行IDのない監視器を作らない。
++       */
++      () => createMvpOutputObserver("invalid"), // 不正設定の監視器生成コールバック
++    ).toThrow("F12_OBSERVABILITY_FAILED"); // 固定例外の比較メソッド
++  },
++);
++
++it("失敗reportのraw JSONをファイルへ保存せず解析し、二度目の読取り・容量超過は固定拒否する", // ケース登録関数
++  /**
++   * 結果のsplit・原文回収・上限を同じ親runner用集計器で確認する。
++   */
++  async () => { // 結果解析の検証コールバック
++    const { createMvpReportReader } = await import("./failure-observability.mjs"); // ファイル保存しない集計器生成関数 / 遅延読込関数
++    const monitor = createMvpOutputObserver(RUN); // 出力監視器生成関数
++    const reader = createMvpReportReader(monitor.observe); // 結果集計器生成関数 / 原文非公開の監視メソッド
++    reader.observe("stderr", Buffer.from("diagnostic")); // stderrを結果JSONへ混ぜない監視メソッド / バイト列生成関数
++    reader.observe("stdout", Buffer.from('{"errors":')); // splitしたJSONの監視メソッド / バイト列生成関数
++    reader.observe("stdout", Buffer.from('["FAKE_PRIVATE"]}')); // メモリ内だけの架空原文を渡すメソッド / バイト列生成関数
++    expect(JSON.stringify(reader.read()).includes("FAKE_PRIVATE")).toBe(true); // メモリ内解析を検証する関数 / JSON化・解析・含有・比較メソッド
++    expect( // 回収後の固定失敗を検証する関数
++      /**
++       * 保持した原文が再取得できないことを確認する。
++       */
++      () => reader.read(), // 再読取コールバック・解析メソッド
++    ).toThrow("F12_REPORT_FAILED"); // 固定失敗の比較メソッド
++    const limited = createMvpReportReader(monitor.observe); // 容量上限を持つ集計器生成関数 / 監視メソッド
++    expect( // 上限超過を検証する関数
++      /**
++       * 異常な大容量出力を子の失敗へ変換する。
++       */
++      () => limited.observe("stdout", Buffer.alloc(16 * 1024 * 1024 + 1)), // 容量検証のコールバック・監視メソッド / 架空バイト列生成関数
++    ).toThrow("F12_REPORT_FAILED"); // 固定失敗の比較メソッド
++  },
++);
+diff --git a/tests/mvp/outbound-harness.test.ts b/tests/mvp/outbound-harness.test.ts
+index d9dc9e54ad4b49b98cf59a49c9ffdda044a6dba8..c6039f31b368cdbe7754dfbc141b6e435a9dd8af 100644
+--- a/tests/mvp/outbound-harness.test.ts
++++ b/tests/mvp/outbound-harness.test.ts
+@@ -977,3 +977,53 @@ it.each([ // 試験ケースを登録する関数 / パラメーター別試験
+        */
+       () => assertMvpE2eReport(report)).toThrow("F12_E2E_FAILED"); // この処理を定義する関数・コールバック / Playwright JSONで実成功・skipなしを検証する関数 / 固定例外を検証するメソッド
+   });
++
++for (const channel of ["resend", "line", "storage"] as const) { // 【追加】検証する故障境界のリテラル型アサーション
++  it(`${channel}の実SDK境界へ当該runのsentinelを注入し、注入件数はresetでも消さない`, // 【追加】ケース登録関数
++    /**
++     * 【追加】秘密ではない架空値だけを故障応答へ渡し、SDKが受け取った事実を終了コードで確認する。
++     */
++    async () => { // 【追加】実SDK経路の検証コールバック
++      const sentinel = `F12_FAKE_SENTINEL_${RUN_ID}_${channel}`;
++      stub.registerFixture({}, ["clubs/" + CLUB + "/"]); // 【追加】所有Storage prefixを登録するメソッド
++      const configured = await control({ // 【追加】同一runの認証付き制御関数
++        action: "configure",
++        channel,
++        mode: "server-error",
++        sentinel,
++        ...(channel === "storage" ? {
++          method: "POST",
++          path: STORAGE_PATH,
++        } : {}),
 +      });
-+  });
++      expect(configured.ok).toBe(true); // 【追加】故障設定の受付を検証する関数・比較メソッド
++      const source = channel === "resend" ? [
++        'import {Resend} from "resend";',
++        'const client=new Resend("re_F12_FAKE_NEVER_SEND");',
++        'const result=await client.emails.send({from:"from@example.test",to:"to@example.test",subject:"fixture",html:"fixture"});',
++        `process.exit(result.error?.message===${JSON.stringify(sentinel)}?0:1);`, // 【追加】架空値だけをJSON化するメソッド
++      ] : channel === "storage" ? [
++        'import {createClient} from "@supabase/supabase-js";',
++        'const client=createClient("http://127.0.0.1:54321","F12_FAKE_INVALID_KEY");',
++        `const result=await client.storage.from(${JSON.stringify(CLUB_ATTACHMENT_BUCKET)}).upload(${JSON.stringify(STORAGE_PATH.split(`/${CLUB_ATTACHMENT_BUCKET}/`)[1])},new Uint8Array([1]),{contentType:"application/pdf"});`, // 【追加】固定bucket・所有pathだけをJSON化・抽出するメソッド
++        `process.exit(result.error?.message===${JSON.stringify(sentinel)}?0:1);`, // 【追加】架空値だけをJSON化するメソッド
++      ] : [
++        'const response=await fetch("https://api.line.me/v2/bot/message/push",{method:"POST",body:JSON.stringify({to:"F12_FAKE",messages:[]})});',
++        `process.exit((await response.json()).message===${JSON.stringify(sentinel)}?0:1);`, // 【追加】架空値だけをJSON化するメソッド
++      ];
++      const result = await probe(source.join("\n")); // 【追加】実Node・preloader・SDK経路の検証関数 / 起動コード連結メソッド
++      expect(result.code === 0 && result.output === "" && result.error === "").toBe(true); // 【追加】原文を表示しない受領証拠を検証する関数・比較メソッド
++      const first = await (await control({ action: "read" })).json(); // 【追加】私有件数を取得する関数・JSON取得メソッド
++      expect(first.faults[channel]).toBe(1); // 【追加】実注入件数を検証する関数・比較メソッド
++      await control({ action: "reset" }); // 【追加】通常のケース回収を実行する関数
++      const after = await (await control({ action: "read" })).json(); // 【追加】reset後の件数を取得する関数・JSON取得メソッド
++      expect(after.faults[channel]).toBe(1); // 【追加】注入証拠が消えないことを検証する関数・比較メソッド
++      expect((await control({ // 【追加】別runの値の拒否を検証する関数 / 私有制御関数
++        action: "configure",
++        channel,
++        mode: "server-error",
++        sentinel: "F12_FAKE_SENTINEL_" + "b".repeat(32) + "_" + channel, // 【追加】別runの架空値を作るメソッド
++      })).status).toBe(400); // 【追加】不正な故障原文を拒否する比較メソッド
++    },
++  );
++}
+diff --git a/tests/mvp/outbound-preload.mjs b/tests/mvp/outbound-preload.mjs
+index 54a2722618bd254220459f6886822f9dcddba927..16b3d206a014b85f6f259f7dd987b30e745059a5 100644
+--- a/tests/mvp/outbound-preload.mjs
++++ b/tests/mvp/outbound-preload.mjs
+@@ -313,7 +313,9 @@ globalThis.fetch = async function(input, init) { // HTTP通信を実行する関
+             headers.set("x-mvp-fault", decision.mode); // 値を設定するメソッド
+           }
+           return fault(new Response(JSON.stringify({ // stubから返された故障指定をSDKが実際に受け取る通信例外へ変換する / HTTP応答を生成するコンストラクター / JSONへ直列化するメソッド
+-            message: "F12_STORAGE_FAILURE"
++            message: decision.sentinel === `F12_FAKE_SENTINEL_${config.runId}_storage`
++              ? decision.sentinel
++              : "F12_STORAGE_FAILURE", // 【追加】当該runの架空値だけをStorage SDKへ返す
+           }), {
+             status: decision.mode === "rejected"
+               ? 400
+@@ -507,7 +509,7 @@ Object.defineProperty(guardedExecFile, promisify.custom, { // オブジェクト
+          * @param {string} stdout 標準出力。
+          * @param {string} stderr 標準エラー。
+          */
+-        (error, stdout, stderr) => error
++        (error, stdout, stderr) => error // 【追加】入力を受け取り操作・照合するコールバック
+           ? reject(new Error(FAILURE)) // 失敗を通知する関数 / 固定例外のコンストラクター
+           : accept({ // 成功時の標準出力と標準エラーを返す関数
+             stdout,
+diff --git a/tests/mvp/outbound-stub.mjs b/tests/mvp/outbound-stub.mjs
+index aaf60374fea496a0699bc7752e8041602f0e005b..844ee5d1636ec9e6aae11c3c44e785f06e9fbd08 100644
+--- a/tests/mvp/outbound-stub.mjs
++++ b/tests/mvp/outbound-stub.mjs
+@@ -203,6 +203,9 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+   }
+   /** @type {{channel: string, body: unknown, idempotencyKey: string | null}[]} */
+   const records = [];
++  const faults = { resend: 0, line: 0, storage: 0 }; // 【追加】実際に注入した故障の累積件数
++  /** @type {Map<string, string>} */
++  const sentinels = new Map(); // 【追加】認証済み制御口で指定した架空sentinelの対応表
+   /** @type {Map<string, string>} */
+   const modes = new Map(); // キーと値を対応付けるMap
+   /** @type {Map<string, string>} */
+@@ -343,11 +346,13 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+         reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
+           records,
+           storageChecks,
++          faults, // 【追加】リセットで消さない注入証拠の件数
+           fixture
+         });
+       } else if (body.action === "reset") {
+         records.length = 0;
+         storageChecks.length = 0;
++        sentinels.clear(); // 【追加】ケース間で故障応答を持ち越さないメソッド
+         modes.clear(); // 登録値を消去するメソッド
+         storage.clear(); // 登録値を消去するメソッド
+         storagePrefixes.clear(); // 【追加】次のケースへ故障条件を持ち越さないメソッド
+@@ -357,6 +362,13 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+       } else if (body.action === "configure" &&
+         typeof body.mode === "string" &&
+         MODES.has(body.mode)) { // 登録の有無を調べるメソッド
++        if (body.sentinel !== undefined &&
++          body.sentinel !== `F12_FAKE_SENTINEL_${options.runId}_${body.channel}`) {
++          reply(response, 400, { // 【追加】入力値を公開しない固定応答関数
++            code: FAILURE,
++          }); // 【追加】実秘密や別runの値を故障応答へ混入させない関数
++          return;
++        }
+         if (body.channel === "resend" ||
+           body.channel === "line") {
+           modes.set(body.channel, body.mode); // 値を設定するメソッド
+@@ -401,6 +413,11 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+           });
+           return;
+         }
++        if (body.sentinel !== undefined) {
++          sentinels.set(body.channel, body.sentinel); // 【追加】検証済みの架空値だけをメモリへ登録するメソッド
++        } else {
++          sentinels.delete(body.channel); // 【追加】sentinelなし指定の既存挙動を維持するメソッド
++        }
+         reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
+           accepted: true
+         });
+@@ -422,6 +439,9 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+           }
+         }
+       }
++      if (mode !== "success") {
++        faults.storage++;
++      }
+       storageChecks.push({ // 【追加】SDKで実際に照合された操作を一時メモリに記録するメソッド
+         method: String(body.method), // 【追加】HTTP操作を文字列に限定する関数
+         path: String(body.path), // 【追加】queryを含まない照合pathを文字列に限定する関数
+@@ -429,6 +449,7 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+       });
+       reply(response, 200, { // 【追加】秘密や対象pathを含めず故障条件だけを返す関数
+         mode,
++        sentinel: mode === "success" ? undefined : sentinels.get("storage"), // 【追加】失敗応答だけへ検証済み架空値を渡すメソッド
+       });
+       return;
+     }
+@@ -454,6 +475,9 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+         : null,
+     });
+     const mode = modes.get(channel) ?? "success"; // 取得する関数・メソッド
++    if (mode !== "success") {
++      faults[channel]++;
++    }
+     if (mode === "timeout" ||
+       mode === "network") {
+       response.setHeader("x-mvp-fault", mode); // 応答headerを設定するメソッド
+@@ -480,10 +504,11 @@ export async function startMvpOutboundStub(options) { // この処理を定義
+             ? "validation_error"
+             : "application_error",
+           statusCode: status, // 【追加】Resend SDKが本文から読む拒否状態を実HTTPと一致させる
+-          message: FAILURE
++          message: sentinels.get(channel) ?? FAILURE, // 【追加】SDKが受け取る故障本文へ架空sentinelを注入するメソッド
+         }
+       : {
+-        accepted: status === 200
++        accepted: status === 200,
++        message: status === 200 ? undefined : sentinels.get(channel) ?? FAILURE, // 【追加】LINEのHTTP失敗本文にも架空値を渡すメソッド
+       });
+   }
+   const server = http.createServer( // serverを生成する関数

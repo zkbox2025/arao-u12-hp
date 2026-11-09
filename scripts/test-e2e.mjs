@@ -45,6 +45,10 @@ import {
   ownMvpServer, // 所有serverと接続の回収関数を作る関数
   startMvpOutboundStub, // 当該runの送信stubとbrowser proxyを起動する関数
 } from "../tests/mvp/outbound-stub.mjs";
+import {
+  createMvpReportReader, // 【追加】PlaywrightのJSONをファイルへ保存せずメモリ内で解析する関数
+  createMvpOutputObserver, // 【追加】子の出力原文を保存せずsentinel検出件数だけを保持する関数
+} from "../tests/mvp/failure-observability.mjs";
 const FAILURE = "F12_E2E_FAILED";
 const CHECKOUT = fileURLToPath(new URL("../", import.meta.url)); // URLをファイルパスへ変換する関数 / URLを解析・構築するコンストラクター
 /**
@@ -101,7 +105,7 @@ export function assertNoMvpEgress(directory, stub) { // この処理を定義す
  */
 /**
  * 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する。
- * @param {{file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv}} request 起動要求。
+ * @param {{file: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, observe?: (stream: "stdout" | "stderr", chunk: Uint8Array) => void}} request 起動要求。
  * @returns {MvpChild} 終了と停止だけを公開するハンドル。
  */
 export function startMvpChild(request) { // この処理を定義する関数・コールバック / 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
@@ -111,11 +115,29 @@ export function startMvpChild(request) { // この処理を定義する関数・
     env: request.env,
     detached: grouped,
     shell: false,
-    stdio: "ignore",
+    stdio: request.observe ? ["ignore", "pipe", "pipe"] : "ignore", // 【追加】監視対象の出力だけをメモリへ渡す
   });
   let ended = false;
   let failed = false;
   let reaped = false;
+  if (request.observe) {
+    for (const stream of ["stdout", "stderr"]) {
+      child[/** @type {"stdout" | "stderr"} */ (stream)]?.on("data", // 【追加】出力系統を限定する型注釈 / 生出力を転送せず受け取るメソッド
+        /**
+         * 【追加】出力を照合器へ渡し、監視失敗を子の失敗に変換する。
+         * @param {Buffer} chunk 今回受け取った出力バイト列。
+         */
+        (chunk) => { // 【追加】原文を保存しない監視コールバック
+          try {
+            request.observe?.(/** @type {"stdout" | "stderr"} */ (stream), chunk); // 【追加】検出件数を更新する関数 / 出力系統の型注釈
+          } catch {
+            failed = true;
+            kill("SIGKILL"); // 【追加】監視不能になった所有子を停止する関数
+          }
+        });
+    }
+  }
+
   const exit = new Promise( // 非同期結果を扱うPromise
     /**
      * 子とstdioの終了まで待ち、OS例外の原文は保持しない。
@@ -578,6 +600,8 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
   let fetchInstalled = false;
   let interrupted = false;
   let ownBuild = false;
+  /** @type {ReturnType<typeof createMvpOutputObserver> | undefined} */
+  let outputObserver; // 【追加】終了時まで共有する監視器の戻り値型・未設定型
   /** @type {(() => Promise<void>) | undefined} */
   let releaseBackend;
   const checkout = options.checkoutDirectory ?? CHECKOUT;
@@ -711,7 +735,9 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
       runtimeDirectory: directory,
       workerPreload,
     };
+    outputObserver = createMvpOutputObserver(owner.runId); // 【追加】当該runの出力監視器を作る関数
     const build = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
+      observe: outputObserver.observe, // 【追加】stdout・stderrを原文非保存の照合器へ渡す関数
       file: "npm",
       args: [
         "run",
@@ -751,6 +777,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     }
     stub.registerFixture({ // seedした当該runのIDと認証情報を、制御secretで守る一時メモリへ登録する
       database: fixture.database,
+      observability: outputObserver.counts, // 【追加】私有制御口では検出件数だけを公開する
       credentials
     }, Object.values(fixture.database.clubs).map( // オブジェクトを扱う組込みAPI / 値を列挙するメソッド / 各要素を変換するメソッド
       /**
@@ -760,6 +787,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     await database.$queryRawUnsafe("SELECT 1"); // 固定SQLで専用DBへ疎通確認するメソッド
     await releaseBackend(); // 所有するbackend予約を解放する関数
     const application = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
+      observe: outputObserver.observe, // 【追加】stdout・stderrを原文非保存の照合器へ渡す関数
       file: process.execPath,
       args: [
         join(checkout, "tests/mvp/next-e2e-server.mjs"), // 【修正】公開Originを保つ専用production serverのパスを作る関数
@@ -791,8 +819,9 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
       certificatePin: certificate.pin,
       browserExecutable,
     };
-    const output = join(directory, "result.json"); // パスを結合する関数
+    const report = createMvpReportReader(outputObserver.observe); // 【追加】失敗時の要求・Cookieを結果ファイルへ残さない集計器生成関数 / 出力監視メソッド
     const browser = startMvpChild({ // 入力値をログに出さず、POSIXではworkerを含む子プロセス群を所有する
+      observe: report.observe, // 【追加】stdout・stderrを原文非保存の照合器へ渡す関数
       file: process.execPath,
       args: [
         join(checkout, "node_modules/@playwright/test/cli.js"), // パスを結合する関数
@@ -823,12 +852,11 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
         TMPDIR: join(directory, "tmp"), // パスを結合する関数
         HOME: process.env.HOME,
         NODE_EXTRA_CA_CERTS: certificate.certFile,
-        PLAYWRIGHT_JSON_OUTPUT_FILE: output,
       },
     });
     children.push(browser); // 配列へ要素を追加するメソッド
     await waitMvpChild(browser, 5 * 60000, abort.signal); // 子の失敗・signal・期限超過を固定例外にし、期限超過時は所有workerも停止する
-    const passed = assertMvpE2eReport(JSON.parse(readFileSync(output, "utf8"))); // JSON結果から実成功だけを数え、skip・期待失敗・retry・hook失敗を完了に含めない / JSONを解析するメソッド / 指定したファイルを読む関数
+    const passed = assertMvpE2eReport(report.read()); // 【修正】メモリ内結果の解析・回収メソッド / 実成功・skipなしだけを許す集計関数
     assertNoMvpEgress(directory, stub); // process.exitで非同期通知が途切れても、同期記録した通信違反を成功に含めない
     if (interrupted ||
       application.finished()) { // 終了済み判定
@@ -902,6 +930,11 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     }
     process.removeListener("SIGINT", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
     process.removeListener("SIGTERM", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
+    try {
+      outputObserver?.finish(); // 【追加】stdioの回収後にも遅延出力の漏えいを検証するメソッド
+    } catch {
+      cleanupFailed = true;
+    }
     if (cleanupFailed) {
       throw new Error(FAILURE); // 固定例外のコンストラクター
     }

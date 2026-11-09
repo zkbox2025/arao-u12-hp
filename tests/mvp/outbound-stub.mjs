@@ -203,6 +203,9 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
   }
   /** @type {{channel: string, body: unknown, idempotencyKey: string | null}[]} */
   const records = [];
+  const faults = { resend: 0, line: 0, storage: 0 }; // 【追加】実際に注入した故障の累積件数
+  /** @type {Map<string, string>} */
+  const sentinels = new Map(); // 【追加】認証済み制御口で指定した架空sentinelの対応表
   /** @type {Map<string, string>} */
   const modes = new Map(); // キーと値を対応付けるMap
   /** @type {Map<string, string>} */
@@ -343,11 +346,13 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
         reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
           records,
           storageChecks,
+          faults, // 【追加】リセットで消さない注入証拠の件数
           fixture
         });
       } else if (body.action === "reset") {
         records.length = 0;
         storageChecks.length = 0;
+        sentinels.clear(); // 【追加】ケース間で故障応答を持ち越さないメソッド
         modes.clear(); // 登録値を消去するメソッド
         storage.clear(); // 登録値を消去するメソッド
         storagePrefixes.clear(); // 【追加】次のケースへ故障条件を持ち越さないメソッド
@@ -357,6 +362,13 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
       } else if (body.action === "configure" &&
         typeof body.mode === "string" &&
         MODES.has(body.mode)) { // 登録の有無を調べるメソッド
+        if (body.sentinel !== undefined &&
+          body.sentinel !== `F12_FAKE_SENTINEL_${options.runId}_${body.channel}`) {
+          reply(response, 400, { // 【追加】入力値を公開しない固定応答関数
+            code: FAILURE,
+          }); // 【追加】実秘密や別runの値を故障応答へ混入させない関数
+          return;
+        }
         if (body.channel === "resend" ||
           body.channel === "line") {
           modes.set(body.channel, body.mode); // 値を設定するメソッド
@@ -401,6 +413,11 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
           });
           return;
         }
+        if (body.sentinel !== undefined) {
+          sentinels.set(body.channel, body.sentinel); // 【追加】検証済みの架空値だけをメモリへ登録するメソッド
+        } else {
+          sentinels.delete(body.channel); // 【追加】sentinelなし指定の既存挙動を維持するメソッド
+        }
         reply(response, 200, { // 固定形式で応答し、制御値をキャッシュ・外部ログへ残さない
           accepted: true
         });
@@ -422,6 +439,9 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
           }
         }
       }
+      if (mode !== "success") {
+        faults.storage++;
+      }
       storageChecks.push({ // 【追加】SDKで実際に照合された操作を一時メモリに記録するメソッド
         method: String(body.method), // 【追加】HTTP操作を文字列に限定する関数
         path: String(body.path), // 【追加】queryを含まない照合pathを文字列に限定する関数
@@ -429,6 +449,7 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
       });
       reply(response, 200, { // 【追加】秘密や対象pathを含めず故障条件だけを返す関数
         mode,
+        sentinel: mode === "success" ? undefined : sentinels.get("storage"), // 【追加】失敗応答だけへ検証済み架空値を渡すメソッド
       });
       return;
     }
@@ -454,6 +475,9 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
         : null,
     });
     const mode = modes.get(channel) ?? "success"; // 取得する関数・メソッド
+    if (mode !== "success") {
+      faults[channel]++;
+    }
     if (mode === "timeout" ||
       mode === "network") {
       response.setHeader("x-mvp-fault", mode); // 応答headerを設定するメソッド
@@ -480,10 +504,11 @@ export async function startMvpOutboundStub(options) { // この処理を定義�
             ? "validation_error"
             : "application_error",
           statusCode: status, // 【追加】Resend SDKが本文から読む拒否状態を実HTTPと一致させる
-          message: FAILURE
+          message: sentinels.get(channel) ?? FAILURE, // 【追加】SDKが受け取る故障本文へ架空sentinelを注入するメソッド
         }
       : {
-        accepted: status === 200
+        accepted: status === 200,
+        message: status === 200 ? undefined : sentinels.get(channel) ?? FAILURE, // 【追加】LINEのHTTP失敗本文にも架空値を渡すメソッド
       });
   }
   const server = http.createServer( // serverを生成する関数

@@ -313,7 +313,9 @@ globalThis.fetch = async function(input, init) { // HTTP通信を実行する関
             headers.set("x-mvp-fault", decision.mode); // 値を設定するメソッド
           }
           return fault(new Response(JSON.stringify({ // stubから返された故障指定をSDKが実際に受け取る通信例外へ変換する / HTTP応答を生成するコンストラクター / JSONへ直列化するメソッド
-            message: "F12_STORAGE_FAILURE"
+            message: decision.sentinel === `F12_FAKE_SENTINEL_${config.runId}_storage`
+              ? decision.sentinel
+              : "F12_STORAGE_FAILURE", // 【追加】当該runの架空値だけをStorage SDKへ返す
           }), {
             status: decision.mode === "rejected"
               ? 400
@@ -507,7 +509,7 @@ Object.defineProperty(guardedExecFile, promisify.custom, { // オブジェクト
          * @param {string} stdout 標準出力。
          * @param {string} stderr 標準エラー。
          */
-        (error, stdout, stderr) => error
+        (error, stdout, stderr) => error // 【追加】入力を受け取り操作・照合するコールバック
           ? reject(new Error(FAILURE)) // 失敗を通知する関数 / 固定例外のコンストラクター
           : accept({ // 成功時の標準出力と標準エラーを返す関数
             stdout,
