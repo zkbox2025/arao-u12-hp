@@ -49,6 +49,11 @@ import {
   createMvpReportReader, // 【追加】PlaywrightのJSONをファイルへ保存せずメモリ内で解析する関数
   createMvpOutputObserver, // 【追加】子の出力原文を保存せずsentinel検出件数だけを保持する関数
 } from "../tests/mvp/failure-observability.mjs";
+import {
+  assertMvpE2eManifest, // 【追加】必須E2Eの実在・所有checkoutを確認する関数
+  assertMvpE2eResults, // 【追加】必須E2E全ファイルの終端件数を照合する関数
+  MVP_E2E_SUITES, // 【追加】粒度18までの必須E2E一覧
+} from "../tests/mvp/suite-manifest";
 const FAILURE = "F12_E2E_FAILED";
 const CHECKOUT = fileURLToPath(new URL("../", import.meta.url)); // URLをファイルパスへ変換する関数 / URLを解析・構築するコンストラクター
 /**
@@ -575,9 +580,63 @@ export function assertMvpE2eReport(input) { // この処理を定義する関数
   }
 }
 /**
+ * 【追加】実結果の全成功を先に確認し、必須E2Eをファイル別の安全な件数へ写す。
+ * @param {unknown} input メモリ内のPlaywright JSON。
+ * @param {string} checkoutDirectory 所有checkout。
+ * @returns {import("../tests/mvp/suite-manifest.ts").MvpE2eSuiteResult[]} ファイル別の終端件数。
+ */
+export function getMvpE2eSuiteResults(input, checkoutDirectory) { // 【追加】必須E2E結果の安全な集計関数
+  assertMvpE2eReport(input); // 【追加】skip・case0・失敗・hook失敗を拒否する関数
+  try {
+    const report = /** @type {import("playwright/types/testReporter").JSONReport} */ (input); // 【追加】Playwright JSONの結果型注釈
+    const results = MVP_E2E_SUITES.map( // 【追加】必須ファイルを0件から集計するメソッド
+      /**
+       * 【追加】見つからないファイルを0件として残し、後段で拒否する。
+       */
+      (path) => ({ // 【追加】安全な初期件数を作るコールバック
+        path,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        pending: 0,
+      }),
+    );
+    /**
+     * 【追加】describeの入れ子を辿り、実行済みspecの所有ファイルだけを集計する。
+     * @param {typeof report.suites} suites Playwright suite配列。
+     */
+    function visit(suites) { // 【追加】実行結果を再帰集計する関数
+      for (const suite of suites) {
+        for (const spec of suite.specs) {
+          const path = spec.file.startsWith("e2e/") // 【追加】root相対の表記を判定するメソッド
+            ? resolve(checkoutDirectory, spec.file) // 【追加】所有checkoutからパスを解決する関数
+            : resolve(checkoutDirectory, "e2e", spec.file); // 【追加】testDir相対または絶対パスを解決する関数
+          const result = results.find( // 【追加】既知の必須ファイルだけを選ぶメソッド
+            /**
+             * 【追加】未知・checkout外・診断用ファイルは結果に含めない。
+             */
+            (candidate) => resolve(checkoutDirectory, candidate.path) === path, // 【追加】所有パスの照合コールバック・解決関数
+          );
+          if (!result) {
+            throw new Error(FAILURE); // 【追加】未知ファイルを拒否するコンストラクター
+          }
+          result.passed += spec.tests.length;
+        }
+        visit(suite.suites ?? []); // 【追加】子suiteを再帰集計する関数
+      }
+    }
+    visit(report.suites); // 【追加】全実行ファイルを集計する関数
+    assertMvpE2eResults(results); // 【追加】必須ファイルの欠落・case0を拒否する関数
+    return results;
+  } catch {
+    throw new Error(FAILURE); // 【追加】JSON原文とパスを公開しないコンストラクター
+  }
+}
+
+/**
  * guard成功後だけ専用資源を起動し、production lifecycle・TLS・実E2Eを順に実行する。
  * migrationとサービス起動は行わず、既存server・既存build成果物を再利用しない。
- * @param {{environment?: Record<string, string | undefined>, checkoutDirectory?: string}} [options] 明示設定。
+ * @param {{environment?: Record<string, string | undefined>, checkoutDirectory?: string, signal?: AbortSignal, onSuite?: (result: import("../tests/mvp/suite-manifest.ts").MvpE2eSuiteResult) => void}} [options] 明示設定。
  */
 export async function runMvpE2e(options = {}) { // この処理を定義する関数・コールバック / guard成功後だけ専用資源を起動し、production lifecycle・TLS・実E2Eを順に実行する
   /** @type {string | undefined} */
@@ -619,9 +678,13 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
         () => undefined); // この処理を定義する関数・コールバック
     }
   }
+  options.signal?.addEventListener("abort", interrupt, { once: true }); // 【追加】外側runnerの中断を既存の回収経路へ接続するメソッド
   process.once("SIGINT", interrupt); // イベントを一度だけ監視するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
   process.once("SIGTERM", interrupt); // イベントを一度だけ監視するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
   try {
+    if (options.signal?.aborted) {
+      throw new Error(FAILURE); // 【追加】中断済みの実行をSDKより前に拒否するコンストラクター
+    }
     const configuration = requireMvpTestEnvironment(options.environment ?? process.env, checkout, randomUUID().replaceAll("-", "")); // 専用checkout・明示flag・接続先を検証する関数 / UUIDを生成する関数 / すべての一致箇所を置換するメソッド
     if (configuration.variables.RUN_MVP_E2E !== "1" ||
       !configuration.variables.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
@@ -630,6 +693,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
       existsSync(join(checkout, ".next"))) { // ファイルの存在を調べる関数 / パスを結合する関数
       throw new Error(FAILURE); // 固定例外のコンストラクター
     }
+    assertMvpE2eManifest(checkout); // 【追加】サービス起動前に全必須E2Eの実在を確認する関数
     if (process.env.PLAYWRIGHT_BROWSERS_PATH !== undefined) {
       throw new Error(FAILURE); // 固定例外のコンストラクター
     }
@@ -856,7 +920,12 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     });
     children.push(browser); // 配列へ要素を追加するメソッド
     await waitMvpChild(browser, 5 * 60000, abort.signal); // 子の失敗・signal・期限超過を固定例外にし、期限超過時は所有workerも停止する
-    const passed = assertMvpE2eReport(report.read()); // 【修正】メモリ内結果の解析・回収メソッド / 実成功・skipなしだけを許す集計関数
+    const rawReport = report.read(); // 【追加】メモリ内結果を一度だけ取得・回収するメソッド
+    const passed = assertMvpE2eReport(rawReport); // 【追加】E2E全件の終端成功を照合する関数
+    const suites = getMvpE2eSuiteResults(rawReport, checkout); // 【追加】全必須ファイルと件数を照合する関数
+    for (const suite of suites) {
+      options.onSuite?.(suite); // 【追加】秘密を含めないファイル別件数だけを通知する関数
+    } // 【修正】メモリ内結果の解析・回収メソッド / 実成功・skipなしだけを許す集計関数
     assertNoMvpEgress(directory, stub); // process.exitで非同期通知が途切れても、同期記録した通信違反を成功に含めない
     if (interrupted ||
       application.finished()) { // 終了済み判定
@@ -928,6 +997,7 @@ export async function runMvpE2e(options = {}) { // この処理を定義する�
     if (fetchInstalled) {
       globalThis.fetch = originalFetch; // HTTP通信を実行する関数 / 遮断適用前のHTTP通信関数
     }
+    options.signal?.removeEventListener("abort", interrupt); // 【追加】外側runnerの中断監視を解除するメソッド
     process.removeListener("SIGINT", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
     process.removeListener("SIGTERM", interrupt); // イベント監視を解除するメソッド / 所有する子だけを停止し、割込みを正常終了へ変換しない
     try {

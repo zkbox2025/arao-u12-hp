@@ -232,6 +232,226 @@ export const MVP_SUITES: readonly MvpSuite[] = [ // 既存必須suiteの読取�
 ];
 
 /**
+ * 【追加】粒度4〜10までに実在した統合suiteを、既存15本と重複せず一度ずつ必須化する。
+ * 空DB・upgrade検証は先行migration段階の専用suiteで実行する。
+ */
+export const MVP_INTEGRATION_SUITES: readonly MvpSuite[] = [ // 【追加】統合段階全体の読取専用suite契約型
+  ...MVP_SUITES,
+  {
+    path: "tests/mvp/database-fixture.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: false,
+    requiredGroups: [
+      "F12 DB fixture統合（専用flag未指定時はskip）",
+    ],
+  },
+  {
+    path: "tests/mvp/local-services-fixture.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: true,
+    requiredGroups: [
+      "F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）",
+    ],
+  },
+  {
+    path: "tests/mvp/content-tenancy.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: false,
+    requiredGroups: [
+      "F12 content Repositoryの実DB越境（専用flag未指定時はskip）",
+    ],
+  },
+  {
+    path: "tests/mvp/attachment-storage.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: true,
+    requiredGroups: [
+      "F12 添付の実Storage・DB・途中失敗（専用flag未指定時はskip）",
+    ],
+  },
+  {
+    path: "tests/mvp/line-webhook-tenancy.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: false,
+    requiredGroups: [
+      "F12 LINE設定・Webhookの実DBクラブ束縛（専用flag未指定時はskip）",
+    ],
+  },
+  {
+    path: "tests/mvp/line-delivery.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: false,
+    requiredGroups: [
+      "F12 LINE workerの実DB並列・障害（専用flag未指定時はskip）",
+    ],
+  },
+  {
+    path: "tests/mvp/mail-failures.integration.test.ts",
+    flags: {
+      RUN_DB_INTEGRATION_TESTS: "1",
+    },
+    database: true,
+    auth: true,
+    requiredGroups: [
+      "F12 Resend障害と実DB・ローカルAuth（専用flag未指定時はskip）",
+    ],
+  },
+];
+
+/**
+ * 【追加】通常postgresを破壊せず、予約した別DBで空・旧データの履歴を検証するsuite。
+ */
+export const MVP_MIGRATION_SUITE: MvpSuite = { // 【追加】先行migration段階のsuite契約型
+  path: "tests/mvp/migrations.integration.test.ts",
+  flags: {
+    RUN_DB_INTEGRATION_TESTS: "1",
+  },
+  database: true,
+  auth: false,
+  requiredGroups: [
+    "F12 空DB・旧データDBのmigration統合（専用flag未指定時はskip）",
+  ],
+};
+
+/**
+ * 【追加】実装済みのE2Eファイルを一度ずつ必須化し、未発見・case0を完了にしない。
+ */
+export const MVP_E2E_SUITES: readonly string[] = [ // 【追加】必須E2Eの読取専用相対パス配列型
+  "e2e/account-children.spec.ts",
+  "e2e/action-boundaries.spec.ts",
+  "e2e/authorization.spec.ts",
+  "e2e/event-month-copy.spec.ts",
+  "e2e/event-practice-batch.spec.ts",
+  "e2e/events.spec.ts",
+  "e2e/failure-observability.spec.ts",
+  "e2e/line-settings.spec.ts",
+  "e2e/members-invitations.spec.ts",
+  "e2e/notices.spec.ts",
+  "e2e/smoke.spec.ts",
+  "e2e/support-platform.spec.ts",
+];
+
+/**
+ * 【追加】自然競合と故障注入の証跡として、実在する実DBケース名を別々に照合する契約。
+ */
+export const MVP_CONCURRENCY_CASES: readonly { // 【追加】並列・注入の必須証跡を表す読取専用契約型
+  path: string; // 【追加】対象suiteの文字列型
+  natural: readonly string[]; // 【追加】自然競合の実ケース名の配列型
+  injected: readonly string[]; // 【追加】注入障害の実ケース名の配列型
+}[] = [
+  {
+    path: "tests/event-month-copy.flow.integration.test.ts",
+    natural: [
+      "同requestIdの実並列送信は1群・1記録となり、同じ入力で確定結果を確認できる",
+      "異なるrequestIdの実並列操作でも古いpreviewから重複群を黙って作らない",
+    ],
+    injected: [
+      "P2034注入後はrollbackして有限再試行し、作成は一度だけになる",
+      "P2034の上限後は結果不明とし、同一入力で確認・replayできる",
+    ],
+  },
+  {
+    path: "tests/event-practice-batch.flow.integration.test.ts",
+    natural: [
+      "同一操作IDの実並列送信は1組だけ保存し、同じ入力で完了を確認できる",
+      "異なる操作IDで同じpreviewを実並列保存すると片方はPREVIEW_CHANGEDとなる",
+    ],
+    injected: [
+      "注入P2034は有限回再試行し、rollback後の1組だけを保存する",
+      "注入P2034が上限に達したら結果不明とし、同じ入力の再送で確認する",
+    ],
+  },
+  {
+    path: "tests/mvp/line-delivery.integration.test.ts",
+    natural: [
+      "同じdeliveryIdへ自然並列に2 workerを実行しても、送信stubは1回だけになる",
+    ],
+    injected: [
+      "rejectedの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
+      "networkの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
+      "timeoutの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
+    ],
+  },
+];
+
+/**
+ * 【追加】必須suiteの成功件数と、実在ケース名で照合した自然競合・注入故障の証跡件数。
+ */
+export type MvpIntegrationSuiteResult = MvpSuiteResult & { // 【追加】suite完了契約と証跡件数の交差型
+  natural: number; // 【追加】自然競合の必須ケース成功件数の数値型
+  injected: number; // 【追加】故障注入の必須ケース成功件数の数値型
+};
+
+/**
+ * 【追加】E2Eのファイル別結果を、秘密・タイトルを含まない終端件数で表す契約。
+ */
+export type MvpE2eSuiteResult = MvpCaseCounts & { // 【追加】ケース件数契約とファイル別契約の交差型
+  path: string; // 【追加】必須E2Eの相対パス文字列型
+};
+
+/**
+ * 【追加】E2Eの実在・通常ファイル・所有checkout配下を、本文を読まずに確認する。
+ */
+export function assertMvpE2eManifest(checkoutDirectory: string): void { // 【追加】E2E一覧の検証関数 / checkout文字列型 / 戻り値なしの型
+  try {
+    const root = realpathSync(checkoutDirectory); // 【追加】所有checkoutの実在パスを解決する関数
+    for (const path of MVP_E2E_SUITES) {
+      const file = realpathSync(resolve(root, path)); // 【追加】実在パスの解決・結合関数
+      if (
+        !file.startsWith(`${root}${sep}`) || // 【追加】checkout配下の判定メソッド
+        !statSync(file).isFile() // 【追加】ファイル情報取得関数・通常ファイル判定メソッド
+      ) { // 【追加】所有範囲と通常ファイルの判定メソッド・関数
+        throw new Error(MANIFEST_ERROR); // 【追加】対象外を固定例外で拒否するコンストラクター
+      }
+    }
+  } catch {
+    throw new Error(MANIFEST_ERROR); // 【追加】パス原文を捨てるコンストラクター
+  }
+}
+
+/**
+ * 【追加】全必須E2Eファイルに終端成功があり、失敗・skip・未完了・余分な結果がないことを照合する。
+ */
+export function assertMvpE2eResults(results: readonly MvpE2eSuiteResult[]): void { // 【追加】E2E完了契約の検証関数 / 読取専用結果型 / 戻り値なしの型
+  try {
+    if (results.length !== MVP_E2E_SUITES.length) {
+      throw new Error(MANIFEST_ERROR); // 【追加】欠落を拒否するコンストラクター
+    }
+    const seen = new Set<string>(); // 【追加】結果重複の集合コンストラクター / 文字列型
+    for (const result of results) {
+      if (
+        !MVP_E2E_SUITES.includes(result.path) || // 【追加】必須パスの含有判定メソッド
+        seen.has(result.path) // 【追加】集計済みパスの判定メソッド
+      ) { // 【追加】登録済みパスと重複を照合するメソッド
+        throw new Error(MANIFEST_ERROR); // 【追加】二重集計を拒否するコンストラクター
+      }
+      assertCompletedCases(result); // 【追加】case0・skip・失敗を拒否する関数
+      seen.add(result.path); // 【追加】集計済みパスを記録するメソッド
+    }
+  } catch {
+    throw new Error(MANIFEST_ERROR); // 【追加】入力原文を捨てるコンストラクター
+  }
+}
+
+/**
  * 重複・空manifest・不正flag・存在しないsuiteを実行前に拒否する。
  * ファイル本文やSDKは読まない。checkout外へのsymlinkも対象にしない。
  */
@@ -247,7 +467,7 @@ export function assertMvpSuiteManifest( // suite一覧の実在と契約を検�
     const paths = new Set<string>(); // 試験パスの重複を検出する集合のコンストラクター / 文字列型
     for (const suite of suites) {
       if (
-        !/^tests\/[a-z0-9.-]+\.test\.ts$/u.test(suite.path) || // 既存suiteの相対パス書式を検証するメソッド
+        !/^tests\/(?:mvp\/)?[a-z0-9.-]+\.test\.ts$/u.test(suite.path) || // 既存suiteの相対パス書式を検証するメソッド
         suite.path.includes("..") || // 親への移動を検出するメソッド
         paths.has(suite.path) || // 同じsuiteの重複を検出するメソッド
         (
@@ -322,9 +542,10 @@ function assertCompletedCases(counts: MvpCaseCounts): void { // ケース件数�
  */
 export function assertMvpSuiteResults( // 必須suiteと群別結果を照合する関数
   results: readonly MvpSuiteResult[], // 実行結果の読取専用配列型
+  suites: readonly MvpSuite[] = MVP_SUITES, // 【追加】今回照合する必須suiteの読取専用契約型
 ): void { // 戻り値を使わない型
   try {
-    if (results.length !== MVP_SUITES.length) {
+    if (suites.length === 0 || results.length !== suites.length) {
       throw new Error(MANIFEST_ERROR); // suite欠落や余分な結果を拒否するコンストラクター
     }
     const paths = new Set<string>(); // 結果パスの重複を検出する集合のコンストラクター / 文字列型
@@ -333,7 +554,7 @@ export function assertMvpSuiteResults( // 必須suiteと群別結果を照合す
         throw new Error(MANIFEST_ERROR); // 二重集計を固定例外で拒否するコンストラクター
       }
       paths.add(result.path); // 集計したパスを記録するメソッド
-      const suite = MVP_SUITES.find( // manifestから対象suiteを探すメソッド
+      const suite = suites.find( // manifestから対象suiteを探すメソッド
         /**
          * 実在を確認した相対パスとの完全一致を調べる。
          */

@@ -230,6 +230,21 @@ function databaseError(code: string) { // Prisma既知エラーfixtureを作る�
 }
 
 /**
+ * 【追加】自然なPostgreSQL競合で観測したadapter例外の形を、秘密を持つ架空値で再現する。
+ */
+function driverWriteConflict(): Error { // 【追加】adapterの競合例外fixtureを作る関数 / 例外型
+  const error = new Error(PRIVATE, { // 【追加】原文を外へ出さないことも検証する例外コンストラクター
+    cause: {
+      kind: "TransactionWriteConflict",
+      originalCode: "40001",
+      originalMessage: PRIVATE,
+    },
+  });
+  error.name = "DriverAdapterError";
+  return error;
+}
+
+/**
  * consoleの出力だけを抑え、spyによる呼出しの検出を可能にする。
  */
 function silence() { // 試験中のログ出力を抑える関数
@@ -482,7 +497,7 @@ it.each(["id", "clubId", "userId", "status", "role", "plan"])("最新所属の%s
     } else if (field === "status") {
       actor!.status = "WITHDRAWN";
     } else {
-      actor![field as "id" | "clubId" | "userId"] = OTHER;
+      actor![field as "id" | "clubId" | "userId"] = OTHER; // 【追加】認可識別子の許可キーへ絞るリテラル型アサーション
     }
     expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ outcome: "FORBIDDEN" }); // 構造の一致を検証するメソッド / 期待値を生成する関数 / 定期練習を冪等に一括保存する関数 / 認可scopeと試験入力を組み立てる関数
     expect(mocks.ledger).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
@@ -885,5 +900,108 @@ it.each(["clubId", "status", "genre", "content", "returnTo"])("未許可項目%s
     expect(result).toEqual({ outcome: "VALIDATION_FAILED" }); // 構造の一致を検証するメソッド / 期待値を生成する関数
     expect(JSON.stringify(result)).not.toContain(PRIVATE); // 値の包含を検証するメソッド / 期待値を生成する関数 / 結果をJSON文字列へ変換する関数
     expect(mocks.transaction).not.toHaveBeenCalled(); // 呼出しの有無を検証するメソッド / 期待値を生成する関数
+  },
+);
+
+
+it("adapterの40001競合はrollback後に再認可し、一度分だけ保存する", // 【追加】自然競合と同じ例外形の試験を登録する関数
+  /**
+   * 【追加】P2034へ変換されない競合でも、同じ入力を再確認して重複保存しない。
+   */
+  async () => { // 【追加】adapter競合の再試行を確認するコールバック
+    mocks.insert.mockRejectedValueOnce(driverWriteConflict()); // 【追加】一度だけ競合させるメソッド / 実測したadapter例外のfixture生成関数
+    const result = await createEventPracticeBatch(SCOPE, input()); // 【追加】定期練習を冪等に一括保存する関数 / 保存入力fixtureの生成関数
+    expect(result.outcome).toBe("CREATED"); // 【追加】結果を検証する関数・比較メソッド
+    expect(mocks.transaction).toHaveBeenCalledTimes(2); // 【追加】初回と再試行だけであることを検証する関数・回数比較メソッド
+    expect(mocks.actor).toHaveBeenCalledTimes(2); // 【追加】再試行時の認可確認を検証する関数・回数比較メソッド
+    expect(inserted).toHaveLength(1); // 【追加】保存が一度分であることを検証する関数・件数比較メソッド
+    expect(ledger).not.toBeNull(); // 【追加】完了記録の存在を検証する関数・比較メソッド
+  },
+);
+
+it("adapterの40001競合が続いても初回後3回で打ち切り、部分保存しない", // 【追加】再試行上限の試験を登録する関数
+  /**
+   * 【追加】競合エラーを無限に再送せず、既存と同じ有限上限で結果不明へ戻す。
+   */
+  async () => { // 【追加】adapter競合の上限を確認するコールバック
+    mocks.insert.mockRejectedValue(driverWriteConflict()); // 【追加】すべての保存試行を競合させるメソッド / adapter例外のfixture生成関数
+    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ // 【追加】保存処理の結果を検証する関数・構造比較メソッド / 保存関数・入力生成関数
+      outcome: "RESULT_UNKNOWN",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(4); // 【追加】初回と最大3回の再試行を検証する関数・回数比較メソッド
+    expect(mocks.actor).toHaveBeenCalledTimes(4); // 【追加】各回の認可確認を検証する関数・回数比較メソッド
+    expect(inserted).toEqual([]); // 【追加】部分保存がないことを検証する関数・構造比較メソッド
+    expect(ledger).toBeNull(); // 【追加】完了記録を残さないことを検証する関数・比較メソッド
+  },
+);
+
+it("adapterの40001競合後に所属が失効したら再保存しない", // 【追加】再試行時認可の試験を登録する関数
+  /**
+   * 【追加】rollback後の最新所属を確認し、失効した権限で保存を継続しない。
+   */
+  async () => { // 【追加】競合後の所属失効を確認するコールバック
+    mocks.insert.mockRejectedValueOnce(driverWriteConflict()); // 【追加】最初の保存だけを競合させるメソッド / adapter例外fixtureの生成関数
+    afterRollback =
+      /**
+       * 【追加】別transactionによる所属失効を再試行前に反映する。
+       */
+      () => { // 【追加】再認可前に所属を失効させるコールバック
+        actor!.status = "WITHDRAWN";
+      };
+    expect(await createEventPracticeBatch(SCOPE, input())).toEqual({ // 【追加】再認可の結果を検証する関数・構造比較メソッド / 保存関数・入力生成関数
+      outcome: "FORBIDDEN",
+    });
+    expect(mocks.insert).toHaveBeenCalledTimes(1); // 【追加】再保存しないことを検証する関数・回数比較メソッド
+    expect(inserted).toEqual([]); // 【追加】部分保存がないことを検証する関数・構造比較メソッド
+    expect(ledger).toBeNull(); // 【追加】完了記録を残さないことを検証する関数・比較メソッド
+  },
+);
+
+it.each([ // 【追加】再試行対象外の例外をパラメーター別に登録するメソッド
+  "different-code",
+  "different-kind",
+  "different-name",
+  "missing-code",
+  "plain-object",
+] as const)( // 【追加】例外形の固定値を表す読取専用リテラル型
+  "adapter例外に似た%sは自動再試行しない",
+  /**
+   * 【追加】実測したError・名前・種別・SQLSTATEの組合せ以外を広く再送しない。
+   */
+  async (mode) => { // 【追加】再試行対象外の例外を検証するコールバック
+    const failure = driverWriteConflict(); // 【追加】adapter競合を模す例外fixtureの生成関数
+    if (mode === "different-code") {
+      Reflect.set(failure, "cause", { // 【追加】接続断を表す異なるSQLSTATEへ置き換える関数
+        kind: "TransactionWriteConflict",
+        originalCode: "08006",
+      });
+    } else if (mode === "different-kind") {
+      Reflect.set(failure, "cause", { // 【追加】競合以外の種別へ置き換える関数
+        kind: "ConnectionClosed",
+        originalCode: "40001",
+      });
+    } else if (mode === "different-name") {
+      failure.name = "UnrecognizedError";
+    } else if (mode === "missing-code") {
+      Reflect.set(failure, "cause", { // 【追加】SQLSTATEのない例外へ置き換える関数
+        kind: "TransactionWriteConflict",
+      });
+    }
+    const rejected = mode === "plain-object" ? {
+      name: "DriverAdapterError",
+      cause: {
+        kind: "TransactionWriteConflict",
+        originalCode: "40001",
+      },
+    } : failure;
+    mocks.insert.mockRejectedValue(rejected); // 【追加】再試行対象外の保存失敗を設定するメソッド
+    const result = await createEventPracticeBatch(SCOPE, input()); // 【追加】定期練習の保存関数 / 保存入力fixtureの生成関数
+    expect(result).toEqual({ // 【追加】不明な保存障害の固定結果を検証する関数・構造比較メソッド
+      outcome: "RESULT_UNKNOWN",
+    });
+    expect(mocks.transaction).toHaveBeenCalledTimes(1); // 【追加】自動再試行がないことを検証する関数・回数比較メソッド
+    expect(inserted).toEqual([]); // 【追加】部分保存がないことを検証する関数・構造比較メソッド
+    expect(ledger).toBeNull(); // 【追加】完了記録を残さないことを検証する関数・比較メソッド
+    expect(JSON.stringify(result)).not.toContain(PRIVATE); // 【追加】秘密原文の非含有を検証する関数・JSON化メソッド・含有比較メソッド
   },
 );

@@ -32,6 +32,8 @@
     "test:platform-support:local": "RUN_PLATFORM_SUPPORT_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/platform-support.flow.integration.test.ts",
     "test:event-month-copy:local": "RUN_EVENT_MONTH_COPY_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-month-copy.flow.integration.test.ts",
     "test:event-practice-batch:local": "RUN_EVENT_PRACTICE_BATCH_TESTS=1 RUN_DB_INTEGRATION_TESTS=1 vitest run tests/event-practice-batch.flow.integration.test.ts",
+    "test:e2e": "node --import tsx scripts/test-e2e.mjs",
+    "verify:mvp": "node --import tsx scripts/verify-mvp.mjs",
     "test:e2e:list": "playwright test --list"
   },
   "dependencies": {

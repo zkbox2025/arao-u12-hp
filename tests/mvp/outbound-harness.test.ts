@@ -46,6 +46,7 @@ import {
   transpileModule,
 } from "typescript";
 import {
+  getMvpE2eSuiteResults, // 【追加】全必須E2Eをファイル別の安全な件数へ集約する関数
   assertMvpE2eReport, // Playwright JSONで実成功・skipなしを検証する関数
   assertNoMvpEgress, // 同期記録とstubで通信違反を検出する関数
   createMvpCertificate, // 所有一時領域でTLS証明書を生成する関数
@@ -62,6 +63,9 @@ import {
   startMvpOutboundStub, // 当該runの送信stubとbrowser proxyを起動する関数
 } from "./outbound-stub.mjs";
 import verifyMvpE2eOwner from "./outbound-stub.mjs"; // 所有runの準備完了を確認するglobal setup関数
+import {
+  MVP_E2E_SUITES, // 【追加】全必須E2Eファイルの一覧
+} from "./suite-manifest";
 const ROOT = resolve(import.meta.dirname, "../.."); // 絶対パスを解決する関数
 const RUN_ID = "a".repeat(32); // 文字列を指定回数繰り返すメソッド
 const PRIVATE = "F12_FAKE_PRIVATE_NEVER_LOG";
@@ -1027,3 +1031,90 @@ for (const channel of ["resend", "line", "storage"] as const) { // 【追加】�
     },
   );
 }
+
+
+/**
+ * 【追加】全必須E2Eファイルを含む架空JSONを作り、ブラウザーや実DBは起動しない。
+ */
+function completeE2eReport() { // 【追加】必須ファイル別の架空結果生成関数
+  const report = successfulReport(); // 【追加】成功ケースのJSON生成関数
+  return {
+    ...report,
+    stats: {
+      ...report.stats,
+      expected: MVP_E2E_SUITES.length,
+    },
+    suites: MVP_E2E_SUITES.map( // 【追加】実在ファイルの結果へ変換するメソッド
+      /**
+       * 【追加】実reporterと同じtestDir相対のファイル名で成功結果を作る。
+       */
+      (path) => ({ // 【追加】ファイル別の架空suite生成コールバック
+        file: path.slice("e2e/".length), // 【追加】testDir相対名を取得するメソッド
+        specs: [{
+          file: path.slice("e2e/".length), // 【追加】実specの所属ファイル名を取得するメソッド
+          tests: report.suites[0].specs[0].tests,
+        }],
+      }),
+    ),
+  };
+}
+
+it("総件数だけでなく全必須E2Eファイルの成功件数を照合する", // 【追加】ケース登録関数
+  /**
+   * 【追加】ファイル別の安全なDTOだけを返すことを確認する。
+   */
+  () => { // 【追加】全必須E2Eの結果検証コールバック
+    const results = getMvpE2eSuiteResults(completeE2eReport(), ROOT); // 【追加】必須ファイル照合関数 / 架空JSON生成関数
+    expect(results.map( // 【追加】安全なパスだけを比較する期待値関数・変換メソッド
+      /**
+       * 【追加】結果のパスだけを取り出す。
+       */
+      (result) => result.path, // 【追加】パス取得コールバック
+    )).toEqual(MVP_E2E_SUITES); // 【追加】全必須ファイルの比較メソッド
+    expect(results.every( // 【追加】件数が正しいことを検証する期待値関数・全件判定メソッド
+      /**
+       * 【追加】各ファイルが一件の終端成功であることを照合する。
+       */
+      (result) => result.passed === 1 && result.failed === 0 && result.skipped === 0, // 【追加】終端成功の照合コールバック
+    )).toBe(true); // 【追加】件数の比較メソッド
+  },
+);
+
+it.each(["missing", "unknown", "case0"] as const)( // 【追加】必須E2Eの不完了別ケース登録メソッド・リテラル型アサーション
+  "E2Eの%sは残りが全成功でも拒否する",
+  /**
+   * 【追加】総件数の整合性がある結果でも、manifest欠落を見逃さない。
+   */
+  (mode) => { // 【追加】不完了の検証コールバック
+    const report = completeE2eReport(); // 【追加】架空の全成功JSON生成関数
+    if (mode === "unknown") report.suites[0].specs[0].file = "unknown.spec.ts";
+    else {
+      report.stats.expected--;
+      if (mode === "missing") report.suites.pop(); // 【追加】必須ファイルを欠落させるメソッド
+      else report.suites[0].specs = [];
+    }
+    expect( // 【追加】不完了の拒否を検証する関数
+      /**
+       * 【追加】case0や未知のファイルを集約境界へ渡す。
+       */
+      () => getMvpE2eSuiteResults(report, ROOT), // 【追加】拒否を確認するコールバック・集約関数
+    ).toThrow("F12_E2E_FAILED"); // 【追加】固定失敗の比較メソッド
+  },
+);
+
+it("外側から中断済みのE2EをSDKより前に拒否し、中断監視を残さない", // 【追加】ケース登録関数
+  /**
+   * 【追加】guard失敗と独立して、既存回収経路へ外側signalを接続する契約を確認する。
+   */
+  async () => { // 【追加】外側中断の検証コールバック
+    const controller = new AbortController(); // 【追加】試験用中断のコンストラクター
+    controller.abort(); // 【追加】起動前に中断するメソッド
+    const before = process.listenerCount("SIGTERM"); // 【追加】開始前の監視件数取得メソッド
+    await expect(runMvpE2e({ // 【追加】起動拒否を検証する関数 / guard付きE2E実行関数
+      environment: {},
+      checkoutDirectory: ROOT,
+      signal: controller.signal,
+    })).rejects.toThrow("F12_E2E_FAILED"); // 【追加】固定失敗の比較メソッド
+    expect(process.listenerCount("SIGTERM")).toBe(before); // 【追加】監視解除を検証する関数・件数取得・比較メソッド
+  },
+);

@@ -45,9 +45,34 @@ const TRANSACTION_OPTIONS = {//トランザクションの実行の際の追加�
 };
 
 /**
+ * 【追加】PrismaのP2034と、実DBで確認したadapterの40001競合だけを再試行対象にする。
+ * 接続断や結果不明の例外は、名前やSQLSTATEだけで再試行しない。
+ */
+function isRetryableBatchConflict(error: unknown): boolean { // 【追加】有限再試行できる競合かを判定する関数 / 未確定の例外型 / 真偽値型
+  if (error instanceof Prisma.PrismaClientKnownRequestError) { // 【追加】Prisma既知例外の実行時型を判定するコンストラクター
+    return error.code === "P2034";
+  }
+  if (
+    !(error instanceof Error) || // 【追加】Errorの実体を確認するコンストラクター
+    error.name !== "DriverAdapterError"
+  ) {
+    return false;
+  }
+  const cause = error.cause;
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    "kind" in cause &&
+    cause.kind === "TransactionWriteConflict" &&
+    "originalCode" in cause &&
+    cause.originalCode === "40001"
+  );
+}
+
+/**
  * callback内の検証で全件rollback（エラーなどで処理を始める前の綺麗な状態に戻す）を要求するときだけ使う
  */
-class BatchRollbackError extends Error {} 
+class BatchRollbackError extends Error {} // 【追加】全件rollbackを指示する内部例外クラス / 例外基底型
 
 /**
  * DB更新前・再送照合前に、DBから現在の所属・本人・クラブ情報を取得し、管理者ロール・利用可能プランを検証する。
@@ -159,7 +184,7 @@ function eventData( // 選択日を固定列の一括作成データへ変換す
       /**
        * 現在の候補日とサーバー生成値を対応付ける。
        */
-      (candidate) => [candidate.date, candidate] as const, 
+      (candidate) => [candidate.date, candidate] as const, // 【追加】日付と候補の組を返すコールバック / 読取専用tupleの型アサーション
     ),
   );
   const data: Prisma.ClubEventCreateManyInput[] = []; // 戻り値の箱を作成する（複数いれれる）
@@ -199,9 +224,9 @@ function eventData( // 選択日を固定列の一括作成データへ変換す
 
 /**
  * 定期練習を一括作成して、その『完了記録』をDBに安全に保存する関数（作成イベントは下書きとしてDBに保存）
- * P2034は初回後最大3回だけ再試行し、P2002後は再認可と記録照合だけを行う。
+ * 【修正】P2034・実測したadapterの40001競合は初回後最大3回再試行し、P2002後は再認可と記録照合だけを行う。
  */
-export async function createEventPracticeBatch( 
+export async function createEventPracticeBatch( // 【追加】再認可・完了記録照合・一体保存と有限再試行を行う関数
   scope: EventPracticeBatchFingerprintScope, // 認可済みクラブ・実行所属・Auth本人の識別情報型
   input: EventPracticeBatchInput, //定期練習の共通入力値に選択日と操作識別子を加えた実行入力。
 ): Promise<EventPracticeBatchResult> { // 固定の保存結果を返す非同期型
@@ -233,8 +258,10 @@ export async function createEventPracticeBatch(
   while (true) {//ループ処理
     let attemptedWrite = false;//DBに書き込んだかを記録するフラグ
     try {
-      return await prisma.$transaction( 
-
+      return await prisma.$transaction( // 【追加】下書き群と完了記録を同一transactionで確定するメソッド
+        /**
+         * 【追加】最新認可・記録・previewを確認し、選択した下書き群と完了記録を一体保存する。
+         */
         async (transaction): Promise<EventPracticeBatchResult> => { //定期練習の保存結果の型
           if (!await isCurrentActor(transaction, actorScope)) { // 最新所属・本人・クラブ・管理権限・プランを検証する関数
             return { outcome: "FORBIDDEN" };
@@ -322,14 +349,14 @@ export async function createEventPracticeBatch(
       if (error instanceof BatchRollbackError) { //callback内の検証で全件rollback（エラーなどで処理を始める前の綺麗な状態に戻す）を要求するときだけ使う
         return { outcome: "CREATE_FAILED" };
       }
-      if (error instanceof Prisma.PrismaClientKnownRequestError) { // Prisma既知エラー型の判定
-        if (error.code === "P2034") {
-          if (retries < MAX_TRANSACTION_RETRIES) {// トランザクションの最大再試行回数（3回）より少ない場合は以下
-            retries += 1;
-            continue;
-          }
-          return { outcome: "RESULT_UNKNOWN" };//多い場合はこれ
+      if (isRetryableBatchConflict(error)) { // 【追加】P2034と実測したadapterの40001競合だけを判定する関数
+        if (retries < MAX_TRANSACTION_RETRIES) { // 【修正】既存の初回後最大3回という上限を維持する
+          retries += 1;
+          continue;
         }
+        return { outcome: "RESULT_UNKNOWN" }; // 【修正】上限到達後は結果不明として同じ操作の再確認へ戻す
+      }
+      if (error instanceof Prisma.PrismaClientKnownRequestError) { // Prisma既知エラー型の判定
         if (
           error.code === "P2002" &&
           attemptedWrite &&//DBに書き込んだかを記録するフラグ

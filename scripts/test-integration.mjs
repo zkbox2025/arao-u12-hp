@@ -33,6 +33,8 @@ import {
 import {
   assertMvpSuiteManifest, // 既存suiteの実在と重複を確認する関数
   assertMvpSuiteResults, // 既存必須suiteとDB・Auth群の完了を確認する関数
+  MVP_INTEGRATION_SUITES, // 【追加】後続F12 suiteも含む必須統合一覧
+  MVP_CONCURRENCY_CASES, // 【追加】自然競合と注入故障の実ケース名の照合契約
   MVP_SUITES, // 実在する既存15本の必須suite
 } from "../tests/mvp/suite-manifest";
 
@@ -44,6 +46,7 @@ const TIMEOUT = 15 * 60_000;
  * Vitest子プロセスへ渡す引数と許可済み環境の契約。
  * @typedef {object} IntegrationLaunch
  * @property {string} checkoutDirectory .envを持たない専用checkout。
+ * @property {AbortSignal} [signal] 外側runnerからの中断要求。
  * @property {string} outputFile この実行専用のJSON出力先。
  * @property {Record<string, string | undefined>} environment 許可した変数だけの辞書。
  */
@@ -53,6 +56,8 @@ const TIMEOUT = 15 * 60_000;
  * @typedef {object} IntegrationOptions
  * @property {Record<string, string | undefined>} [environment] 呼出し元の明示設定。
  * @property {string} [checkoutDirectory] 検証対象checkout。
+ * @property {AbortSignal} [signal] 外側runnerからの中断要求。
+ * @property {(result: import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult) => void} [onSuite] 検証済みの安全なsuite別件数。
  * @property {(request: IntegrationLaunch) => Promise<void>} [launch] Vitest子プロセスの完了待機。
  */
 
@@ -64,40 +69,21 @@ const TIMEOUT = 15 * 60_000;
  */
 
 /**
- * 既存15本に、粒度2・3で実装済みのDB・ローカルサービスsuiteだけを加える。
+ * 【修正】既存15本と粒度2〜10の実装済みsuiteを、一つの必須manifestから取得する。
  * @returns {import("../tests/mvp/suite-manifest.ts").MvpSuite[]} 必須suiteの一覧。
  */
 export function getIntegrationSuites() { // 実在する統合試験の契約一覧を返す関数
-  return [
-    ...MVP_SUITES,
-    {
-      path: "tests/mvp/database-fixture.integration.test.ts",
-      flags: {
-        RUN_DB_INTEGRATION_TESTS: "1",
-      },
-      database: true,
-      auth: false,
-      requiredGroups: ["F12 DB fixture統合（専用flag未指定時はskip）"],
-    },
-    {
-      path: "tests/mvp/local-services-fixture.integration.test.ts",
-      flags: {
-        RUN_DB_INTEGRATION_TESTS: "1",
-      },
-      database: true,
-      auth: true,
-      requiredGroups: ["F12ローカルAuth・Storage・DB統合（専用flag未指定時はskip）"],
-    },
-  ];
+  return [...MVP_INTEGRATION_SUITES]; // 【修正】実在する必須suiteを一度ずつ返す
 }
 
 /**
  * 個々の成功ケースから群別件数を作る。未発見・skip・失敗・壊れたJSONは許可しない。
  * @param {import("vitest/reporters").JsonTestResults} report Vitest 4のJSON結果。
  * @param {string} checkoutDirectory 検証checkout。
+ * @param {(result: import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult) => void} [onSuite] 全検証後の安全な件数通知。
  * @returns {number} 実行した成功ケースの総数。
  */
-export function assertIntegrationReport(report, checkoutDirectory) { // 最終JSONから必須実行を検証する関数
+export function assertIntegrationReport(report, checkoutDirectory, onSuite) { // 最終JSONから必須実行を検証する関数
   try {
     const suites = getIntegrationSuites(); // 必須suiteの一覧を取得する関数
     if (
@@ -112,7 +98,8 @@ export function assertIntegrationReport(report, checkoutDirectory) { // 最終JS
       throw new Error(RUN_ERROR); // 秘密を含めない例外を作るコンストラクター
     }
     const seen = new Set(); // suiteの二重集計を防ぐ集合のコンストラクター
-    const results = [];
+    /** @type {import("../tests/mvp/suite-manifest.ts").MvpIntegrationSuiteResult[]} */
+    const results = []; // 【追加】安全なsuite別件数の配列型
     let total = 0;
     for (const file of report.testResults) {
       const suite = suites.find( // 絶対パスが完全一致するsuiteを探すメソッド
@@ -163,9 +150,36 @@ export function assertIntegrationReport(report, checkoutDirectory) { // 最終JS
           };
         },
       );
+      const evidence = MVP_CONCURRENCY_CASES.find( // 【追加】当該suiteの必須競合ケースを探すメソッド
+        /**
+         * 【追加】実在するsuiteパスだけと照合する。
+         */
+        (candidate) => candidate.path === suite.path, // 【追加】証跡契約を選ぶコールバック
+      );
+      /**
+       * 【追加】DB群の中の完全一致ケースを一件ずつ照合し、guardだけの成功で代用しない。
+       * @param {readonly string[]} titles 必須の実ケース名。
+       */
+      function evidenceCount(titles) { // 【追加】証跡ケースの成功件数を返す関数
+        for (const title of titles) {
+          const matches = file.assertionResults.filter( // 【追加】DB群と実ケース名の両方で照合するメソッド
+            /**
+             * 【追加】guard群や同名の別群を証跡に含めない。
+             */
+            (test) => test.title === title && // 【追加】証跡の実ケース名を照合するコールバック
+              suite?.requiredGroups.includes(test.ancestorTitles[0]), // 【追加】必須DBケース判定のコールバック・群照合メソッド
+          );
+          if (matches.length !== 1) {
+            throw new Error(RUN_ERROR); // 【追加】自然競合・注入の欠落や重複を拒否するコンストラクター
+          }
+        }
+        return titles.length;
+      }
       total += file.assertionResults.length;
       results.push({ // suite別の完了件数を登録するメソッド
         path: suite.path,
+        natural: evidenceCount(evidence?.natural ?? []), // 【追加】自然競合の必須ケース件数を照合する関数
+        injected: evidenceCount(evidence?.injected ?? []), // 【追加】注入障害の必須ケース件数を照合する関数
         passed: file.assertionResults.length,
         failed: 0,
         skipped: 0,
@@ -192,6 +206,10 @@ export function assertIntegrationReport(report, checkoutDirectory) { // 最終JS
         (suite) => suite.path === result.path, // パス照合のコールバック
       ),
     ));
+    assertMvpSuiteResults(results, suites); // 【追加】後続F12も含む全結果を照合する関数
+    for (const result of results) {
+      onSuite?.(result); // 【追加】全検証済みの件数だけを呼出し元へ通知する関数
+    }
     return total;
   } catch {
     throw new Error(RUN_ERROR); // assertion原文やJSON内容を公開しないコンストラクター
@@ -210,6 +228,10 @@ export async function launchIntegration(request) { // Vitest子プロセスを�
      * 終了イベントまでtimerと割込み監視を保持する。
      */
     (accept, reject) => { // 非同期完了を制御するコールバック
+      if (request.signal?.aborted) {
+        reject(new Error(RUN_ERROR)); // 【追加】中断済みの起動を拒否する関数・例外コンストラクター
+        return;
+      }
       const grouped = process.platform !== "win32";
       const child = spawn(process.execPath, [ // ローカルNodeでVitestを起動する関数
         resolve(request.checkoutDirectory, "node_modules/vitest/vitest.mjs"), // インストール済みVitestのパスを解決する関数
@@ -266,6 +288,8 @@ export async function launchIntegration(request) { // Vitest子プロセスを�
           3_000,
         );
       }
+      request.signal?.addEventListener("abort", stop, { once: true }); // 【追加】外側の中断を所有子の停止へ接続するメソッド
+      if (request.signal?.aborted) stop(); // 【追加】起動直後に中断済みになった場合も停止する関数
       const timer = setTimeout(stop, TIMEOUT); // 全体の実行期限を設定する関数 / 子プロセス停止関数の参照
       process.once("SIGINT", stop); // 割込みを監視するメソッド / 子プロセス停止関数の参照
       process.once("SIGTERM", stop); // 終了要求を監視するメソッド / 子プロセス停止関数の参照
@@ -290,6 +314,7 @@ export async function launchIntegration(request) { // Vitest子プロセスを�
             // leaderが先に終了しても、同じ群に残ったworkerを停止させる。
             terminate("SIGKILL"); // 登録した子プロセス群の残存を停止する関数
           }
+          request.signal?.removeEventListener("abort", stop); // 【追加】外側の中断監視を解除するメソッド
           clearTimeout(timer); // 実行期限timerを解除する関数
           clearTimeout(force); // 強制停止timerを解除する関数
           process.removeListener("SIGINT", stop); // 割込み監視を解除するメソッド / 子プロセス停止関数の参照
@@ -329,6 +354,7 @@ export async function runIntegration(options = {}) { // 接続前ガードから
     ) {
       throw new Error(RUN_ERROR); // Authを含む必須suiteのキー不足を拒否するコンストラクター
     }
+    assertMvpSuiteManifest(configuration.checkoutDirectory, getIntegrationSuites()); // 【修正】後続F12を含む全必須ファイルを照合する関数
     assertMvpSuiteManifest(configuration.checkoutDirectory); // 既存manifestの実在と重複を確認する関数
     const suites = getIntegrationSuites(); // 実行するsuiteを取得する関数
     for (const suite of suites) {
@@ -356,9 +382,13 @@ export async function runIntegration(options = {}) { // 接続前ガードから
       checkoutDirectory: configuration.checkoutDirectory,
       outputFile,
       environment,
+      signal: options.signal, // 【追加】外側の中断要求を起動境界へ渡す
     });
+    if (options.signal?.aborted) {
+      throw new Error(RUN_ERROR); // 【追加】中断後の見かけ上の成功を拒否するコンストラクター
+    }
     const report = JSON.parse(readFileSync(outputFile, "utf8")); // JSON解析関数 / 自分の結果ファイルだけを読む関数
-    const passed = assertIntegrationReport(report, configuration.checkoutDirectory); // 必須suiteと群別完了を検証する関数
+    const passed = assertIntegrationReport(report, configuration.checkoutDirectory, options.onSuite); // 必須suiteと群別完了を検証する関数
     return {
       suites: suites.length,
       passed,

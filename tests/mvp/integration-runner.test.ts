@@ -38,6 +38,7 @@ import {
   runIntegration, // 実行前ガードからJSON検証と削除までを行う関数
 } from "../../scripts/test-integration.mjs";
 import {
+  MVP_CONCURRENCY_CASES, // 【追加】実DBの自然競合・注入障害の必須ケース名
   MVP_SUITES, // 既存15本の必須suite
 } from "./suite-manifest";
 import unitConfig from "../../vitest.mvp-unit.config.mjs"; // 既存設定を継承したunit専用設定
@@ -167,19 +168,33 @@ function report(): JsonTestResults { // 架空結果生成関数 / VitestのJSON
       message: "",
       startTime: 1,
       endTime: 2,
-      assertionResults: suite.requiredGroups.map( // 必須群の結果を作るメソッド
+      assertionResults: suite.requiredGroups.flatMap( // 必須群の結果を作るメソッド
         /**
          * JSON reporterのancestorTitlesに対応する群名を保持する。
          */
-        (name) => ({ // 架空の成功ケースを作るコールバック
-          ancestorTitles: [name],
-          fullName: `${name} succeeds`,
-          title: "succeeds",
-          status: "passed" as const, // ケース成功状態のリテラル型
-          meta: {},
-          failureMessages: [],
-          tags: [],
-        }),
+        (name) => { // 【修正】各必須群の実ケース契約に合わせるコールバック
+          const evidence = MVP_CONCURRENCY_CASES.find( // 【追加】対象suiteの実ケースを取得するメソッド
+            /**
+             * 【追加】架空結果にも実在する必須ケース名を使う。
+             */
+            (candidate) => candidate.path === suite.path, // 【追加】対象パス照合コールバック
+          );
+          const titles = evidence ? [...evidence.natural, ...evidence.injected] : ["succeeds"];
+          return titles.map( // 【追加】実ケース名をJSON結果へ変換するメソッド
+            /**
+             * 【追加】guardだけの架空成功で必須ケースを代用しない。
+             */
+            (title) => ({ // 【追加】架空の成功結果を生成するコールバック
+              ancestorTitles: [name],
+              fullName: `${name} ${title}`,
+              title,
+              status: "passed" as const, // 【追加】ケース成功状態のリテラル型
+              meta: {},
+              failureMessages: [],
+              tags: [],
+            }),
+          );
+        },
       ),
     }),
   );
@@ -321,7 +336,7 @@ it("環境ファイルや必須suiteの欠落があれば起動しない", // �
   },
 );
 
-it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用flagだけを渡す", // 試験を登録する関数
+it("既存15本と実装済みF12の7本を一度だけ必須とし、許可変数と専用flagだけを渡す", // 試験を登録する関数
   /**
    * ガード後の起動・結果検証・一時JSON削除までを本物のファイル操作で確認する。
    */
@@ -337,8 +352,8 @@ it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用f
       launch, // 起動代替関数の参照
     });
     expect(result).toEqual({ // 期待値生成関数 / 成功件数の比較メソッド
-      suites: 17,
-      passed: 17,
+      suites: getIntegrationSuites().length, // 【修正】実在する必須suite一覧取得関数
+      passed: report().numTotalTests, // 【修正】必須証跡を含む架空結果の生成関数
     });
     expect(launch).toHaveBeenCalledTimes(1); // 期待値生成関数 / 起動回数の検証メソッド
     const child = launch.mock.calls[0][0].environment;
@@ -357,7 +372,7 @@ it("既存15本とF12の2本を一度だけ必須とし、許可変数と専用f
        * 同じsuiteを二度起動する計画になっていないことを確認する。
        */
       (suite) => suite.path, // suiteパス抽出のコールバック
-    )).size).toBe(17); // 件数を比較するメソッド
+    )).size).toBe(getIntegrationSuites().length); // 件数を比較するメソッド
     expect(existsSync(outputs[0])).toBe(false); // 期待値生成関数 / 結果資源存在の判定関数 / 削除済み状態の比較メソッド
   },
 );
@@ -471,7 +486,7 @@ it("成功JSONと必須群の対応を直接検証し、F12の実DB群欠落も�
    * 既存manifestだけでなく、追加済みF12の実接続群も必須にする。
    */
   () => { // F12群の検証コールバック
-    expect(assertIntegrationReport(report(), checkout)).toBe(17); // 期待値生成関数 / 結果検証関数 / 架空JSON生成関数 / 件数比較メソッド
+    expect(assertIntegrationReport(report(), checkout)).toBe(report().numTotalTests); // 期待値生成関数 / 結果検証関数 / 架空JSON生成関数 / 件数比較メソッド
     const value = report(); // 架空JSONを生成する関数
     value.testResults[16].assertionResults[0].ancestorTitles = ["guard only"];
     expect( // 期待値を作る関数
@@ -504,7 +519,7 @@ it("専用設定は既存aliasを維持し、unitとintegrationを分け、フ�
       throw new Error("Expected synchronous config"); // 設定型の不一致を検出する例外コンストラクター
     }
     expect(config.resolve).toEqual(baseConfig.resolve); // 期待値生成関数 / alias維持の比較メソッド
-    expect(config.test?.include).toHaveLength(17); // 期待値生成関数 / suite件数の比較メソッド
+    expect(config.test?.include).toHaveLength(getIntegrationSuites().length); // 期待値生成関数 / suite件数の比較メソッド
     expect(config.test?.fileParallelism).toBe(false); // 期待値生成関数 / ファイル間直列の比較メソッド
     expect(config.test?.maxWorkers).toBe(1); // 期待値生成関数 / worker件数の比較メソッド
     expect(config.test?.pool).toBe("forks"); // 期待値生成関数 / 独立worker設定の比較メソッド
@@ -612,5 +627,92 @@ it("割込み後にleaderが先に終了しても、同じ群のworkerを停止�
     await assertion;
     expect(kill).toHaveBeenCalledWith(-12345, "SIGKILL"); // 期待値生成関数 / 残存worker群の停止要求を検証するメソッド
     expect(vi.getTimerCount()).toBe(0); // 期待値生成関数 / 残存timer取得関数 / timer解除の比較メソッド
+  },
+);
+
+
+it("検証済みのsuite別件数で自然競合と注入を分け、結果原文を通知しない", // 【追加】ケース登録関数
+  /**
+   * 【追加】全結果の照合後だけ安全な証跡件数を渡す。
+   */
+  async () => { // 【追加】安全な件数通知の検証コールバック
+    const onSuite = vi.fn(); // 【追加】通知境界のmock生成関数
+    await runIntegration({ // 【追加】guard付き統合入口の実行関数
+      environment: environment(), // 【追加】架空設定生成関数
+      checkoutDirectory: checkout,
+      launch: successfulLaunch, // 【追加】架空JSONだけを書く起動代替関数
+      onSuite, // 【追加】安全な通知mock関数
+    });
+    expect(onSuite).toHaveBeenCalledTimes(getIntegrationSuites().length); // 【追加】全必須suiteの通知件数を照合する関数・一覧取得・比較メソッド
+    const results = onSuite.mock.calls.map( // 【追加】通知結果だけを取り出すメソッド
+      /**
+       * 【追加】検証済みのDTOだけを調べる。
+       */
+      (call) => call[0], // 【追加】通知引数取得コールバック
+    );
+    for (const evidence of MVP_CONCURRENCY_CASES) {
+      const result = results.find( // 【追加】証跡対象を探すメソッド
+        /**
+         * 【追加】F10・F11・LINE workerの対象パスを照合する。
+         */
+        (suite) => suite.path === evidence.path, // 【追加】パス照合コールバック
+      );
+      expect(result.natural).toBe(evidence.natural.length); // 【追加】自然競合件数を照合する関数・比較メソッド
+      expect(result.injected).toBe(evidence.injected.length); // 【追加】注入障害件数を照合する関数・比較メソッド
+    }
+    expect(JSON.stringify(results).includes(PRIVATE)).toBe(false); // 【追加】秘密非通知を検証する関数・JSON化・含有・比較メソッド
+  },
+);
+
+it.each(["natural", "injected"] as const)( // 【追加】証跡欠落別のケース登録メソッド・リテラル型アサーション
+  "%sの実ケースが欠落した結果をguard成功で代用しない",
+  /**
+   * 【追加】DB群名だけが残った結果でも、必須の競合ケースがなければ拒否する。
+   */
+  (kind) => { // 【追加】証跡欠落の検証コールバック
+    const value = report(); // 【追加】架空JSON生成関数
+    const evidence = MVP_CONCURRENCY_CASES[0];
+    const file = value.testResults.find( // 【追加】対象ファイルを選ぶメソッド
+      /**
+       * 【追加】F10の実DB群を対象にする。
+       */
+      (item) => item.name === resolve(checkout, evidence.path), // 【追加】所有ファイルの照合コールバック・解決関数
+    )!;
+    const item = file.assertionResults.find( // 【追加】必須ケースだけを選ぶメソッド
+      /**
+       * 【追加】自然または注入の一件だけを変更する。
+       */
+      (test) => test.title === evidence[kind][0], // 【追加】実ケース名の照合コールバック
+    )!;
+    item.title = "guard-only";
+    expect( // 【追加】証跡欠落の拒否を検証する関数
+      /**
+       * 【追加】件数と群名が正しい偽の完了を渡す。
+       */
+      () => assertIntegrationReport(value, checkout), // 【追加】結果検証のコールバック・関数
+    ).toThrow(RUN_ERROR); // 【追加】固定失敗の比較メソッド
+  },
+);
+
+it("外側AbortSignalも子の停止・待機・固定失敗へ伝播する", // 【追加】ケース登録関数
+  /**
+   * 【追加】実プロセスを起動せず、既存signal経路の所有子停止を確認する。
+   */
+  async () => { // 【追加】外側signalの検証コールバック
+    const controller = new AbortController(); // 【追加】試験用中断のコンストラクター
+    const child = Object.assign(new EventEmitter(), { pid: 12345 }); // 【追加】架空子イベントの生成・属性設定関数
+    boundary.spawn.mockReturnValue(child); // 【追加】子プロセスを置き換えるメソッド
+    const kill = vi.spyOn(process, "kill").mockReturnValue(true); // 【追加】実OS通知を置き換える関数・メソッド
+    const pending = launchIntegration({ // 【追加】既存の期限付き起動関数
+      checkoutDirectory: checkout,
+      outputFile: join(checkout, "results.json"), // 【追加】架空結果先の結合関数
+      environment: environment(), // 【追加】架空設定生成関数
+      signal: controller.signal,
+    });
+    const rejected = expect(pending).rejects.toThrow(RUN_ERROR); // 【追加】固定失敗の期待値関数・比較メソッド
+    controller.abort(); // 【追加】外側の中断メソッド
+    expect(kill).toHaveBeenCalledWith(-12345, "SIGTERM"); // 【追加】所有プロセス群への停止を検証する関数・比較メソッド
+    child.emit("close", 0, null); // 【追加】停止後の見かけ上の正常終了を通知するメソッド
+    await rejected;
   },
 );
