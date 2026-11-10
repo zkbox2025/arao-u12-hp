@@ -764,7 +764,7 @@ F13-ENV-REPROは、G1の受入条件（CLI・Node・DBの版、fresh環境での
 | F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する。**G2で実装済み**（処理権の取得は合計3回まで、超過は専用errorCodeのFAILEDへ終端化）。ローカルintegrationで確認（第12.1節）。`verify:mvp` 全体とG3（結果不明の再送操作の除外）は未完了のため、LINE通知の本番有効化の判断は保留 |
 | F13-LINE-TIMEOUT | 実LINE通信を一定時間で打ち切る機能は未実装 | [LINE-api]のfetch、[line-worker-DB]はTimeoutError注入。実timeoutと結果不明／重複防止の扱いを別patchで検討する |
 | F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | **解消済み（G1、第12.2節）**。新しいコピーで `npm ci` から `verify:mvp` 全11段階まで成功し、CLIはlockfileどおり2.101.0、DBは17.6。条件：DB版は別実行で取得。別マシン・空のキャッシュでの確認と、allowScripts警告の扱いは未実施・別項目 |
-| F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない。バックアップ（Supabase Proの日次バックアップ＋migration直前の手動バックアップ＋別環境での復元確認）の方針と手順は、[本番migration手順書]。Proが有効化済みかは、管理画面で確認する |
+| F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない。バックアップ（Supabase Proの日次バックアップ＋migration直前の手動バックアップ＋別環境での復元確認）の方針と手順は、[本番migration手順書]。**現在の構成は、Pro・日次バックアップ一覧確認済み**（利用者が管理画面で確認し、報告した結果。2026-11-11。Claudeが検証した結果ではない）。以前の記録（Free）とは区別する。復元の操作・別環境での復元確認・migration直前の手動バックアップは未実施で、復元可能なことは実証されていない |
 | MANUAL-ACCEPTANCE | 既存運用書の実機・アクセシビリティ・Proxy条件 | 第10.5節と既存手動表へ、実施結果／保留理由を対応付ける |
 
 解決済みの粒度19修正は、統合originのlocalhost統一と、F11の確認済みadapter競合の有限再試行である。
