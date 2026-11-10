@@ -21,8 +21,8 @@ import type {
 } from "@prisma/client";
 
 import {
+  getLineRetryKeyResendWindowStart,//【追加】期限切れPROCESSINGを同じretry keyで再送してよい最も古い依頼日時を返す関数
   LINE_DELIVERY_RESULT_UNKNOWN_DETAIL,//【追加】結果不明のFAILEDに保存する固定の説明文
-  LINE_RETRY_KEY_VALID_MILLISECONDS,//【追加】retry keyが有効な期間（24時間）のミリ秒
   type LineDeliveryResultUnknownErrorCode,//【追加】結果不明のerrorCodeの型
 } from "@/domain/club/line/line-delivery-result";
 
@@ -84,10 +84,9 @@ async function claimDelivery(
         CLAIM_LEASE_MILLISECONDS,
     );
 
-  const retryKeyWindowStart =//【追加】retry keyが有効な最も古い依頼日時（現在から24時間前）
-    new Date(//【追加】日時を作るコンストラクター
-      now.getTime() -//【追加】時刻を数値にするメソッド
-        LINE_RETRY_KEY_VALID_MILLISECONDS,
+  const retryKeyWindowStart =//【修正】同じretry keyで再送してよい最も古い依頼日時（24時間から安全余裕を引いた期間）
+    getLineRetryKeyResendWindowStart(//【追加】再送してよい最も古い依頼日時を返す関数
+      now,
     );
 
  //データベースにあるLINE配信データを、他の処理と衝突しないように安全に
@@ -140,7 +139,7 @@ async function claimDelivery(
                 lte: now,
               },
 
-              requestedAt: {//【追加】同じretry keyで再送できる期間内のものだけ（有効期間は最初の送信から24時間）
+              requestedAt: {//【修正】再送期限内のものだけ（期限は依頼日時から数える。依頼日時は最初の送信以前で、再claimでも変わらない）
                 gte: retryKeyWindowStart,
               },
             },
@@ -467,17 +466,16 @@ export async function sendPendingLineDeliveries(
  * 【追加】結果が記録されないまま期限切れになったPROCESSINGのうち、これ以上送信できないものを、
  * FAILED（送信結果不明）へ終端化する。自動再送はしない。
  * ・処理権の取得が上限（MAX_CLAIM_COUNT）に達した配信は、4回目の送信をしない。
- * ・retry keyの有効期間（24時間）を過ぎた配信は、同じkeyで再送できないため送信しない。
+ * ・再送期限（依頼日時から、24時間から安全余裕を引いた期間）に達した配信は、同じkeyで再送しないため送信しない。
  * 再claimの条件（取得回数が上限未満・有効期間内）とは重ならないため、並列のclaimと競合しない。
  */
 async function terminateUnresendableDeliveries(): Promise<void> {
   const now =//【追加】現在の時刻を取得
     new Date();//【追加】日時を作るコンストラクター
 
-  const retryKeyWindowStart =//【追加】retry keyが有効な最も古い依頼日時
-    new Date(//【追加】日時を作るコンストラクター
-      now.getTime() -//【追加】時刻を数値にするメソッド
-        LINE_RETRY_KEY_VALID_MILLISECONDS,
+  const retryKeyWindowStart =//【修正】同じretry keyで再送してよい最も古い依頼日時
+    getLineRetryKeyResendWindowStart(//【追加】再送してよい最も古い依頼日時を返す関数
+      now,
     );
 
   /*
@@ -500,7 +498,7 @@ async function terminateUnresendableDeliveries(): Promise<void> {
     },
     {
       where: {
-        requestedAt: {//【追加】retry keyの有効期間を過ぎている
+        requestedAt: {//【修正】再送期限に達している（期限が判定できない場合も送信しない）
           lt: retryKeyWindowStart,
         },
       },
@@ -597,11 +595,10 @@ export async function sendClaimableLineDeliveries(
                 lte: now,
               },
 
-              requestedAt: {//【追加】retry keyの有効期間内のものだけ（claimの条件と同じ）
+              requestedAt: {//【修正】再送期限内のものだけ（claimの条件と同じ）
                 gte:
-                  new Date(//【追加】日時を作るコンストラクター
-                    now.getTime() -//【追加】時刻を数値にするメソッド
-                      LINE_RETRY_KEY_VALID_MILLISECONDS,
+                  getLineRetryKeyResendWindowStart(//【追加】再送してよい最も古い依頼日時を返す関数
+                    now,
                   ),
               },
             },

@@ -99,9 +99,10 @@ describe("sendLinePushMessage の打ち切り", () => { // テスト群を定義
   });
 
   /**
-   * 時間切れ以外の通信エラーは、従来どおり通常の通信エラーとして返すことを確認する。
+   * 【修正】時間切れ以外の通信エラーも、送信失敗と断定せず「送信結果不明」の説明で返すことを確認する。
+   * errorCodeは既存のLINE_NETWORK_ERRORを維持する。
    */
-  it("時間切れ以外の通信エラーは通常の通信エラーのまま返す", async () => { // テストケースを定義する関数 / 非同期コールバック
+  it("時間切れ以外の通信エラーも、送信失敗と断定しない結果不明の説明で返す", async () => { // テストケースを定義する関数 / 非同期コールバック
     vi.spyOn(globalThis, "fetch").mockRejectedValue( // HTTP送信関数を通信エラーで失敗させるメソッド
       new Error("PRIVATE_RAW_NETWORK_TEXT"), // 通常のエラーのコンストラクター
     );
@@ -111,7 +112,8 @@ describe("sendLinePushMessage の打ち切り", () => { // テスト群を定義
     expect(result).toEqual({ // 期待値を検証する関数 / 結果の比較メソッド
       success: false,
       errorCode: "LINE_NETWORK_ERROR",
-      errorDetail: "LINEへの接続中にエラーが発生しました。",
+      errorDetail: "LINEへの送信結果を確認できませんでした。",
     });
+    expect(JSON.stringify(result)).not.toContain("PRIVATE_RAW_NETWORK_TEXT"); // 【追加】期待値を検証する関数 / 文字列化関数 / 原文を含まない検証メソッド
   });
 });

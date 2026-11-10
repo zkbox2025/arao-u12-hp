@@ -343,16 +343,14 @@ it.each(["accepted", "duplicate", "rejected", "network", "timeout"] as const)( /
         ? { success: true }
         : {
             success: false,
-            errorCode: mode === "rejected" // 【修正】timeoutは通常の通信エラーと区別する
+            errorCode: mode === "rejected" // 【修正】timeoutは通常の通信エラーと区別し、通信エラーも結果不明として扱う
               ? "LINE_HTTP_500"
               : mode === "timeout"
                 ? "LINE_RESULT_UNKNOWN_TIMEOUT"
                 : "LINE_NETWORK_ERROR",
             errorDetail: mode === "rejected"
               ? "LINEへの通知送信に失敗しました。"
-              : mode === "timeout"
-                ? "LINEへの送信結果を確認できませんでした。"
-                : "LINEへの接続中にエラーが発生しました。",
+              : "LINEへの送信結果を確認できませんでした。", // 【修正】timeoutも通信エラーも送信失敗と断定しない
           };
       expect(result).toEqual(expected); // 期待値生成関数 / 固定結果の比較メソッド
       expect(fetch).toHaveBeenCalledTimes(1); // 期待値生成関数 / HTTP試行件数の検証メソッド / HTTP送信関数の参照
@@ -775,9 +773,7 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
                 : "LINE_NETWORK_ERROR");
             expect(finished.errorDetail).toBe(mode === "rejected" // 【修正】期待値生成関数 / 固定error detail比較メソッド
               ? "LINEへの通知送信に失敗しました。"
-              : mode === "timeout"
-                ? "LINEへの送信結果を確認できませんでした。"
-                : "LINEへの接続中にエラーが発生しました。");
+              : "LINEへの送信結果を確認できませんでした。"); // 【修正】timeoutも通信エラーも送信失敗と断定しない
           }
           const [url, init] = vi.mocked(fetch).mock.calls[0]; // fetch監視の型を復元する関数 / HTTP送信関数の参照
           expect(url).toBe(ENDPOINT); // 期待値生成関数 / 固定endpoint比較メソッド
@@ -990,18 +986,86 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
     );
 
     /**
-     * 【追加】期限切れPROCESSINGの再送は、retry keyの有効期間（依頼から24時間）内に限ることを確認する。
-     * 有効期間内は同じretry keyで再claimし、超過は送信せず「送信結果不明」のFAILEDで終端化する。
+     * 【追加】お知らせの再送対象の取得が、通常の再送可能な失敗だけを返し、
+     * 通信エラー・タイムアウト・再claim上限到達・再送期限切れの結果不明を返さないことを、実DBで確認する。
+     * 実LINE通信は行わず、同じFAILEDとして保存した行を、実際の取得処理で調べる。
      */
-    it.each([
-      { hours: 23, status: "SENT" },
-      { hours: 25, status: "FAILED" },
-    ] as const)( // 【追加】有効期間内外の試験登録メソッド / リテラル型アサーション
-      "依頼から$hours時間後の期限切れPROCESSINGは$statusになる（retry key有効期間24時間）",
+    it("お知らせの再送対象は、通常の再送可能な失敗だけを返し、結果不明は返さない", // 【追加】再送対象の取得試験を登録する関数
+      /**
+       * 【追加】同じFAILEDの行のerrorCodeだけを変え、実Repositoryの取得結果を確認する。
+       */
+      async () => safeCheck( // 【追加】再送対象の非同期コールバック / 固定例外へ変換する関数
+        /**
+         * 【追加】通常の失敗3種と結果不明4種を順に保存して取得し、他クラブからは取得できないことも確認する。
+         */
+        async () => { // 【追加】再送対象の取得を検証する非同期関数
+          const beforeB = await snapshot(["b"]); // 【追加】B全列取得関数
+          const repository = await import("@/src/infrastructure/prisma/repositories/club-notice-repository"); // 【追加】実Repositoryを遅延読込みする関数
+          const id = owned().related.a.deliveryId!; // 【追加】所有fixture取得関数
+          const clubId = owned().clubs.a.id; // 【追加】所有fixture取得関数
+          await database().clubLineDelivery.update({ // 【追加】専用client取得関数 / お知らせのFAILEDへ置くDBメソッド
+            where: { id },
+            data: {
+              contentType: "NOTICE", // 【追加】content種別とeventId・noticeIdの検査制約を同時に満たす
+              eventId: null,
+              noticeId: null,
+              status: "FAILED",
+              sentAt: null,
+              claimedAt: null,
+              claimToken: null,
+              leaseExpiresAt: null,
+              nextAttemptAt: null,
+            },
+          });
+          const cases = [
+            { code: "LINE_HTTP_500", retriable: true }, // 【追加】LINEが拒否した通常の失敗
+            { code: "LINE_TARGET_DISABLED", retriable: true }, // 【追加】LINEへ通信する前に失敗した通常の失敗
+            { code: null, retriable: true }, // 【追加】errorCodeのない失敗
+            { code: "LINE_NETWORK_ERROR", retriable: false }, // 【追加】通信エラー（結果不明）
+            { code: "LINE_RESULT_UNKNOWN_TIMEOUT", retriable: false }, // 【追加】タイムアウト（結果不明）
+            { code: "LINE_RESULT_UNKNOWN_CLAIM_LIMIT", retriable: false }, // 【追加】再claim上限到達（結果不明）
+            { code: "LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED", retriable: false }, // 【追加】再送期限切れ（結果不明）
+          ] as const; // 【追加】リテラル型アサーション
+          for (const item of cases) {
+            await database().clubLineDelivery.update({ // 【追加】専用client取得関数 / errorCodeだけを変えるDBメソッド
+              where: { id },
+              data: {
+                errorCode: item.code,
+                errorDetail: item.code === null ? null : "架空の固定説明",
+              },
+            });
+            const found = await repository.findFailedClubNoticeLineDeliveryForRetry({ // 【追加】お知らせの再送対象を取得する実関数
+              clubId,
+              deliveryId: id,
+            });
+            if (item.retriable) {
+              expect(found?.id).toBe(id); // 【追加】期待値生成関数 / 再送対象のIDの比較メソッド
+            } else {
+              expect(found).toBeNull(); // 【追加】期待値生成関数 / 結果不明は対象外の検証メソッド
+            }
+            const crossClub = await repository.findFailedClubNoticeLineDeliveryForRetry({ // 【追加】他クラブからの取得を試す実関数
+              clubId: owned().clubs.b.id, // 【追加】所有fixture取得関数
+              deliveryId: id,
+            });
+            expect(crossClub).toBeNull(); // 【追加】期待値生成関数 / 他クラブからは取得できない検証メソッド
+          }
+          expect(bridge.send).not.toHaveBeenCalled(); // 【追加】期待値生成関数 / LINE送信なしの検証メソッド / 送信stub関数の参照
+          expect(fetch).not.toHaveBeenCalled(); // 【追加】期待値生成関数 / HTTP非実行検証メソッド / HTTP送信関数の参照
+          expect(await snapshot(["b"])).toEqual(beforeB); // 【追加】期待値生成関数 / B全列取得関数 / 全列比較メソッド
+        },
+      ),
+    );
+
+    /**
+     * 【修正】期限切れPROCESSINGの再送は、再送期限（依頼日時から24時間、安全余裕10分を引く）内に限ることを確認する。
+     * 期限内は同じretry keyで再claimし、期限に達したものは送信せず「送信結果不明」のFAILEDで終端化する。
+     */
+    it.each([23, 25])( // 【修正】再送期限の内外（時間）の試験登録メソッド
+      "依頼から%s時間後の期限切れPROCESSINGの再送期限（24時間）を判定する",
       /**
        * 【追加】依頼日時と期限切れclaimを準備し、送信の有無と終端状態を確認する。
        */
-      async ({ hours, status }) => safeCheck( // 【追加】期間別の非同期コールバック / 固定例外へ変換する関数
+      async (hours) => safeCheck( // 【修正】期間別の非同期コールバック / 固定例外へ変換する関数
         /**
          * 【追加】取得1回済みの期限切れPROCESSINGを作り、実workerで処理する。
          */
@@ -1021,7 +1085,7 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
             },
           });
           await send(); // 【追加】認可済みclub指定のworker呼出し関数
-          if (status === "SENT") {
+          if (hours === 23) { // 【追加】再送期限内（24時間から安全余裕10分を引いた期間）は同じretry keyで再送する
             assertReleased(await row(), "SENT", 2); // 【追加】終端状態の検証関数 / A全列取得関数
             expect(bridge.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ retryKey: id })); // 【追加】期待値生成関数 / 送信1回と同じretry keyの検証メソッド / 部分一致の期待値生成関数 / 送信stub関数の参照
           } else {

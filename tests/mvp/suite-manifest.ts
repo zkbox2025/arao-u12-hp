@@ -383,11 +383,16 @@ export const MVP_CONCURRENCY_CASES: readonly { // 【追加】並列・注入の
     path: "tests/mvp/line-delivery.integration.test.ts",
     natural: [
       "同じdeliveryIdへ自然並列に2 workerを実行しても、送信stubは1回だけになる",
+      "取得2回済みの期限切れを並列claimしても、送信は1回だけで取得回数は3を超えない", // 【追加】F13粒度2：並列でも処理権の取得は3回まで
     ],
     injected: [
       "rejectedの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
       "networkの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
       "timeoutの受付結果で実DBを終端更新し、同じdeliveryを自動再試行しない",
+      "結果未記録の期限切れを3回まで再claimし、4回目は送らず結果不明・上限到達のFAILEDにする", // 【追加】F13粒度2：上限到達の終端化
+      "依頼から23時間後の期限切れPROCESSINGの再送期限（24時間）を判定する", // 【追加】F13粒度3：再送期限内は同じretry keyで再送
+      "依頼から25時間後の期限切れPROCESSINGの再送期限（24時間）を判定する", // 【追加】F13粒度3：再送期限切れは送信せず結果不明
+      "お知らせの再送対象は、通常の再送可能な失敗だけを返し、結果不明は返さない", // 【追加】F13粒度3：結果不明を再送対象から除外
     ],
   },
 ];

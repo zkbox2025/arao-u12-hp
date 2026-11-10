@@ -56,7 +56,8 @@ export type LinePushResult =
 
 /**
  * 【追加】アクセストークン・グループID・本文・retry keyを受け取り、LINEへpushメッセージを1通要求する。
- * 戻り値は、LINEの受付成功（409の重複受理を含む）、通常の失敗、10秒の時間切れによる結果不明のいずれか。
+ * 戻り値は、LINEの受付成功（409の重複受理を含む）、LINEが拒否した通常の失敗（LINE_HTTP_*）、
+ * 応答を確認できなかった結果不明（10秒の時間切れ・通信エラー）のいずれか。
  * 受付成功は、受信者への配送完了を意味しない。
  */
     //アプリの通知についてLINE公式アカウント（Messaging API）を使って、
@@ -165,6 +166,11 @@ export async function sendLinePushMessage(
       };
     }
 
+    /*
+     * 【修正】通信エラー（LINEから応答を確認できなかった）も、タイムアウトと同じく
+     * 「送信結果不明」として扱う。LINEに届いている可能性があるため、送信失敗と断定せず、
+     * 自動再送も通常の再送操作もしない。errorCodeは既存のLINE_NETWORK_ERRORを維持する。
+     */
     return {//インターネットが切れている、LINEのサーバーが落ちているなどのエラー
       success: false,
 
@@ -172,7 +178,7 @@ export async function sendLinePushMessage(
         "LINE_NETWORK_ERROR",
 
       errorDetail:
-        "LINEへの接続中にエラーが発生しました。",
+        LINE_RESULT_UNKNOWN_DETAIL,//【修正】送信失敗と断定しない固定の説明文
     };
   }
 }

@@ -7,6 +7,7 @@ import {
 
 import {
   isLineDeliveryResultUnknown,//【追加】errorCodeが送信結果不明のものか判定する関数
+  LINE_DELIVERY_RESULT_UNKNOWN_DETAIL,//【追加】結果不明のFAILEDに保存・表示する固定の説明文
 } from "@/domain/club/line/line-delivery-result";
 
 import {
@@ -130,9 +131,11 @@ export function ContentLineDeliveryHistory({
 
                   <p className="mt-1 text-sm text-neutral-700">
                     状態：
-                    {getStatusLabel(
-                      delivery.status,
-                    )}
+                    {isResultUnknown
+                      ? "送信結果不明"//【修正】結果不明は「送信失敗」と断定しない
+                      : getStatusLabel(
+                          delivery.status,
+                        )}
                   </p>
 
                   <p className="mt-1 text-sm text-neutral-700">
@@ -156,17 +159,23 @@ export function ContentLineDeliveryHistory({
                   {delivery.status ===
                   "FAILED" ? (
                     <>
-                      <p className="mt-2 whitespace-pre-wrap wrap-break-word text-sm text-red-700">
-                        {delivery.errorDetail ??
-                          "LINE通知に失敗しました。"}
-                      </p>
-
                       {isResultUnknown ? (
-                        <p className="mt-2 text-sm text-neutral-700">
-                          LINEに届いている可能性があるため、再送はできません。
-                          LINEグループで届いているかをご確認ください。
+                        <>
+                          <p className="mt-2 whitespace-pre-wrap wrap-break-word text-sm text-neutral-800">
+                            {LINE_DELIVERY_RESULT_UNKNOWN_DETAIL}
+                          </p>
+
+                          <p className="mt-2 text-sm text-neutral-700">
+                            LINEに届いている可能性があるため、再送はできません。
+                            LINEグループで届いているかをご確認ください。
+                          </p>
+                        </>
+                      ) : (
+                        <p className="mt-2 whitespace-pre-wrap wrap-break-word text-sm text-red-700">
+                          {delivery.errorDetail ??
+                            "LINE通知に失敗しました。"}
                         </p>
-                      ) : null}
+                      )}
 
                       {boundRetryAction &&
                       retryRequestId ? (
