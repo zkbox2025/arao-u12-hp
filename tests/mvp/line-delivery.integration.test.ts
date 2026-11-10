@@ -1,6 +1,8 @@
 // tests/mvp/line-delivery.integration.test.ts
 // 専用実DBでLINE workerを検証し、LINE受付APIはstubへ置き換えて送信しない。
-// 現行workerのFAILEDは自動再送せず、期限切れPROCESSINGの試行回数上限は未実装。
+// 現行workerのFAILEDは自動再送しない。
+// 【修正】期限切れPROCESSINGの処理権の取得は1配信あたり合計3回までで、超過分は終端化する（F13粒度2）。
+// 実LINE通信のtimeoutは未実装で、TimeoutError注入は正規化の確認にとどまる。
 
 import {
   Buffer,
@@ -890,6 +892,84 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
             expect(input.retryKey).toBe(stranded.id); // 期待値生成関数 / retry key不変の比較メソッド
           }
           expect(await snapshot(["b"])).toEqual(beforeB); // 期待値生成関数 / B全列取得関数 / 全列比較メソッド
+        },
+      ),
+    );
+
+    /**
+     * 【追加】処理権の取得は3回までで、3回目も結果未記録のまま期限切れなら4回目を送らずFAILEDで終端化することを確認する。
+     */
+    it("結果未記録の期限切れを3回まで再claimし、4回目は送らず結果不明・上限到達のFAILEDにする", // 【追加】取得回数の上限試験を登録する関数
+      /**
+       * 【追加】3回とも送信境界で中断させ、自動再claimと巡回の双方で4回目が起きないことを検証する。
+       */
+      async () => safeCheck( // 【追加】上限試験の非同期コールバック / 固定例外へ変換する関数
+        /**
+         * 【追加】期限切れを準備しながら3回claimし、上限到達後の送信・終端化・B不変を確認する。
+         */
+        async () => { // 【追加】上限到達を検証する非同期関数
+          const beforeB = await snapshot(["b"]); // 【追加】B全列取得関数
+          const id = owned().related.a.deliveryId!; // 【追加】所有fixture取得関数
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            bridge.send.mockRejectedValueOnce(new Error(PRIVATE)); // 【追加】送信境界の中断を注入するメソッド / 架空例外コンストラクター / 送信stub関数の参照
+            await expect(send()).rejects.toThrow(PRIVATE); // 【追加】期待値生成関数 / 実worker呼出し関数 / 中断例外の検証メソッド
+            const stranded = await row(); // 【追加】中断後のA履歴取得関数
+            assertProcessing(stranded); // 【追加】実claim状態の検証関数
+            expect(stranded.attemptCount).toBe(attempt); // 【追加】期待値生成関数 / 取得回数の比較メソッド
+            await database().clubLineDelivery.update({ // 【追加】専用client取得関数 / 所有leaseを期限切れへ置くDBメソッド
+              where: { id },
+              data: { leaseExpiresAt: new Date(0) }, // 【追加】期限切れfixture日時のコンストラクター
+            });
+          }
+          expect(bridge.send).toHaveBeenCalledTimes(3); // 【追加】期待値生成関数 / 3回の送信境界到達の検証メソッド / 送信stub関数の参照
+          const exhausted = await row(); // 【追加】3回目後の履歴取得関数
+          await send(); // 【追加】認可済みclub指定のworker呼出し関数（4回目のclaimを拒否する）
+          expect(await row()).toEqual(exhausted); // 【追加】期待値生成関数 / A全列取得関数 / claim拒否で不変の比較メソッド
+          expect(bridge.send).toHaveBeenCalledTimes(3); // 【追加】期待値生成関数 / 4回目の送信なしの検証メソッド / 送信stub関数の参照
+          await globalPass(10); // 【追加】上限到達を終端化する全クラブ巡回関数
+          const terminated = await row(); // 【追加】終端化後のA履歴取得関数
+          assertReleased(terminated, "FAILED", 3); // 【追加】終端状態の検証関数
+          expect(terminated.errorCode).toBe("LINE_RESULT_UNKNOWN_CLAIM_LIMIT"); // 【追加】期待値生成関数 / 結果不明・上限到達のerrorCode比較メソッド
+          expect(terminated.errorCode).not.toMatch(/^LINE_HTTP_|^LINE_NETWORK_ERROR$/u); // 【追加】期待値生成関数 / 通常の失敗と区別する検証メソッド / 通常の失敗の正規表現コンストラクター
+          expect(bridge.send).toHaveBeenCalledTimes(3); // 【追加】期待値生成関数 / 終端化後も送信なしの検証メソッド / 送信stub関数の参照
+          await globalPass(10); // 【追加】FAILEDが自動再送されないことを確認する全クラブ巡回関数
+          expect(await row()).toEqual(terminated); // 【追加】期待値生成関数 / A全列取得関数 / FAILED不変の比較メソッド
+          expect(bridge.send).toHaveBeenCalledTimes(3); // 【追加】期待値生成関数 / 自動再送なしの検証メソッド / 送信stub関数の参照
+          expect(await snapshot(["b"])).toEqual(beforeB); // 【追加】期待値生成関数 / B全列取得関数 / 全列比較メソッド
+        },
+      ),
+    );
+
+    /**
+     * 【追加】2回取得済みの期限切れPROCESSINGを並列に処理しても、3回目の取得が1回だけで上限を超えないことを確認する。
+     */
+    it("取得2回済みの期限切れを並列claimしても、送信は1回だけで取得回数は3を超えない", // 【追加】並列上限試験を登録する関数
+      /**
+       * 【追加】実DBの原子的な更新条件だけで競合を防ぐことを、claimや時刻を細工せず確認する。
+       */
+      async () => safeCheck( // 【追加】並列上限試験の非同期コールバック / 固定例外へ変換する関数
+        /**
+         * 【追加】複数workerを同時に実行し、送信件数と取得回数を確認する。
+         */
+        async () => { // 【追加】並列上限を検証する非同期関数
+          const beforeB = await snapshot(["b"]); // 【追加】B全列取得関数
+          await database().clubLineDelivery.update({ // 【追加】専用client取得関数 / 取得2回済みの期限切れへ置くDBメソッド
+            where: { id: owned().related.a.deliveryId! }, // 【追加】所有fixture取得関数
+            data: {
+              status: "PROCESSING",
+              attemptCount: 2,
+              claimedAt: new Date(0), // 【追加】日時コンストラクター
+              claimToken: randomUUID(), // 【追加】claim token生成関数
+              leaseExpiresAt: new Date(0), // 【追加】期限切れfixture日時のコンストラクター
+            },
+          });
+          const results = await Promise.allSettled(Array.from({ length: 5 }, () => send())); // 【追加】全workerの終了を待つ関数 / 配列生成関数 / 実worker呼出し関数
+          expect(results.every((result) => result.status === "fulfilled")).toBe(true); // 【追加】期待値生成関数 / 全workerの正常完了を判定するコールバック / 真偽値の比較メソッド
+          expect(bridge.send).toHaveBeenCalledTimes(1); // 【追加】期待値生成関数 / 送信1回の検証メソッド / 送信stub関数の参照
+          assertReleased(await row(), "SENT", 3); // 【追加】終端状態の検証関数 / A全列取得関数
+          await send(); // 【追加】終端後に再実行する実worker呼出し関数
+          expect(bridge.send).toHaveBeenCalledTimes(1); // 【追加】期待値生成関数 / 再送なしの検証メソッド / 送信stub関数の参照
+          expect(await snapshot(["b"])).toEqual(beforeB); // 【追加】期待値生成関数 / B全列取得関数 / 全列比較メソッド
         },
       ),
     );

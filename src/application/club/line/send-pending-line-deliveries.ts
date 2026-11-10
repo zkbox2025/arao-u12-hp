@@ -34,7 +34,25 @@ import {
 const CLAIM_LEASE_MILLISECONDS =
   5 * 60 * 1000;
 
+/**
+ * 【追加】1配信あたりの処理権の取得回数の上限（初回1回＋期限切れPROCESSINGの再claim最大2回）。
+ * attemptCountは送信回数ではなく、処理権の取得回数を数える。
+ */
+const MAX_CLAIM_COUNT = 3; // 【追加】処理権の取得回数の上限値
 
+/**
+ * 【追加】3回目の処理も結果が記録されないまま期限切れになり、上限到達で終端化したFAILEDのerrorCode。
+ * 「送信結果不明・上限到達」を表し、LINE_HTTP_*などの通常の失敗と区別する。
+ */
+export const LINE_DELIVERY_CLAIM_LIMIT_ERROR_CODE =
+  "LINE_RESULT_UNKNOWN_CLAIM_LIMIT"; // 【追加】送信結果不明・上限到達を表すerrorCode
+
+
+/**
+ * 【追加】配信ID（任意でclubId）を受け取り、claim可能なら原子的にPROCESSINGへ更新して配信を返す。
+ * 処理権の取得がMAX_CLAIM_COUNT回に達した配信はclaimせずnullを返す。
+ * 他workerが先にclaimした場合や対象外の状態の場合もnullを返す。
+ */
    //データベースにあるLINE配信データを、他の処理と衝突しないように安全に
  // 「送信中（PROCESSING）」として確定させる関数
 async function claimDelivery(
@@ -72,6 +90,10 @@ async function claimDelivery(
                   input.clubId,
               }
             : {}),
+
+          attemptCount: {//【追加】処理権の取得回数が上限未満のものだけ（並列でも同じ更新文で判定される）
+            lt: MAX_CLAIM_COUNT,
+          },
 
         //状態の絞り込み
         //送信待ち（PENDING） であり、かつ「送信予定時刻がない（null）」、または「送信予定時刻が今を過ぎている状態）
@@ -168,6 +190,10 @@ async function claimDelivery(
     });
 }
 
+/**
+ * 【追加】配信IDとclaimTokenと送信結果を受け取り、claimが一致するPROCESSINGの行だけをSENTまたはFAILEDへ更新する。
+ * claimTokenが一致しない旧workerの結果は反映しない。
+ */
 //送信処理の最終的な結果（成功か失敗か）をデータベースに保存する関数
 async function finishDelivery(
   input: {
@@ -245,6 +271,10 @@ async function finishDelivery(
           },
     });
 }
+/**
+ * 【追加】配信ID（任意でclubId）を受け取り、claimからLINE送信、結果のDB保存までを1配信分行う。
+ * claimできなかった場合は何もしない。戻り値はない。
+ */
 //送信待ち→送信中への変更から、ライン通知送信までの一連の流れのメイン関数
 async function processDelivery(
   input: {
@@ -387,6 +417,9 @@ async function processDelivery(
   });
 }
 
+/**
+ * 【追加】認可済みclubIdと配信ID一覧を受け取り、重複を除いて順にprocessDeliveryで処理する。
+ */
 //溜まっている送信待ち（以前失敗したが再送信可能も含む）や５分の期限切れの送信中（遭難データ）チケットを
 //上から順に実送信処理（processDelivery）へ流し込む」という最終的な実行ボタン
 export async function sendPendingLineDeliveries(
@@ -409,6 +442,55 @@ export async function sendPendingLineDeliveries(
   }
 }
 
+/**
+ * 【追加】処理権の取得が上限に達して期限切れになったPROCESSINGを、FAILED（送信結果不明・上限到達）へ終端化する。
+ * 4回目の送信は行わない。再claimの条件（取得回数が上限未満）とは重ならないため、並列のclaimと競合しない。
+ */
+async function terminateExhaustedDeliveries(): Promise<void> {
+  const now =//【追加】現在の時刻を取得
+    new Date();//【追加】日時を作るコンストラクター
+
+  await prisma//【追加】DBクライアント
+    .clubLineDelivery
+    .updateMany({//【追加】条件に合う複数行をまとめて更新するメソッド
+      where: {
+        status:
+          "PROCESSING",//【追加】結果が記録されないままの送信中
+
+        leaseExpiresAt: {//【追加】期限切れ
+          lte: now,
+        },
+
+        attemptCount: {//【追加】処理権の取得が上限に達している
+          gte: MAX_CLAIM_COUNT,
+        },
+      },
+
+      data: {
+        status: "FAILED",//【追加】既存のFAILEDへ終端化（自動再送しない）
+        sentAt: null,
+
+        claimedAt: null,
+        claimToken: null,
+        leaseExpiresAt:
+          null,
+
+        nextAttemptAt:
+          null,
+
+        errorCode:
+          LINE_DELIVERY_CLAIM_LIMIT_ERROR_CODE,
+
+        errorDetail:
+          "LINEへの送信結果を確認できないまま、処理の再試行上限に達しました。",
+      },
+    });
+}
+
+/**
+ * 【追加】上限到達の配信を終端化したうえで、claim可能な配信をlimit件まで順にprocessDeliveryで処理する。
+ * limitは1回の取得件数の上限で、同一配信の再claim回数の上限とは別である。
+ */
 //システム全体を見回して、今すぐ送信可能な状態（あるいは遭難状態）になっているLINE配信データを
 //DBから自動で掘り出して、まとめて一括送信する『自動巡回（バッチ処理・定期実行）用の送信エンジン
 export async function sendClaimableLineDeliveries(
@@ -416,6 +498,8 @@ export async function sendClaimableLineDeliveries(
     limit: number;
   },
 ): Promise<void> {
+  await terminateExhaustedDeliveries();//【追加】上限到達の期限切れPROCESSINGを先に終端化する関数
+
   const now =
     new Date();
 
@@ -424,6 +508,10 @@ export async function sendClaimableLineDeliveries(
       .clubLineDelivery
       .findMany({
         where: {//自動検索する
+          attemptCount: {//【追加】上限に達した配信は取得対象にしない（limitの枠を使わない）
+            lt: MAX_CLAIM_COUNT,
+          },
+
           OR: [
             {
               status:
