@@ -698,7 +698,23 @@ G2の合格は、ローカルの専用DBでのintegrationに限る。本番のLI
 - 追加の確認事項（実行前に利用者へ提示）：fresh環境では `npm ci` による依存取得とChromium取得のため、
   npm registry等への準備通信が発生する。lockfileは変更しない。
 
-実行結果は、実施後にここへ記録する（未実行）。
+実行結果（2026-11-10、利用者の報告に基づく。生ログ・URL・資格情報は記録しない）：
+
+| 項目 | 記録 |
+| --- | --- |
+| コピー元revision | `50660c7a62db159ae3dfa327951faecae474a1d8`。実行前の変更は未追跡の `.claude/` のみ |
+| 環境の版 | Node v24.12.0、npm 11.18.0、Docker 29.2.1、Supabase CLI 2.101.0 |
+| 依存の取得 | `node_modules` を複製せず、新しいコピーで `npm ci`（638パッケージ追加、終了コード0）。package.json・lockfileは元と一致（`cmp`） |
+| 主要パッケージの版 | supabase 2.101.0、prisma 7.9.1、@prisma/client 7.8.0、next 16.2.6、@playwright/test 1.64.1、vitest 4.1.10（lockfileの記録と一致） |
+| `npm ci` の警告 | 6パッケージのinstall scriptがallowScripts未設定（@prisma/engines、esbuild、fsevents、prisma、sharp、unrs-resolver）。スクリプトが実行されたか、許可されずにskipされたかは未確認。後続の全段階は成功している |
+| 他の警告 | `npm audit` が26件の脆弱性（moderate 10・high 15・critical 1）を表示。G1では対応せず、`npm audit fix` も実行していない |
+| verify:mvp | 全11段階成功、`F12_MVP_PASSED 11`、終了コード0。MIGRATION 23件、INTEGRATION 22ファイル（件数の合計621）、E2E 12ファイル（件数の合計78） |
+| LINE worker | `line-delivery.integration.test.ts` は28件成功。必須ケースとして数える自然競合1・注入3は、manifestの登録どおり（G2で追加した2件は含まれない） |
+| Chromium | 導入の終了コード0、`test:e2e:list` は78件・12ファイル |
+| 回収 | `.next` 不在、3000・3443の待受なし、専用projectの container・volume の表示は空。通常Supabaseの起動終了コード0、元ソースの `git status` は前後で同一、`git diff --check` は出力なし |
+
+この結果は、同じマシン・同じDockerイメージ・Playwrightのブラウザーキャッシュ（取得済み）の条件での1回の再現である。
+F13-ENV-REPROの扱い（解消とするか）は、利用者の判断とする。
 
 残課題を「テストがあるから解決済み」にしない。以下はF13の粒度計画作成・見直し時の引継ぎ項目とする。
 本粒度ではF13の文書や実装を変更しない。引継ぎ時に担当・期限・採否・公開判断への影響を記録する。
@@ -707,7 +723,7 @@ G2の合格は、ローカルの専用DBでのintegrationに限る。本番のLI
 | --- | --- | --- |
 | F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する。**G2で実装済み**（処理権の取得は合計3回まで、超過は専用errorCodeのFAILEDへ終端化）。ローカルintegrationで確認（第12.1節）。`verify:mvp` 全体とG3（結果不明の再送操作の除外）は未完了のため、LINE通知の本番有効化の判断は保留 |
 | F13-LINE-TIMEOUT | 実LINE通信を一定時間で打ち切る機能は未実装 | [LINE-api]のfetch、[line-worker-DB]はTimeoutError注入。実timeoutと結果不明／重複防止の扱いを別patchで検討する |
-| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する |
+| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する。**G1実施済み**（第12.2節）：新しいコピーで `npm ci` から `verify:mvp` 全11段階まで成功し、CLIはlockfileどおり2.101.0。残る条件：allowScripts警告の扱い、別マシン・空のキャッシュでの確認は未実施。解消とするかは利用者の判断 |
 | F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない |
 | MANUAL-ACCEPTANCE | 既存運用書の実機・アクセシビリティ・Proxy条件 | 第10.5節と既存手動表へ、実施結果／保留理由を対応付ける |
 
