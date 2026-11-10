@@ -6,6 +6,10 @@ import {
 } from "@/domain/shared/date-time/club-date-time";
 
 import {
+  isLineDeliveryResultUnknown,//【追加】errorCodeが送信結果不明のものか判定する関数
+} from "@/domain/club/line/line-delivery-result";
+
+import {
   createRequestId,//リクエストID作成関数
 } from "@/domain/shared/request-id";
 
@@ -39,6 +43,7 @@ type ContentLineDeliveryHistoryProps = {
         string | null;
       requestedAt: Date;
       sentAt: Date | null;
+      errorCode: string | null;//【追加】失敗の種類（送信結果不明の判定に使う）
       errorDetail: string | null;
     }[];
 };
@@ -88,9 +93,17 @@ export function ContentLineDeliveryHistory({
         <ul className="mt-4 space-y-3">
           {deliveries.map(
             (delivery) => {
+              const isResultUnknown =//【追加】送信結果不明のFAILEDか（LINEに届いている可能性がある）
+                delivery.status ===
+                  "FAILED" &&
+                isLineDeliveryResultUnknown(//【追加】errorCodeが送信結果不明のものか判定する関数
+                  delivery.errorCode,
+                );
+
               const retryRequestId =
                 delivery.status ===
-                "FAILED"
+                  "FAILED" &&
+                !isResultUnknown//【修正】送信結果不明は通常の再送操作の対象にしない
                   ? createRequestId()
                   : null;
 
@@ -147,6 +160,13 @@ export function ContentLineDeliveryHistory({
                         {delivery.errorDetail ??
                           "LINE通知に失敗しました。"}
                       </p>
+
+                      {isResultUnknown ? (
+                        <p className="mt-2 text-sm text-neutral-700">
+                          LINEに届いている可能性があるため、再送はできません。
+                          LINEグループで届いているかをご確認ください。
+                        </p>
+                      ) : null}
 
                       {boundRetryAction &&
                       retryRequestId ? (

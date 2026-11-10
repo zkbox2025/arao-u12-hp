@@ -5,6 +5,10 @@
 import "server-only";
 
 import {
+  LINE_DELIVERY_RESULT_UNKNOWN_ERROR_CODES, // 【追加】送信結果不明を表すerrorCodeの一覧
+} from "@/domain/club/line/line-delivery-result";
+
+import {
   Prisma,
 } from "@prisma/client";
 
@@ -1124,6 +1128,21 @@ export async function findFailedClubEventLineDeliveryForRetry(
       clubId: input.clubId,
       contentType: "EVENT",
       status: "FAILED",
+
+      /*
+       * 【追加】送信結果不明のFAILEDは、LINEに届いている可能性があるため
+       * 通常の再送操作の対象にしない。errorCodeがnullのものは対象に残す。
+       */
+      OR: [
+        { errorCode: null },
+        {
+          errorCode: {
+            notIn: [
+              ...LINE_DELIVERY_RESULT_UNKNOWN_ERROR_CODES, // 【追加】結果不明のerrorCode一覧
+            ],
+          },
+        },
+      ],
     },
     select: {
       id: true,

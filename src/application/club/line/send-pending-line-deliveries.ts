@@ -16,6 +16,16 @@ import {
   randomUUID,//独自のランダムなUUIDを自動作成する
 } from "node:crypto";
 
+import type {
+  Prisma,//【追加】Prismaの検索条件などの型の名前空間
+} from "@prisma/client";
+
+import {
+  LINE_DELIVERY_RESULT_UNKNOWN_DETAIL,//【追加】結果不明のFAILEDに保存する固定の説明文
+  LINE_RETRY_KEY_VALID_MILLISECONDS,//【追加】retry keyが有効な期間（24時間）のミリ秒
+  type LineDeliveryResultUnknownErrorCode,//【追加】結果不明のerrorCodeの型
+} from "@/domain/club/line/line-delivery-result";
+
 import {
   decryptLineCredential,//LINE資格情報を復号する。
 } from "@/src/infrastructure/security/line-credential-crypto";
@@ -44,7 +54,8 @@ const MAX_CLAIM_COUNT = 3; // 【追加】処理権の取得回数の上限値
  * 【追加】3回目の処理も結果が記録されないまま期限切れになり、上限到達で終端化したFAILEDのerrorCode。
  * 「送信結果不明・上限到達」を表し、LINE_HTTP_*などの通常の失敗と区別する。
  */
-export const LINE_DELIVERY_CLAIM_LIMIT_ERROR_CODE =
+export const LINE_DELIVERY_CLAIM_LIMIT_ERROR_CODE:
+  LineDeliveryResultUnknownErrorCode =//【修正】結果不明のerrorCodeの型で検査する
   "LINE_RESULT_UNKNOWN_CLAIM_LIMIT"; // 【追加】送信結果不明・上限到達を表すerrorCode
 
 
@@ -71,6 +82,12 @@ async function claimDelivery(
     new Date(
       now.getTime() +
         CLAIM_LEASE_MILLISECONDS,
+    );
+
+  const retryKeyWindowStart =//【追加】retry keyが有効な最も古い依頼日時（現在から24時間前）
+    new Date(//【追加】日時を作るコンストラクター
+      now.getTime() -//【追加】時刻を数値にするメソッド
+        LINE_RETRY_KEY_VALID_MILLISECONDS,
     );
 
  //データベースにあるLINE配信データを、他の処理と衝突しないように安全に
@@ -121,6 +138,10 @@ async function claimDelivery(
 
               leaseExpiresAt: {//エラーにより５分の有効期限が切れて放置されている状態（遭難データ）
                 lte: now,
+              },
+
+              requestedAt: {//【追加】同じretry keyで再送できる期間内のものだけ（有効期間は最初の送信から24時間）
+                gte: retryKeyWindowStart,
               },
             },
           ],
@@ -443,52 +464,91 @@ export async function sendPendingLineDeliveries(
 }
 
 /**
- * 【追加】処理権の取得が上限に達して期限切れになったPROCESSINGを、FAILED（送信結果不明・上限到達）へ終端化する。
- * 4回目の送信は行わない。再claimの条件（取得回数が上限未満）とは重ならないため、並列のclaimと競合しない。
+ * 【追加】結果が記録されないまま期限切れになったPROCESSINGのうち、これ以上送信できないものを、
+ * FAILED（送信結果不明）へ終端化する。自動再送はしない。
+ * ・処理権の取得が上限（MAX_CLAIM_COUNT）に達した配信は、4回目の送信をしない。
+ * ・retry keyの有効期間（24時間）を過ぎた配信は、同じkeyで再送できないため送信しない。
+ * 再claimの条件（取得回数が上限未満・有効期間内）とは重ならないため、並列のclaimと競合しない。
  */
-async function terminateExhaustedDeliveries(): Promise<void> {
+async function terminateUnresendableDeliveries(): Promise<void> {
   const now =//【追加】現在の時刻を取得
     new Date();//【追加】日時を作るコンストラクター
 
-  await prisma//【追加】DBクライアント
-    .clubLineDelivery
-    .updateMany({//【追加】条件に合う複数行をまとめて更新するメソッド
+  const retryKeyWindowStart =//【追加】retry keyが有効な最も古い依頼日時
+    new Date(//【追加】日時を作るコンストラクター
+      now.getTime() -//【追加】時刻を数値にするメソッド
+        LINE_RETRY_KEY_VALID_MILLISECONDS,
+    );
+
+  /*
+   * 先に取得回数の上限到達を終端化し、
+   * 次にretry keyの有効期間切れを終端化する。
+   */
+  const targets: readonly {//【追加】終端化の条件とerrorCodeの組の型
+    where: Prisma.ClubLineDeliveryWhereInput;//【追加】Prismaの検索条件の型
+    errorCode: LineDeliveryResultUnknownErrorCode;//【追加】結果不明のerrorCodeの型
+  }[] = [
+    {
       where: {
-        status:
-          "PROCESSING",//【追加】結果が記録されないままの送信中
-
-        leaseExpiresAt: {//【追加】期限切れ
-          lte: now,
-        },
-
         attemptCount: {//【追加】処理権の取得が上限に達している
           gte: MAX_CLAIM_COUNT,
         },
       },
 
-      data: {
-        status: "FAILED",//【追加】既存のFAILEDへ終端化（自動再送しない）
-        sentAt: null,
-
-        claimedAt: null,
-        claimToken: null,
-        leaseExpiresAt:
-          null,
-
-        nextAttemptAt:
-          null,
-
-        errorCode:
-          LINE_DELIVERY_CLAIM_LIMIT_ERROR_CODE,
-
-        errorDetail:
-          "LINEへの送信結果を確認できないまま、処理の再試行上限に達しました。",
+      errorCode:
+        LINE_DELIVERY_CLAIM_LIMIT_ERROR_CODE,
+    },
+    {
+      where: {
+        requestedAt: {//【追加】retry keyの有効期間を過ぎている
+          lt: retryKeyWindowStart,
+        },
       },
-    });
+
+      errorCode:
+        "LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED",
+    },
+  ];
+
+  for (const target of targets) {
+    await prisma//【追加】DBクライアント
+      .clubLineDelivery
+      .updateMany({//【追加】条件に合う複数行をまとめて更新するメソッド
+        where: {
+          ...target.where,
+
+          status:
+            "PROCESSING",//【追加】結果が記録されないままの送信中
+
+          leaseExpiresAt: {//【追加】期限切れ
+            lte: now,
+          },
+        },
+
+        data: {
+          status: "FAILED",//【追加】既存のFAILEDへ終端化（自動再送しない）
+          sentAt: null,
+
+          claimedAt: null,
+          claimToken: null,
+          leaseExpiresAt:
+            null,
+
+          nextAttemptAt:
+            null,
+
+          errorCode:
+            target.errorCode,
+
+          errorDetail:
+            LINE_DELIVERY_RESULT_UNKNOWN_DETAIL,
+        },
+      });
+  }
 }
 
 /**
- * 【追加】上限到達の配信を終端化したうえで、claim可能な配信をlimit件まで順にprocessDeliveryで処理する。
+ * 【追加】再送できない配信を終端化したうえで、claim可能な配信をlimit件まで順にprocessDeliveryで処理する。
  * limitは1回の取得件数の上限で、同一配信の再claim回数の上限とは別である。
  */
 //システム全体を見回して、今すぐ送信可能な状態（あるいは遭難状態）になっているLINE配信データを
@@ -498,7 +558,7 @@ export async function sendClaimableLineDeliveries(
     limit: number;
   },
 ): Promise<void> {
-  await terminateExhaustedDeliveries();//【追加】上限到達の期限切れPROCESSINGを先に終端化する関数
+  await terminateUnresendableDeliveries();//【追加】送信できない期限切れPROCESSINGを先に終端化する関数
 
   const now =
     new Date();
@@ -535,6 +595,14 @@ export async function sendClaimableLineDeliveries(
 
               leaseExpiresAt: {
                 lte: now,
+              },
+
+              requestedAt: {//【追加】retry keyの有効期間内のものだけ（claimの条件と同じ）
+                gte:
+                  new Date(//【追加】日時を作るコンストラクター
+                    now.getTime() -//【追加】時刻を数値にするメソッド
+                      LINE_RETRY_KEY_VALID_MILLISECONDS,
+                  ),
               },
             },
           ],

@@ -12,8 +12,36 @@
 
 import "server-only";
 
+/**
+ * 【追加】LINE APIの1リクエストを打ち切るまでの時間（ミリ秒）。
+ * tests/mvp/outbound-harness.test.tsが、このファイルを単体で読み込むため、
+ * 他のモジュールをimportしない。値は同じ試験ファイル群（line-messaging-api.test.ts）で固定している。
+ */
+const LINE_REQUEST_TIMEOUT_MILLISECONDS = 10 * 1000; // 【追加】10秒を表すミリ秒の数値
+
+/**
+ * 【追加】時間切れ（送信結果不明）のFAILEDに保存する固定の説明文。
+ * domain/club/line/line-delivery-result.tsの結果不明の説明文と同じ文言にする
+ * （importできない理由は上の定数と同じ。文言はline-messaging-api.test.tsで固定）。
+ */
+const LINE_RESULT_UNKNOWN_DETAIL =
+  "LINEへの送信結果を確認できませんでした。"; // 【追加】結果不明を伝える固定の説明文
+
 const LINE_PUSH_ENDPOINT =
   "https://api.line.me/v2/bot/message/push";
+
+/**
+ * 【追加】fetchの例外が、時間切れ（AbortSignal.timeoutによる打ち切り）かどうかを判定する。
+ * 受け取るのはcatchで捕まえた値で、TimeoutErrorという名前の例外ならtrueを返す。
+ */
+function isTimeoutError(
+  error: unknown, // 【追加】catchで受け取った例外の型
+): boolean {
+  return (
+    error instanceof Error && // 【追加】標準のError型かを調べる演算子
+    error.name === "TimeoutError" // 【追加】AbortSignal.timeoutが付ける例外名
+  );
+}
 
   //アプリのライン通知の結果
 export type LinePushResult =
@@ -26,6 +54,11 @@ export type LinePushResult =
       errorDetail: string;
     };
 
+/**
+ * 【追加】アクセストークン・グループID・本文・retry keyを受け取り、LINEへpushメッセージを1通要求する。
+ * 戻り値は、LINEの受付成功（409の重複受理を含む）、通常の失敗、10秒の時間切れによる結果不明のいずれか。
+ * 受付成功は、受信者への配送完了を意味しない。
+ */
     //アプリの通知についてLINE公式アカウント（Messaging API）を使って、
     // 指定したLINEグループに直接メッセージを1通送信する
 export async function sendLinePushMessage(
@@ -50,6 +83,15 @@ export async function sendLinePushMessage(
         LINE_PUSH_ENDPOINT,
         {
           method: "POST",
+
+          /*
+           * 【追加】LINE APIの1リクエストを10秒で打ち切る。
+           * 打ち切り後もLINE側で受け付けられている可能性がある。
+           */
+          signal:
+            AbortSignal.timeout(//【追加】指定時間後にTimeoutErrorで中断する信号を作るメソッド
+              LINE_REQUEST_TIMEOUT_MILLISECONDS,
+            ),
 
           headers: {
             Authorization:
@@ -102,7 +144,27 @@ export async function sendLinePushMessage(
       errorDetail:
         "LINEへの通知送信に失敗しました。",
     };
-  } catch {
+  } catch (error) {//【追加】例外の種類（時間切れか）を調べるため、例外を受け取る
+    /*
+     * 【追加】10秒以内に応答が返らなかった場合は、
+     * 通常の失敗と区別して「送信結果不明」とする。
+     * メッセージはLINEに届いている可能性があるため、自動再送しない。
+     * 例外の内容はログにも保存にも出さない。
+     */
+    if (
+      isTimeoutError(error)//【追加】時間切れの例外か判定する関数
+    ) {
+      return {
+        success: false,
+
+        errorCode:
+          "LINE_RESULT_UNKNOWN_TIMEOUT",
+
+        errorDetail:
+          LINE_RESULT_UNKNOWN_DETAIL,
+      };
+    }
+
     return {//インターネットが切れている、LINEのサーバーが落ちているなどのエラー
       success: false,
 

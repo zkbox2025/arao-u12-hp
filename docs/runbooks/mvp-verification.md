@@ -714,7 +714,7 @@ G2の合格は、ローカルの専用DBでのintegrationに限る。本番のLI
 | 回収 | `.next` 不在、3000・3443の待受なし、専用projectの container・volume の表示は空。通常Supabaseの起動終了コード0、元ソースの `git status` は前後で同一、`git diff --check` は出力なし |
 
 この結果は、同じマシン・同じDockerイメージ・Playwrightのブラウザーキャッシュ（取得済み）の条件での1回の再現である。
-F13-ENV-REPROの扱い（解消とするか）は、利用者の判断とする。
+F13-ENV-REPROは、DB（PostgreSQL）の版が未記録のため解消済みにしない。版は、専用DBの起動中に取得するか、取得済みのDBイメージのタグで確認して記録する。
 
 残課題を「テストがあるから解決済み」にしない。以下はF13の粒度計画作成・見直し時の引継ぎ項目とする。
 本粒度ではF13の文書や実装を変更しない。引継ぎ時に担当・期限・採否・公開判断への影響を記録する。
@@ -723,7 +723,7 @@ F13-ENV-REPROの扱い（解消とするか）は、利用者の判断とする�
 | --- | --- | --- |
 | F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する。**G2で実装済み**（処理権の取得は合計3回まで、超過は専用errorCodeのFAILEDへ終端化）。ローカルintegrationで確認（第12.1節）。`verify:mvp` 全体とG3（結果不明の再送操作の除外）は未完了のため、LINE通知の本番有効化の判断は保留 |
 | F13-LINE-TIMEOUT | 実LINE通信を一定時間で打ち切る機能は未実装 | [LINE-api]のfetch、[line-worker-DB]はTimeoutError注入。実timeoutと結果不明／重複防止の扱いを別patchで検討する |
-| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する。**G1実施済み**（第12.2節）：新しいコピーで `npm ci` から `verify:mvp` 全11段階まで成功し、CLIはlockfileどおり2.101.0。残る条件：allowScripts警告の扱い、別マシン・空のキャッシュでの確認は未実施。解消とするかは利用者の判断 |
+| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する。**G1実施済み**（第12.2節）：新しいコピーで `npm ci` から `verify:mvp` 全11段階まで成功し、CLIはlockfileどおり2.101.0。未解消：G1の受入条件に必要な **DB（PostgreSQL）の版の記録が不足**している。他に、allowScripts警告の扱い、別マシン・空のキャッシュでの確認は未実施。DB版を記録するまで解消済みにしない |
 | F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない |
 | MANUAL-ACCEPTANCE | 既存運用書の実機・アクセシビリティ・Proxy条件 | 第10.5節と既存手動表へ、実施結果／保留理由を対応付ける |
 

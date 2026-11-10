@@ -2,7 +2,8 @@
 // 専用実DBでLINE workerを検証し、LINE受付APIはstubへ置き換えて送信しない。
 // 現行workerのFAILEDは自動再送しない。
 // 【修正】期限切れPROCESSINGの処理権の取得は1配信あたり合計3回までで、超過分は終端化する（F13粒度2）。
-// 実LINE通信のtimeoutは未実装で、TimeoutError注入は正規化の確認にとどまる。
+// 【修正】実LINE通信は10秒で打ち切り、時間切れは送信結果不明のFAILEDにする（F13粒度3）。
+// ここでのTimeoutError注入は、実時間を待たずに終端状態を確認するためのもの。
 
 import {
   Buffer,
@@ -202,7 +203,8 @@ function pushResult(success: boolean): LinePushResult { // 固定結果を作る
 
 /**
  * 実受付APIのfetchを置換し、実時間を待たずにHTTP結果または通信例外を注入する。
- * TimeoutErrorの正規化を確認するだけで、実APIに未実装の時間制限は保証しない。
+ * TimeoutErrorの正規化を確認するだけで、実際の10秒の打ち切りはline-messaging-api.test.tsで別に確認する。
+ * 【修正】実APIはAbortSignal.timeoutを付けて送信し、時間切れは結果不明として固定エラーに変換する（F13粒度3）。
  */
 function transport(mode: TransportMode): void { // 通信境界の故障設定関数 / 通信モード型 / 戻り値を使わない型
   vi.mocked(fetch).mockImplementation( // fetch監視の型を復元する関数 / 明示した通信結果へ置換するメソッド
@@ -341,16 +343,23 @@ it.each(["accepted", "duplicate", "rejected", "network", "timeout"] as const)( /
         ? { success: true }
         : {
             success: false,
-            errorCode: mode === "rejected" ? "LINE_HTTP_500" : "LINE_NETWORK_ERROR",
+            errorCode: mode === "rejected" // 【修正】timeoutは通常の通信エラーと区別する
+              ? "LINE_HTTP_500"
+              : mode === "timeout"
+                ? "LINE_RESULT_UNKNOWN_TIMEOUT"
+                : "LINE_NETWORK_ERROR",
             errorDetail: mode === "rejected"
               ? "LINEへの通知送信に失敗しました。"
-              : "LINEへの接続中にエラーが発生しました。",
+              : mode === "timeout"
+                ? "LINEへの送信結果を確認できませんでした。"
+                : "LINEへの接続中にエラーが発生しました。",
           };
       expect(result).toEqual(expected); // 期待値生成関数 / 固定結果の比較メソッド
       expect(fetch).toHaveBeenCalledTimes(1); // 期待値生成関数 / HTTP試行件数の検証メソッド / HTTP送信関数の参照
       const [url, init] = vi.mocked(fetch).mock.calls[0]; // 監視関数の型を復元する関数 / HTTP送信関数の参照
       expect(url).toBe(ENDPOINT); // 期待値生成関数 / 固定endpointの比較メソッド
       expect(init?.method).toBe("POST"); // 期待値生成関数 / HTTP methodの比較メソッド
+      expect(init?.signal).toBeInstanceOf(AbortSignal); // 【追加】期待値生成関数 / 時間切れ用の中断信号の型検証メソッド / 中断信号のコンストラクター
       const headers = new Headers(init?.headers); // HTTP headerのコンストラクター
       expect(headers.get("authorization")).toBe(`Bearer ${input.channelAccessToken}`); // 期待値生成関数 / header取得メソッド / 認証headerの比較メソッド
       expect(headers.get("x-line-retry-key")).toBe(input.retryKey); // 期待値生成関数 / header取得メソッド / UUID retry keyの比較メソッド
@@ -499,7 +508,7 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
           nextAttemptAt: null,
           errorCode: null,
           errorDetail: null,
-          requestedAt: new Date(key === "a" ? "2000-01-01T00:00:00Z" : "2001-01-01T00:00:00Z"), // 巡回順を固定するfixture日時のコンストラクター
+          requestedAt: new Date(Date.now() - (key === "a" ? 2 : 1) * 3_600_000), // 【修正】巡回順を固定しつつretry keyの有効期間（24時間）内に収めるfixture日時のコンストラクター / 現在時刻取得メソッド
         },
       });
     }
@@ -759,10 +768,16 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
           const finished = await row(); // Aの処理後履歴取得関数
           assertReleased(finished, success ? "SENT" : "FAILED", 1); // 終端状態検証関数
           if (!success) {
-            expect(finished.errorCode).toBe(mode === "rejected" ? "LINE_HTTP_500" : "LINE_NETWORK_ERROR"); // 期待値生成関数 / 固定error code比較メソッド
-            expect(finished.errorDetail).toBe(mode === "rejected" // 期待値生成関数 / 固定error detail比較メソッド
+            expect(finished.errorCode).toBe(mode === "rejected" // 【修正】期待値生成関数 / 固定error code比較メソッド
+              ? "LINE_HTTP_500"
+              : mode === "timeout"
+                ? "LINE_RESULT_UNKNOWN_TIMEOUT"
+                : "LINE_NETWORK_ERROR");
+            expect(finished.errorDetail).toBe(mode === "rejected" // 【修正】期待値生成関数 / 固定error detail比較メソッド
               ? "LINEへの通知送信に失敗しました。"
-              : "LINEへの接続中にエラーが発生しました。");
+              : mode === "timeout"
+                ? "LINEへの送信結果を確認できませんでした。"
+                : "LINEへの接続中にエラーが発生しました。");
           }
           const [url, init] = vi.mocked(fetch).mock.calls[0]; // fetch監視の型を復元する関数 / HTTP送信関数の参照
           expect(url).toBe(ENDPOINT); // 期待値生成関数 / 固定endpoint比較メソッド
@@ -969,6 +984,55 @@ databaseSuite("F12 LINE workerの実DB並列・障害（専用flag未指定時�
           assertReleased(await row(), "SENT", 3); // 【追加】終端状態の検証関数 / A全列取得関数
           await send(); // 【追加】終端後に再実行する実worker呼出し関数
           expect(bridge.send).toHaveBeenCalledTimes(1); // 【追加】期待値生成関数 / 再送なしの検証メソッド / 送信stub関数の参照
+          expect(await snapshot(["b"])).toEqual(beforeB); // 【追加】期待値生成関数 / B全列取得関数 / 全列比較メソッド
+        },
+      ),
+    );
+
+    /**
+     * 【追加】期限切れPROCESSINGの再送は、retry keyの有効期間（依頼から24時間）内に限ることを確認する。
+     * 有効期間内は同じretry keyで再claimし、超過は送信せず「送信結果不明」のFAILEDで終端化する。
+     */
+    it.each([
+      { hours: 23, status: "SENT" },
+      { hours: 25, status: "FAILED" },
+    ] as const)( // 【追加】有効期間内外の試験登録メソッド / リテラル型アサーション
+      "依頼から$hours時間後の期限切れPROCESSINGは$statusになる（retry key有効期間24時間）",
+      /**
+       * 【追加】依頼日時と期限切れclaimを準備し、送信の有無と終端状態を確認する。
+       */
+      async ({ hours, status }) => safeCheck( // 【追加】期間別の非同期コールバック / 固定例外へ変換する関数
+        /**
+         * 【追加】取得1回済みの期限切れPROCESSINGを作り、実workerで処理する。
+         */
+        async () => { // 【追加】有効期間の境界を検証する非同期関数
+          const beforeB = await snapshot(["b"]); // 【追加】B全列取得関数
+          const id = owned().related.a.deliveryId!; // 【追加】所有fixture取得関数
+          await database().clubLineDelivery.update({ // 【追加】専用client取得関数 / 取得1回済みの期限切れへ置くDBメソッド
+            where: { id },
+            data: {
+              status: "PROCESSING",
+              attemptCount: 1,
+              requestedAt: new Date(Date.now() - hours * 3_600_000), // 【追加】現在時刻取得メソッド / 日時コンストラクター
+              lastAttemptAt: new Date(0), // 【追加】日時コンストラクター
+              claimedAt: new Date(0), // 【追加】日時コンストラクター
+              claimToken: randomUUID(), // 【追加】claim token生成関数
+              leaseExpiresAt: new Date(0), // 【追加】期限切れfixture日時のコンストラクター
+            },
+          });
+          await send(); // 【追加】認可済みclub指定のworker呼出し関数
+          if (status === "SENT") {
+            assertReleased(await row(), "SENT", 2); // 【追加】終端状態の検証関数 / A全列取得関数
+            expect(bridge.send).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ retryKey: id })); // 【追加】期待値生成関数 / 送信1回と同じretry keyの検証メソッド / 部分一致の期待値生成関数 / 送信stub関数の参照
+          } else {
+            expect((await row()).status).toBe("PROCESSING"); // 【追加】期待値生成関数 / A全列取得関数 / claim拒否の比較メソッド
+            await globalPass(10); // 【追加】有効期間切れを終端化する全クラブ巡回関数
+            const terminated = await row(); // 【追加】終端化後のA履歴取得関数
+            assertReleased(terminated, "FAILED", 1); // 【追加】終端状態の検証関数
+            expect(terminated.errorCode).toBe("LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED"); // 【追加】期待値生成関数 / 結果不明のerrorCode比較メソッド
+            expect(terminated.errorDetail).toBe("LINEへの送信結果を確認できませんでした。"); // 【追加】期待値生成関数 / 固定説明文の比較メソッド
+            expect(bridge.send).not.toHaveBeenCalled(); // 【追加】期待値生成関数 / 送信なしの検証メソッド / 送信stub関数の参照
+          }
           expect(await snapshot(["b"])).toEqual(beforeB); // 【追加】期待値生成関数 / B全列取得関数 / 全列比較メソッド
         },
       ),
