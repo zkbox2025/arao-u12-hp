@@ -747,8 +747,14 @@ F13-ENV-REPROは、G1の受入条件（CLI・Node・DBの版、fresh環境での
 
 | 項目 | 記録 |
 | --- | --- |
-| 実施済み | unit（`vitest.mvp-unit.config.mts`）132ファイル・4,272件成功、型検査・対象lintに成功（いずれも元ソース側。専用環境での実行ではない） |
-| 未実施 | 実DBのintegration、`verify:mvp`。実DBの試験は、登録後のmanifestでは `natural=2 injected=7`、`line-delivery.integration.test.ts` の件数は31件になる見込み（見込みであり、実測ではない） |
+| 元ソース側の確認 | unit（`vitest.mvp-unit.config.mts`）132ファイル・4,272件成功、型検査・対象lintに成功 |
+| コピー元revision | `b37f9bf223640e25152fb2676fff50724268ff8f`（追加決定のコードのcommit）。実行前の変更は未追跡の `.claude/` のみ |
+| 環境 | Node v24.12.0、npm 11.18.0、Supabase CLI 2.101.0。`npm ci` で作った新しいコピー。package.json・lockfileは元と一致（`cmp`）。`prisma generate`・`migrate deploy` の終了コードはともに0 |
+| integration | 3回実行、毎回22 suites・624件成功、終了コード0（直前の623件より、お知らせの再送対象の試験1件が増えた）。skipなし |
+| verify:mvp | 全11段階成功、`F12_MVP_PASSED 11`、終了コード0 |
+| manifest | `line-delivery.integration.test.ts` は `passed=31 natural=2 injected=7`。登録した必須ケース（自然競合2・注入7）が、実際に数えられた |
+| unit（専用環境） | 追加分：`line-delivery-result.test.ts` 15件、`line-messaging-api.test.ts` 3件、`line-delivery-retry-repository.test.ts` 2件 |
+| 回収 | `.next` 不在、専用projectの停止とcontainer・volumeの確認、通常Supabaseの起動終了コード0。元ソースの `git status` は前後で同一、`git diff --check` は出力なし |
 
 残課題を「テストがあるから解決済み」にしない。以下はF13の粒度計画作成・見直し時の引継ぎ項目とする。
 本粒度ではF13の文書や実装を変更しない。引継ぎ時に担当・期限・採否・公開判断への影響を記録する。

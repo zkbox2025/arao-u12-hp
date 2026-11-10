@@ -133,8 +133,8 @@ LINE公式仕様の確認結果（2026-11-10、公式ドキュメント「Retryi
 - 公式ドキュメントに記載がない事項：24時間を過ぎたkeyの挙動、最初のリクエストが処理中のときの挙動。
   このため、24時間を過ぎた再送は行わない。
 
-決定した設計（実装済み。初回の実装は実DBのintegration 623件・`verify:mvp` 全11段階で確認済み。
-2026-11-10の追加決定の変更は、unit・型検査・lintのみ確認済みで、実DBのintegrationは利用者の実行待ち）：
+決定した設計（実装済み。2026-11-10の追加決定を含め、実DBのintegration（22 suites・624件、3回成功）と
+`verify:mvp` 全11段階（`F12_MVP_PASSED 11`）で確認済み。運用書第12.3・12.4節を参照）：
 - 時間切れ：`AbortSignal.timeout(10秒)`。検知できたら `LINE_RESULT_UNKNOWN_TIMEOUT` のFAILEDに記録し、
   自動再送しない。
 - 通信エラー（利用者の決定、2026-11-10）：LINE APIから応答を確認できなかった `LINE_NETWORK_ERROR` も、
@@ -330,12 +330,15 @@ Supabase Cronについて：
 
 未確認・要判断：
 1. G2・G3の追加試験の必須化：`tests/mvp/suite-manifest.ts` の `MVP_CONCURRENCY_CASES` に登録した
-   （natural 1→2、injected 3→7）。登録した変更の実DB確認は、利用者の実行待ち。
+   （natural 1→2、injected 3→7）。実DBで `passed=31 natural=2 injected=7` と数えられたことを確認済み
+   （運用書第12.4節）。
 2. F13-ENV-REPRO：G1の受入条件の記録が揃ったため、解消済み（DB版17.6を運用書第12.2節に記録）。
    DB版は別実行で取得した値。別マシン・空のキャッシュでの確認は未実施。
 3. 依存関係の警告（`npm audit`、allowScripts）：対象・影響・公開への影響・最小の対処案を、完了報告で提示した。
    依存関係・lockfileは変更していない。対処の採否は要判断。
-4. G3：決定済みの3点（通信エラー・再送期限・お知らせの実DB試験）の実装は済み。実DBでの確認は未実施。
+4. G3：決定済みの3点（通信エラー・再送期限・お知らせの実DB試験）の実装と、実DB・全体実行での確認は済み。
+   G3の完了（LINE有効化の条件）の確認は、利用者の判断。実LINE APIへの実通信での打ち切りは未確認
+   （本番の最小疎通で確認する）。
 5. G6：ログ削除Cron。現在の本番デプロイでは、`vercel.json`が旧パス
    `delete-old-submission-logs`を指し、実ルートは`delete-old-security-logs`で不一致（確認済み）。
    リリース対象コードでは両方が`delete-old-security-logs`で一致しているため、パス変更は不要。
