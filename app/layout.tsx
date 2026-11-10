@@ -1,5 +1,5 @@
 // app/layout.tsx
-//全ページ共通のレイアウト
+//HP全ページ共通のレイアウト
 
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";

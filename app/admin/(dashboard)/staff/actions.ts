@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import type { ContentStatus } from "@/types/prisma";
 import {
@@ -88,7 +88,7 @@ function validateStaffImageFile(file: FormDataEntryValue | null) {
 }
 
 export async function updateStaffPageSetting(formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const topSummaryTitle = String(formData.get("topSummaryTitle") ?? "").trim();
   const topSummaryBody = String(formData.get("topSummaryBody") ?? "").trim();
@@ -196,7 +196,7 @@ export async function updateStaffPageSetting(formData: FormData) {
 }
 
 export async function deleteStaffTopImage(_formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const currentSetting = await prisma.staffPageSetting.findUnique({
     where: {
@@ -255,7 +255,7 @@ export async function deleteStaffTopImage(_formData: FormData) {
 }
 
 export async function createStaff(formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const role = String(formData.get("role") ?? "").trim();
   const externalRole = getOptionalText(formData, "externalRole");
@@ -340,7 +340,7 @@ export async function createStaff(formData: FormData) {
 }
 
 export async function updateStaff(formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const id = String(formData.get("id") ?? "");
   const role = String(formData.get("role") ?? "").trim();
@@ -456,7 +456,7 @@ export async function updateStaff(formData: FormData) {
 }
 
 export async function deleteStaff(staffId: string) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const staff = await prisma.staff.findUnique({
     where: {

@@ -69,9 +69,7 @@ function applyContactAutoReplyTemplate({
 }
 
 export async function sendContactAutoReply(input: ContactAutoReplyInput) {
-  if (!mailFrom) {
-    throw new Error("MAIL_FROM is not defined");
-  }
+
 
   const pageKey = "CONTACT" as const;
   const blockKey = "AUTO_REPLY_BODY" as const;

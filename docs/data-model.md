@@ -1,8 +1,8 @@
 //docs/data-model.md
 //今後実装予定のものをメモする
 
-◯本番運用する場合は、ドメイン取得後に、.env.prodのMAIL_FROM=を"ARAO U-12 <取得したドメイン>"に変更し、
-Vercelの環境変数（MAIL_FROM=）も変更し、Resendにドメイン登録をすること。
+◯❌本番運用する場合は、ドメイン取得後に、.env.prodのMAIL_FROM=を"ARAO U-12 <取得したドメイン>"に変更し、
+Vercelの環境変数（MAIL_FROM=）も変更し、Resendにドメイン登録をすること。→⭕️マルチテナント化したら、共通ドメインを作成してそのドメイン名でResendと環境変数に登録する
 ◯全ページ、ヘッダーとの距離、フッターとの距離、フォント、文字の大きさなどを統一する。
 ◯仮に現在のスパム対策をすり抜けるボットが出てきたら、自作スパム対策をやめてCloudflare Turnstileを導入する。
 ◯入会届のPDFは別タブで出るようにする
@@ -71,3 +71,84 @@ export default function AdminMonthlyPracticePlansPage() {
 
 
 ◯マルチテナント化した後にgroupIDを確認する際のログにクラブ情報も入れる仕様にする（どのクラブから送られたgroupIDかを識別できるように）
+
+◯マルチテナント化した後に・Webhook URLを再設定する（ファイル名をapp/api/line/webhook/route.tsからapp/api/line/webhook/[webhookKey]/route.tsへ書き換えた。DBにwebhookKeyを追加した。ファイル内のコードを書き換えたため）
+LINEデベロッパーズのWebhook設定にhttps://ドメイン/api/line/webhook/[webhookKey]を設定し（事前にDBで新しいクラブを登録した際に、発行されたClubLineSettingテーブルのwebhookKeyをコピペしてURLの末尾に貼り付ける）
+流れは以下の通り
+各クラブが自分のLINE公式アカウントを持つ
+↓
+クラブごとにClubLineSettingを持つ
+↓
+ClubLineSetting.webhookKeyを持つ
+↓
+Webhook URLは /api/line/webhook/[webhookKey]
+↓
+webhookKeyで設定取得
+↓
+Channel Secret復号
+↓
+署名検証
+↓
+本文処理
+
+
+◯Resendについて
+現在、顧客ごとにアカウントを生成しているが、マルチテナント化後には、以下のようにアカウントを一つにして共通送信ドメインにする。
+Resendアカウント（開発者）
+1個
+
+認証ドメイン（開発者）
+1個
+
+APIキー（開発者）
+1個
+
+DNS設定（開発者）
+1回
+
+という共通送信ドメインにする。
+
+【現在】
+ARAO U-12 HP
+↓
+問い合わせフォーム
+↓
+ARAO U-12専用Resend
+↓
+管理者へメール
+
+【修正後】
+ARAO U-12 HP
+↓
+問い合わせフォーム
+↓
+共通sendEmail()
+↓
+あなたのResend
+↓
+ARAO U-12管理者へメール
+
+
+イメージ
+あなたのResendアカウント
+        │
+        ├─ あなたの送信用ドメインを1個だけ認証
+        │
+        │  例：
+        │  mail.club-app.jp
+        │
+        ├─ ホームページのお問い合わせ通知
+        ├─ ホームページの体験・見学通知
+        ├─ アプリのメンバー招待
+        ├─ パスワード再設定
+        └─ その他システムメール
+
+すべてここから送信
+
+DBのresendApiKeyEncryptedは要らなくなる。
+【各クラブの独自ドメインから送る場合は料金が１万円くらい発生するから、共通ドメインにすること】
+
+追記
+マルチテナント化の際に同時にアプリのメンバー招待の際の手続きについてSupabaseで招待リンクだけ生成し、メール送信自体はResendに統一する方式に変更すること
+
+◯訪問者計算実装日別や月別

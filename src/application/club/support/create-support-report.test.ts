@@ -1,0 +1,482 @@
+// src/application/club/support/create-support-report.test.ts
+// DB受付・補助通知・結果記録の順序と、保存後の成功維持、入力とログの境界を確認する。
+
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+
+import type {
+  ClubAccessContext,
+} from "@/app/(club-app)/club/club-membership-authorization";
+import type {
+  SupportReportFormValues,
+} from "@/domain/club/support/support-report-form";
+import type {
+  SupportReportCreationResult,
+  SupportReportNotificationResult,
+  SupportReportReceipt,
+} from "@/domain/club/support/support-report-types";
+import { DomainError } from "@/domain/shared/domain-error";
+import { createSupportReport } from "./create-support-report";
+
+const mocks = vi.hoisted(() => ({
+  create: vi.fn(),
+  send: vi.fn(),
+  record: vi.fn(),
+}));
+
+// 外部境界だけをmockし、実DB・dotenv・Auth・実メールを起動しない。
+vi.mock("@/src/infrastructure/prisma/repositories/support-report-repository", () => ({
+  createSupportReportForMember: mocks.create,
+  recordSupportReportNotification: mocks.record,
+}));
+vi.mock("@/lib/mail/support-report-mail", () => ({
+  sendSupportReportEmail: mocks.send,
+}));
+
+const REQUEST_ID = "11111111-1111-4111-8111-111111111111";
+const PRIVATE_DETAIL = "private@example.test private-token private-db-url";
+const CONTEXT: ClubAccessContext = {
+  userId: "user-a",
+  club: {
+    id: "club-a",
+    name: "古いクラブ名",
+    slug: "club-a",
+    timezone: "Asia/Tokyo",
+    planType: "STANDARD",
+  },
+  membership: {
+    id: "membership-a",
+    role: "MEMBER",
+  },
+};
+const INPUT: SupportReportFormValues = {
+  category: "BUG",
+  message: "  保存する本文  ",
+};
+const METADATA = {
+  pageUrl: "/club/club-a/account",
+  userAgent: "テストブラウザ",
+};
+const EXTRA = {
+  clubId: "other-club",
+  actorMembershipId: "other-membership",
+  userId: "other-user",
+  membershipId: "other-membership",
+  requestId: "22222222-2222-4222-8222-222222222222",
+  reporterName: PRIVATE_DETAIL,
+  reporterEmail: PRIVATE_DETAIL,
+  reporterRole: "OWNER",
+  status: "RESOLVED",
+  notifiedAt: new Date(),
+  notifyError: PRIVATE_DETAIL,
+  pageUrl: "https://evil.example.test/?token=private-token",
+  userAgent: PRIVATE_DETAIL,
+};
+
+// 通知には入力や古いcontextではなく、Repositoryが返した保存済みDTOを使う。
+function savedReport(): SupportReportReceipt {
+  return {
+    id: REQUEST_ID,
+    clubId: "club-a",
+    membershipId: "membership-a",
+    clubName: "保存時クラブ名",
+    category: "BUG",
+    message: "保存する本文",
+    reporterName: "保存時氏名",
+    reporterEmail: "snapshot@example.test",
+    reporterRole: "COACH",
+    pageUrl: "/club/club-a/account",
+    userAgent: "保存時ブラウザ",
+    createdAt: new Date("2026-10-22T00:00:00Z"),
+  };
+}
+
+// 保存済みの受付を既定値にし、各段階の失敗だけを個別に差し替える。
+beforeEach(() => {
+  vi.resetAllMocks();
+  mocks.create.mockResolvedValue({
+    outcome: "CREATED",
+    report: savedReport(),
+  });
+  mocks.send.mockResolvedValue({
+    outcome: "ACCEPTED",
+  });
+  mocks.record.mockResolvedValue({
+    outcome: "RECORDED",
+  });
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
+  vi.spyOn(console, "warn").mockImplementation(() => undefined);
+  vi.spyOn(console, "log").mockImplementation(() => undefined);
+  vi.spyOn(console, "info").mockImplementation(() => undefined);
+  vi.spyOn(console, "debug").mockImplementation(() => undefined);
+});
+
+// 全ケースで外部処理の再試行と、ログへの本文・snapshot・例外原文の混入を検出する。
+afterEach(() => {
+  expect(mocks.create.mock.calls.length).toBeLessThanOrEqual(1);
+  expect(mocks.send.mock.calls.length).toBeLessThanOrEqual(1);
+  expect(mocks.record.mock.calls.length).toBeLessThanOrEqual(1);
+  for (const [message, context] of vi.mocked(console.error).mock.calls) {
+    expect(message).toBe("support_report_operation_failed");
+    expect(Object.keys(context).sort()).toEqual([
+      "errorCode",
+      "operation",
+      "requestId",
+      "result",
+    ]);
+    expect(context.requestId).toBe(REQUEST_ID);
+  }
+  const logs = JSON.stringify(vi.mocked(console.error).mock.calls);
+  expect(logs).not.toContain(PRIVATE_DETAIL);
+  expect(logs).not.toContain(INPUT.message.trim());
+  expect(logs).not.toContain("snapshot@example.test");
+  expect(logs).not.toContain("保存時氏名");
+  expect(logs).not.toContain(METADATA.pageUrl);
+  expect(logs).not.toContain(METADATA.userAgent);
+  expect(console.warn).not.toHaveBeenCalled();
+  expect(console.log).not.toHaveBeenCalled();
+  expect(console.info).not.toHaveBeenCalled();
+  expect(console.debug).not.toHaveBeenCalled();
+  vi.restoreAllMocks();
+});
+
+describe("createSupportReportの入力境界", () => {
+  it("許可入力とサーバーmetadataだけをcontextのIDへ組み立てる", async () => {
+    const input = {
+      ...INPUT,
+      ...EXTRA,
+    };
+    const metadata = {
+      ...EXTRA,
+      ...METADATA,
+    };
+    expect(await createSupportReport(CONTEXT, REQUEST_ID, input, metadata)).toEqual({
+      outcome: "ACCEPTED",
+    });
+    expect(mocks.create).toHaveBeenCalledWith({
+      clubId: CONTEXT.club.id,
+      actorMembershipId: CONTEXT.membership.id,
+      userId: CONTEXT.userId,
+      requestId: REQUEST_ID,
+      category: "BUG",
+      message: "保存する本文",
+      ...METADATA,
+    });
+    expect(mocks.send).toHaveBeenCalledWith(savedReport());
+    expect(mocks.record).toHaveBeenCalledWith({
+      reportId: savedReport().id,
+      clubId: savedReport().clubId,
+      notification: {
+        outcome: "ACCEPTED",
+      },
+    });
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it.each(["OWNER", "COACH", "OFFICER", "MEMBER"] as const)(
+    "%sもRepositoryによる最新所属照合へ進める",
+    async (role) => {
+      await createSupportReport(
+        {
+          ...CONTEXT,
+          membership: {
+            ...CONTEXT.membership,
+            role,
+          },
+        },
+        REQUEST_ID,
+        INPUT,
+        METADATA,
+      );
+      expect(mocks.create).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    null,
+    undefined,
+    {},
+    {
+      category: "INVALID",
+      message: "本文",
+    },
+    {
+      category: "BUG",
+      message: " ",
+    },
+    {
+      category: "BUG",
+      message: "あ".repeat(2001),
+    },
+  ])("不正な入力では保存も通知もしない %#", async (input) => {
+    expect(await createSupportReport(
+      CONTEXT,
+      REQUEST_ID,
+      input as SupportReportFormValues,
+      METADATA,
+    )).toEqual({
+      outcome: "CREATE_FAILED",
+    });
+    expect(mocks.create).not.toHaveBeenCalled();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.record).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it.each(["", PRIVATE_DETAIL, " 11111111-1111-4111-8111-111111111111 "])(
+    "不正なrequestIdでは保存もログ出力もしない %#",
+    async (requestId) => {
+      expect(await createSupportReport(CONTEXT, requestId, INPUT, METADATA)).toEqual({
+        outcome: "CREATE_FAILED",
+      });
+      expect(mocks.create).not.toHaveBeenCalled();
+      expect(mocks.send).not.toHaveBeenCalled();
+      expect(mocks.record).not.toHaveBeenCalled();
+      expect(console.error).not.toHaveBeenCalled();
+    },
+  );
+});
+
+describe("DB受付の結果", () => {
+  it.each(["FORBIDDEN", "CONFLICT", "CREATE_FAILED"] as const)(
+    "%sなら通知せず、余分な内部情報を返さない",
+    async (outcome) => {
+      mocks.create.mockResolvedValue({
+        outcome,
+        report: savedReport(),
+        cause: PRIVATE_DETAIL,
+      });
+      expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+        outcome,
+      });
+      expect(mocks.send).not.toHaveBeenCalled();
+      expect(mocks.record).not.toHaveBeenCalled();
+    },
+  );
+
+  it("重複受付は成功へ統一し、通知や通知結果保存を再実行しない", async () => {
+    mocks.create.mockResolvedValue({
+      outcome: "ALREADY_ACCEPTED",
+      report: savedReport(),
+      notifyError: PRIVATE_DETAIL,
+    });
+    expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+      outcome: "ACCEPTED",
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.record).not.toHaveBeenCalled();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    new Error(PRIVATE_DETAIL),
+    new DomainError("INTERNAL", PRIVATE_DETAIL, {
+      cause: PRIVATE_DETAIL,
+    }),
+  ])("DB例外は固定失敗と安全なログだけを返す %#", async (error) => {
+    mocks.create.mockRejectedValue(error);
+    expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+      outcome: "CREATE_FAILED",
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.record).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith(
+      "support_report_operation_failed",
+      {
+        requestId: REQUEST_ID,
+        operation: "supportReport.create",
+        result: "CREATE_FAILED",
+        errorCode: "INTERNAL",
+      },
+    );
+  });
+
+  it("契約外のDB結果を成功や公開エラーへ反射しない", async () => {
+    mocks.create.mockResolvedValue({
+      outcome: PRIVATE_DETAIL,
+    });
+    expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+      outcome: "CREATE_FAILED",
+    });
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.record).not.toHaveBeenCalled();
+  });
+});
+
+const NOTIFICATIONS: SupportReportNotificationResult[] = [
+  {
+    outcome: "ACCEPTED",
+  },
+  {
+    outcome: "FAILED",
+    errorCode: "EMAIL_CONFIGURATION_MISSING",
+  },
+  {
+    outcome: "FAILED",
+    errorCode: "EMAIL_SEND_FAILED",
+  },
+  {
+    outcome: "UNKNOWN",
+    errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
+  },
+];
+
+// 保存後の通知結果と記録結果の全組合せで、利用者向け受付成功を維持する。
+describe.each(NOTIFICATIONS)("通知結果 $outcome $errorCode", (notification) => {
+  it.each(["RECORDED", "NOT_FOUND", "UPDATE_FAILED", "exception"])(
+    "記録%sでも受付成功を維持し、固定結果だけを記録する",
+    async (recordOutcome) => {
+      mocks.send.mockResolvedValue({
+        ...notification,
+        headers: PRIVATE_DETAIL,
+        cause: PRIVATE_DETAIL,
+      });
+      if (recordOutcome === "exception") {
+        mocks.record.mockRejectedValue(new Error(PRIVATE_DETAIL));
+      } else {
+        mocks.record.mockResolvedValue({
+          outcome: recordOutcome,
+          cause: PRIVATE_DETAIL,
+        });
+      }
+      expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+        outcome: "ACCEPTED",
+      });
+      expect(mocks.send).toHaveBeenCalledWith(savedReport());
+      expect(mocks.record).toHaveBeenCalledWith({
+        reportId: REQUEST_ID,
+        clubId: CONTEXT.club.id,
+        notification,
+      });
+      if (notification.outcome !== "ACCEPTED") {
+        expect(console.error).toHaveBeenCalledWith(
+          "support_report_operation_failed",
+          {
+            requestId: REQUEST_ID,
+            operation: "supportReport.notify",
+            result: notification.errorCode,
+            errorCode: "EXTERNAL_SERVICE",
+          },
+        );
+      }
+      if (recordOutcome !== "RECORDED") {
+        expect(console.error).toHaveBeenCalledWith(
+          "support_report_operation_failed",
+          {
+            requestId: REQUEST_ID,
+            operation: "supportReport.recordNotification",
+            result: recordOutcome === "NOT_FOUND" ? "NOT_FOUND" : "UPDATE_FAILED",
+            errorCode: "INTERNAL",
+          },
+        );
+      }
+      const expectedLogs = Number(notification.outcome !== "ACCEPTED") +
+        Number(recordOutcome !== "RECORDED");
+      expect(console.error).toHaveBeenCalledTimes(expectedLogs);
+    },
+  );
+});
+
+it.each([
+  new Error(PRIVATE_DETAIL),
+  new DomainError("EXTERNAL_SERVICE", PRIVATE_DETAIL, {
+    cause: PRIVATE_DETAIL,
+  }),
+])("通知例外でも固定の結果不明を記録し、受付を成功させる %#", async (error) => {
+  mocks.send.mockRejectedValue(error);
+  expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+    outcome: "ACCEPTED",
+  });
+  expect(mocks.record).toHaveBeenCalledWith({
+    reportId: REQUEST_ID,
+    clubId: CONTEXT.club.id,
+    notification: {
+      outcome: "UNKNOWN",
+      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
+    },
+  });
+});
+
+it.each([
+  null,
+  {
+    outcome: "FAILED",
+    errorCode: PRIVATE_DETAIL,
+  },
+  {
+    outcome: PRIVATE_DETAIL,
+  },
+])("契約外の通知結果も固定の結果不明へ変換する %#", async (notification) => {
+  mocks.send.mockResolvedValue(notification);
+  expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+    outcome: "ACCEPTED",
+  });
+  expect(mocks.record).toHaveBeenCalledWith({
+    reportId: REQUEST_ID,
+    clubId: CONTEXT.club.id,
+    notification: {
+      outcome: "UNKNOWN",
+      errorCode: "EMAIL_SEND_RESULT_UNKNOWN",
+    },
+  });
+});
+
+it("通知・記録・ログの例外が重なっても保存済み受付を失敗へ戻さない", async () => {
+  mocks.send.mockRejectedValue(new Error(PRIVATE_DETAIL));
+  mocks.record.mockRejectedValue(new Error(PRIVATE_DETAIL));
+  vi.mocked(console.error).mockImplementation(() => {
+    throw new Error(PRIVATE_DETAIL);
+  });
+  expect(await createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA)).toEqual({
+    outcome: "ACCEPTED",
+  });
+  expect(mocks.record).toHaveBeenCalledTimes(1);
+  expect(console.error).toHaveBeenCalledTimes(2);
+});
+
+it("DB保存確定後に通知し、通知完了後に結果保存を待って成功を返す", async () => {
+  let finishCreate!: (result: SupportReportCreationResult) => void;
+  let finishSend!: (result: SupportReportNotificationResult) => void;
+  let finishRecord!: (result: { outcome: "RECORDED" }) => void;
+  mocks.create.mockReturnValue(new Promise((resolve) => {
+    finishCreate = resolve;
+  }));
+  mocks.send.mockReturnValue(new Promise((resolve) => {
+    finishSend = resolve;
+  }));
+  mocks.record.mockReturnValue(new Promise((resolve) => {
+    finishRecord = resolve;
+  }));
+  let completed = false;
+  const pending = createSupportReport(CONTEXT, REQUEST_ID, INPUT, METADATA).then((result) => {
+    completed = true;
+    return result;
+  });
+
+  expect(mocks.send).not.toHaveBeenCalled();
+  expect(mocks.record).not.toHaveBeenCalled();
+  finishCreate({
+    outcome: "CREATED",
+    report: savedReport(),
+  });
+  await vi.waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(1));
+  expect(mocks.record).not.toHaveBeenCalled();
+  expect(completed).toBe(false);
+  finishSend({
+    outcome: "ACCEPTED",
+  });
+  await vi.waitFor(() => expect(mocks.record).toHaveBeenCalledTimes(1));
+  expect(completed).toBe(false);
+  finishRecord({
+    outcome: "RECORDED",
+  });
+  expect(await pending).toEqual({
+    outcome: "ACCEPTED",
+  });
+});

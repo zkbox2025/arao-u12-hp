@@ -29,7 +29,7 @@ export const prisma =//prismaClient（電話回線）がすでにあればそれ
   globalForPrisma.prisma ??
   new PrismaClient({
   adapter, // ★ ここでアダプターを渡すのが新ルール！
-    log: ["error", "warn"],//エラーと警告だけターミナルにメッセージを表示する
+    log: [],//入力値を含み得るPrismaエラー原文を自動出力しない
   });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;//本番環境（production）ではない時（＝開発中）だけ、倉庫に回線を保存しておく(本番環境では Next.js の挙動が異なるため、この使い回しテクニックは主に開発中のエラーを防ぐために使われる)
