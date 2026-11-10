@@ -661,12 +661,51 @@ URL、資格情報、本文、個人情報、生reportを添付しない。未�
 | SDK・実サービス | ローカルAuth／Storageと受付stubの範囲でR19 | LINE／Resend本番最小疎通はF13で別途確認 |
 | browser・DB範囲 | Chromium・ローカルPostgreSQLの自動受入 | 他browser、実機、本番DBupgradeは未確認 |
 
+### 12.1 F13粒度2（LINE再claim上限）の実行記録
+
+2026-11-10に利用者が運用書第4〜7.2節の手順で実行した結果の報告に基づく記録。
+URL・資格情報・生ログは記録しない。
+
+| 項目 | 記録 |
+| --- | --- |
+| コピー元revision | `8f44b50885ac68b1f03697e74f183b8b0c819b38`（G2のcommit）。実行前の変更は未追跡の `.claude/` のみ |
+| 環境の版 | Node v24.12.0、Supabase CLI 2.101.0（package.jsonの `^2.101.0` と一致）、専用project ID方式 |
+| 依存の準備 | 元プロジェクトの `node_modules` を `rsync` で複製。fresh installではない。`npm ls --depth=0` はエラーなし |
+| migration | 専用postgresへの既存履歴のdeploy、終了コード0 |
+| integration | 3回実行、毎回22 suites・621件成功、終了コード0。F12時点の619件より2件増え、追加した2件に一致する。runnerはskipを許さない |
+| 追加した試験 | 上限3回の終端化、取得2回済みの5並列。必須ケース名（manifest）への登録は未決定で、件数にだけ含まれる |
+| verify:mvp | 利用者の報告で `F12_MVP_PASSED 11`、終了コード0（2026-11-10、同じ専用コピー・同revision）。件数・所要時間・回収の個別確認は未報告。上のintegration3回とは別の、DB再作成後の実行 |
+| E2E一覧 | Chromium導入と `test:e2e:list`（78件・12ファイル）は一覧確認 |
+| 回収 | `.next` 不在、3000・3443の待受なし。専用projectは `--no-backup` で停止し、該当label（project ID）のcontainerとvolumeの表示は空 |
+| 通常環境の復帰 | 通常Supabaseを停止（`--no-backup`なし）して専用projectを実行。終了後に通常起動の終了コード0 |
+| 元ソース | 前後の `git status --short` は同一、`git diff --check` は出力なし |
+
+verify:mvp実行後の回収確認（`.next`・container・volume・通常Supabase復帰）は、利用者から未報告である。
+
+この記録でF13-ENV-REPROは解消しない。依存を元から複製しており、fresh環境の通し再現ではない。
+G2の合格は、ローカルの専用DBでのintegrationに限る。本番のLINE配信・実通信の確認ではない。
+
+### 12.2 F13粒度1（再現性確認）の承認と実行記録
+
+承認地点A（利用者の明示承認、2026-11-10）：
+
+- 対象：ローカルDockerの使い捨てSupabase（実行ごとのproject ID）と、`/private/tmp` 配下の新しいコピー。
+  本番・通常のDB／Auth／Storageには触れない。
+- 変更：`/private/tmp` に作業ディレクトリを作る、Dockerコンテナを起動する、
+  通常のローカルSupabaseを一時的に止める。package.json・lockfileは変更しない。
+- 戻し方：専用projectを `--no-backup` で停止し、通常Supabaseを起動し直す。
+- 実メール・LINE送信、deploy、外部設定・プランの変更は行わない。
+- 追加の確認事項（実行前に利用者へ提示）：fresh環境では `npm ci` による依存取得とChromium取得のため、
+  npm registry等への準備通信が発生する。lockfileは変更しない。
+
+実行結果は、実施後にここへ記録する（未実行）。
+
 残課題を「テストがあるから解決済み」にしない。以下はF13の粒度計画作成・見直し時の引継ぎ項目とする。
 本粒度ではF13の文書や実装を変更しない。引継ぎ時に担当・期限・採否・公開判断への影響を記録する。
 
 | ID | 未解決／未確認 | 根拠・次の判断 |
 | --- | --- | --- |
-| F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する |
+| F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する。**G2で実装済み**（処理権の取得は合計3回まで、超過は専用errorCodeのFAILEDへ終端化）。ローカルintegrationで確認（第12.1節）。`verify:mvp` 全体とG3（結果不明の再送操作の除外）は未完了のため、LINE通知の本番有効化の判断は保留 |
 | F13-LINE-TIMEOUT | 実LINE通信を一定時間で打ち切る機能は未実装 | [LINE-api]のfetch、[line-worker-DB]はTimeoutError注入。実timeoutと結果不明／重複防止の扱いを別patchで検討する |
 | F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する |
 | F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない |
