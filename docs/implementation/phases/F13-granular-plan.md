@@ -26,8 +26,8 @@ F12の記録（`F12_MVP_PASSED 11`、619件成功など）は過去の実行記�
 
 | ID | 対応粒度 | 受入条件 | 担当 | 実施時期 | 未対応時の公開可否（要判断） |
 | --- | --- | --- | --- | --- | --- |
-| F13-LINE-RECLAIM | G2 | 期限切れPROCESSINGの再claim回数に数値上限があり、超過後の状態が定義されている。FAILEDを自動再送しない現行仕様と、一回の取得limitは変えない。境界を実DBで確認する。 | Claude実装、人間が上限値・終端状態を判断 | 公開前 | LINE通知を本番で有効化する場合は止める案。LINEを無効のままなら、リスクを記録して公開できる案。 |
-| F13-LINE-TIMEOUT | G3 | 実LINE通信に打ち切り時間がある。打ち切り後は結果不明として扱い、重複送信を防ぐ範囲と防げない範囲が文書化されている。TimeoutError注入試験だけを根拠にしない。 | Claude実装、人間が方針判断 | 公開前（G2の後） | G2と同じ。実通信のtimeoutが未実装のまま、LINEを本番有効化しない案。 |
+| F13-LINE-RECLAIM | G2 | 処理権の取得は1配信につき合計3回まで（初回1回＋再claim最大2回）。3回目も結果未記録で期限切れなら、4回目を送らず専用errorCodeのFAILEDで終端化する。並列でも超えないことを実DBで確認する。一回の取得limitとFAILEDの自動再送なしは変えない。 | Claude実装、人間がレビュー（方針は決定済み） | 公開前 | LINE通知を本番で有効化する場合は止める案。LINEを無効のままなら、リスクを記録して公開できる案。 |
+| F13-LINE-TIMEOUT | G3 | LINE APIの1リクエストを10秒で打ち切る。記録できたtimeoutは「送信結果不明」のFAILEDとし、自動再送せず、管理画面の通常の再送操作の対象にもしない。期限切れPROCESSINGの再送は同じretry keyで、公式仕様の有効期間内と確認できる場合に限る。TimeoutError注入試験だけを根拠にしない。 | Claude実装、人間がレビューとLINE公式仕様の確認（方針は決定済み、有効期間は未確認） | 公開前（G2の後） | G2と同じ。実通信のtimeoutが未実装のまま、LINEを本番有効化しない案。 |
 | F13-ENV-REPRO | G1 | CLI・Node・DBの版と、運用書に従うfresh環境での通し結果が記録されている。package.json・lockfileは無断更新しない。 | 人間が実行、Claudeは手順の読み合わせ | 本番操作の前 | 公開を止める条件にはしない案。ただし、再現できない場合は判断記録を必須とする。 |
 | F13-RELEASE | G4〜G9 | 各粒度の受入条件に従う。 | Claude（コード・手順・dryRun）、人間（本番実行・確認） | 公開直前〜公開当日 | 未達の項目は止める案。 |
 | MANUAL-ACCEPTANCE | G10 | 実機のキーボード・フォーカス・読み上げ・狭い画面、本番Proxy／Origin条件に、実施結果か保留理由が付いている。 | 人間 | 公開前後 | Proxy／Origin条件と主要導線は止める案。他は理由付きで保留できる案。 |
@@ -59,26 +59,90 @@ F12の記録（`F12_MVP_PASSED 11`、619件成功など）は過去の実行記�
 ### G2. LINE再claim回数の上限
 
 - 目的：F13-LINE-RECLAIMの解消。
-- 対象：`src/application/club/line/send-pending-line-deliveries.ts`（`claimDelivery`）。
+- 対象：`src/application/club/line/send-pending-line-deliveries.ts`（`claimDelivery`、`finishDelivery`、
+  `sendClaimableLineDeliveries`）。
 - 調査開始：同ファイル、`prisma/schema.prisma`のClubLineDelivery、`tests/mvp/line-delivery.integration.test.ts`。
 - 変更しない：一回の取得limit、FAILEDを自動再送しない仕様。
+
+決定事項（利用者の方針。実装は後続）：
+- 1配信につき、初回1回＋期限切れPROCESSINGの再claim最大2回とし、処理権の取得は合計3回までとする。
+- 3回目の処理も結果が記録されないまま期限切れになった場合は、4回目の送信を行わず、
+  既存のFAILEDへ終端化する。errorCodeは「送信結果不明・上限到達」を表す専用の値とし、
+  既存のFAILED（`LINE_HTTP_*`、`LINE_NETWORK_ERROR`など）と区別できるようにする。
+- 1回の取得limitと、FAILEDを自動再送しない仕様は変更しない。
+
+現行コードの確認結果（2026-11-10、読み取りのみ）：
+- `claimDelivery`は、PENDINGとPROCESSING（期限切れ）のどちらの取得でも`attemptCount`を1増やす。
+  このため`attemptCount`は「LINEへの送信回数」ではなく「処理権の取得回数」である。
+  初回取得で1、再claimで2・3となり、決定事項の「合計3回」と同じ数え方で使える。
+- 取得は`updateMany`の`where`で状態を絞る1文で行われる。
+  上限は同じ`where`へ`attemptCount`の条件として入れる必要がある（アプリ側の事前読取りだけでは
+  並列処理で超過し得る）。
+- 現行の`where`には上限がなく、期限切れPROCESSINGは何度でも再claimされる。
+- `finishDelivery`は`claimToken`と`PROCESSING`で絞って更新し、FAILEDでは自動再送しない。
+- `retryKey`は現行でも`delivery.id`であり、再claimでも同じ値が使われる。
+
+実装時の確認事項：
+- 上限到達後の期限切れPROCESSINGは、再claimされない配信として残るため、
+  誰がFAILED（結果不明・上限到達）へ終端化するかを設計する。
+  `sendClaimableLineDeliveries`の取得条件や、終端化の処理で、残り続けたり
+  毎回の取得対象になったりしないことを確認する。
+- errorCodeは文字列のため、専用値の追加でマイグレーションが必要かは未確認。
+  実装前に`prisma/schema.prisma`と画面側の表示（`ContentLineDeliveryHistory.tsx`）を確認する。
+
 - 依存：なし。
-- テスト：unit、実DB統合（上限前後の境界、並列claim）。
-- 受入：上限超過のPROCESSINGは再claimされず、終端状態と運用上の見方が文書化されている。
-- 要判断：上限値、上限超過時の状態（既存statusの再利用かマイグレーションか）。
-- 担当：Claude実装、人間が判断。
+- テスト：unit、実DB統合（1〜3回目の取得、4回目の拒否、終端化、並列claim）。
+- 受入：
+  - 同一配信の処理権の取得が3回を超えない。並列にclaimしても超えない（実DBで確認する）。
+  - 3回目も結果未記録で期限切れになった配信は、4回目の送信をせず、専用のerrorCodeのFAILEDになる。
+  - 専用のerrorCodeを、既存のFAILEDと区別して判定・表示できる。
+  - 一回の取得limitとFAILEDの自動再送なしの仕様が変わっていない。
+  - 終端状態と運用上の見方が文書化されている。
+- 担当：Claude実装、人間がレビュー。
 
 ### G3. LINE実通信のtimeout
 
 - 目的：F13-LINE-TIMEOUTの解消。
-- 対象：`src/infrastructure/line/line-messaging-api.ts`。
-- 調査開始：`sendLinePushMessage`の呼び出し元、`tests/mvp/line-delivery.integration.test.ts`。
+- 対象：`src/infrastructure/line/line-messaging-api.ts`、`send-pending-line-deliveries.ts`。
+  管理画面の再送操作の対象判定は、後述の確認事項を調べてから対象ファイルを確定する。
+- 調査開始：`sendLinePushMessage`の呼び出し元、`tests/mvp/line-delivery.integration.test.ts`、
+  `app/(club-app)/club/[clubSlug]/admin/notice/[noticeId]/edit/actions.ts`（FAILEDを対象に再送する処理）、
+  `app/(club-app)/club/admin/_components/ContentLineDeliveryHistory.tsx`（FAILEDの表示）。
 - 変更しない：retryKeyの仕組み、通常のエラー分類、Service Roleキーの渡し先。
+
+決定事項（利用者の方針。実装は後続）：
+- LINE APIの1リクエストを10秒で打ち切る。
+- タイムアウトを検知して記録できた配信は、通常の失敗と区別できる「送信結果不明」としてFAILEDに記録し、
+  自動再送しない。管理画面でも通常の再送操作の対象にしない。
+- G2で期限切れPROCESSINGを引き継ぐ場合は、同じretry keyを使う。
+  公式仕様上の有効期間内と確認できる場合に限って再送する。
+
+現行コードの確認結果（2026-11-10、読み取りのみ）：
+- `sendLinePushMessage`の`fetch`に打ち切り時間はない。通信例外は`LINE_NETWORK_ERROR`になり、
+  timeoutを区別できない。
+- `retryKey`は`delivery.id`で、再claimでも同じ値になる。
+  ただし、管理者の再送は新しいDeliveryを作るため、retry keyは別の値になり、
+  結果不明の配信を再送すると重複し得る。これが「通常の再送操作の対象にしない」理由に当たる。
+  再送操作側の現行の絞り込み条件は、実装前に確認する（未確認）。
+
+実装前に確認する事項（未確認。確認前に実装しない）：
+- LINE公式仕様の、retry keyの有効期間と起算点。値は本書に推測で書かない。
+  再送可否の判定に使う起算点が、アプリのどの時刻（`claimedAt`、`requestedAt`など）に対応するかも確認する。
+- timeoutを検知しても、その結果をDBへ記録できなかった場合は、G2の期限切れPROCESSINGの扱いに戻る。
+  この場合の再送は、上記の有効期間内に限る。
+- LINE側が10秒の打ち切り後にメッセージを受け付けている可能性は残る。
+  「送信結果不明」は、受付の有無も配送完了も確認できない状態を意味し、成功とも失敗とも扱わない。
+
 - 依存：G2（終端化の扱いと整合させる）。
-- テスト：unit（打ち切りの動作）。実DB側の注入試験は実timeoutの根拠にしない。
-- 受入：timeout後は結果不明として扱われ、重複送信を防げる範囲が文書化されている。
-- 要判断：timeout値、retryKey有効期間を超えた再送の可否。
-- 担当：Claude実装、人間が判断。
+- テスト：unit（10秒で打ち切る動作。fake timer等）、実DB統合（timeout結果のFAILED記録、自動再送されないこと）。
+  TimeoutError注入試験だけを実timeoutの根拠にしない。
+- 受入：
+  - LINE APIの1リクエストが10秒で打ち切られる。
+  - タイムアウトを記録できた配信は、通常の失敗と区別できる「送信結果不明」のFAILEDになり、自動再送されない。
+  - 管理画面の通常の再送操作の対象にならない。
+  - 期限切れPROCESSINGの再送は、同じretry keyで、公式仕様の有効期間内と確認できる場合に限られる。
+  - 重複送信を防げる範囲と防げない範囲が文書化されている。
+- 担当：Claude実装、人間がレビューと公式仕様の確認。
 
 ### G4. バックアップ・migration・rollback手順
 
@@ -114,10 +178,40 @@ F12の記録（`F12_MVP_PASSED 11`、619件成功など）は過去の実行記�
 - 依存：G0。
 - 受入：変数名・用途・設定先・有無の一覧（値は含めない）、非公開bucketと制限の確認手順、
   Cronが認証なしで拒否される確認手順がある。
-- 未確定：Cronの起動元（要判断）。`vercel.json`に登録があるのは`delete-old-security-logs`だけで、
-  `club-line-deliveries`と`storage-deletions`はrouteが存在する。起動元をVercel Cronと
-  外部スケジューラのどちらにするかを決める。
-- 担当：Claude（手順書）、人間（各サービス側の設定確認）。
+決定事項（利用者の方針。変更・実行は後続）：
+- 既存HPのログ削除CronはVercelでの運用を維持する。
+- `club-line-deliveries`と`storage-deletions`は、登録済みの本番Supabase Cronを維持する。
+  どちらも5分間隔で、LINEは毎時00分起点、Storageは毎時02分起点（利用者の確認。本書では未検証）。
+  二重起動を避けるため、この2件は`vercel.json`へ追加しない。
+- 本番でのSupabase Cronの登録は、利用者が確認済み。
+
+ログ削除Cronの照合結果（利用者がVercelの本番デプロイのSourceで確認。本書では再検証していない）：
+- 現在の本番デプロイでは、Vercelの Cron一覧に`/api/cron/delete-old-submission-logs`が表示されている。
+- 同じ本番デプロイの`vercel.json`も、旧パス`/api/cron/delete-old-submission-logs`を指定している。
+- 一方、実際のルートは`app/api/cron/delete-old-security-logs/route.ts`である。
+  現在の本番デプロイ内で、Cronの設定とルートが一致していない。
+- 旧パスへのリクエストが404だったか、削除処理が成功していたかは未確認。
+  本番ログの確認で分かるかは未確認。
+- 今回のリリース対象コードでは、`vercel.json`のpathと実際のルートが、
+  ともに`/api/cron/delete-old-security-logs`に対応している（リポジトリを読み取りで確認、2026-11-10）。
+  このためのパス変更は不要とする。コードと`vercel.json`は変更しない。
+- 現在の本番では、ログ削除が実際には動いていなかった可能性がある。
+  この間の削除漏れの有無と扱いは、未確認・要判断とする。
+
+G6で残す確認（本番デプロイ後。デプロイは承認後に人間が行う）：
+- Vercelの Cron一覧で、新パス`/api/cron/delete-old-security-logs`が有効で、
+  旧パス`/api/cron/delete-old-submission-logs`が残っていないことを確認する。
+- 定刻の本番ログで、新パスへの呼び出しとHTTP応答を確認する。ジョブの手動起動はしない。
+
+Supabase Cronについて：
+- 5分間隔と起動時刻（LINEは毎時00分起点、Storageは毎時02分起点）は、利用者が管理画面で確認済み。
+- Supabase Cronの認証付きでの正常実行は未確認。既存の実行履歴・本番ログを照合し、
+  呼び出し先・時刻・HTTP応答を確認する。ジョブの手動起動はしない。
+  ログに認証情報（CRON_SECRET等）やレスポンス本文が含まれる場合は、記録に写さない。
+- Cronの認証（`CRON_SECRET`、`src/application/cron/cron-authorization.ts`）が、
+  3つのCronで同じ方式で働くことを、routeごとに確認する。
+
+- 担当：Claude（手順書・照合項目の整理）、人間（Vercel・Supabase側の設定・ログの確認）。
 
 ### G7. 本番smoke testとWebhook切替の手順
 
@@ -184,11 +278,27 @@ F12の記録（`F12_MVP_PASSED 11`、619件成功など）は過去の実行記�
 
 ## 6. 未解決・要判断
 
-1. G2：再claim回数の上限値と、超過時の状態。
-2. G3：timeout値と、結果不明時の再送の扱い。
-3. G6：Cronの起動元（Vercel Cronか外部スケジューラか）。
-4. 第5節の各停止条件を、公開を止める条件として確定するか。
-5. 削除済みF12仕様書・粒度別計画に相当する現行資料は無い。参照は削除した。
+決定済み（方針。実装・設定の確認は後続）：
+- G2：処理権の取得は合計3回まで。超過時は専用errorCodeのFAILEDで終端化する。
+- G3：LINE APIの1リクエストは10秒で打ち切る。結果不明はFAILEDで自動再送せず、通常の再送操作の対象外。
+- G6：ログ削除CronはVercel、`club-line-deliveries`と`storage-deletions`は本番Supabase Cron。
+  Supabaseの2件は`vercel.json`へ追加しない。
+
+未確認・要判断：
+1. G2：専用errorCodeの値と、終端化を行う処理の設計。errorCodeの追加でマイグレーションが
+   必要かは未確認。
+2. G3：LINE公式仕様のretry keyの有効期間と起算点（実装前に確認）。
+   管理画面の再送操作の現行の絞り込み条件（未確認）。
+3. G6：ログ削除Cron。現在の本番デプロイでは、`vercel.json`が旧パス
+   `delete-old-submission-logs`を指し、実ルートは`delete-old-security-logs`で不一致（確認済み）。
+   リリース対象コードでは両方が`delete-old-security-logs`で一致しているため、パス変更は不要。
+   未確認：旧パスへのリクエストが404だったか、削除が成功していたか。
+   デプロイ後の確認：新パスが有効で旧パスが残っていないこと、定刻の本番ログのHTTP応答。
+   不一致の間の削除漏れの有無と扱いは要判断。
+4. G6：Supabase Cron（LINE配信・Storage削除）の認証付き正常実行
+   （呼び出し先・時刻・HTTP応答）は未確認。
+5. 第5節の各停止条件を、公開を止める条件として確定するか。
+6. 削除済みF12仕様書・粒度別計画に相当する現行資料は無い。参照は削除した。
    「F13-granular-plan」自体が今後の計画の入口になる。
 
 [F13仕様]: F13.md
