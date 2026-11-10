@@ -4,7 +4,9 @@
 
 ## 1. この運用書の範囲と完了の区別
 
-[F12仕様]と[粒度別計画]の粒度20を対象とする。
+F12の粒度20（MVP検証運用書・受入matrix・残課題）を対象とする。
+F12の仕様書と粒度別計画は、今後の運用に不要なため意図的に削除済みで、復元しない。
+本書が現行の検証・受入・残課題の資料であり、F12の検証結果・証跡・制限は本書に保持する。
 実装の基準は粒度19完了コミット `22e8f4c417c286bb96ccad68252fa1f6a55b6bb1`。
 本書の作成では実DB・Auth・Storage・メール・LINEを操作せず、実行結果を作り直していない。
 
@@ -674,9 +676,10 @@ URL、資格情報、本文、個人情報、生reportを添付しない。未�
 LINEの再claim上限・実timeoutの未実装と混同しない。
 LINE workerの一回の取得limitも、同一deliveryの再claim回数上限とは別である。
 
+本節を残課題の正本とする。F13での対応粒度・受入条件・担当・実施時期・公開可否への影響は、
+[F13粒度別計画]に記載する。採否・上限値などの判断結果は、決定後に本節へ反映する。
+
 <!-- 以下は実在するコード・試験・既存運用書への参照。 -->
-[F12仕様]: ../implementation/phases/F12.md
-[粒度別計画]: ../implementation/phases/F12-granular-plan.md
 [package.json]: ../../package.json
 [supabase/config.toml]: ../../supabase/config.toml
 [guard]: ../../tests/mvp/environment.ts
@@ -726,3 +729,4 @@ LINE workerの一回の取得limitも、同一deliveryの再claim回数上限と
 [LINE-api]: ../../src/infrastructure/line/line-messaging-api.ts
 [F10-runbook]: event-month-copy.md
 [F11-runbook]: event-practice-batch.md
+[F13粒度別計画]: ../implementation/phases/F13-granular-plan.md
