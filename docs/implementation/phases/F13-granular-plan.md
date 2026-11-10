@@ -133,26 +133,42 @@ LINE公式仕様の確認結果（2026-11-10、公式ドキュメント「Retryi
 - 公式ドキュメントに記載がない事項：24時間を過ぎたkeyの挙動、最初のリクエストが処理中のときの挙動。
   このため、24時間を過ぎた再送は行わない。
 
-決定した設計（実装済み。unit・型検査・lintは確認済み。実DBのintegrationと全体実行は未実施で、利用者の実行待ち）：
-- 時間切れ：`AbortSignal.timeout(10秒)`。検知できたら、通常の通信エラー（`LINE_NETWORK_ERROR`）と区別して
-  `LINE_RESULT_UNKNOWN_TIMEOUT` のFAILEDに記録し、自動再送しない。
-- 結果不明のerrorCode（3種）：`LINE_RESULT_UNKNOWN_TIMEOUT`、`LINE_RESULT_UNKNOWN_CLAIM_LIMIT`（G2）、
-  `LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED`。定義は `domain/club/line/line-delivery-result.ts`。
-  画面とDBの説明文は「LINEへの送信結果を確認できませんでした。」で統一する。
-- 管理画面：結果不明のFAILEDには再送ボタンを出さず、「LINEに届いている可能性があるため、再送はできません。
-  LINEグループで届いているかをご確認ください。」と表示する。再送対象の取得（お知らせ・イベントのRepository）も
-  結果不明のerrorCodeを除外する（サーバー側でも拒否する）。
-- retry keyの有効期間：期限切れPROCESSINGの再claimは、依頼日時から24時間以内に限る。
-  最初の送信時刻は保存していないため、より早い時刻である依頼日時から数える（安全側。有効期間内でも、
-  依頼から24時間を過ぎた配信は再送しない）。超過した配信は `LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED` で終端化する。
-  最初の送信時刻の保存（migration）が必要かは、運用で超過が起きるかを見て判断する（要判断）。
+決定した設計（実装済み。初回の実装は実DBのintegration 623件・`verify:mvp` 全11段階で確認済み。
+2026-11-10の追加決定の変更は、unit・型検査・lintのみ確認済みで、実DBのintegrationは利用者の実行待ち）：
+- 時間切れ：`AbortSignal.timeout(10秒)`。検知できたら `LINE_RESULT_UNKNOWN_TIMEOUT` のFAILEDに記録し、
+  自動再送しない。
+- 通信エラー（利用者の決定、2026-11-10）：LINE APIから応答を確認できなかった `LINE_NETWORK_ERROR` も、
+  タイムアウトと同じ結果不明として扱う。errorCodeは既存の `LINE_NETWORK_ERROR` を維持し、
+  説明文は「LINEへの送信結果を確認できませんでした。」にする（送信失敗と断定しない）。
+  LINEへ通信する前に失敗したと確認できるもの（`LINE_TARGET_DISABLED`・`LINE_SETTING_INCOMPLETE`・
+  `LINE_CREDENTIAL_ERROR`）と、LINEが拒否した `LINE_HTTP_*` は、結果不明に変更しない（再送できる）。
+  `fetch` の例外は、送信前の不正な入力（例：不正なヘッダー値）でも同じ通信エラーとして捕まえるため、
+  区別できず、結果不明に含まれる（安全側）。
+- 結果不明のerrorCode（4種）：`LINE_RESULT_UNKNOWN_TIMEOUT`、`LINE_NETWORK_ERROR`、
+  `LINE_RESULT_UNKNOWN_CLAIM_LIMIT`（G2）、`LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED`。
+  定義は `domain/club/line/line-delivery-result.ts`。
+- 管理画面：結果不明のFAILEDは、状態を「送信結果不明」と表示し（「送信失敗」と断定しない）、再送ボタンを出さず、
+  「LINEに届いている可能性があるため、再送はできません。LINEグループで届いているかをご確認ください。」と表示する。
+  再送対象の取得（お知らせ・イベントのRepository）も結果不明のerrorCodeを除外し、再送Actionは
+  対象が取得できないため `notFound()` で拒否する（ボタンを出さないだけでなくサーバー側でも拒否する）。
+- 再送期限（利用者の決定、2026-11-10）：期限切れPROCESSINGの再claimは、依頼日時から数えた期限内に限る。
+  期限は、公式仕様の24時間から安全余裕10分を引いた期間。期限に達した配信、判定できない配信は送信せず、
+  `LINE_RESULT_UNKNOWN_RETRY_KEY_EXPIRED` で終端化する。新しいretry keyへの切替、最初の送信時刻の列の追加
+  （Prismaスキーマ変更・migration）は行わない。G2の「初回1回＋再claim最大2回」の上限は維持する。
+  依頼日時が安全側になる根拠（コードで確認済み）：
+  - 依頼日時（`requestedAt`）は、配信の作成時に1回だけ記録される（作成時の `new Date()`、またはスキーマの既定値）。
+    `requestedAt` を更新するコードは、claim・終端更新・再送のいずれにもない。
+  - 最初の送信は配信の作成後に行うため、最初の送信時刻は依頼日時以降である。
+  - 公式仕様は「最初のリクエストから24時間」なので、依頼日時から数えた期限は実際の期限より早く来る。
+  - 管理者の再送は新しい配信（新しいretry keyと依頼日時）を作るため、元の配信の期限には影響しない。
+  - 依頼日時は、DBの既定値またはアプリの時計で付く。時計のずれは、安全余裕10分で吸収する。
+- 公式仕様（2026-11-10確認）：retry keyは最初のリクエストから24時間有効。期限後の挙動と、
+  最初のリクエストが処理中のときの挙動は、公式資料に記載がない。このため、期限に達した配信は送信しない。
 
 残る制約：
-- 通信エラー（`LINE_NETWORK_ERROR`）も、応答を受け取れなかっただけで届いている可能性は否定できない。
-  この扱いは今回の決定に含めておらず、従来どおり通常の失敗として再送できる（要判断）。
 - 管理者の再送は新しい配信（新しいretry key）を作るため、結果不明でない失敗でも重複し得る。
-- お知らせの再送対象取得の絞り込みは、イベントと同じ条件で実装したが、実DBでの検証はイベント側の
-  試験に含めていない（要判断）。
+- 最初の送信が依頼日時より大きく遅れる配信（長時間の送信待ち後に最初の送信をした配信）は、
+  期限が実際より早く来る。期限切れPROCESSINGは、再送されず結果不明で終端化される（安全側）。
 
 - 依存：G2（終端化の扱いと整合させる）。
 - テスト：unit（10秒で打ち切る動作。fake timer等）、実DB統合（timeout結果のFAILED記録、自動再送されないこと）。
@@ -305,18 +321,21 @@ Supabase Cronについて：
 - G2：処理権の取得は合計3回まで。超過時は `LINE_RESULT_UNKNOWN_CLAIM_LIMIT` のFAILEDで終端化する。
   画面では「送信結果を確認できませんでした」と伝え、結果不明の配信は通常の再送操作の対象にしない。
 - G3：LINE APIの1リクエストは10秒で打ち切る。結果不明はFAILEDで自動再送せず、通常の再送操作の対象外。
+- G3：通信エラー（`LINE_NETWORK_ERROR`）も結果不明として扱う。再送期限は依頼日時から判定し、
+  最初の送信時刻の列は追加しない。お知らせの再送対象を確認する実DB試験を1件追加する。
 - G2の追加2件の試験は、必須とする。
 - 第5節を公開停止条件として確定する。G2・G3が未完了のままLINEを有効化しない。
 - G6：ログ削除CronはVercel、`club-line-deliveries`と`storage-deletions`は本番Supabase Cron。
   Supabaseの2件は`vercel.json`へ追加しない。
 
 未確認・要判断：
-1. G2の追加2件の必須化：既存のmanifestだけでは、試験の欠落（削除・改名）を検出できない。
-   登録方法の提案は完了報告を参照。登録は別の変更として依頼する。
-2. F13-ENV-REPRO：G1の受入条件のうち、DB（PostgreSQL）の版の記録が不足している。解消済みにしない。
+1. G2・G3の追加試験の必須化：`tests/mvp/suite-manifest.ts` の `MVP_CONCURRENCY_CASES` に登録した
+   （natural 1→2、injected 3→7）。登録した変更の実DB確認は、利用者の実行待ち。
+2. F13-ENV-REPRO：G1の受入条件の記録が揃ったため、解消済み（DB版17.6を運用書第12.2節に記録）。
+   DB版は別実行で取得した値。別マシン・空のキャッシュでの確認は未実施。
 3. 依存関係の警告（`npm audit`、allowScripts）：対象・影響・公開への影響・最小の対処案を、完了報告で提示した。
    依存関係・lockfileは変更していない。対処の採否は要判断。
-4. G3：通信エラー（`LINE_NETWORK_ERROR`）の扱い、最初の送信時刻の保存の要否、お知らせ側の再送対象の試験。
+4. G3：決定済みの3点（通信エラー・再送期限・お知らせの実DB試験）の実装は済み。実DBでの確認は未実施。
 5. G6：ログ削除Cron。現在の本番デプロイでは、`vercel.json`が旧パス
    `delete-old-submission-logs`を指し、実ルートは`delete-old-security-logs`で不一致（確認済み）。
    リリース対象コードでは両方が`delete-old-security-logs`で一致しているため、パス変更は不要。

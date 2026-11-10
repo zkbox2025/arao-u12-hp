@@ -391,6 +391,10 @@ E2E内部の事前buildと最後のbuildを両方行う。
 
 単独入口はmigrationやSupabase起動を行わない。
 同じ専用DBでDEPLOYまで成功済みなら、その状態を使う。
+`npm ci` で作ったコピーでは、`test:integration` の前に Prisma Client を生成する必要がある
+（`verify:mvp` のPRISMA_GENERATE段階と同じ `node node_modules/prisma/build/index.js generate --config ./prisma.config.ts`）。
+生成しないとDB suiteの準備で止まり、runnerは固定メッセージだけを返す（F13粒度3の検証で確認）。
+元の `node_modules` を複製したコピーは、生成済みである。
 新しい専用DBへ単独実行する場合だけ、上記guard成功と所有確認の後に以下を行う。
 
 ```bash
@@ -710,11 +714,41 @@ G2の合格は、ローカルの専用DBでのintegrationに限る。本番のLI
 | 他の警告 | `npm audit` が26件の脆弱性（moderate 10・high 15・critical 1）を表示。G1では対応せず、`npm audit fix` も実行していない |
 | verify:mvp | 全11段階成功、`F12_MVP_PASSED 11`、終了コード0。MIGRATION 23件、INTEGRATION 22ファイル（件数の合計621）、E2E 12ファイル（件数の合計78） |
 | LINE worker | `line-delivery.integration.test.ts` は28件成功。必須ケースとして数える自然競合1・注入3は、manifestの登録どおり（G2で追加した2件は含まれない） |
+| DB（PostgreSQL）の版 | 17.6（`show server_version`）。G1の `verify:mvp` とは別の実行（同日の粒度3の検証中）で、同じSupabase CLI 2.101.0・同じ専用config（`major_version = 17`）の専用DBから取得。専用DBのmigration履歴は26行、`prisma/migrations` の26ディレクトリと一致 |
 | Chromium | 導入の終了コード0、`test:e2e:list` は78件・12ファイル |
 | 回収 | `.next` 不在、3000・3443の待受なし、専用projectの container・volume の表示は空。通常Supabaseの起動終了コード0、元ソースの `git status` は前後で同一、`git diff --check` は出力なし |
 
 この結果は、同じマシン・同じDockerイメージ・Playwrightのブラウザーキャッシュ（取得済み）の条件での1回の再現である。
-F13-ENV-REPROは、DB（PostgreSQL）の版が未記録のため解消済みにしない。版は、専用DBの起動中に取得するか、取得済みのDBイメージのタグで確認して記録する。
+F13-ENV-REPROは、G1の受入条件（CLI・Node・DBの版、fresh環境での通し結果、package.json・lockfileの無変更、回収の確認）の記録が揃ったため、解消済みとする。ただし、DBの版は別の実行で取得した値で、同じ実行での取得ではない。別マシン・空のキャッシュでの確認は未実施で、allowScripts警告の扱いは別項目（依存関係の警告）で扱う。
+
+### 12.3 F13粒度3（LINE通信のtimeout）の実行記録
+
+2026-11-10に利用者が運用書第4〜7.2節の手順で実行した結果の報告に基づく記録。生ログ・URL・資格情報は記録しない。
+
+| 項目 | 記録 |
+| --- | --- |
+| 対象 | G3のcommit `7c953b3`（コピー元revisionの出力は未報告） |
+| 環境 | `npm ci` で作った新しいコピー、Supabase CLI 2.101.0、PostgreSQL 17.6（専用DBの `show server_version`） |
+| DB・migration | 専用DBに接続でき、migration履歴26行、`ClubLineDelivery` テーブルあり（確認用の読み取りのみ） |
+| 初回の失敗 | integrationを3回実行し、毎回終了コード1。runnerは固定メッセージのみで原因を示さなかった |
+| 原因 | コピーで Prisma Client が未生成だった（`npm ci` 後に生成していない）。DB suiteの準備が止まり、24件が実行されなかった。生成後に解消。コードの不具合ではない |
+| 切り分け | 生成後の再実行で解消したことで確認。診断は、使い捨てDBの読み取り確認と、line-delivery単体のvitest実行（失敗した試験名のみを出力）で行った |
+| integration（生成後） | 3回実行、毎回22 suites・623件成功、終了コード0。粒度2の621件より2件増え、G3で追加した有効期間の2件（23時間・25時間）に一致する。skipなし |
+| verify:mvp | 利用者の報告で `F12_MVP_PASSED 11`、終了コード0。`line-delivery.integration.test.ts` は `passed=30 natural=1 injected=3`（G2・G3で追加した4件はmanifest未登録のため、必須の件数には含まれない） |
+| 回収 | `.next` 不在、専用projectの停止とcontainer・volumeの確認、通常Supabaseの起動終了コード0。実行後の `git status` の差分は、台帳の編集（文書2ファイル）のみ |
+| コピー元revision | 利用者が貼り付け1の出力を確認できなかったため、未記録（G3のcommit `7c953b3` のコピーに G3 の変更が入っていることは、`grep` で確認済み） |
+
+実LINE通信の10秒の打ち切りは、unitで `AbortSignal.timeout` の値と時間切れの変換を確認した。実際のLINE APIへの通信・実時間の打ち切りは確認していない。
+
+### 12.4 F13粒度3の追加決定（通信エラー・再送期限・manifest）の変更記録
+
+2026-11-10の追加決定（通信エラーを結果不明に含める、再送期限を依頼日時から判定する、お知らせの再送対象の
+実DB試験を1件追加する、G2・G3の追加試験をmanifestへ登録する）に伴うコード変更の記録。
+
+| 項目 | 記録 |
+| --- | --- |
+| 実施済み | unit（`vitest.mvp-unit.config.mts`）132ファイル・4,272件成功、型検査・対象lintに成功（いずれも元ソース側。専用環境での実行ではない） |
+| 未実施 | 実DBのintegration、`verify:mvp`。実DBの試験は、登録後のmanifestでは `natural=2 injected=7`、`line-delivery.integration.test.ts` の件数は31件になる見込み（見込みであり、実測ではない） |
 
 残課題を「テストがあるから解決済み」にしない。以下はF13の粒度計画作成・見直し時の引継ぎ項目とする。
 本粒度ではF13の文書や実装を変更しない。引継ぎ時に担当・期限・採否・公開判断への影響を記録する。
@@ -723,7 +757,7 @@ F13-ENV-REPROは、DB（PostgreSQL）の版が未記録のため解消済みに�
 | --- | --- | --- |
 | F13-LINE-RECLAIM | 期限切れPROCESSINGの再claim回数に数値上限がない | [LINE-worker]。FAILEDは自動再送しない現行仕様と区別し、上限・終端化・運用保留を設計判断する。**G2で実装済み**（処理権の取得は合計3回まで、超過は専用errorCodeのFAILEDへ終端化）。ローカルintegrationで確認（第12.1節）。`verify:mvp` 全体とG3（結果不明の再送操作の除外）は未完了のため、LINE通知の本番有効化の判断は保留 |
 | F13-LINE-TIMEOUT | 実LINE通信を一定時間で打ち切る機能は未実装 | [LINE-api]のfetch、[line-worker-DB]はTimeoutError注入。実timeoutと結果不明／重複防止の扱いを別patchで検討する |
-| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | package／lockを無断更新せず、公開準備で実際の環境版と再現結果を確定する。**G1実施済み**（第12.2節）：新しいコピーで `npm ci` から `verify:mvp` 全11段階まで成功し、CLIはlockfileどおり2.101.0。未解消：G1の受入条件に必要な **DB（PostgreSQL）の版の記録が不足**している。他に、allowScripts警告の扱い、別マシン・空のキャッシュでの確認は未実施。DB版を記録するまで解消済みにしない |
+| F13-ENV-REPRO | CLI版差とfreshセットアップ未実行 | **解消済み（G1、第12.2節）**。新しいコピーで `npm ci` から `verify:mvp` 全11段階まで成功し、CLIはlockfileどおり2.101.0、DBは17.6。条件：DB版は別実行で取得。別マシン・空のキャッシュでの確認と、allowScripts警告の扱いは未実施・別項目 |
 | F13-RELEASE | 本番DBバックアップ・初期化・Storage制限・Cron・LINE／Resend疎通 | F12のローカル合格を本番確認の代用にしない |
 | MANUAL-ACCEPTANCE | 既存運用書の実機・アクセシビリティ・Proxy条件 | 第10.5節と既存手動表へ、実施結果／保留理由を対応付ける |
 
