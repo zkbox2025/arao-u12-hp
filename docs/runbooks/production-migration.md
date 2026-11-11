@@ -78,7 +78,7 @@ dry-run結果、戻し方を、レビューできる形で示す。
 
 | 道具 | 要件 |
 | --- | --- |
-| `pg_dump`・`pg_restore`・`psql` | **メジャー版が、本番のサーバー版以上**であること（`pg_dump --version`。サーバー版はB-0の `show server_version` で確認） |
+| `pg_dump`・`pg_restore`・`psql` | **メジャー版が、本番のサーバー版以上**であること（`pg_dump --version`。サーバー版はB-0の `show server_version` で確認）。**未導入の場合（2026-11-11のB-0の準備で、利用者のMacに未導入だった）：** Homebrewの `libpq`（`brew install libpq`）を入れ、`export PATH="$(brew --prefix libpq)/bin:$PATH"` で、そのターミナルのPATHへ足す。手元の道具であり、プロジェクトの依存関係（package.json・lockfile）は変わらない。`libpq` は通常、最新のメジャー版が入るため、本番のサーバー版が古くても使える |
 | Docker | 検証用DBに使う（第7章） |
 | `npx prisma` | リポジトリの導入済みの版（package.json・lockfileは変更しない） |
 
@@ -243,6 +243,8 @@ CHECK制約・トリガー・関数・RLS・権限・Storageのポリシーは�
 5.2では分からない。次の読取りSQLで、本番の状態を控える（名前と件数だけで、データは出ない）。
 
 ```bash
+# publicのテーブル名の一覧（アプリのテーブルが、すでに本番にあるかの判断に使う。名前のみ）
+psql -X -At -c "select table_name from information_schema.tables where table_schema='public' and table_type='BASE TABLE' order by 1"
 # RLSが有効なテーブル
 psql -X -At -c "select c.relname, c.relrowsecurity from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relkind='r' order by 1"
 # publicのトリガー（名前のみ）
@@ -556,6 +558,9 @@ npx dotenv-cli -e .env.prod -- npx prisma migrate status
 - 6.2と同じSQLで、**既存HPのテーブルの件数が、取得前から変わっていない**（適用の間に、HPへの申込みがあった場合は、その増加分だけ）。
 - 5.3のSQLで、RLS・トリガー・権限・ポリシーが、5.4の想定どおり。
 - 既存HPの公開ページが表示され、管理画面へログインできる。`WEBSITE_ADMIN_USER_IDS` は有効なまま（DB方式の認可へ切り替えない）。
+- **`club-images` のポリシー削除（20260817003046）の影響の確認：** HPの公開ページで、スタッフ画像・ページ内容の画像が表示される。
+  管理画面から、画像のアップロード・差替え・削除ができる（これらは、`SERVICE_ROLE_KEY` のサーバー側の処理で、ポリシーに依存しない見込み）。
+  月間練習計画のPDF（`club-documents`）の表示・アップロードも確認する。**テストのデータを使い、実データを壊さない。**
 
 ### 8.4 事後
 
@@ -627,6 +632,20 @@ Prisma Migrateには、`down`（戻し）がない。適用済みのmigration.sq
 | トリガー・関数の作り直し | 削除前の定義を、バックアップから戻す |
 | ENUMへの値の追加 | PostgreSQLでは、値を削除できない。**戻せない。** 前方修正で扱う |
 
+**20260817003046（`club-images` のStorageポリシーの削除）の戻しの材料**（B-0で確認した、本番の4件の定義。適用前に、取得した `schema-reference.sql` と照合して確定する）：
+
+```sql
+CREATE POLICY "Allow public read access to all users dipc33_0" ON storage.objects FOR SELECT TO public USING (bucket_id = 'club-images');
+CREATE POLICY "Give users authenticated access to folder dipc33_0" ON storage.objects FOR INSERT TO authenticated WITH CHECK (bucket_id = 'club-images');
+CREATE POLICY "Give users authenticated access to update dipc33_0" ON storage.objects FOR UPDATE TO authenticated USING (bucket_id = 'club-images');
+CREATE POLICY "Give users authenticated access to update dipc33_1" ON storage.objects FOR SELECT TO authenticated USING (bucket_id = 'club-images');
+```
+
+（本番の `pg_policies` の表示から起こしたもの。`roles` と条件式は報告のとおり。ポリシーが許可型（PERMISSIVE）かは、`schema-reference.sql` で確認する。**この戻しSQLは、検証用DBで動くことを確認してから使う。**）
+
+**20260816224901（権限の剥奪）の戻しの材料：** 本番では、`anon`・`authenticated` に、`public` の12テーブルへの `REFERENCES`・`TRIGGER`・`TRUNCATE` だけが付いていた（B-0）。
+戻す場合も、これを `GRANT` するだけでよい。ただし、**戻す必要は、通常ない**（これらの権限は、HPの動作に使われていない）。
+
 - 戻しSQLは、リポジトリのmigrationには入れない（適用済みmigrationの編集を避ける）。レビュー用の別ファイルとして保管する。
 - 戻しSQLに、本番の接続情報・データを書かない。
 
@@ -678,3 +697,85 @@ Prisma Migrateには、`down`（戻し）がない。適用済みのmigration.sq
 10. 日次バックアップの**保持日数**（一覧は7件。断定しない）、**復元の仕様**（上書きか、ダウンタイムの長さ）、**ダウンロードの可否**、PITRが画面で無効であること（4.6・4.7。管理画面と公式資料で確認する）
 11. Storage本体の復元の方法と、既存のオブジェクト行がある場合の上書きの挙動（6.4。検証用の環境で先に確認する）
 12. 日次バックアップの確認を、適用（C）の必須条件とすること（8.1に、2026-11-11の方針として入れた。外す・緩める場合は、利用者の判断）
+
+## 12. 実施記録
+
+実施するたびに、該当の行を埋める。**URL・資格情報・個人情報・生のログ・接続先のホスト名は、記録しない。**
+結果の欄が空の行は、**未実施**である（空欄を「問題なし」と読まない）。
+
+| 地点 | 承認 | 実施者 | 実施日時 | 結果 |
+| --- | --- | --- | --- | --- |
+| B-0（読取り確認） | 2026-11-11、利用者（右田和也）が承認 | 右田和也 | 2026-11-11〜12（利用者が実行し、出力を報告） | **実施済み・通過**（履歴は整合、中止条件なし、追加確認2点も完了。第12.1・12.2節）。残る注意は、第12.2節の「残るリスク」 |
+| B-1（手動バックアップ） | 未 | — | — | 未実施 |
+| B-2（復元確認・リハーサル） | 未 | — | — | 未実施 |
+| C（本番適用） | 未 | — | — | 未実施 |
+
+### 12.1 B-0の実施結果（利用者が実行・報告）
+
+**これは、利用者が本番に対して実行し、報告した出力の記録である。** Claudeは、本番へ接続しておらず、出力を読んで解釈した。
+接続先のホスト名・URL・資格情報・データは、報告されていない（記録しない）。
+
+| 項目 | 結果 |
+| --- | --- |
+| 道具 | `psql` 18.6・`pg_dump` 18.6（Homebrewの `libpq` を導入）。本番のサーバー版は **17.6**。`pg_dump` のメジャー版が、サーバー以上である |
+| 接続 | ポート **5432**、**poolerを含まない**（transaction poolerではない）。`PGOPTIONS` で読取り専用にして接続できた。実行したのはSELECTと `migrate status`・`migrate diff` のみ |
+| 適用履歴 | `_prisma_migrations` は**15行**。すべて `finished`、`rolled_back` なし。**本番にあってリポジトリにないmigrationはない**。失敗・ロールバックの行はない |
+| 未適用 | **11件**：`20260816221153_add_club_app_schema` 〜 `20261031000000_f11_event_practice_batch`（第5.4節の、アプリ側のmigration）。先頭の15件（`20260529012549_init` 〜 `20260713001709_add_external_role_to_staff`）が適用済みで、**履歴は連続している**。第5.1節の「先頭から途中まで一致し、残りが未適用」に該当する |
+| `migrate status` | 26件を検出し、未適用の11件を表示。失敗・不整合の表示はない |
+| `migrate diff`（Prismaの範囲） | 終了コード0、800行。**報告された範囲（上位60行）は、`CREATE TABLE`・`CREATE TYPE`・`CREATE UNIQUE INDEX` のみ**（アプリのテーブル・型・一意制約）。**全体（既存HPのテーブルへの `ALTER`・`DROP` の有無）は、未確認** |
+| 本番の `public` | 既存HPの11テーブルと `_prisma_migrations` のみ。**アプリのテーブルは、まだない**（未適用の11件と整合する） |
+| RLS | 上の12テーブルすべてで有効 |
+| トリガー | `public` にトリガーはない |
+| 権限 | `anon` に36件、`authenticated` に36件（`public` のテーブルへの権限）。第5.4節の `revoke_public_data_api_access` で剥奪される予定 |
+| `storage.objects` のポリシー | 4件（名前と操作のみ確認）：`Allow public read access to all users dipc33_0`（SELECT）、`Give users authenticated access to folder dipc33_0`（INSERT）、`Give users authenticated access to update dipc33_0`（UPDATE）、`Give users authenticated access to update dipc33_1`（SELECT）。**定義（対象のバケット）は、未確認**。第5.4節の `remove_club_images_storage_policies` が、`club-images` を含むものを削除する |
+| バケット | `club-app-attachments`（非公開）、`club-documents`（公開）、`club-images`（公開） |
+| Cron | 2件：`club-line-deliveries-every-5-minutes`（`*/5 * * * *`）、`storage-deletions-every-5-minutes`（`2-59/5 * * * *`）。登録済み |
+
+**Claudeがコードで確認したこと：** 既存HPの3つのStorageのモジュール（スタッフ画像・ページ内容の画像・月間練習計画）は、
+すべて `SUPABASE_SERVICE_ROLE_KEY` を使うサーバー専用で、Storageのポリシーに依存しない見込み。ブラウザ側のStorage使用は、検索で見つからなかった。
+**本番の他のクライアント（外部のアプリ・ダッシュボードなど）の依存は、未確認。**
+
+**判定：** 第5.5節の中止条件には、**当てはまらない**（履歴なし・本番が先行・失敗が残る・履歴が飛ぶ・接続先が6543、のいずれでもない。
+サーバー版と `pg_dump` の版も問題ない）。**ただし、次の追加確認2点が済むまで、B-0を「通過」としない**（→ 追加確認は完了。第12.2節）。
+
+1. `migrate diff` の全体の確認：既存HPのテーブルへの `ALTER`・`DROP` が、含まれていないこと
+2. `storage.objects` のポリシーの定義（どのバケットを対象にしているか）と、`public` のRLSのポリシーの有無
+
+**参考（Cron）：** Cronのジョブは、本番にすでに登録されている。アプリのテーブルが本番にない間（migration適用前）に、
+Cronが呼ぶエンドポイントを含むアプリがデプロイされていると、エラーになり得る。第8.1節の「DBを先に適用し、アプリを後にデプロイ」を守る。
+Cronの認証付きの正常実行の確認は、G6で行う。
+
+### 12.2 B-0の追加確認の結果と判定（利用者が実行・報告）
+
+**利用者が本番に対して実行し、報告した出力の記録である。** Claudeは、出力を読んで解釈した。
+
+| 確認 | 結果 | 判断 |
+| --- | --- | --- |
+| `migrate diff`（全体） | 終了コード0、800行。`CREATE TABLE` 22、`CREATE TYPE` 13、`CREATE INDEX` 51、`CREATE UNIQUE INDEX` 31、`ALTER TABLE` 46。**`DROP` は0件。既存HPの11テーブルへの `ALTER` は「なし」** | 差分は、**アプリの新規オブジェクトだけ**。`schema.prisma` のアプリのモデル22個、列挙型13個と一致する。既存HPのテーブルへの変更・drift は、ない |
+| `CREATE TABLE` の一覧 | `AppUser`・`Child`・`ChildClubMembership`・`Club`・`ClubEmailSetting`・`ClubEvent`・`ClubEventAttachment`・`ClubEventBatchOperation`・`ClubEventMemo`・`ClubEventRead`・`ClubInvitation`・`ClubLineDelivery`・`ClubLineRegistrationToken`・`ClubLineSetting`・`ClubLineTarget`・`ClubMembership`・`ClubNotice`・`ClubNoticeAttachment`・`ClubNoticeRead`・`PlatformAdmin`・`StorageDeletionJob`・`SupportReport`（22個） | すべてアプリのテーブル |
+| `storage.objects` のポリシーの定義 | 4件**すべて `bucket_id = 'club-images'` が対象**：公開の読取り（SELECT、`public`）、認証ユーザーの INSERT・UPDATE・SELECT（`authenticated`） | 20260817003046 は、この4件を**すべて削除する**（条件に `club-images` を含む） |
+| `public` のRLSのポリシー | **なし**（RLSは全テーブルで有効） | 既存HPのテーブルは、`anon`・`authenticated` から、すでに行へアクセスできない |
+| `anon`・`authenticated` の権限 | 各ロールで `REFERENCES`・`TRIGGER`・`TRUNCATE` が12件ずつ（計36件）。**`SELECT`・`INSERT`・`UPDATE`・`DELETE` の権限は、すでにない** | 20260816224901 が剥奪するのは、この3種類だけで、既存HPの動作（Prisma経由）には影響しない見込み |
+| バケット | `club-app-attachments`：非公開、サイズ上限 3,145,728 バイト（3 MiB）、許可は `application/pdf` のみ。`club-documents`・`club-images`：公開、サイズ上限・許可形式の指定なし | G6の材料（下記） |
+
+**判定：B-0は通過。** 第5.5節の中止条件に当たらず、第12.1節の追加確認2点も、問題がなかった。
+
+**第5.4節の確認事項への回答：**
+
+- 20260816224901（権限の剥奪）：既存HPのテーブルには、すでにDMLの権限も、RLSのポリシーもない。**HPの動作（Prisma経由）への影響は、ない見込み。**
+- 20260817003046（Storageのポリシーの削除）：削除されるのは、`club-images` を対象にした4件。
+  - **公開の読取り**は、バケットが公開（`public = true`）で、HPが `getPublicUrl` の公開URLを使うため、ポリシーなしでも動く見込み。
+  - **認証ユーザーの INSERT・UPDATE・SELECT** は、HPの3つのStorageのモジュールが `SUPABASE_SERVICE_ROLE_KEY` のサーバー専用で、ポリシーに依存しない見込み（コードで確認）。
+  - **適用後に、実際に確認する**（第8.3節）。
+
+**残るリスク（未確認）：**
+
+- 本番の**他のクライアント**（外部のアプリ・スクリプト・ダッシュボードなど）が、`club-images` の認証ユーザーのポリシー、または `public` のData APIを使っていないか。コードと、B-0の読取りでは、確認できない。適用後の確認（HPの画像表示・管理画面のアップロード）で補う。
+- アプリのテーブルは、まだ本番にない。Cron（`club-line-deliveries`・`storage-deletions`）は、すでに登録されている。適用前後の挙動は、G6で確認する。
+
+**G6への引き継ぎ（Storage制限の観測、B-0）：**
+
+- `club-app-attachments` は、**すでに本番に存在**し、非公開・3 MiB・PDFのみ。アプリのPDF検証は「合計3MBまで」（`pdf-file-validation.ts`）で、バケットの上限と整合して見える（MBとMiBの単位の違いは、G6で確認する）。
+- `club-images`・`club-documents` は、サイズ上限・許可形式が未設定。HPのコードの上限は、スタッフ画像・ページ画像が5MiB、月間練習計画のPDFが10MiB。バケット側の制限を設定するかは、G6で判断する（HPの既存の動作を変えない範囲で）。
+
+次は、B-1（手動バックアップの取得）の承認の判断である。
