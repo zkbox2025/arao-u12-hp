@@ -353,8 +353,14 @@ order by table_name" > "$F13_BACKUP/counts-before.tsv"
 psql -X -At -c "select migration_name, finished_at is not null from _prisma_migrations order by started_at" > "$F13_BACKUP/migrations-before.txt"
 psql -X -At -c "select count(*) from auth.users" > "$F13_BACKUP/auth-users-count.txt"
 psql -X -At -F $'\t' -c "select bucket_id, count(*), coalesce(sum((metadata->>'size')::bigint),0) from storage.objects group by 1 order by 1" > "$F13_BACKUP/storage-objects-before.tsv"
+# 【追加：2026-11-13、B-1の実績を取り込み】Storageのパスとサイズの一覧（6.4・6.5のパス単位の突き合わせに使う）
+psql -X -At -F $'\t' -c "select bucket_id, name, coalesce(metadata->>'size','') from storage.objects order by bucket_id, name" > "$F13_BACKUP/storage-list-before.tsv"
+chmod 600 "$F13_BACKUP/storage-list-before.tsv"
 wc -l "$F13_BACKUP"/*.tsv "$F13_BACKUP"/*.txt
 ```
+
+- **`storage-list-before.tsv` には、ファイルのパス（個人名が含まれ得る）が入る。** 保管先から出さず、チャットにも台帳にも貼らない。件数と差の数だけを共有する。
+- 取得の直前に、Storageの件数を再集計する（`storage-objects-before.tsv`）。直前の値と、事前の報告がずれていれば、原因を確認してから進める。
 
 ### 6.3 DBのバックアップ（`pg_dump`、読取りのみ）
 
@@ -391,7 +397,8 @@ printf 'schema-reference.sql 終了コード: %s\n' "$?"
 
 - **方法1：** Supabase CLIの `storage` コマンドで、バケットを再帰的にダウンロードする（ログインとプロジェクトの紐付けが必要。実験的な機能の可能性）。
 - **方法2：** SupabaseのS3互換エンドポイントと、S3互換のCLIで同期する（S3用のアクセスキーを、ダッシュボードで作る。作成したキーは、取得後に削除する）。
-- **方法3：** 件数が少ない場合に、手作業・小さなスクリプトで取得する（その場合は、別の変更として依頼する）。
+- **方法3：** 件数が少ない場合に、手作業・小さなスクリプトで取得する（B-1では、件数が少ない15ファイルだったため、この方法で手動ダウンロードした）。
+  手動ダウンロードの場合は、`$F13_BACKUP/storage/<バケット名>/` の下に、バケット内と同じ相対パスで置く。
 
 取得後の確認（バケットごと）：
 
@@ -399,21 +406,85 @@ printf 'schema-reference.sql 終了コード: %s\n' "$?"
 - ファイルごとのSHA-256の一覧を作り、保管する（`shasum -a 256`）。後で、壊れていないことを確認できる。
 - **非公開バケット（`club-app-attachments`）のファイル名には、個人名が含まれ得る。** 一覧の共有に注意する。
 - `club-app-attachments` は、削除ジョブ（`storage-deletions` のCron）で、ファイルが削除され得る。取得中に、削除ジョブが動いていないか（Cronの実行時刻、毎時02分起点）を確認する。
+- **【追加：2026-11-13、B-1の実績を取り込み】余分なファイルがないこと：** `.DS_Store` や、未完了のダウンロード（`.crdownload`・`.download` など）が混ざっていない。
+
+```bash
+find "$F13_BACKUP/storage" \( -name '.DS_Store' -o -name '*.crdownload' -o -name '*.download' -o -name '*.part' \) | wc -l
+```
+
+  期待は `0`。
+- **【追加：2026-11-13、B-1の実績を取り込み】パス単位の突き合わせ（NFC正規化つき）：** macOSは、日本語のファイル名を分解形（NFD）で保存することがある。
+バケット内のパスは結合形（NFC）で記録されているため、**両方をNFCに揃えて**から、`storage-list-before.tsv` と比べる。件数・サイズ・欠け・余りの数だけを出す。
+
+```bash
+env -i PATH="$PATH" HOME="$HOME" F13_BACKUP="$F13_BACKUP" node --input-type=module <<'JS'
+import { readdir, readFile, stat } from "node:fs/promises";
+import { join, sep } from "node:path";
+
+const backup = process.env.F13_BACKUP;
+const buckets = ["club-documents", "club-images", "club-app-attachments"];
+const norm = (value) => value.normalize("NFC");
+
+async function walk(dir, base = "") {
+  const entries = await readdir(join(dir, base), { withFileTypes: true });
+  const found = [];
+  for (const entry of entries) {
+    const rel = base ? join(base, entry.name) : entry.name;
+    if (entry.isDirectory()) found.push(...(await walk(dir, rel)));
+    else found.push(rel);
+  }
+  return found;
+}
+
+const text = await readFile(join(backup, "storage-list-before.tsv"), "utf8");
+const expected = new Map();
+for (const line of text.split("\n").filter(Boolean)) {
+  const [bucket, name, size] = line.split("\t");
+  expected.set(`${bucket}/${norm(name)}`, Number(size));
+}
+
+const actual = new Map();
+for (const bucket of buckets) {
+  let files = [];
+  try {
+    files = await walk(join(backup, "storage", bucket));
+  } catch {
+    files = [];
+  }
+  for (const rel of files) {
+    const full = join(backup, "storage", bucket, rel);
+    actual.set(`${bucket}/${norm(rel.split(sep).join("/"))}`, (await stat(full)).size);
+  }
+}
+
+let missing = 0;
+let sizeDiff = 0;
+for (const [key, size] of expected) {
+  if (!actual.has(key)) missing += 1;
+  else if (actual.get(key) !== size) sizeDiff += 1;
+}
+let extra = 0;
+for (const key of actual.keys()) if (!expected.has(key)) extra += 1;
+console.log(`期待${expected.size} 実際${actual.size} 欠け${missing} 余り${extra} サイズ違い${sizeDiff}`);
+JS
+```
+
+  期待は、`欠け0 余り0 サイズ違い0`（B-1では、15行対15行で差0だった）。パスは出力しない。
 
 #### Storageのファイル本体の復元（DBの復元とは別に行う）
 
 - **DBを復元しても、Storageのファイル本体は戻らない。** `storage.objects` の行（メタデータ）だけが戻り、
-  本体が欠けた状態になり得る。日次バックアップでも、同じである（本体を含まない前提）。
+本体が欠けた状態になり得る。日次バックアップでも、同じである（本体を含まない前提）。
 - 復元は、次の順に行う。方法の構文は、実行前に確認する（**要確認**）。
-  1. **バケットの存在と設定の確認：** 3つのバケットが存在し、公開・非公開、サイズの上限、許可するファイル形式が、
-     バックアップ時の記録（6.3の `schema-reference.sql` と、5.3のバケットの出力）と同じか。違う場合は、先に設定を戻す。
-     `club-app-attachments` は非公開のまま保つ（公開にしない）。
-  2. **本体を、同じバケット・同じパスへ戻す：** 6.4で取得したファイルから戻す。既存の `storage.objects` の行がある場合の、
-     上書き（upsert）の挙動は、**検証用の環境で先に確認する**（本番で初めて試さない）。
-  3. **整合の確認：** DBが持つファイルのパス（アプリの添付ファイル、HPの画像・月間練習計画のファイルのパスの列）と、
-     バケット内のファイルの存在を、突き合わせる。**欠けているファイルの一覧**を作り、記録する（件数と、どのバケットか）。
+1. **バケットの存在と設定の確認：** 3つのバケットが存在し、公開・非公開、サイズの上限、許可するファイル形式が、
+   バックアップ時の記録（6.3の `schema-reference.sql` と、5.3のバケットの出力）と同じか。違う場合は、先に設定を戻す。
+   `club-app-attachments` は非公開のまま保つ（公開にしない）。
+2. **本体を、同じバケット・同じパスへ戻す：** 6.4で取得したファイルから戻す。既存の `storage.objects` の行がある場合の、
+   上書き（upsert）の挙動は、**検証用の環境で先に確認する**（本番で初めて試さない）。
+3. **整合の確認：** DBが持つファイルのパス（アプリの添付ファイル、HPの画像・月間練習計画のファイルのパスの列）と、
+   バケット内のファイルの存在を、突き合わせる。**欠けているファイルの一覧**を作り、記録する（件数と、どのバケットか）。
 - **復元後のCron：** DBを復元すると、古い時点の `StorageDeletionJob`（削除ジョブ）と、LINEの配信行が戻る。
-  確認が済むまで、**`storage-deletions` と `club-line-deliveries` のCronを止める**（9.3）。
+確認が済むまで、**`storage-deletions` と `club-line-deliveries` のCronを止める**（9.3）。
 - この復元の手順は、B-2の検証用の環境で、**ローカルの検証用Storageに対して、一度行う**（本番のStorageへは行わない）。
 
 ### 6.5 取得後の確認（B-1の通過条件）
@@ -424,6 +495,20 @@ printf 'schema-reference.sql 終了コード: %s\n' "$?"
 - 6.4のStorage本体の件数・サイズが、6.2と一致した。
 - 暗号鍵・Authの設定・環境変数の一覧を、別の場所へ控えた。
 - 取得の開始時刻・終了時刻を、台帳へ記録した（取得後〜適用までの書込みの範囲を、後で判断する）。
+- **【追加：2026-11-13、B-1の実績を取り込み】取得中に書込みがなかったこと：** 取得後に、6.2の件数をもう一度取り、取得前と比べる。
+
+  ```bash
+  psql -X -At -F $'\t' -c "select bucket_id, count(*), coalesce(sum((metadata->>'size')::bigint),0) from storage.objects group by 1 order by 1" > "$F13_BACKUP/storage-objects-after.tsv"
+  psql -X -At -c "select count(*) from auth.users" > "$F13_BACKUP/auth-users-count-after.txt"
+  # counts-after.tsv は、6.2の counts-before.tsv と同じSQLで取る
+  diff "$F13_BACKUP/storage-objects-before.tsv" "$F13_BACKUP/storage-objects-after.tsv" | wc -l
+  diff "$F13_BACKUP/auth-users-count.txt" "$F13_BACKUP/auth-users-count-after.txt" | wc -l
+  diff "$F13_BACKUP/counts-before.tsv" "$F13_BACKUP/counts-after.tsv" | wc -l
+  ```
+
+  期待は、すべて `0`。差があれば、取得中に書込みがあった。差の内容（どのテーブルか）を確認し、取り直すか判断する。
+- **【追加：2026-11-13、B-1の実績を取り込み】SHA-256の一覧：** 上記の `*-after` ファイルを作ってから、`SHA256SUMS.txt` を作る（`storage/` の下も含める）。
+  ファイルの権限は600（B-1では28項目）。作成後、`shasum -a 256 -c` で不一致が0であること。
 
 終わったら、本番の接続情報を消す。
 
@@ -480,6 +565,9 @@ printf 'public 復元 終了コード: %s / エラー行数: %s\n' "$?" "$(wc -l
   戻せない場合は、**「取得できていること（`pg_restore --list` と件数）」の確認にとどめる**。
   この場合も、`public` の復元が成功していれば、既存HPのデータと `_prisma_migrations` の確認はできる。
 
+- **【追加：2026-11-13、B-2の実績】** B-2では、`public.dump` の復元は終了コード1・エラー4件（検証用の環境差。`public` スキーマが既にある、`supabase_admin` の既定権限への権限不足）で、
+  件数と履歴は一致した。接続先のポートが通常のローカル環境と重なる場合は、通常環境を止めず、独立したプロジェクト（別のproject ID・別のポート）を使う。
+
 ```bash
 # 2. auth・storage：データのみ（ベストエフォート。失敗した場合は件数の確認にとどめる）
 f13_assert_local && pg_restore --no-owner --data-only --dbname="$PGDATABASE" "$F13_BACKUP/auth-storage-data.dump" 2> "$F13_BACKUP/restore-auth-storage.err"
@@ -495,10 +583,121 @@ printf 'auth/storage 復元 終了コード: %s\n' "$?"
 | 件数 | 6.2と同じSQLを検証用DBで実行し、`counts-before.tsv` と比べる（`diff`） | **全テーブルで一致** |
 | migration履歴 | 6.2の `_prisma_migrations` の一覧を、`migrations-before.txt` と比べる | 一致（件数・名前・finished） |
 | **既存HPのデータ** | HPのテーブル（`SessionApplication`・`Contact`・`PageContent`・`Notice`・`Faq`・`FormSubmissionLog`・`FormNotificationSetting`・`LoginSubmissionLog`・`MonthlyPracticePlan`・`Staff`・`StaffPageSetting`）の件数が、上と一致している。加えて、公開状態の件数（`PageContent`・`Faq`・`Notice` の公開・下書き）を、本番と検証用DBで比べる | 一致 |
-| スキーマ・権限・ポリシー | 検証用DBから `pg_dump --schema-only`（public）を取り、`schema-reference.sql` のpublic部分と比べる | 差分なし（所有者・拡張機能の違いだけ許容） |
+| スキーマ・権限・ポリシー | 検証用DBから `pg_dump --schema-only`（public）を取り、`schema-reference.sql` のpublic部分と比べる | 差分なし（所有者・拡張機能の違いだけ許容）。**【追加】ローカルのSupabaseは、新しいテーブルに `anon`・`authenticated` へ全権限を既定で付けるため、権限（ACL）は本番と異なる。権限は、DDLの比較から外して別に確認する**（B-2の実績） |
 | `auth`・`storage` | 戻せた場合は、`auth.users` の件数、バケット別のオブジェクト件数を比べる。戻せなかった場合は、`pg_restore --list` で、含まれていることを確認する | 一致、または理由を記録 |
-| Storage本体 | 6.4で取得したファイル数・合計サイズ・SHA-256を、`storage-objects-before.tsv` と比べる | 一致 |
+| Storage本体 | 6.4で取得したファイル数・合計サイズ・SHA-256を、`storage-objects-before.tsv` と比べる。**【追加】検証用のローカルStorageへ戻して照合する（下の「Storage本体の復元確認」）** | 一致 |
 | HP画面の表示（任意） | 検証用DBへ向けたアプリで、公開ページの表示を確認する。**外部送信・本番のSupabase（Auth・Storage）へ接続しない設定にする** | 表示できる |
+
+**【追加：2026-11-13、B-2の実績を取り込み】Storage本体の復元確認（検証用のローカルStorageのみ）**
+
+目的：6.4で取得したファイル本体を、検証用のローカルStorageへ戻し、SHA-256で一致することを確認する。**本番のStorageには接続しない。**
+
+1. 検証用のSupabaseから、APIのURLとService Roleキーを、**メモリ内の変数へ**取る（画面にもファイルにも出さない。使い終わったら `unset`）。
+   接続先が `http://127.0.0.1:<検証用のAPIのポート>` でなければ、スクリプトは中止する。
+2. 次のスクリプトを、検証用のチェックアウト（`@supabase/supabase-js` がある場所）に `f13-storage-check.mjs` として保存する。
+3. **1回目**（`F13_UPSERT=0`）：バケットを作り、本番と同じ設定にして、全ファイルを保存し、ダウンロードしてSHA-256を照合する。
+   `club-documents`・`club-images` は公開、`club-app-attachments` は非公開・3MiB・PDFのみ。**設定は、5.3のバケットの出力に合わせる**（B-2では、この3つ）。
+4. 検証用DBで、`storage.objects` の件数・バイト数を、`storage-objects-before.tsv` と比べる（差0）。バケットの設定（公開・上限・MIME）も確認する。
+5. **2回目**（`F13_UPSERT=1`）：同じファイルを上書きで保存する。失敗0、不一致0、`storage.objects` の行が増えない（差0）ことを確認する（**既存の行がある場合の上書きの挙動の確認**）。
+
+```bash
+# 例：APIのポートが 55321 の場合（検証用のSupabaseの設定に合わせて変える）
+env -i PATH="$PATH" HOME="$HOME" F13_API_URL="$F13_API_URL" F13_SERVICE_KEY="$F13_SERVICE_KEY" \
+  F13_API_PORT=55321 F13_STORAGE_DIR="$F13_BACKUP/storage" F13_UPSERT=0 node f13-storage-check.mjs
+```
+
+```js
+// f13-storage-check.mjs（検証用のチェックアウトに保存する。件数と結果だけを出力し、パス・キーは出さない）
+import { createClient } from "@supabase/supabase-js";
+import { createHash } from "node:crypto";
+import { readdir, readFile } from "node:fs/promises";
+import { join, extname, sep } from "node:path";
+
+const url = process.env.F13_API_URL;
+const key = process.env.F13_SERVICE_KEY;
+const root = process.env.F13_STORAGE_DIR;
+const port = process.env.F13_API_PORT;
+const upsert = process.env.F13_UPSERT === "1";
+
+const allowed = new RegExp(`^http://(127\\.0\\.0\\.1|localhost):${port}$`);
+if (!port || !allowed.test(url ?? "") || !key || !root) {
+  console.log("中止: 接続先が検証用ではありません");
+  process.exit(1);
+}
+
+const client = createClient(url, key, { auth: { persistSession: false } });
+const types = {
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+};
+const settings = {
+  "club-documents": { public: true },
+  "club-images": { public: true },
+  "club-app-attachments": {
+    public: false,
+    fileSizeLimit: 3145728,
+    allowedMimeTypes: ["application/pdf"],
+  },
+};
+const sha = (buffer) => createHash("sha256").update(buffer).digest("hex");
+
+async function walk(dir, base = "") {
+  const entries = await readdir(join(dir, base), { withFileTypes: true });
+  const found = [];
+  for (const entry of entries) {
+    const rel = base ? join(base, entry.name) : entry.name;
+    if (entry.isDirectory()) found.push(...(await walk(dir, rel)));
+    else found.push(rel);
+  }
+  return found;
+}
+
+for (const [bucket, options] of Object.entries(settings)) {
+  let bucketFailed = 0;
+  if (!upsert) {
+    const created = await client.storage.createBucket(bucket, options);
+    if (created.error) bucketFailed = 1;
+  }
+  const files = await walk(join(root, bucket));
+  let saved = 0;
+  let failed = 0;
+  let ok = 0;
+  let bad = 0;
+  const codes = new Set();
+  for (const rel of files) {
+    const body = await readFile(join(root, bucket, rel));
+    const path = rel.split(sep).join("/").normalize("NFC");
+    const contentType = types[extname(rel).toLowerCase()] ?? "application/octet-stream";
+    const up = await client.storage.from(bucket).upload(path, body, { upsert, contentType });
+    if (up.error) {
+      failed += 1;
+      codes.add(String(up.error.statusCode ?? up.error.status ?? "?"));
+      continue;
+    }
+    saved += 1;
+    const dl = await client.storage.from(bucket).download(path);
+    if (dl.error) {
+      failed += 1;
+      continue;
+    }
+    const got = Buffer.from(await dl.data.arrayBuffer());
+    if (sha(got) === sha(body)) ok += 1;
+    else bad += 1;
+  }
+  console.log(
+    `${bucket}\tファイル${files.length}\t保存${saved}\t失敗${failed}\t一致${ok}\t不一致${bad}` +
+      `\tバケット作成失敗${bucketFailed}\t失敗コード[${[...codes].join(",")}]`,
+  );
+}
+```
+
+- 期待は、全バケットで失敗0・不一致0・バケット作成失敗0。失敗コードが出た場合（日本語のファイル名が拒否される400系など）は、**本番への復元でも起こり得る問題として記録する。**
+- 終わったら、`f13-storage-check.mjs` は検証用のチェックアウトごと削除する。キーの変数は `unset` する。
+- この確認は、**ローカルの検証用Storageに対するものであり、本番のStorageの復元の実行ではない。**
 
 **リハーサル（必須）：** 検証用DBへ、`migrate deploy` を実行する。リリース対象のcommitの専用コピー
 （運用書 `mvp-verification.md` の第4章）で行う。接続先は、**`.env.prod` を使わず、環境変数で指定**する。
@@ -821,8 +1020,7 @@ CREATE POLICY "Give users authenticated access to update dipc33_1" ON storage.ob
 17. **ローカルの検証の限界：** 本番の `auth`・`storage` のスキーマは、ローカルのSupabaseイメージより新しく、`storage.buckets`・`storage.objects`
     や一部の `auth` のテーブルは、データを復元できなかった（第12.5節）。ローカルの既定の権限は、本番と異なる。
     これらの差に依存する結果は、本番で確認する。
-18. **B-1の追加確認の取り込み：** 12.4で行った追加確認（パス一覧の突き合わせ、取得後の件数の再確認、NFC正規化）と、
-    B-2の12.5で行ったStorage本体の復元確認の手順を、第6.2〜6.5節・7.4節へ反映するかは未決（別の変更として依頼）。
+18. ~~B-1の追加確認の取り込み~~ **取り込み済み**（2026-11-13）。第6.2・6.4・6.5・7.3・7.4節に、パス一覧・余分なファイルの確認・NFC突き合わせ・取得後の再確認・SHA-256・Storage本体の復元確認の手順を反映した。
 19. ~~Cronの停止方法~~ **確認済み（2026-11-13、利用者の報告、第12.8節）。** 呼び出し元は、Supabase Cron（`club-line-deliveries-every-5-minutes`・`storage-deletions-every-5-minutes`）。各ジョブにActiveの切替スイッチがあり、停止はこのスイッチで行える見込み（本番の設定変更のため、操作ごとに承認が必要）。
     未確認：Cronの呼び出し先のHTTPステータスと、認証付きの処理の成否（G6）。**復元でCronの定義がバックアップ時点の状態（Active）に戻る場合、復元の直後から動き出す可能性がある**（要確認）。
 20. ~~日次バックアップの復元の仕様~~ **画面で確認済み（2026-11-13、利用者の報告、第12.8節）。** 「同じプロジェクトを上書きする」という明記はないが、現在のDBを選んだ時点に戻す説明で、**操作は取り消せない**と表示。復元中はプロジェクトがオフライン。所要時間の目安の表示なし。バックアップ後のDBデータは失われる。Storage本体は含まれず、バックアップ後に削除したファイル本体は復元されない。ダウンロードのボタンなし。PITRは無効。
