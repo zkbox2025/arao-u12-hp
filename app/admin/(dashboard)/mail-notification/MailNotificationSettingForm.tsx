@@ -48,7 +48,7 @@ export function MailNotificationSettingForm({
         </p>
 
         <p className="mt-2 text-sm leading-7 text-neutral-600">
-          1行に1つずつメールアドレスを入力してください。
+          1行に1つずつメールアドレスを入力してください。最大5件登録できます。
         </p>
       </div>
 
