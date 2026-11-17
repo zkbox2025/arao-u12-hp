@@ -1695,3 +1695,105 @@ G5（本番初期化スクリプト）→ G6（Storage・環境変数・Cron・R
 - `APP_BASE_URL` も、同じ時期に変わり得る。招待メール・パスワード再設定のリンク・`robots`・`sitemap`・認証のSite URL・Redirect URLに影響するため、一緒に計画する。
 - 他のクラブを実際に受け入れるのは、G9の公開判断の後。先にドメインの切替を済ませると、他のクラブのメールがARAO名義の送信元から出ることを避けられる。
 
+## 16. G5：本番初期化スクリプト（`scripts/initialize-production-club.ts`）
+
+**【追加：2026-11-18】** 実装とローカル検証の記録、および本番での実行手順の案。**本番での実行（承認D・E）は未承認・未実施。** Claudeは本番へ接続していない。
+
+### 16.1 何をするか
+
+- 作成するのは5テーブルだけ：`Club`（プランは `STARTER`、タイムゾーン `Asia/Tokyo`）、`AppUser`、`ClubMembership`（OWNER / ACTIVE / `canManageWebsite = true`）、`PlatformAdmin`（DEVELOPER / 有効）、`ClubEmailSetting`（`fromName` はクラブ名、`notificationEmail`・`replyToEmail` は `null`、有効）。
+- 触らないもの：既存HPのテーブル、`ClubLineSetting`、プラン切替（G8）、`WEBSITE_ADMIN_USER_IDS`。
+- **作成のみ（更新しない）。** 既存の行が期待値と**完全一致**なら `UNCHANGED`、**1項目でも違えば** `CONFLICT` で全体を中止する（何も書かない）。再実行しても、安全に同じ結果になる（冪等）。
+- 実行は1つのトランザクション（Serializable）。適用の開始時に、照合をやり直す。途中で失敗すれば、全体をロールバックする。
+- 出力は、テーブル名と `CREATE` / `UNCHANGED` / `CONFLICT`、接続先の指紋だけ。メール・user.id・名前・接続先のホスト・生のエラーは出さない。
+
+### 16.2 安全装置
+
+| 装置 | 内容 |
+| --- | --- |
+| `--target` | `production` はローカル以外のDB・Supabaseだけ、`local` はローカルだけを許可する。DBへ接続する**前**に確認する。本番は直接接続（ポート5432）だけを許可し、pooler（6543など）を拒否する |
+| 接続先の指紋 | dry-runが、DATABASE_URLのホスト・ポート・DB名から作った12文字のハッシュを表示する。**本番のapplyは、`--expect-fingerprint` でそれを要求する。** dry-run未実施・別環境への取り違えを防ぐ |
+| Authの照合 | `getUserById`（読取りのみ）で、user.idの実在とメールの一致を、OWNER・PlatformAdminの両方で確認する。不一致なら、dry-runの段階で中止する |
+| 入力ファイル | JSON。通常のファイル（シンボリックリンク不可）で、**権限600**。未知の項目は拒否する。内容は、エラーにも出力にも含めない |
+| 実値の扱い | user.id・email・名前は、チャット・手順書・シェルの履歴に残さない（入力ファイルで渡す） |
+
+### 16.3 入力ファイル（例。実値は書かない）
+
+保管先は、リポジトリの外（例：`~/f13-input/`、権限700）。ファイルは権限600。実行後は、削除する。
+
+```json
+{
+  "owner": { "authUserId": "<UUID>", "email": "<メール>", "name": "<表示名>" },
+  "platformAdmin": { "authUserId": "<UUID>", "email": "<メール>", "name": "<表示名>" }
+}
+```
+
+### 16.4 本番での実行手順（案。承認DとEを、別々に取る）
+
+**前提：** 本番用のターミナル（`PG*` 変数が未設定のもの）、`.env.prod`、入力ファイル。承認D・Eのたびに、実施日時・承認者を第12章へ記録する。
+
+**承認D：本番のdry-run（書込みなし。DBは読取り、Authは読取り）**
+
+```bash
+cd ~/Documents/arao-u12-hp
+git status --short
+npx dotenv-cli -e .env.prod -- npm run club:prod:init -- \
+  --club-name "ARAO U-12" --club-slug arao-u12 --target production \
+  --input-file ~/f13-input/initial.json --dry-run
+```
+
+- 見るもの：5テーブルがすべて `CREATE`（初回）。`CONFLICT` があれば中止して報告する。**「接続先の指紋」を控える**（Eで使う）。
+- 終了コード0であること。DBへは何も書かない。
+
+**承認E：apply（作成）**
+
+```bash
+npx dotenv-cli -e .env.prod -- npm run club:prod:init -- \
+  --club-name "ARAO U-12" --club-slug arao-u12 --target production \
+  --input-file ~/f13-input/initial.json --apply --expect-fingerprint <Dで控えた指紋>
+```
+
+- 終了コード0、5テーブルが `CREATE`。
+- 直後に、もう一度dry-runを実行し、5テーブルがすべて `UNCHANGED` になることを確認する（冪等・完了の確認）。
+
+**実行後：** 入力ファイルを削除する（`rm ~/f13-input/initial.json`）。`PG*` を使った場合は `unset` する。
+
+### 16.5 適用後の確認（読取りのみ。第8.2節と同じ読取り専用の接続で）
+
+- 5テーブルの件数：`Club` 1、`AppUser` 1、`ClubMembership` 1、`PlatformAdmin` 1、`ClubEmailSetting` 1（他のクラブがなければ）。
+- `Club` の `planType` が `STARTER`。`ClubMembership` が OWNER / ACTIVE / `canManageWebsite = true`。
+- 5テーブルのRLSが有効。`anon`・`authenticated` の権限が0件（第12.11節と同じ確認）。
+- 既存HPのテーブルの件数が、適用前と同じ（本番の読取りで比べる）。
+
+### 16.6 戻し方
+
+作成した行だけを、IDを指定して削除する（`Club` の削除で `ClubMembership`・`ClubEmailSetting` もカスケードで消える）。**本番では、人が内容を確認してから、承認を取って実行する。** このスクリプトに、削除の機能はない。
+
+```sql
+-- 例（IDはdry-run・apply後の読取りで確認したものを入れる）
+BEGIN;
+DELETE FROM "Club" WHERE "slug" = 'arao-u12';
+DELETE FROM "AppUser" WHERE "id" = '<owner の user.id>';
+DELETE FROM "PlatformAdmin" WHERE "id" = '<platformAdmin の user.id>';
+-- 件数を確認してから COMMIT（想定外なら ROLLBACK）
+```
+
+### 16.7 ローカルでの検証結果（2026-11-18、Claudeが実行）
+
+| 項目 | 結果 |
+| --- | --- |
+| unit（引数・入力ファイル・接続先ガード・指紋・Auth照合） | 13件成功 |
+| DB統合（ローカルDB。実行前に、DBがループバック・ポート54322であることを確認） | 8件を含む計21件成功。5テーブルの作成、dry-runが書込まない、再実行の冪等（更新時刻も不変）、プラン違いで全体を中止、メールの衝突、Membership・PlatformAdmin・メール設定の差分で中止（元の値を書き戻さない）、他クラブ非接触、出力に個人情報を含まない |
+| 後片付け | 試験で作ったクラブ・AppUser・PlatformAdminの残りは0件 |
+| 型チェック・lint | エラー0（lintの警告3件は既存のファイル） |
+| `npm test` 全体 | 149ファイル成功・4ファイル失敗。**失敗は4ファイルとも、今回の変更前から** `DATABASE_URL` 未設定で落ちる既存のDB統合試験（今回の変更を外しても同じ4ファイル） |
+| CLIのスモーク | 引数なし→安全なエラー（終了1）。ダミーの入力で `--target local` の dry-run → Auth不一致で中止（終了1）。`--target production` にローカルの接続先 → 中止（終了1） |
+
+**未確認：** 本番のSupabase Authとの実際の照合（承認Dで初めて確認）。ローカルのSupabase Authのユーザーを使った、ローカルでの通しの実行（Authの照会は、関数を差し替えた試験のみ）。
+
+### 16.8 実装上の注意・逸脱
+
+- `test:club-prod-init:local`（ローカルDBの統合試験）は、F12の必須一覧（`tests/mvp/suite-manifest.ts`）には**登録していない**。登録すると、F12の期待件数（スイート数・ケース数）の契約が変わるため。必要なら、別の粒度で扱う。
+- `package.json` へ、`club:prod:init` と `test:club-prod-init:local` の2つのスクリプトを追加した（利用者の承認あり）。パッケージ・ロックファイルは変更していない。
+- `PGOPTIONS`（読取り専用）をdry-runで併用できるかは、未確認。**applyは、`PGOPTIONS` を設定していないターミナルで実行する。**
+
