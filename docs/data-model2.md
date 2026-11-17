@@ -356,3 +356,7 @@ LINE_CREDENTIAL_ENCRYPTION_KEY
 
 
 ⭐️⭐️前月イベント複製と定期練習生成について、保存後は下書きとして保存されるので一つ一つを下書きから公開に保存しないといけないため、何かその旨を注意書きしておく
+
+
+⭐️マルチテナント化の際にDBのFormNotificationSettingから、ClubEmailSettingへデータ移行し、その際に
+notificationEmail を、複数件にできるよう拡張する。

@@ -96,7 +96,7 @@ model FormSubmissionLog {
   @@index([formType, emailHash, contentHash, createdAt])
 }
 
-//メール通知先設定
+//問い合わせ・体験/見学のメール通知先設定
 model FormNotificationSetting {
   formType  FormType @id
   emails    String

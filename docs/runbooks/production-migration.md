@@ -1659,3 +1659,39 @@ Claudeは本番へ接続していない。URL・資格情報・個人情報・St
 
 **台帳に書けない（未確認・未了）事項：** 第11節の15（シーケンスの既定権限）・16（他のクライアントへの影響）、G5・G6・G7の未了、Vercel Cronの初回実行（2026-11-18 03:00 JST）の結果。
 
+## 15. F13の後に行う作業（順序・判断の記録。2026-11-18、利用者の判断）
+
+**【追加：2026-11-18】** 実施の承認ではない。各作業は、操作ごとに、別の承認を取る（第3章）。値（鍵・アドレス・ID）は記録しない。
+
+### 15.1 F13の残りの順序
+
+G5（本番初期化スクリプト）→ G6（Storage・環境変数・Cron・Resendの確認手順）→ G8（プラン切替の手順書）→ G7（本番smoke testとWebhook切替）→ G10（手動受入）→ G9（公開判断）→ 環境変数の整理 → ドメイン切替。
+
+- **G8をG7の前に置く理由：** STARTERのままでは、OWNER・MEMBERがアプリを開けない（`app/(club-app)/club/club-app-authorization.ts`）。G7のsmoke testの直前に、承認を取って、一時的にSTANDARDへ切り替え、戻し方も決めておく必要がある。
+- **G5で作るもの：** `Club`（ARAO U-12、スラッグ `arao-u12`、STARTER）、`AppUser` と `ClubMembership`（クラブ代表者1名。OWNER / ACTIVE / `canManageWebsite = true`）、`PlatformAdmin`（開発者1名。DEVELOPER）、`ClubEmailSetting`。`ClubLineSetting` はG7（Webhook切替）で入れる。
+- OWNER・PlatformAdminの本番Auth（user.id・email）は、利用者が照合済み（2026-11-17〜18の報告）。実値は、初期化の実行時に利用者が指定する。
+- `WEBSITE_ADMIN_USER_IDS` は維持する。DB方式へは切り替えない。OWNERにならない既存HP管理者は、この方式のまま使える。
+
+### 15.2 `ClubEmailSetting` の扱い（決定）
+
+- 現在、**`ClubEmailSetting` を読むコードはない**（型の公開のみ）。HPの問い合わせ・体験申込みの運営向け通知は、`FormNotificationSetting`（`formType` が `CONTACT`・`SESSION_APPLICATION`）と `ADMIN_EMAIL` で動いており、G5で `ClubEmailSetting` を作っても挙動は変わらない。
+- `FormNotificationSetting` は、HPの2種類のフォームの通知先であり、アプリのお知らせ・イベントの通知先ではない（アプリの通知はLINE）。
+- **G5では `notificationEmail` を `null` にする。** `fromName` は `ARAO U-12`、`isEnabled` は `true`。理由：`notificationEmail` が1件（`String?`）で、ARAOが現在4人に通知している運用を表せない。
+- **マルチテナント化で移行するときの設計方針：** `notificationEmail` は、`FormNotificationSetting.emails` と同じ形（改行区切りの文字列）にする（利用者の判断）。最大5件、形式チェックの仕様を維持する。
+  あわせて、`FormType`（問い合わせ・体験申込み）ごとに宛先を分けている現行の仕様を、移行後も維持できるかを決める（`ClubEmailSetting` は1クラブにつき1件のため、このままでは種類を分けられない）。
+- 不具合報告（宛先は開発者）と招待（宛先は招待された本人）は、`ClubEmailSetting` の通知先の対象ではない。招待は、送信元の表示名だけがクラブに関係する。
+- それまで、HPは `FormNotificationSetting`・`ADMIN_EMAIL` を使い続ける。スキーマの変更は、マルチテナント化の作業で行い、F13の範囲では行わない。
+
+### 15.3 環境変数の整理（G9の後）
+
+- 順序：G5でDBへ初期データを入れる → G7で、DBの値で動くことをsmoke testで確認し、LINEのWebhookを切り替える → G9の安定確認の後に、環境変数を**1変数ずつ**消す。
+- 消す前に、変数ごとに確認する：コードがその変数をまだ読んでいないか、DB側の値が正しいか、戻せるか（値はパスワード管理ツールに残す）、消した直後に動作確認できるか。
+- `LINE_CHANNEL_SECRET` は「移行期間中のみ」（`.env.example`）。`LINE_CHANNEL_ACCESS_TOKEN`・`LINE_ADMIN_GROUP_ID`（既存HP用のLINE通知）は、DBへ移す対象かを、コードの読み先を調べてから決める（未確認）。
+
+### 15.4 Resendの共通ドメイン化と `MAIL_FROM_ADDRESS`（公開後の別の作業）
+
+- 順序：共通の独自ドメインを取得 → 開発者名義のResendアカウントでドメインを登録し、DNSの検証（SPF・DKIMなど）を済ませる → テスト送信で確認 → **`RESEND_API_KEY` と `MAIL_FROM_ADDRESS` を同時に**切り替える（VercelのProductionと `.env.prod`）→ 再デプロイして、実際のメール送信を確認する。
+- キーと送信元は、必ずセットで変える。片方だけでは、Resendが送信を拒否する。切替の直前に、旧の値をパスワード管理ツールへ残す（戻すため）。
+- `APP_BASE_URL` も、同じ時期に変わり得る。招待メール・パスワード再設定のリンク・`robots`・`sitemap`・認証のSite URL・Redirect URLに影響するため、一緒に計画する。
+- 他のクラブを実際に受け入れるのは、G9の公開判断の後。先にドメインの切替を済ませると、他のクラブのメールがARAO名義の送信元から出ることを避けられる。
+
