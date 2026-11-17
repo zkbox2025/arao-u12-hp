@@ -359,4 +359,4 @@ LINE_CREDENTIAL_ENCRYPTION_KEY
 
 
 ⭐️マルチテナント化の際にDBのFormNotificationSettingから、ClubEmailSettingへデータ移行し、その際に
-notificationEmail を、複数件にできるよう拡張する。
+notificationEmail を、複数件にできるよう拡張する。つまり、複数件（最大5件）と、FormType ごとの宛先を維持できる設計にする。
