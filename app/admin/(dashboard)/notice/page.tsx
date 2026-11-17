@@ -4,7 +4,7 @@
 import Link from "next/link";
 import { findAdminNotices } from "@/lib/repositories/admin-notice";
 import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge";
-import { NoticeCreateModal } from "./NoticeCreateModal";
+import { WebsiteNoticeCreateModal } from "./WebsiteNoticeCreateModal";
 import { ToastMessage } from "@/components/admin/ToastMessage";
 import { AdminPageHeader } from "@/components/admin/AdminPageHeader";//アイコン付きタイトル
 import { ADMIN_ACTION_DELETE_ERROR_MESSAGE } from "@/constants/adminActionError";
@@ -54,7 +54,7 @@ const toastVariant = params.deleteError === "1" ? "error" : "success";
     showBorder={false}
   >
     <div className="flex w-full flex-col gap-3 sm:w-auto sm:flex-row sm:items-center">
-      <NoticeCreateModal />
+      <WebsiteNoticeCreateModal />
 
       <Link
         href="/notice#top"

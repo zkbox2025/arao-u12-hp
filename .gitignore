@@ -32,6 +32,7 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+!.env.example
 
 # vercel
 .vercel
@@ -41,3 +42,14 @@ yarn-error.log*
 next-env.d.ts
 
 /app/generated/prisma
+
+# 【追加：F12粒度11】認証状態と機密を含み得るE2E成果物を追跡しない
+/.auth/
+/e2e/.auth/
+/playwright/.auth/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+*.har
+**/trace.zip

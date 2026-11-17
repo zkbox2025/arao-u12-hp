@@ -11,7 +11,7 @@ import {
 } from "@/lib/storage/page-content-image-storage";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
   parseBlockKey,
@@ -68,7 +68,7 @@ export async function updatePageContent(
   state: PageContentActionState,
   formData: FormData
 ): Promise<PageContentActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const parsed = parsePageContentFormData(formData);
 
@@ -264,7 +264,7 @@ if (canEditImage && imageFile instanceof File && imageFile.size > 0) {
 
 //画像を削除する関数
 export async function deletePageContentImage(formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const pageKey = parsePageKey(String(formData.get("pageKey") ?? ""));
 

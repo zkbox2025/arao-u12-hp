@@ -1,0 +1,250 @@
+<!-- docs/runbooks/support-report.md -->
+
+# F08 サポート報告の運用と統合受入
+
+F08粒度8の手順書です。DB保存を正式な受付、メールを補助通知として扱います。
+実装済み、単体・mock試験済み、実DB試験済み、ブラウザー・HTTP確認済み、
+実配送確認済みを分けて記録します。patch適用や単体試験の成功だけで受入完了にしません。
+この文書の作成では実DB・実Auth・本番設定を変更せず、実メールも送信しません。
+
+## 対象と実装境界
+
+- 現在の利用可能プランSTANDARDに属するACTIVEなOWNER・COACH・OFFICER・MEMBERが対象です。
+  STARTER・PROを利用可能にせず、Actionでも認可とプランを再確認します。
+- categoryはBUG・QUESTION・REQUEST・OTHER。本文はtrim後に空欄を拒否し、
+  JavaScriptのlengthで2000文字以内とします。表示用の切り詰めと保存前検証は別です。
+- 保存する本人・クラブ・所属はサーバーから取得します。requestIdの一致は認証の代わりではありません。
+- pageUrlは送信時の認可済みマイページの相対パスです。直前ページの履歴は取得しません。
+  query・fragment、hiddenのURL、Referer・Hostを保存先の根拠にしません。
+- UAはサーバーのheadersから取得し、制御文字除去・trim後に512文字までとします。
+  UAは偽装できる補助情報で、認可には使いません。
+- AppUserのname・email、最新Membershipのroleをsnapshot保存します。
+  name・emailのnullは維持し、Auth emailとの同期・修復は行いません。
+- F08では受付一覧、Platformの対応操作、通知再送queue・復旧workerを追加しません。
+  本文・snapshot・statusの手動DB更新を標準運用にしません。
+
+## ユーザー操作からDBまで
+
+画面・Actionの基点は `app/(club-app)/club/[clubSlug]/account/` です。
+Serviceは `src/application/club/support/`、Repositoryは
+`src/infrastructure/prisma/repositories/support-report-repository.ts` です。
+
+| 段階 | ファイル・関数、受け取る値と返す値 | DB変更 |
+| --- | --- | --- |
+| 表示 | `page.tsx / ClubAccountPage` が認可し、独立初期stateと認可済みslugをbindしたActionを渡す | 読取のみ |
+| 入力・確認 | `SupportReportForm.tsx / SupportReportForm` → `AccountConfirmDialog.tsx / useConfirmedAccountForm` がcategory・message・requestIdのFormDataを保持し、確認後だけ送信する | なし |
+| Action | `support-actions.ts / createSupportReportAction` がslug・前state・FormDataを受け、ACTIVE所属、プラン、単一UUID v4のrequestIdと前stateの一致、category・messageを検証する | Service経由 |
+| metadata | 同Actionが認可済みslugからURLを構築し、`await headers()` のUAだけを取得。`domain/club/support/support-report-metadata.ts` の2関数で安全化する | まだ書き込まない |
+| 受付 | `create-support-report.ts / createSupportReport` がcontext・requestId・許可入力・metadataを再検証してRepositoryへ渡す | Repository経由 |
+| 保存 | `createSupportReportForMember` が最新所属・本人・プランを照合し、requestIdをSupportReport.idとして保存。CREATEDのときだけ保存済みDTOを返す | OPENの報告、snapshot、metadataをtransaction内で作成 |
+| 通知 | `lib/mail/support-report-mail.ts / sendSupportReportEmail` が保存済みDTOを受け、共通Resendへ1回試行。固定結果だけを返す | なし |
+| 通知記録 | `recordSupportReportNotification` が受付ID・clubId・固定通知結果を受け、RECORDED等の結果を返す | notifiedAt・notifyErrorだけを更新 |
+| 完了 | Actionがsuccess・BUG・空の本文・新requestIdを返す。フォーム内側だけを新keyで再マウントし、外側に固定トーストを出す | 再保存なし |
+
+既存account DTOがFETCH_FAILEDでも、認可成功後なら非開示エラーと報告フォームを表示します。
+UNAVAILABLEはnotFound、未ログインは既存のログイン遷移を維持します。
+氏名・Childのstateやkey、既存toast、URL、再検証処理をF08の成功で変更しません。
+このフローに未接続の後続粒度はありません。実環境での受入結果は別途必要です。
+
+## 通知設定の責任と手順
+
+運用開始前に以下の担当者名を割り当てて記録します。現在の資料から個人名は確定できません。
+
+| 担当 | 設定・確認すること |
+| --- | --- |
+| デプロイ設定管理者 | 保護された環境変数設定へRESEND_API_KEY・MAIL_FROM_ADDRESS・ADMIN_EMAILを登録し、対象環境と反映を確認する |
+| 通知先管理者 | ADMIN_EMAILの受信先、必要な閲覧権限、担当引継ぎと受信確認を管理する |
+| 受入担当者 | 実メール送信の承認範囲、受信結果、DB受付との対応、未実施事項を記録する |
+
+| 設定 | 現在のコード上の意味 |
+| --- | --- |
+| `RESEND_API_KEY` | `lib/mail/resend.ts` で共通SDKを初期化するAPIキー。本番では既存の起動前検証とモジュール読込で必須 |
+| `MAIL_FROM_ADDRESS` | 全クラブ共通のFromアドレス。本番は必須。非本番の未設定時はonboarding@resend.devが既存fallback |
+| `ADMIN_EMAIL` | サポート通知の単一宛先。既存env schemaでは任意だが、通知には有効なアドレスが必要 |
+
+1. 担当者は対象環境と受信先を確認し、デプロイ先の保護された設定方法で値を登録します。
+   実値をチャット、コマンド引数、画面写真、公開資料、運用ログへ貼り付けません。
+2. 共通モジュールは読込時に設定を評価するため、対象環境で必要な再起動・再デプロイを行います。
+   変更方法や権限は運用先の手順に従います。このrunbookは設定変更を自動実行しません。
+3. `scripts/validate-env.mjs` の本番要件と起動可否を確認します。
+   このスクリプトは環境変数ファイルを読み込むため、patch作成時には実行しません。
+4. 実配送確認は別途承認されたローカル・検証環境だけで行い、結果を後述の記録へ残します。
+   HPのFormType別通知設定はF08の宛先設定には使いません。
+
+Fromは `buildMailFrom(report.clubName)` で表示名を安全化し、アドレスは共通設定を使います。
+reporterEmailは検証後のreplyToに限定し、null・不正なら省略します。
+通知本文には保存済み本文・snapshotが含まれるため、運営者の受信箱も閲覧を制限します。
+
+メール設定不備を稼働中のadapterが捕捉できれば、DB受付後は通知失敗として扱います。
+一方、起動前のenv検証で本番必須設定が不足していればアプリ自体が起動できません。
+「キー未設定でも必ずアプリが稼働する」とは扱いません。
+
+## 受付と通知障害の切り分け
+
+SupportReportの存在が受付の正本です。通知メールの有無だけで受付失敗と判定しません。
+
+| DBの通知状態 | 読み取れることと対応 |
+| --- | --- |
+| notifiedAtあり・notifyError=null | SDKが有効な受付IDを返し、成功記録が保存された。受信者への配送完了は未証明 |
+| EMAIL_CONFIGURATION_MISSING | 宛先の未設定・不正、共通メールモジュール初期化失敗等。設定担当へ確認する |
+| EMAIL_SEND_FAILED | 明確な拒否または送信前の生成失敗等。固定コードから対象段階を確認する |
+| EMAIL_SEND_RESULT_UNKNOWN | 通信例外・timeout等、結果を確定できない。未送信とは断定しない |
+| notifiedAt=null・notifyError=null | 受付直後、処理中断、通知結果保存不能等を区別できない。未送信の証明にはならない |
+
+- DB commit後にプロセスが停止すると、通知や結果保存、利用者への応答が完了しない場合があります。
+- 通知結果のDB更新が不能なら、notifyErrorの永続化も保証できません。
+  安全なログは試みますが、ログ基盤自体の障害でも失われ得ます。
+- notifiedAtは配送時刻ではなく、provider受付を記録した時刻です。
+  `support-report/{report.id}` の冪等キーだけで完全な重複配送防止は保証しません。
+- 同じ本人・元所属・内容の再送はALREADY_ACCEPTEDとして成功へ統一し、通知を再試行しません。
+  別人・別クラブ・内容差の同一IDは成功扱いにしません。
+
+調査は次の順で行います。
+
+1. 承認済みの読取手段で、対象クラブと元の受付IDに対応する報告の存在・通知状態を確認します。
+   成功後の画面hiddenは次回用の新requestIdであり、元の受付IDとは異なります。
+2. 元の受付IDをログのrequestIdと照合します。固定operationは `supportReport.create`、
+   `supportReport.notify`、`supportReport.recordNotification` です。
+   通知コードやNOT_FOUND・UPDATE_FAILEDはresult、共通分類はerrorCodeに記録します。
+3. 本文・氏名・email・URL・UA・Cookie・token・SDK headers・例外原文を調査ログへ転記しません。
+   日付、対象ケース、受付の有無、固定コード、対応担当と確認結果だけを残します。
+4. 通知失敗を理由に利用者へ再送を依頼しません。応答不明時も先にDB受付を調査します。
+   新requestIdを発行しての再送や、DBの通知列の手動更新を復旧の標準手順にしません。
+5. 再通知が必要な場合は別途承認・設計の対象として記録します。
+   F08には復旧worker・再送コマンド・Platform対応操作はありません。
+
+## DBなしの自動回帰
+
+実DB用flagを未設定にした環境で、次の対象だけを実行します。
+`npm run verify`・`verify:local`・既存 `test:db` はこの確認の代用にしません。
+環境変数ファイルや実接続設定は読み込みません。
+
+```sh
+npm test -- \
+  domain/club/support \
+  src/application/club/support \
+  tests/support-report-repository.test.ts \
+  tests/support-report-actions.test.ts \
+  tests/support-report-form.test.ts \
+  tests/support-report.flow.integration.test.ts \
+  tests/club-membership-authorization.test.ts \
+  domain/club/plan-features.test.ts \
+  src/infrastructure/logging/sanitize-log-context.test.ts \
+  lib/mail/support-report-mail.test.ts \
+  lib/mail/club-invitation-mail.test.ts \
+  tests/club-account-pages.test.ts \
+  tests/club-account-forms.test.ts
+```
+
+接続ガード19件は架空の設定だけを使い、実DBケース23件は専用flagが未指定ならskipします。
+関数直接試験はHTTP Origin保護を証明しません。フォームのnode試験はhook境界を模しており、
+実DOM保持・native dialog・focus・ブラウザー履歴・beforeunloadの実証にはしません。
+
+## 使い捨てDBでの専用統合試験
+
+1. 日常の開発データ・本番データを含まない、破棄できる専用ローカルDBを用意します。
+2. 既存migrationの適用を担当者が確認します。試験はmigration・seed・resetを実行しません。
+   SupportReportの同一クラブ参照制約とMembership削除時のSetNullも検証対象です。
+3. loopbackがリモートDBへのトンネルやproxyではないことを確認します。
+   URL検査だけで転送先や使い捨て状態は証明できません。
+4. 接続設定は承認された方法でプロセス環境へ渡し、URL・資格情報を公開しません。
+   使い捨てを確認した担当者だけが `SUPPORT_REPORT_DISPOSABLE=1` を設定します。
+
+| 条件 | 許可する値・用途 |
+| --- | --- |
+| DATABASE_URL | postgres/postgresql、localhostまたは127.0.0.1、ポート54322、DB名postgres、ユーザー名・PWあり。query・fragmentなし |
+| NODE_ENV | production以外 |
+| SUPPORT_REPORT_DISPOSABLE | 担当者の確認後に設定する1 |
+| RUN_SUPPORT_REPORT_TESTS・RUN_DB_INTEGRATION_TESTS | 両方1が必要。専用scriptが設定する |
+
+すべての前提を満たす環境で、次の専用コマンドだけを実行します。
+
+```sh
+npm run test:support-report:local
+```
+
+専用scriptは当該ファイルだけを実行し、dotenvを自動読込しません。
+両flagがあっても設定が不正なら接続前に固定エラーで失敗します。ガードを緩和しません。
+共有clientを初期化せず、ガード後に作った専用Prisma clientを注入します。
+
+23ケースでは4ロール、A/Bクラブ・他人、所属失効・利用不可プラン、最新snapshotとnull、
+同じIDの再送・同時作成・内容差、DB保存失敗、通知失敗・不明、通知結果更新失敗、
+受付直後のMembership削除とsnapshot保持を確認します。
+AuthとNextの境界、共通ResendのSDKをmockし、Action・認可のDB照合・Service・Repositoryは実装を通します。
+実Authユーザーや実メールは使いません。実配送やHTTP経由の保護は別試験です。
+transaction障害の注入と、実SQLのunique・参照制約・同時作成の確認は分けて記録します。
+同時開始は特定SQL順序や特定の競合コードの発生を強制するものではありません。
+
+fixtureのUUIDは作成前に登録し、その報告・クラブ・AppUserだけをcleanupします。
+全件削除・truncateは行いません。途中失敗・強制終了では残存し得るため、担当者が専用環境で確認します。
+失敗出力へDB・SDKの原文や設定値を追加せず、ケース名・固定エラーと理由を記録します。
+
+## ブラウザーでの受入
+
+使い捨てのAuthアカウントとクラブA/Bを別途用意します。
+専用DB試験のfixtureはAuthユーザーを作らないため、そのままログイン用途には使えません。
+送信操作は事前承認した検証環境だけで実施します。実メール未承認時は、ADMIN_EMAIL未設定等の
+SDK送信へ到達しない条件を使うか、送信操作自体をskipし理由を残します。
+
+| 観点 | 操作と期待結果 |
+| --- | --- |
+| 全ロール | STANDARDのACTIVEな4ロールで表示・送信できる。OWNER限定にしない |
+| 認可 | 未ログインはログインへ遷移。別クラブ・非ACTIVE・利用不可プランでは表示・直接送信を拒否する |
+| 取得失敗 | account DTOのFETCH_FAILED時も非開示エラーと報告フォームを表示し、本人情報を漏らさない。UNAVAILABLE時は表示しない |
+| 入力 | 種別4択、本文必須、2000文字上限、パスワード・不要な個人情報を入力しない補足文を確認する |
+| 確認 | 送信ボタンでは確認を開くだけ。キャンセルで送信せず、種別・本文を保持。確定後だけ送信する |
+| Esc・focus | dialogの見出し、初期focus、Tab/Shift+Tab、Escとキャンセル、閉じた後のfocus復帰を確認する |
+| pending | 通信遅延中の連打・再確認・Esc・キャンセルを試し、二重送信や閉じる操作が起きないことを確認する |
+| エラー | 種別・本文のエラー表示と関連付け、最初のエラーへのfocus移動、本文保持を確認する |
+| 成功 | 本文が空、種別がBUG、新requestIdになり、固定受付トーストが表示される。次の成功でも再表示される |
+| F07との独立 | 氏名・複数Childの未保存入力を用意して報告を送る。それらの入力・state・エラーをresetしない |
+| 未保存ガード | 報告編集中の離脱警告、キャンセル・失敗後の警告、成功後の報告guard初期化を確認する。F07のdirty状態は維持する |
+| 戻る・再読込 | 確認中・送信後に戻る/再読込を試し、意図しないPOST再送や重複受付がないことをDBと照合する |
+| 通知障害 | 未設定宛先等の承認済み障害条件でDB受付が残り、画面は受付成功・reset・固定トーストとなる |
+| 情報非開示 | Client propsは初期stateとbind済みAction、hiddenはrequestIdだけ。報告者snapshot・生URL・UA・内部通知状態を追加しない |
+
+通知例外・結果更新不能はまず専用DB試験の障害注入で確認します。
+ブラウザー側で同条件を安全に用意できない場合はskipし、mock試験成功で代替済みにしません。
+
+## HTTPでの直接呼出しと入力改ざん
+
+使い捨て環境で、正常なリクエストと対象fixtureのDB状態を先に確認します。
+認証Cookie、現在のAction ID、認証ヘッダー、リクエスト本文を公開資料や結果ログへ保存しません。
+Action IDを文書へ固定しません。
+
+1. 正常リクエストの複製でOriginだけをforeign Originへ変更します。
+   Nextが拒否し、対象DBに書込みがないことを確認します。応答の結果を記録し、固定のHTTP番号を推測しません。
+2. 正常OriginではhiddenのclubId・membershipId・reporterName/Email/Role・status・notifiedAt・
+   notifyError・pageUrl・userAgent・returnToを変更し、他クラブ保存・snapshot偽装・外部遷移がないことを確認します。
+3. requestIdの欠損・重複・File・不正形式・前stateとの不一致、category/messageの欠損・重複・File・
+   不正カテゴリ・空欄・trim後2001文字を送信し、保存されず固定エラーとなることを確認します。
+4. 表示後にMembershipを失効させた送信も拒否されることを確認します。
+5. マイページのquery・fragmentやhidden URLへ検証用の架空tokenを加えても、DBのpageUrlには
+   認可済みマイページ相対パスだけが残ることを確認します。実tokenは使いません。
+6. HTTPクライアントから長い検証用UAを送り、DBは512文字以内となることを確認します。
+   HTTP層が拒否する制御文字の試験と、純粋関数での制御文字除去は区別します。
+7. `next.config.ts` のServer Actions bodySizeLimitは既存の12mbです。
+   リクエスト全体の上限と本文2000文字の検証は別です。既存設定を緩めず、上限超過時の非保存を確認します。
+
+allowedDevOriginsをServer Actionsのforeign Origin許可と混同しません。
+HTTP拒否・Cookie・Next実行環境は関数直接試験の対象外なので、別の証跡を残します。
+
+## 結果記録と受入保留
+
+基準は `feat/club-app-foundation`、コミット
+`586c45945c0faba09230e6292efdfab4b3a1054c` です。
+
+| 区分 | 本patch作成時点の結果・理由 |
+| --- | --- |
+| 通常単体・mock・既存回帰 | pass。一時環境で上記14ファイル、429件成功。接続flagを除いて実行 |
+| 専用接続ガード | pass。上記429件に含む19件。実設定を使わず確認 |
+| 実DB統合 | skip。23件。実DB変更を行わない条件のため、永続化・実制約・競合・cleanupの実動作は未確認 |
+| 実Auth・ブラウザー | skip。使い捨てログイン環境での操作は未実施 |
+| HTTP・foreign Origin | skip。実HTTP送信は未実施 |
+| 実配送 | skip。実メール送信は未承認・未実施。provider受付を配送確認へ読み替えない |
+| F08受入完了 | 保留。未実施項目の確認結果が必要 |
+
+各確認について、担当者・日付・基準コミット・環境の識別名・対象ケース・pass/fail/skip・理由・
+機密値を除いた証跡の所在を記録します。DB試験ではPostgreSQL/Prisma版とmigration適用状況も記録します。
+未割当の設定責任者・通知先管理者、実環境の設定充足、実DB・ブラウザー・HTTP・配送は未確認事項です。
+不一致が出た場合はファイル・関数・再現条件と修正対象の粒度を報告し、この運用粒度で本体を改修しません。

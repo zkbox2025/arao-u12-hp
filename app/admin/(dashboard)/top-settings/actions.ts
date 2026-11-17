@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
   MAX_PAGE_CONTENT_IMAGE_SIZE,
@@ -49,7 +49,7 @@ function buildAdminTopSettingsPath({
 }
 
 export async function updateTopSummaryImage(formData: FormData) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const pageKey = "TOP" as const;
   const blockKey = String(formData.get("blockKey") ?? "");
@@ -172,7 +172,7 @@ export async function updateTopSummaryImage(formData: FormData) {
 }
 
 export async function deleteTopSummaryImage(blockKey: string) {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const pageKey = "TOP" as const;
 

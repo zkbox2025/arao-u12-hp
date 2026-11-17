@@ -1,5 +1,5 @@
 //types/action-state.ts
-//フォーム送信後の状態を表す関数
+//HPのフォーム送信後の状態を表す関数
 
 export type ActionState = {
   ok: boolean;
@@ -9,7 +9,7 @@ export type ActionState = {
 };
 
 //練習スケ変更ページのステイト
-export type NoticeActionState = {
+export type WebsiteNoticeActionState = {
   error?: string;
   values?: {
     title?: string;

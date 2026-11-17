@@ -1,0 +1,403 @@
+// tests/club-invitation-schema.integration.test.ts
+// 招待のDB制約を、環境変数ファイルの読み込み・Prisma原文ログなしで検証する。
+
+import { randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { Client, DatabaseError } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+
+import { normalizeEmail } from "@/domain/shared/email";
+import type { ClubInvitationStatus } from "@/types/prisma";
+
+const describeDatabase =
+  process.env.RUN_DB_INTEGRATION_TESTS === "1" ? describe : describe.skip;
+
+const activeStatuses = [
+  "PREPARING", "READY_TO_SEND", "SENT", "EMAIL_FAILED",
+] as const satisfies readonly ClubInvitationStatus[];
+
+type InvitationSeed = {
+  id: string;
+  clubId: string;
+  email: string;
+  status: ClubInvitationStatus;
+  tokenHash: string;
+  expiresAt: Date;
+  membershipId: string | null;
+  invitedByMembershipId: string;
+  claimToken: string | null;
+  leaseExpiresAt: Date | null;
+};
+
+describeDatabase("ClubInvitation DB制約", () => {
+  const clubAId = randomUUID();
+  const clubBId = randomUUID();
+  const ownerAId = randomUUID();
+  const ownerBId = randomUUID();
+  const ownerAMembershipId = randomUUID();
+  const ownerBMembershipId = randomUUID();
+  const future = new Date("2099-01-01T00:00:00.000Z");
+  let db: Client | undefined;
+  let connected = false;
+  let testSavepointActive = false;
+  let preflightSql: string;
+
+  function connection(): Client {
+    if (!db) throw new Error("DBテスト接続が準備されていません。");
+    return db;
+  }
+
+  async function createInvitation(overrides: Partial<InvitationSeed> = {}) {
+    const data: InvitationSeed = {
+      id: randomUUID(),
+      clubId: clubAId,
+      email: `${randomUUID()}@example.test`,
+      status: "PREPARING",
+      tokenHash: randomBytes(32).toString("hex"),
+      expiresAt: future,
+      membershipId: null,
+      invitedByMembershipId: ownerAMembershipId,
+      claimToken: null,
+      leaseExpiresAt: null,
+      ...overrides,
+    };
+    await connection().query(`
+      INSERT INTO "ClubInvitation" (
+        "id", "clubId", "email", "role", "status", "tokenHash", "expiresAt",
+        "membershipId", "invitedByMembershipId", "claimToken", "leaseExpiresAt", "updatedAt"
+      ) VALUES ($1, $2, $3, 'MEMBER', $4, $5, $6, $7, $8, $9, $10, now())
+    `, [
+      data.id, data.clubId, data.email, data.status, data.tokenHash, data.expiresAt,
+      data.membershipId, data.invitedByMembershipId, data.claimToken, data.leaseExpiresAt,
+    ]);
+    return data;
+  }
+
+  async function createInvitedMembership(clubId = clubAId) {
+    const userId = randomUUID();
+    const id = randomUUID();
+    await connection().query(`
+      INSERT INTO "AppUser" ("id", "email", "updatedAt") VALUES ($1, $2, now())
+    `, [userId, `${userId}@example.test`]);
+    await connection().query(`
+      INSERT INTO "ClubMembership" ("id", "clubId", "userId", "role", "status", "updatedAt")
+      VALUES ($1, $2, $3, 'MEMBER', 'INVITED', now())
+    `, [id, clubId, userId]);
+    return { id, userId };
+  }
+
+  // 予期した違反の原文・detail・入力値をアサーションへ渡さない。
+  // SAVEPOINTで制約違反後も同じテストtransactionを利用できるようにする。
+  async function expectConstraintViolation(
+    operation: () => Promise<unknown>,
+    code: string,
+    constraint: string,
+  ) {
+    await connection().query("SAVEPOINT constraint_check");
+    let failure: { code: string | undefined; constraint: string | undefined } | null = null;
+    try {
+      await operation();
+    } catch (error) {
+      if (error instanceof DatabaseError) {
+        failure = { code: error.code, constraint: error.constraint };
+      } else {
+        throw new Error("DB制約テストで想定外のエラーが発生しました。");
+      }
+    } finally {
+      await connection().query("ROLLBACK TO SAVEPOINT constraint_check");
+      await connection().query("RELEASE SAVEPOINT constraint_check");
+    }
+    expect(failure).toEqual({ code, constraint });
+  }
+
+  beforeAll(async () => {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) throw new Error("DBテストにはDATABASE_URLの設定が必要です。");
+    db = new Client({ connectionString: databaseUrl });
+    try {
+      await db.connect();
+    } catch {
+      throw new Error("DBテスト接続に失敗しました。");
+    }
+    connected = true;
+    await db.query("BEGIN");
+
+    // DBのlocaleとJavaScriptの小文字化の差も含め、既存データを先に確認する。
+    const existing = await db.query<{ email: string }>(`
+      SELECT "email" FROM "AppUser" WHERE "email" IS NOT NULL
+      UNION ALL
+      SELECT "email" FROM "ClubInvitation"
+    `);
+    const inconsistentCount = existing.rows.reduce(
+      (count, row) => count + Number(row.email !== normalizeEmail(row.email)), 0,
+    );
+    expect(inconsistentCount, "既存emailの正規化不整合件数").toBe(0);
+
+    const migration = readFileSync(new URL(
+      "../prisma/migrations/20261009000000_f05_invitation_processing_lease/migration.sql",
+      import.meta.url,
+    ), "utf8");
+    const preflight = migration.match(/DO \$f05_email_preflight\$[\s\S]*?\$f05_email_preflight\$;/)?.[0];
+    if (!preflight) throw new Error("migrationのemail事前確認を取得できません。");
+    preflightSql = preflight;
+    await db.query(preflightSql);
+
+    await db.query(`
+      INSERT INTO "AppUser" ("id", "email", "updatedAt")
+      VALUES ($1, $2, now()), ($3, $4, now())
+    `, [ownerAId, `${ownerAId}@example.test`, ownerBId, `${ownerBId}@example.test`]);
+    await db.query(`
+      INSERT INTO "Club" ("id", "name", "slug", "updatedAt")
+      VALUES ($1, 'F05 Club A', $2, now()), ($3, 'F05 Club B', $4, now())
+    `, [clubAId, `f05-a-${clubAId}`, clubBId, `f05-b-${clubBId}`]);
+    await db.query(`
+      INSERT INTO "ClubMembership" ("id", "clubId", "userId", "role", "status", "updatedAt")
+      VALUES ($1, $2, $3, 'OWNER', 'ACTIVE', now()), ($4, $5, $6, 'OWNER', 'ACTIVE', now())
+    `, [ownerAMembershipId, clubAId, ownerAId, ownerBMembershipId, clubBId, ownerBId]);
+  });
+
+  // suite全体もtransactionで囲み、setup途中の失敗でもfixtureを残さない。
+  beforeEach(async () => {
+    await connection().query("SAVEPOINT invitation_test");
+    testSavepointActive = true;
+  });
+  afterEach(async () => {
+    if (!testSavepointActive) return;
+    try {
+      await connection().query("ROLLBACK TO SAVEPOINT invitation_test");
+      await connection().query("RELEASE SAVEPOINT invitation_test");
+    } finally {
+      testSavepointActive = false;
+    }
+  });
+
+  afterAll(async () => {
+    if (!db) return;
+    try {
+      if (connected) await db.query("ROLLBACK");
+    } finally {
+      await db.end();
+    }
+  });
+
+  it("CHECK・index・同一クラブtrigger・RLS・公開API制限が維持される", async () => {
+    const indexes = await connection().query<{ indexname: string; indexdef: string }>(`
+      SELECT indexname, indexdef FROM pg_indexes
+      WHERE schemaname = 'public' AND tablename = 'ClubInvitation'
+    `);
+    const definitions = new Map(indexes.rows.map((row) => [row.indexname, row.indexdef]));
+    for (const name of [
+      "ClubInvitation_active_email_key", "ClubInvitation_claimToken_key",
+      "ClubInvitation_tokenHash_key", "ClubInvitation_membershipId_key",
+    ]) {
+      expect(definitions.get(name)).toContain("CREATE UNIQUE INDEX");
+    }
+    const activeIndex = definitions.get("ClubInvitation_active_email_key") ?? "";
+    expect(activeIndex).toContain("lower(email)");
+    expect(activeIndex).toContain("WHERE");
+    for (const status of activeStatuses) expect(activeIndex).toContain(`'${status}'`);
+    for (const status of ["ACCEPTED", "CANCELLED", "EXPIRED"]) {
+      expect(activeIndex).not.toContain(`'${status}'`);
+    }
+    expect(definitions.get("ClubInvitation_clubId_status_expiresAt_idx"))
+      .toMatch(/\("clubId", status, "expiresAt"\)/);
+
+    const check = await connection().query<{ convalidated: boolean }>(`
+      SELECT convalidated FROM pg_constraint
+      WHERE conrelid = 'public."ClubInvitation"'::regclass
+        AND conname = 'ClubInvitation_claim_pair_check' AND contype = 'c'
+    `);
+    expect(check.rows).toEqual([{ convalidated: true }]);
+    const triggers = await connection().query<{ tgname: string }>(`
+      SELECT tgname FROM pg_trigger
+      WHERE tgrelid = 'public."ClubInvitation"'::regclass
+        AND NOT tgisinternal AND tgenabled IN ('O', 'A')
+    `);
+    expect(triggers.rows.map((row) => row.tgname)).toEqual(expect.arrayContaining([
+      "ClubInvitation_membership_club_match", "ClubInvitation_club_id_immutable",
+    ]));
+    const rls = await connection().query<{ relrowsecurity: boolean }>(`
+      SELECT relrowsecurity FROM pg_class WHERE oid = 'public."ClubInvitation"'::regclass
+    `);
+    expect(rls.rows).toEqual([{ relrowsecurity: true }]);
+    const privileges = await connection().query<{
+      role_name: string; table_access: boolean; column_access: boolean;
+    }>(`
+      SELECT role_name,
+        has_table_privilege(role_name, 'public."ClubInvitation"',
+          'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') AS table_access,
+        has_any_column_privilege(role_name, 'public."ClubInvitation"',
+          'SELECT,INSERT,UPDATE,REFERENCES') AS column_access
+      FROM unnest(ARRAY['anon', 'authenticated']) AS roles(role_name)
+      ORDER BY role_name
+    `);
+    expect(privileges.rows).toEqual([
+      { role_name: "anon", table_access: false, column_access: false },
+      { role_name: "authenticated", table_access: false, column_access: false },
+    ]);
+  });
+
+  it.each(activeStatuses)("%sは同クラブ・同emailの有効招待と重複できない", async (status) => {
+    const original = await createInvitation({ status });
+    await expectConstraintViolation(
+      () => createInvitation({ email: original.email }),
+      "23505", "ClubInvitation_active_email_key",
+    );
+  });
+
+  it("大小文字だけ異なるemailも既存の部分uniqueで拒否する", async () => {
+    const original = await createInvitation();
+    await expectConstraintViolation(
+      () => createInvitation({ email: original.email.toUpperCase() }),
+      "23505", "ClubInvitation_active_email_key",
+    );
+  });
+
+  it("同emailでも別クラブには招待できる", async () => {
+    const original = await createInvitation();
+    await createInvitation({
+      clubId: clubBId, email: original.email, invitedByMembershipId: ownerBMembershipId,
+    });
+  });
+
+  it.each(["CANCELLED", "EXPIRED", "ACCEPTED"] as const)(
+    "%sの履歴は新しい有効招待を妨げない", async (status) => {
+      const history = await createInvitation({ status });
+      await createInvitation({ email: history.email });
+    },
+  );
+
+  it("期限を過ぎただけのSENTはstatus変更まで部分uniqueの対象である", async () => {
+    const original = await createInvitation({ status: "SENT", expiresAt: new Date(0) });
+    await expectConstraintViolation(
+      () => createInvitation({ email: original.email }),
+      "23505", "ClubInvitation_active_email_key",
+    );
+    await connection().query('UPDATE "ClubInvitation" SET "status" = \'EXPIRED\' WHERE "id" = $1', [original.id]);
+    await createInvitation({ email: original.email });
+  });
+
+  it("claim両方NULL・両方設定・両方解除を許可する", async () => {
+    const unclaimed = await createInvitation();
+    await createInvitation();
+    await createInvitation({ claimToken: randomUUID(), leaseExpiresAt: future });
+    await connection().query(`
+      UPDATE "ClubInvitation" SET "claimToken" = $1, "leaseExpiresAt" = $2 WHERE "id" = $3
+    `, [randomUUID(), future, unclaimed.id]);
+    await connection().query(`
+      UPDATE "ClubInvitation" SET "claimToken" = NULL, "leaseExpiresAt" = NULL WHERE "id" = $1
+    `, [unclaimed.id]);
+    const saved = await connection().query<{ claimToken: string | null; leaseExpiresAt: Date | null }>(`
+      SELECT "claimToken", "leaseExpiresAt" FROM "ClubInvitation" WHERE "id" = $1
+    `, [unclaimed.id]);
+    expect(saved.rows).toEqual([{ claimToken: null, leaseExpiresAt: null }]);
+  });
+
+  it.each(["claimToken", "leaseExpiresAt"] as const)("%sだけのINSERT・UPDATE・片側解除を拒否する", async (field) => {
+    const pair = field === "claimToken"
+      ? { claimToken: randomUUID(), leaseExpiresAt: null }
+      : { claimToken: null, leaseExpiresAt: future };
+    await expectConstraintViolation(
+      () => createInvitation(pair), "23514", "ClubInvitation_claim_pair_check",
+    );
+    const unclaimed = await createInvitation();
+    const claimed = await createInvitation({ claimToken: randomUUID(), leaseExpiresAt: future });
+    for (const id of [unclaimed.id, claimed.id]) {
+      await expectConstraintViolation(
+        () => connection().query(`
+          UPDATE "ClubInvitation" SET "claimToken" = $1, "leaseExpiresAt" = $2 WHERE "id" = $3
+        `, [pair.claimToken, pair.leaseExpiresAt, id]),
+        "23514", "ClubInvitation_claim_pair_check",
+      );
+    }
+  });
+
+  it("claimTokenの重複を拒否する", async () => {
+    const claimToken = randomUUID();
+    await createInvitation({ claimToken, leaseExpiresAt: future });
+    await expectConstraintViolation(
+      () => createInvitation({ claimToken, leaseExpiresAt: future }),
+      "23505", "ClubInvitation_claimToken_key",
+    );
+  });
+
+  it("tokenHashのuniqueを維持する", async () => {
+    const original = await createInvitation();
+    await expectConstraintViolation(
+      () => createInvitation({ tokenHash: original.tokenHash }),
+      "23505", "ClubInvitation_tokenHash_key",
+    );
+  });
+
+  it("membershipIdとMembershipのclubId/userIdのuniqueを維持する", async () => {
+    const member = await createInvitedMembership();
+    await createInvitation({ membershipId: member.id });
+    await expectConstraintViolation(
+      () => createInvitation({ membershipId: member.id }),
+      "23505", "ClubInvitation_membershipId_key",
+    );
+    await expectConstraintViolation(
+      () => connection().query(`
+        INSERT INTO "ClubMembership" ("id", "clubId", "userId", "updatedAt")
+        VALUES ($1, $2, $3, now())
+      `, [randomUUID(), clubAId, member.userId]),
+      "23505", "ClubMembership_clubId_userId_key",
+    );
+  });
+
+  it("別クラブMembershipのINSERT・UPDATE紐付けを拒否する", async () => {
+    await expectConstraintViolation(
+      () => createInvitation({ membershipId: ownerBMembershipId }),
+      "23514", "ClubInvitation_membership_club_match",
+    );
+    const original = await createInvitation();
+    await expectConstraintViolation(
+      () => connection().query('UPDATE "ClubInvitation" SET "membershipId" = $1 WHERE "id" = $2', [ownerBMembershipId, original.id]),
+      "23514", "ClubInvitation_membership_club_match",
+    );
+  });
+
+  it("別クラブの招待者とclubId変更を拒否する", async () => {
+    await expectConstraintViolation(
+      () => createInvitation({ invitedByMembershipId: ownerBMembershipId }),
+      "23503", "ClubInvitation_invitedByMembershipId_clubId_fkey",
+    );
+    const original = await createInvitation();
+    await expectConstraintViolation(
+      () => connection().query('UPDATE "ClubInvitation" SET "clubId" = $1 WHERE "id" = $2', [clubBId, original.id]),
+      "23514", "ClubInvitation_club_id_immutable",
+    );
+  });
+
+  it("招待先INVITED Membership削除後も履歴とAppUserを残す", async () => {
+    const member = await createInvitedMembership();
+    const invitation = await createInvitation({ membershipId: member.id, status: "CANCELLED" });
+    await connection().query('DELETE FROM "ClubMembership" WHERE "id" = $1', [member.id]);
+    const saved = await connection().query<{ membershipId: string | null; status: ClubInvitationStatus }>(`
+      SELECT "membershipId", "status" FROM "ClubInvitation" WHERE "id" = $1
+    `, [invitation.id]);
+    expect(saved.rows).toEqual([{ membershipId: null, status: "CANCELLED" }]);
+    const user = await connection().query<{ exists: boolean }>(`
+      SELECT EXISTS(SELECT 1 FROM "AppUser" WHERE "id" = $1) AS exists
+    `, [member.userId]);
+    expect(user.rows).toEqual([{ exists: true }]);
+  });
+
+  describe.each(["AppUser", "ClubInvitation"] as const)("%sのmigration事前確認", (table) => {
+    it.each(["uppercase", "fullwidth", "whitespace"] as const)("%sの不整合を値の出力なしで拒否する", async (variant) => {
+      const canonical = `${randomUUID()}@example.test`;
+      const email = variant === "uppercase" ? canonical.toUpperCase()
+        : variant === "fullwidth" ? canonical.replace(/[!-~]/g, (char) => String.fromCharCode(char.charCodeAt(0) + 0xfee0))
+        : `\t\r\n\u1680\u2028\u2029\uFEFF${canonical}\uFEFF\u3000\n`;
+      if (table === "AppUser") {
+        await connection().query('INSERT INTO "AppUser" ("id", "email", "updatedAt") VALUES ($1, $2, now())', [randomUUID(), email]);
+      } else {
+        await createInvitation({ email });
+      }
+      await expectConstraintViolation(
+        () => connection().query(preflightSql),
+        "23514", `F05_${table}_email_normalization`,
+      );
+    });
+  });
+});

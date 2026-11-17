@@ -38,7 +38,7 @@ export function SessionApplicationForm() {
 const formKey = JSON.stringify(state.values ?? {});
 
 //SessionApplicationFormのリターン
-//キーを持たせ、キーが変わった送信後にフォームの内容を再度作り直すように指示している（state.valuesが変わると、SessionApplicationFormInnerが再レンダリングされるため）
+//キーを持たせ、キー（送信ごとに変わる）が変わった送信後にフォームの内容をまっさらな形で作り直すように指示している（state.valuesが変わると、SessionApplicationFormInnerが再レンダリングして送信内容を再表示しようとするため）
   return (
     <SessionApplicationFormInner
       key={formKey}

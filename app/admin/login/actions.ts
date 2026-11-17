@@ -3,6 +3,7 @@
 
 "use server";
 
+import { isWebsiteAdminUserId } from "@/lib/auth/admin";
 import { redirect } from "next/navigation";
 import { createClient } from "@/src/infrastructure/supabase/server";
 import { getRequestMeta } from "@/lib/security/request";
@@ -65,28 +66,57 @@ export async function loginAdmin(
 
 
   //次にメアドとPWがあってるかを確認する
-  const { error } = await supabase.auth.signInWithPassword({
-    email,
-    password,
-  });
+const {
+  data: signInData,
+  error: signInError,
+} = await supabase.auth.signInWithPassword({
+  email,
+  password,
+});
 
-  if (error) {
-    try {
-      await saveLoginSubmissionLog({
-        ipHash: rateLimit.ipHash,
-        emailHash: rateLimit.emailHash,
-        userAgent,
-        result: "FAILED",
-        reason: "INVALID_CREDENTIALS",
-      });
-    } catch (logError) {
-      console.error("ログイン失敗ログの保存に失敗しました", logError);
-    }
-
-    return {
-      error: LOGIN_INVALID_MESSAGE,
-    };
+if (signInError || !signInData.user) {
+  try {
+    await saveLoginSubmissionLog({
+      ipHash: rateLimit.ipHash,
+      emailHash: rateLimit.emailHash,
+      userAgent,
+      result: "FAILED",
+      reason: "INVALID_CREDENTIALS",
+    });
+  } catch (logError) {
+    console.error("ログイン失敗ログの保存に失敗しました", logError);
   }
+
+  return {
+    error: LOGIN_INVALID_MESSAGE,
+  };
+}
+
+// 認証には成功したが、HP管理権限がない場合
+if (!isWebsiteAdminUserId(signInData.user.id)) {
+  // 管理者ログインとして作られたセッションを破棄する
+  await supabase.auth.signOut();
+
+  try {
+    await saveLoginSubmissionLog({
+      ipHash: rateLimit.ipHash,
+      emailHash: rateLimit.emailHash,
+      userAgent,
+      result: "FAILED",
+      reason: "NOT_WEBSITE_ADMIN",
+    });
+  } catch (logError) {
+    console.error(
+      "HP管理権限なしログインの記録に失敗しました",
+      logError
+    );
+  }
+
+  // 管理者登録の有無を外部へ知らせない
+  return {
+    error: LOGIN_INVALID_MESSAGE,
+  };
+}
 
   try {
     await saveLoginSubmissionLog({

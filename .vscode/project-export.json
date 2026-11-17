@@ -1,0 +1,9 @@
+{
+  "forceInclude": [],
+  "forceExclude": [
+    ".env.local",
+    ".env.prod",
+    "tsconfig.tsbuildinfo",
+    ".DS_Store"
+  ]
+}

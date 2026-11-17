@@ -1,0 +1,836 @@
+// e2e/event-practice-batch.spec.ts
+// F12粒度17：実ブラウザーのUI受入。DB上限・自然並列・rollbackは既存flow試験を使う。
+import type {
+  ClubEvent,
+} from "@prisma/client";
+import type {
+  Page,
+  Request as BrowserRequest,
+  Route,
+} from "@playwright/test";
+import {
+  test, // 実Auth・所有クラブ・専用DB・独立contextを提供するcontent専用fixture
+  expect, // content専用fixtureと同じPlaywrightの期待値検証API
+} from "./content-fixtures";
+import type {
+  ContentScenario, // 独立contextでcontentを操作する契約型
+} from "./content-fixtures";
+import {
+  parseEventPracticeBatchFormData as parseSaveForm, // 保存FormDataの構造と値を検証する関数
+} from "../domain/club/event/event-practice-batch-form";
+
+/**
+ * このケースが所有するイベントの初期値。日時はUTCの固定文字列で指定する。
+ */
+type Seed = { // イベント準備入力の型
+  suffix: string; // ケース固有の題名へ追加する文字列型
+  start: string; // UTC開始日時の文字列型
+  end: string | null; // UTC終了日時または未設定の型
+  status?: "DRAFT" | "PUBLISHED"; // 準備する公開状態の型
+  practice?: boolean; // F11の固定保存列を使うか示す真偽値型
+  meeting?: string; // UTC集合日時の文字列型
+};
+
+/**
+ * 既存content fixtureに、当該ケースのseedと生成行の読取だけを加えた契約。
+ */
+type BatchScenario = ContentScenario & { // content操作と一括作成確認をまとめる型
+  month: string; // 表示対象月の文字列型
+  seed: (input: Seed) => Promise<string>; // 所有イベントを準備しIDを返す関数型 / 非同期文字列型
+  generated: () => Promise<ClubEvent[]>; // seedを除いた生成イベントを返す関数型 / DBイベント配列の非同期型
+};
+
+/**
+ * ガード済み所有クラブだけに準備し、題名prefixの行と当該月の新しい完了記録を回収する。
+ * 認可fixtureの業務DB非更新契約は使わず、content fixtureの実ログインを再利用する。
+ */
+async function scenario( // ケース専用の準備・検証・回収を実行する関数
+  content: ContentScenario, // 所有DBと実画面の契約型
+  month: string, // 対象月の文字列型
+  check: (batch: BatchScenario) => Promise<void>, // 所有シナリオを検証する関数型 / 非同期完了型
+  timezone = "Asia/Tokyo",
+): Promise<void> { // 非同期完了型
+  test.setTimeout(90_000); // 準備・障害再送・回収を含めたケース期限を設定するメソッド
+  const { database, data } = content;
+  const clubId = data.clubs.a.id;
+  const scope = {
+    clubId,
+    targetMonth: month,
+    executedByMembershipId: data.actors.aOwner.membershipId,
+  };
+  const seeds: string[] = []; // このケースが登録したseed IDの文字列配列型
+  let original: {
+    timezone: string; // 文字列型
+    updatedAt: Date // 日時型
+  } | undefined; // 復元用のtimezone文字列・更新日時型 / 未設定の型
+  const previous = new Set<string>(); // 既存完了記録のIDを保持する文字列集合のコンストラクター
+  let prepared = false;
+  try {
+    original = await database.club.findFirstOrThrow({ // 所有クラブの復元値を取得するメソッド
+      where: {
+        id: clubId,
+        slug: data.clubs.a.slug
+      },
+      select: {
+        timezone: true,
+        updatedAt: true
+      },
+    });
+    for (const row of await database.clubEventBatchOperation.findMany({ // 所有月の既存記録を取得するメソッド
+      where: scope,
+      select: { id: true },
+    })) {
+      previous.add(row.id); // 既存記録を回収対象から除く集合メソッド
+    }
+    prepared = true;
+    await database.club.update({ // 当該所有クラブの表示timezoneを準備するメソッド
+      where: { id: clubId },
+      data: { timezone },
+    });
+    await check({ // 所有する画面・DBだけを検証する関数
+      ...content,
+      month,
+      /**
+       * prefixと所有クラブ・実行所属を固定して、確認に必要な最小イベントを準備する。
+       */
+      async seed(input) { // イベント準備の非同期メソッド
+        const row = await database.clubEvent.create({ // 所有するイベントを一件作るメソッド
+          data: {
+            clubId,
+            createdByMembershipId: data.actors.aOwner.membershipId,
+            title: content.title + input.suffix,
+            content: input.practice ? null : "F12架空の複製本文",
+            genre: input.practice ? "PRACTICE" : "PRACTICE_GAME",
+            targetRoles: ["OWNER"],
+            status: input.status ?? "PUBLISHED",
+            startAt: new Date(input.start), // 固定UTC日時のコンストラクター
+            endAt: input.end === null ? null : new Date(input.end), // 未設定または固定UTC日時のコンストラクター
+            meetingAt: input.meeting ? new Date(input.meeting) : null, // 固定UTC集合日時のコンストラクター
+          },
+          select: { id: true },
+        });
+        seeds.push(row.id); // このケースが所有するseed IDを登録するメソッド
+        return row.id;
+      },
+      /**
+       * このケースのprefixを持ち、直接準備したID以外の保存行だけを照合する。
+       */
+      async generated() { // 画面操作が新規作成したイベントを取得するメソッド
+        return database.clubEvent.findMany({ // 所有クラブ・prefix・seed除外で行を取得するメソッド
+          where: {
+            clubId,
+            title: { startsWith: content.title },
+            id: { notIn: seeds },
+          },
+          orderBy: { startAt: "asc" },
+        });
+      },
+    });
+  } catch {
+    throw new Error("F12_BATCH_UI_FAILED"); // SQL・payload・秘密を含めない固定例外のコンストラクター
+  } finally {
+    if (prepared &&
+      original) {
+      try {
+        const records = await database.clubEventBatchOperation.findMany({ // 同じ所有scopeの終了記録を取得するメソッド
+          where: scope,
+          select: { id: true },
+        });
+        const owned = records.filter( // 準備前から存在した記録を除くメソッド
+          /**
+           * このケース中に追加された、同クラブ・月・所属の記録だけを回収する。
+           */
+          (row) => !previous.has(row.id), // 所有記録の判定コールバック / 既存IDの照合メソッド
+        );
+        await database.$transaction([ // イベント・記録の回収とtimezone復元を一体で実行するメソッド
+          database.clubEvent.deleteMany({ // 当該クラブとランダムprefixのイベントだけを回収するメソッド
+            where: {
+              clubId,
+              title: { startsWith: content.title }
+            },
+          }),
+          database.clubEventBatchOperation.deleteMany({ // このケースで追加した完了記録だけを回収するメソッド
+            where: {
+              ...scope,
+              id: {
+                in: owned.map( // 所有記録からIDを抽出するメソッド
+                  /**
+                   * 回収する記録のIDだけを取り出す。
+                   */
+                  (row) => row.id, // 記録IDを抽出するコールバック
+                ),
+              },
+            },
+          }),
+          database.club.update({ // 元のtimezoneと更新日時を復元するメソッド
+            where: { id: clubId },
+            data: original,
+          }),
+        ]);
+      } catch {
+        throw new Error("F12_BATCH_UI_CLEANUP_FAILED"); // 回収失敗を原文なしで通知する例外のコンストラクター
+      }
+    }
+  }
+}
+
+/**
+ * 保存列・実行者・完了記録を照合し、関連行や配送の作成を許さない。
+ */
+async function saved( // 生成結果と通知非実行を検証する関数
+  batch: BatchScenario, // 一括作成確認用の契約型
+  count: number, // 期待件数の数値型
+  operation: "COPY_PREVIOUS_MONTH" | "CREATE_PRACTICE_BATCH", // 完了記録の操作種別型
+): Promise<void> { // 非同期完了型
+  const rows = await batch.generated(); // seedを除く生成イベントの取得関数
+  expect(rows.length).toBe(count); // 期待値生成関数 / 生成件数の比較メソッド
+  const ids = [];
+  for (const row of rows) {
+    ids.push(row.id); // 生成行の所有IDを登録するメソッド
+    expect(row.status).toBe("DRAFT"); // 期待値生成関数 / 下書き固定の比較メソッド
+    expect(row.createdByMembershipId === batch.data.actors.aOwner.membershipId).toBe(true); // 期待値生成関数 / 実行所属の一致検証メソッド
+    expect(row.firstPublishedAt === null && // 期待値を生成する関数
+      row.readRequiredAt === null).toBe(true); // 期待値生成関数 / 公開関連日時の未設定検証メソッド
+    expect(row.updatedByMembershipId === batch.data.actors.aOwner.membershipId).toBe(true); // 【修正】期待値生成関数 / 更新者が今回の実行所属であることを検証するメソッド
+  }
+  const where = {
+    clubId: batch.data.clubs.a.id,
+    eventId: { in: ids }
+  };
+  expect(await batch.database.clubEventAttachment.count({ where })).toBe(0); // 期待値生成関数 / 所有添付件数の取得・比較メソッド
+  expect(await batch.database.clubEventRead.count({ where })).toBe(0); // 期待値生成関数 / 所有既読件数の取得・比較メソッド
+  expect(await batch.database.clubEventMemo.count({ where })).toBe(0); // 期待値生成関数 / 所有メモ件数の取得・比較メソッド
+  expect(await batch.database.clubLineDelivery.count({ where })).toBe(0); // 期待値生成関数 / 所有LINE履歴件数の取得・比較メソッド
+  const receipts = await batch.database.clubEventBatchOperation.findMany({ // 所有クラブ・対象月・実行所属で完了記録を読むメソッド
+    where: {
+      clubId: batch.data.clubs.a.id,
+      targetMonth: batch.month,
+      executedByMembershipId: batch.data.actors.aOwner.membershipId,
+      operation,
+    },
+  });
+  expect(receipts.length).toBe(1); // 期待値生成関数 / 完了記録の一件性検証メソッド
+  expect(receipts[0].createdCount).toBe(count); // 期待値生成関数 / 記録と生成件数の一致検証メソッド
+  const status = await batch.control({ action: "status" }) as { requests: number }; // 所有stubの制御関数 / 配送要求件数の応答型
+  expect(status.requests).toBe(0); // 期待値生成関数 / 外部配送要求なしの検証メソッド
+}
+
+/**
+ * Actionのmultipartから業務FormDataだけを正規化し、前回state・署名付きbound値は比較・表示しない。
+ */
+async function businessPayload(request: BrowserRequest): Promise<string> { // 実ブラウザー要求型 / 業務入力を比較用文字列へ変換する非同期関数
+  const bytes = request.postDataBuffer(); // 要求本文をメモリ内で取得するメソッド
+  if (!bytes) {
+    throw new Error("F12_BATCH_PAYLOAD_FAILED"); // 本文なしを固定コードで拒否する例外のコンストラクター
+  }
+  const form = await new Request("http://localhost/", { // multipart解析専用の標準Requestコンストラクター（通信しない）
+    method: "POST",
+    headers: { "content-type": request.headers()["content-type"] }, // 元要求の境界headerを取得するメソッド
+    body: new Uint8Array(bytes), // 本文を独立したバイト配列へ複製するコンストラクター
+  }).formData(); // multipartをフォーム値へ解析するメソッド
+  const entries: string[][] = []; // 項目名と文字列値の比較用配列型
+  for (const [name, value] of form.entries()) { // 符号化されたフォーム項目を列挙するメソッド
+    const key = name.replace(/^_?\d+_/u, ""); // ReactのFormData接頭番号だけを除くメソッド
+    if (key === "requestId" ||
+      key === "previewFingerprint" ||
+      key === "targetMonth" ||
+      key === "selectedEventIds" ||
+      key === "selectedDates" ||
+      key === "title" ||
+      key === "startTime" ||
+      key === "endTime" ||
+      key === "periodStart" ||
+      key === "periodEnd" ||
+      key === "weekdays" ||
+      key === "location" ||
+      key === "meetingTime" ||
+      key === "meetingLocation" ||
+      key === "targetRoles") {
+      if (typeof value !== "string") {
+        throw new Error("F12_BATCH_PAYLOAD_FAILED"); // File混入を固定コードで拒否する例外のコンストラクター
+      }
+      entries.push([key, value]); // 比較する業務値だけを登録するメソッド
+    }
+  }
+  expect(entries.filter( // 期待値生成関数 / 操作ID項目だけを選ぶメソッド
+    /**
+     * 部分比較だけで再送一致と誤判定しないよう、操作IDの存在を必須にする。
+     */
+    ([key]) => key === "requestId", // 操作IDを判定するコールバック
+  ).length).toBe(1); // 操作IDの一意な存在を検証するメソッド
+  expect(entries.filter( // 期待値生成関数 / 照合値項目だけを選ぶメソッド
+    /**
+     * preview照合値も保存FormDataに含まれることを確認する。
+     */
+    ([key]) => key === "previewFingerprint", // 照合値を判定するコールバック
+  ).length).toBe(1); // 照合値の一意な存在を検証するメソッド
+  entries.sort( // フォーム項目の順序に依存しない比較にするメソッド
+    /**
+     * 項目名と値の順序を固定する。
+     */
+    (left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)), // 並べ替えコールバック / 配列の直列化関数 / 文字列比較メソッド
+  );
+  return JSON.stringify(entries); // 比較値だけをメモリ上で直列化する関数
+}
+
+/**
+ * 実保存成功応答を確認した後、needsReloadのAction結果だけをブラウザーへ注入する。
+ * Next内部の再検証失敗そのものは注入しない。Flight形状が変わったら固定エラーで失敗する。
+ */
+async function savedResponse( // 実保存後にneedsReload結果を注入する関数
+  route: Route, // 要求捕捉の型
+  batch: BatchScenario, // 所有する一括作成確認の契約型
+  practice: boolean, // 定期練習の保存か示す真偽値型
+): Promise<void> { // 非同期完了型
+  const response = await route.fetch({ maxRedirects: 0 }); // 実Actionへ送信し、redirect先へ自動再送しないメソッド
+  const redirect = response.headers()["x-action-redirect"]; // 実Actionの成功遷移headerを取得するメソッド
+  const destination = batch.path("events", "", "a", true); // 所有クラブのパスを生成する関数
+  expect(typeof redirect === "string" && // 期待値を生成する関数
+    redirect.startsWith(destination + "?")).toBe(true); // 期待値生成関数 / 同クラブ一覧への成功遷移の照合・比較メソッド
+  await saved(batch, 1, practice ? "CREATE_PRACTICE_BATCH" : "COPY_PREVIOUS_MONTH"); // 実保存結果と関連行非作成を検証する関数
+  const match = /^0:(\{[^\n]*\})$/mu.exec(await response.text()); // Flightのルート行だけを取得する正規表現メソッド / 本文をメモリへ取得するメソッド
+  if (!match) {
+    throw new Error("F12_BATCH_FLIGHT_CHANGED"); // 未知のFlight形式を拒否する固定例外のコンストラクター
+  }
+  const root = JSON.parse(match[1]); // 実応答のルートとbuild IDをメモリ上で解析する関数
+  if (!root ||
+    typeof root.b !== "string") {
+    throw new Error("F12_BATCH_FLIGHT_CHANGED"); // build ID未確認を拒否する固定例外のコンストラクター
+  }
+  const form = new FormData(); // 実送信した保存入力を復元するフォームコンストラクター
+  const entries = JSON.parse(await businessPayload(route.request())) as string[][]; // 要求取得メソッド / 業務入力の正規化関数 / JSON解析関数 / 文字列配列型
+  for (const [key, value] of entries) {
+    form.append(key, value); // 実送信した業務項目を復元するメソッド
+  }
+  const parsed = parseSaveForm(form); // 実保存入力の構造と値を検証する関数
+  if (!parsed.success) {
+    throw new Error("F12_BATCH_PAYLOAD_FAILED"); // 不正な保存入力の注入を拒否する固定例外のコンストラクター
+  }
+  const state = {
+    status: "success",
+    outcome: "CREATED",
+    values: parsed.data,
+    requestId: parsed.data.requestId,
+    fieldErrors: {},
+    formError: null,
+    data: {
+      targetMonth: batch.month,
+      createdCount: 1,
+      needsReload: true
+    },
+  };
+  await route.fulfill({ // 実保存済みの画面へ、再保存禁止を確認する限定応答を返すメソッド
+    status: 200,
+    headers: {
+      "content-type": "text/x-component",
+      "cache-control": "no-store"
+    },
+    body: "0:" + JSON.stringify({ // 値をメモリ上でJSONへ直列化する関数
+      b: root.b,
+      a: state,
+      f: ""
+    }) + "\n", // 同一buildのFlightルートを直列化する関数
+  });
+}
+
+/**
+ * 実POSTだけを同一origin・pathに限定し、先読みや他ページの通信を捕捉しない。
+ */
+function actionPath(page: Page): (url: URL) => boolean { // 実画面型 / URL照合関数型 / URL型 / 真偽値型
+  const current = new URL(page.url()); // 現在URLの取得メソッド / URL解析のコンストラクター
+  /**
+   * queryの内部RSC値は限定せず、originとpathを固定する。
+   */
+  return (url) => url.origin === current.origin && // 同一originを確認するURL照合コールバック
+    url.pathname === current.pathname; // URL照合のコールバック
+}
+
+/**
+ * 表示月の一覧入口から、指定した現地日付・曜日・時刻を正規入力欄へ設定する。
+ */
+async function openPractice( // 実一覧から定期練習の入力を準備する関数
+  batch: BatchScenario, // 所有シナリオ型
+  options: {
+    end?: string; // 文字列型
+    startTime?: string; // 文字列型
+    endTime?: string; // 文字列型
+    weekday?: string; // 文字列型
+    meeting?: string; // 文字列型
+    day?: string // 文字列型
+  } = {}, // 日付・時刻・曜日の任意指定型
+): Promise<void> { // 非同期完了型
+  const page = batch.admin;
+  await page.goto(batch.path("events", `?month=${batch.month}&status=PUBLISHED`, "a", true)); // 管理一覧へ移動するメソッド / 所有パスの生成関数
+  await page.getByRole("link", { // roleと名前で要素を選ぶメソッド
+    name: "定期練習を一括作成",
+    exact: true
+  }).click(); // 表示月の入口を選ぶ・操作するメソッド
+  await expect(page.getByRole("heading", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+    name: "定期練習の一括作成",
+    exact: true
+  })).toBeVisible(); // 期待値生成関数 / 入力画面の見出しを選ぶ・表示検証するメソッド
+  expect(new URL(page.url()).searchParams.get("month")).toBe(batch.month); // 期待値生成関数 / URL取得・解析・対象月取得・比較メソッド
+  const day = options.day ?? "01";
+  await page.getByLabel("期間開始日（必須）", { exact: true }).fill(`${batch.month}-${day}`); // 開始日を選ぶ・入力するメソッド
+  await page.getByLabel("期間終了日（必須）", { exact: true }).fill(options.end ?? `${batch.month}-${day}`); // 終了日を選ぶ・入力するメソッド
+  await page.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
+    name: options.weekday ?? "火曜日",
+    exact: true
+  }).check(); // 現地曜日を選ぶ・指定するメソッド
+  await page.getByLabel("タイトル（必須）", { exact: true }).fill(batch.title + "-practice"); // 所有prefixの題名を選ぶ・入力するメソッド
+  await page.getByLabel("開始時刻（必須）", { exact: true }).fill(options.startTime ?? "00:00"); // 現地開始時刻を選ぶ・入力するメソッド
+  await page.getByLabel("終了時刻（必須・同日）", { exact: true }).fill(options.endTime ?? "01:00"); // 現地終了時刻を選ぶ・入力するメソッド
+  if (options.meeting) {
+    await page.getByLabel("集合時刻（任意・同日）", { exact: true }).fill(options.meeting); // 現地集合時刻を選ぶ・入力するメソッド
+  }
+}
+
+/**
+ * 正規previewボタンから最新候補のfieldset表示まで待つ。
+ */
+async function preview(batch: BatchScenario): Promise<void> { // 所有シナリオ型 / previewを表示する非同期関数
+  await batch.admin.getByRole("button", { // roleと名前で要素を選ぶメソッド
+    name: "作成予定をpreviewする",
+    exact: true
+  }).click(); // previewボタンを選ぶ・送信するメソッド
+  await expect(batch.admin.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+    name: "作成する日を選択",
+    exact: true
+  })).toBeVisible(); // 期待値生成関数 / 最新候補のfieldsetを選ぶ・表示検証するメソッド
+}
+
+/**
+ * F11運用書M01・M04・M06・M07・M14：月初・閏日・既存一致・集合警告と固定DRAFT保存。
+ */
+test("F11 Tokyoの月初・閏日と既存一致の初期未選択を確認し、明示した2日だけ保存する", // 実ブラウザー受入ケースを登録する関数
+  /**
+   * UTCでは前日の予定と一致先を準備し、現地日付で選択して保存する。
+   */
+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
+      /**
+       * 公開済み・下書きの双方との一致と、生成後のUTC日時を照合する。
+       */
+      async (batch) => { // 所有シナリオの検証コールバック
+        await batch.seed({ // 所有イベントを準備する関数
+          suffix: "-practice",
+          start: "2028-01-31T15:00:00Z",
+          end: "2028-01-31T16:00:00Z",
+          meeting: "2028-01-31T15:30:00Z",
+          practice: true
+        }); // 月初候補と完全一致する公開予定の準備関数
+        await batch.seed({ // 所有イベントを準備する関数
+          suffix: "-practice",
+          start: "2028-02-28T15:00:00Z",
+          end: "2028-02-28T16:00:00Z",
+          meeting: "2028-02-28T15:30:00Z",
+          status: "DRAFT",
+          practice: true
+        }); // 閏日候補と完全一致する下書きの準備関数
+        await openPractice(batch, { // 実一覧から定期練習入力を準備する関数
+          end: "2028-02-29",
+          meeting: "00:30"
+        }); // 月初から月末までの共通入力を準備する関数
+        const page = batch.admin;
+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / preview前の生成行取得関数 / DB非作成の検証メソッド
+        await preview(batch); // 正規previewを送信する関数
+        await expect(page.getByText("候補件数: 5 / 選択可能: 5", { exact: true })).toBeVisible(); // 期待値生成関数 / 閏月の曜日件数を選ぶ・表示検証するメソッド
+        const group = page.getByRole("group", { // roleと名前で要素を選ぶメソッド
+          name: "作成する日を選択",
+          exact: true
+        }); // 候補選択fieldsetを取得するメソッド
+        const first = group.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
+          name: "2028-02-01：" + batch.title + "-practice",
+          exact: true
+        }); // 月初候補のcheckboxを選ぶメソッド
+        const last = group.getByRole("checkbox", { // roleと名前で要素を選ぶメソッド
+          name: "2028-02-29：" + batch.title + "-practice",
+          exact: true
+        }); // 閏日候補のcheckboxを選ぶメソッド
+        await expect(first).not.toBeChecked(); // 期待値生成関数 / 公開済み一致の初期未選択を検証するメソッド
+        await expect(last).not.toBeChecked(); // 期待値生成関数 / 下書き一致の初期未選択を検証するメソッド
+        await expect(first.locator("..")).toContainText("2028/02/01 00:00 GMT+09:00"); // 期待値生成関数 / 候補行取得メソッド / 月初の現地日時表示を検証するメソッド
+        await expect(last.locator("..")).toContainText("集合時刻が開始時刻より後です。"); // 期待値生成関数 / 候補行取得メソッド / 警告付き選択可の説明を検証するメソッド
+        for (const box of await group.getByRole("checkbox").all()) { // 候補checkboxを列挙するメソッド
+          await box.uncheck(); // 初期選択されていた他の日を解除するメソッド
+        }
+        await first.focus(); // 月初候補へキーボードfocusを移すメソッド
+        await page.keyboard.press("Space"); // 月初の既存一致候補をキーボードで明示選択するメソッド
+        await last.check(); // 閏日の既存一致候補も明示選択するメソッド
+        await expect(page.getByText("選択件数: 2", { exact: true })).toBeVisible(); // 期待値生成関数 / 明示選択件数を選ぶ・表示検証するメソッド
+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / preview段階の生成行取得関数 / DB非作成の検証メソッド
+        await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
+          name: "選択した予定を下書き作成",
+          exact: true
+        }).click(); // 保存ボタンを選ぶ・実Actionへ送信するメソッド
+        await expect(page).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=event-practice-batch-created&toastId=[0-9a-f-]+$/u); // 期待値生成関数 / 固定管理一覧遷移を検証するメソッド
+        await expect(page.getByText("定期練習の予定を下書きとして作成しました。", { exact: true })).toBeVisible(); // 期待値生成関数 / 固定toastを選ぶ・表示検証するメソッド
+        await saved(batch, 2, "CREATE_PRACTICE_BATCH"); // 完了記録と関連行非作成を確認する関数
+        const rows = await batch.generated(); // 保存した2日のDB行を取得する関数
+        expect(rows[0].startAt.toISOString()).toBe("2028-01-31T15:00:00.000Z"); // 期待値生成関数 / 月初開始UTCへの変換・比較メソッド
+        expect(rows[1].startAt.toISOString()).toBe("2028-02-28T15:00:00.000Z"); // 期待値生成関数 / 閏日開始UTCへの変換・比較メソッド
+        for (const row of rows) {
+          expect(row.genre).toBe("PRACTICE"); // 期待値生成関数 / 練習ジャンル固定を検証するメソッド
+          expect(row.content === null && // 期待値を生成する関数
+            row.belongings === null &&
+            row.notes === null).toBe(true); // 期待値生成関数 / 未入力列の未設定を検証するメソッド
+          expect(row.isAllDay).toBe(false); // 期待値生成関数 / 時刻指定固定を検証するメソッド
+          expect(row.endAt!.getTime() - row.startAt.getTime()).toBe(3_600_000); // 期待値生成関数 / 開始・終了の時刻取得メソッド / 経過一時間の比較メソッド
+          expect(row.meetingAt!.getTime() - row.startAt.getTime()).toBe(1_800_000); // 期待値生成関数 / 集合・開始の時刻取得メソッド / 警告付き集合時刻の保持を検証するメソッド
+        }
+      });
+  });
+
+/**
+ * F11運用書M08・M11：preview連打・遅い旧応答・入力変更直後の旧保存を実イベントで拒否する。
+ */
+test("F11 遅い旧previewを破棄し、入力変更と同時に古い保存フォームをsubmitしても保存しない", // 入力競合のブラウザーケースを登録する関数
+  /**
+   * 正規Actionの応答だけを保留し、入力変更通知のrevision制御を実DOMで検証する。
+   */
+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
+      /**
+       * 旧応答の到着後も候補を適用せず、新previewだけを表示する。
+       */
+      async (batch) => { // 所有シナリオの検証コールバック
+        await openPractice(batch); // 単一日の共通入力を準備する関数
+        const page = batch.admin;
+        const match = actionPath(page); // 所有Actionだけを捕捉する照合関数
+        let calls = 0;
+        let release!: () => void; // 応答保留の解放関数型
+        const gate = new Promise<void>( // 応答保留用のPromiseコンストラクター / 完了型
+          /**
+           * 共通入力の変更を終えてから旧応答を返す。
+           */
+          (resolve) => { release = resolve; }, // 解放関数を保持するコールバック
+        );
+        await page.route(match, // 所有preview要求だけを捕捉するメソッド
+          /**
+           * previewの実応答を取得し、ブラウザーへ戻す時点だけを遅らせる。
+           */
+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
+            try {
+              if (route.request().method() !== "POST") { // 要求取得・HTTP method照合メソッド
+                await route.continue(); // 対象外要求を通すメソッド
+                return;
+              }
+              calls += 1;
+              const response = await route.fetch({ maxRedirects: 0 }); // 実previewを取得するメソッド
+              await gate;
+              await route.fulfill({ response }); // 同じ実応答を変更せず返すメソッド
+            } catch {
+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
+            }
+          });
+        try {
+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
+            name: "作成予定をpreviewする",
+            exact: true
+          }).evaluate( // 正規previewボタンを選ぶ・実DOMで操作するメソッド
+            /**
+             * React再描画より前の連続submitでもpreview要求を一件に抑える。
+             */
+            (button: HTMLButtonElement) => { // DOM操作コールバック / ボタン要素型
+              button.form!.requestSubmit(button); // 正規submitイベントを送るメソッド
+              button.form!.requestSubmit(button); // 同じイベントターンで再送を試すメソッド
+            });
+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "previewを作成中…",
+            exact: true
+          })).toBeDisabled(); // 期待値生成関数 / pendingボタンを選ぶ・無効化検証するメソッド
+          await page.getByLabel("タイトル（必須）", { exact: true }).fill(batch.title + "-changed"); // 応答待ち中の共通入力を変更するメソッド
+        } finally {
+          release(); // 失敗時も保留応答を解放する関数
+        }
+        try {
+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "作成予定をpreviewする",
+            exact: true
+          })).toBeEnabled(); // 期待値生成関数 / 旧応答完了後の再preview可能性を検証するメソッド
+          await expect(page.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "作成する日を選択",
+            exact: true
+          })).toHaveCount(0); // 期待値生成関数 / 遅い旧候補の非適用を検証するメソッド
+          expect(calls).toBe(1); // 期待値生成関数 / preview連打の要求一件性を検証するメソッド
+        } finally {
+          await page.unroute(match); // 保留用の要求捕捉を解除するメソッド
+        }
+        await preview(batch); // 現在の入力で新しいpreviewを作る関数
+        let stalePosts = 0;
+        /**
+         * 入力変更直後の旧保存が遅れてDBへ届く場合も、POSTの発生そのもので検出する。
+         */
+        function countStale(request: BrowserRequest) { // 旧保存の要求件数を記録する関数 / 実ブラウザー要求型
+          if (
+            request.method() === "POST" && // 要求のHTTP methodを取得するメソッド
+            match(new URL(request.url())) // 所有pathの照合関数 / 要求URL取得メソッド / URL解析コンストラクター
+          ) {
+            stalePosts += 1;
+          }
+        }
+        page.on("request", countStale); // 要求イベントの監視メソッド / 旧保存POSTを数える関数
+        try {
+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
+            name: "選択した予定を下書き作成",
+            exact: true
+          }).evaluate( // 保存ボタンを選ぶ・実DOMで操作するメソッド
+            /**
+             * Reactの変更通知を送った直後、古いフォームの参照から同期的に保存を試す。
+             */
+            (button: HTMLButtonElement) => { // 入力と保存競合のコールバック / ボタン要素型
+              const input = document.querySelector<HTMLInputElement>('input[name="title"]')!; // 入力欄の取得メソッド / HTML入力要素型
+              const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!; // native値setterを取得するメソッド / HTML入力要素のコンストラクター
+              setter.call(input, input.value + "-latest"); // Reactが追跡する実入力値をnative setterで更新するメソッド
+              input.dispatchEvent(new Event("input", { bubbles: true })); // Reactへ入力変更を通知するメソッド / DOMイベントのコンストラクター
+              button.form!.requestSubmit(button); // 変更直後に旧フォームから正規submitを試すメソッド
+            });
+          await expect(page.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "作成する日を選択",
+            exact: true
+          })).toHaveCount(0); // 期待値生成関数 / 入力変更後の旧preview非表示を検証するメソッド
+          expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / 旧previewによるDB非作成を検証するメソッド
+          expect(await batch.database.clubEventBatchOperation.count({ // 期待値生成関数 / 完了記録の件数取得メソッド
+            where: {
+              clubId: batch.data.clubs.a.id,
+              targetMonth: batch.month
+            },
+          })).toBe(0); // 旧操作が保存されていないことを検証するメソッド
+          expect(stalePosts).toBe(0); // 期待値生成関数 / 旧previewからのPOST非発生を検証するメソッド
+        } finally {
+          page.off("request", countStale); // 要求イベントの監視解除メソッド / 旧保存POSTを数える関数
+        }
+      });
+  });
+for (const item of [
+  {
+    month: "2026-03",
+    day: "08",
+    start: "02:30",
+    end: "03:30",
+    reason: "存在しない現地時刻のため作成できません。"
+  },
+  {
+    month: "2026-11",
+    day: "01",
+    start: "01:30",
+    end: "02:30",
+    reason: "曖昧な現地時刻のため作成できません。"
+  },
+]) {
+  /**
+   * F11運用書M05・M06：gap／foldを理由付きで除外し、全件除外時は保存できない。
+   */
+  test(`F11 ${item.month} NYのDST除外日は選択できず全件除外で保存を止める`, // DST条件ごとのケースを登録する関数
+    /**
+     * 現地日時の不正を翌日や他offsetへ補正せず表示することを確認する。
+     */
+    async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
+      await scenario(content, item.month, // ケース専用の準備・回収関数
+        /**
+         * 生成不能な候補にcheckboxと理由を表示し、DBへ保存しない。
+         */
+        async (batch) => { // 所有シナリオの検証コールバック
+          await openPractice(batch, { // 実一覧から定期練習入力を準備する関数
+            day: item.day,
+            weekday: "日曜日",
+            startTime: item.start,
+            endTime: item.end
+          }); // DST日の共通入力を準備する関数
+          await preview(batch); // 正規previewを作る関数
+          await expect(batch.admin.getByRole("group", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "作成する日を選択",
+            exact: true
+          }).getByRole("checkbox")).toBeDisabled(); // 期待値生成関数 / 候補fieldset・checkboxを選ぶ・無効化検証するメソッド
+          await expect(batch.admin.getByText(item.reason, { exact: true })).toBeVisible(); // 期待値生成関数 / DST除外理由を選ぶ・表示検証するメソッド
+          await expect(batch.admin.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "選択した予定を下書き作成",
+            exact: true
+          })).toBeDisabled(); // 期待値生成関数 / 全件除外時の保存不可を検証するメソッド
+          expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / DB非作成の検証メソッド
+        }, "America/New_York");
+    });
+}
+
+/**
+ * F11運用書M09：preview後の最新timezone変更を実保存で検出し、再previewへ戻せる。
+ */
+test("F11 preview後のtimezone変更は実Actionで拒否され、保存せず入力へ戻れる", // 最新設定照合のケースを登録する関数
+  /**
+   * 他タブの設定変更に相当する所有クラブ更新を行い、古いpreviewで保存を試す。
+   */
+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
+      /**
+       * PREVIEW_CHANGED時に新規保存を行わず、安全なpreview作り直しを許す。
+       */
+      async (batch) => { // 所有シナリオの検証コールバック
+        await openPractice(batch); // 単一日の共通入力を準備する関数
+        await preview(batch); // Tokyoのpreviewを作る関数
+        await batch.database.club.update({ // 他操作に相当する所有クラブのtimezone変更メソッド
+          where: { id: batch.data.clubs.a.id },
+          data: { timezone: "America/New_York" },
+        });
+        await batch.admin.getByRole("button", { // roleと名前で要素を選ぶメソッド
+          name: "選択した予定を下書き作成",
+          exact: true
+        }).click(); // 古いpreviewの保存を実Actionへ送るメソッド
+        await expect(batch.admin.getByRole("alert").filter({ hasText: "候補が変更されました。previewを作成し直してください。" })).toBeVisible(); // 期待値生成関数 / 変更検出のalertを選ぶ・絞る・表示検証するメソッド
+        expect((await batch.generated()).length).toBe(0); // 期待値生成関数 / 生成行の取得関数 / 拒否時のDB非作成を検証するメソッド
+        await batch.admin.getByRole("button", { // roleと名前で要素を選ぶメソッド
+          name: "入力を変更してpreviewを作成し直す",
+          exact: true
+        }).click(); // 安全な入力変更ボタンを選ぶ・操作するメソッド
+        await expect(batch.admin.getByLabel("タイトル（必須）", { exact: true })).toBeEnabled(); // 期待値生成関数 / 入力欄の再操作可を検証するメソッド
+      });
+  });
+
+/**
+ * F11運用書M11・M12：連続submitと実保存後の応答喪失を再現し、同じ操作を再確認する。
+ */
+test("F11 連打を抑止し、応答喪失後も同payload・requestIdだけを再送して増やさない", // 実通信障害ケースを登録する関数
+  /**
+   * 初回ActionはDBまで完了させてからブラウザー側の応答だけを切断する。
+   */
+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
+      /**
+       * pending中の再送を止め、結果不明時の選択・ID固定とreplayを確認する。
+       */
+      async (batch) => { // 所有シナリオの検証コールバック
+        await openPractice(batch); // 単一日の共通入力を準備する関数
+        await preview(batch); // 正規previewを表示する関数
+        const page = batch.admin;
+        const match = actionPath(page); // 同一origin・pathだけを捕捉する関数
+        let calls = 0;
+        let first = "";
+        let release!: () => void; // 初回要求を解放する関数型
+        const gate = new Promise<void>( // 初回要求を保留するPromiseコンストラクター / 完了型
+          /**
+           * pendingの検証後にだけ通信を進める。
+           */
+          (resolve) => { release = resolve; }, // 解放関数を保持するコールバック
+        );
+        await page.route(match, // 同じ保存Actionだけを捕捉するメソッド
+          /**
+           * 実DBへ初回送信し、その結果を捨てる。再送要求は元のActionへ通す。
+           */
+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
+            try {
+              if (route.request().method() !== "POST") { // 要求の取得・HTTP methodの照合メソッド
+                await route.continue(); // 対象外要求をそのまま送るメソッド
+                return;
+              }
+              calls += 1;
+              const input = await businessPayload(route.request()); // 要求取得メソッド / 業務payloadの正規化関数
+              if (calls === 1) {
+                first = input;
+                await gate;
+                const response = await route.fetch({ maxRedirects: 0 }); // 実ActionをDB保存まで実行するメソッド
+                expect(Boolean(response.headers()["x-action-redirect"])).toBe(true); // 期待値生成関数 / 応答header取得メソッド / 真偽変換関数 / 成功遷移確認メソッド
+                await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // 切断前の実保存完了を検証する関数
+                await route.abort("failed"); // 保存済み応答だけを喪失させるメソッド
+              } else {
+                expect(input === first).toBe(true); // 期待値生成関数 / requestId・選択・照合値を含む同一payloadの比較メソッド
+                await route.continue(); // 同じ操作を実Actionへ再送するメソッド
+              }
+            } catch {
+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
+            }
+          });
+        try {
+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
+            name: "選択した予定を下書き作成",
+            exact: true
+          }).evaluate( // 保存ボタンを選ぶ・実DOMで操作するメソッド
+            /**
+             * 同一イベントターンに2回submitし、同期refでの連打防止を確認する。
+             */
+            (button: HTMLButtonElement) => { // ブラウザー内のコールバック / ボタン要素型
+              button.form!.requestSubmit(button); // 実フォームのsubmitイベントを送るメソッド
+              button.form!.requestSubmit(button); // 同じイベントターンでもう一度submitするメソッド
+            });
+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "保存結果を確認中…",
+            exact: true
+          })).toBeDisabled(); // 期待値生成関数 / pendingボタンの選択・無効化検証メソッド
+        } finally {
+          release(); // 検証失敗時も保留要求を解放する関数
+        }
+        try {
+          await expect(page.getByText("結果が不明です。新しい操作を作らず、同じ選択・操作IDで再確認してください。", { exact: true })).toBeVisible(); // 期待値生成関数 / 結果不明時の案内を選ぶ・表示を検証するメソッド
+          await expect(page.getByRole("button", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "入力を変更してpreviewを作成し直す",
+            exact: true
+          })).toHaveCount(0); // 期待値生成関数 / 新操作リンクを選ぶ・非表示を検証するメソッド
+          await expect(page.getByRole("checkbox", { // 期待値を生成する関数 / roleと名前で要素を選ぶメソッド
+            name: "2028-02-01：" + batch.title + "-practice",
+            exact: true
+          })).toBeDisabled(); // 期待値生成関数 / 送信済み選択の固定を検証するメソッド
+          expect(calls).toBe(1); // 期待値生成関数 / 連打時の要求一件性を検証するメソッド
+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
+            name: "同じ選択・操作IDで再確認する",
+            exact: true
+          }).click(); // 同じ操作の再確認ボタンを選ぶ・操作するメソッド
+          await expect(page).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=event-practice-batch-created&toastId=[0-9a-f-]+$/u); // 期待値生成関数 / replay成功後の固定遷移を検証するメソッド
+          expect(calls).toBe(2); // 期待値生成関数 / 初回と明示再確認だけの要求件数を検証するメソッド
+          await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // replayで生成行と完了記録が増えないことを検証する関数
+        } finally {
+          await page.unroute(match); // 所有する要求捕捉だけを解除するメソッド
+        }
+      });
+  });
+
+/**
+ * F11運用書M13：実保存後にneedsReload結果を注入し、再保存せず一覧へ戻すUIを確認する。
+ */
+test("F11 保存済みneedsReload応答では保存ボタンを消し、月別一覧の再読込だけを案内する", // 保存済みUIのケースを登録する関数
+  /**
+   * サーバー再検証失敗の内部注入ではなく、実保存後のClient境界を検証する。
+   */
+  async ({ content }) => { // 所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // ケース専用の準備・回収関数
+      /**
+       * 成功データを持つ応答を受け取っても保存を再実行しないことを確認する。
+       */
+      async (batch) => { // 所有シナリオの検証コールバック
+        await openPractice(batch); // 単一日の共通入力を準備する関数
+        await preview(batch); // 正規previewを表示する関数
+        const page = batch.admin;
+        const match = actionPath(page); // 所有Actionのpath照合関数
+        let calls = 0;
+        await page.route(match, // 所有保存要求だけを捕捉するメソッド
+          /**
+           * 保存要求以外はそのまま通し、実保存成功後にだけneedsReload結果を注入する。
+           */
+          async (route) => { // 実Actionを通し、指定した通信障害だけを再現するコールバック
+            try {
+              if (route.request().method() !== "POST") { // 要求取得・HTTP method照合メソッド
+                await route.continue(); // 保存以外の要求を通すメソッド
+                return;
+              }
+              calls += 1;
+              await savedResponse(route, batch, true); // 実保存とneedsReload応答を接続する関数
+            } catch {
+              throw new Error("F12_BATCH_UI_NETWORK_FAILED"); // 捕捉要求・SDK原文を表示しない固定例外のコンストラクター
+            }
+          });
+        try {
+          await page.getByRole("button", { // roleと名前で要素を選ぶメソッド
+            name: "選択した予定を下書き作成",
+            exact: true
+          }).click(); // 正規保存ボタンを選ぶ・操作するメソッド
+          await expect(page.getByRole("status").filter({ hasText: "1件を下書きで作成済みです。再保存しないでください。" })).toBeVisible(); // 期待値生成関数 / 保存済みstatusを選ぶ・絞る・表示検証するメソッド
+          await expect(page.getByRole("button", { name: /下書き作成|同じ選択・操作IDで再確認する/u })).toHaveCount(0); // 期待値生成関数 / 保存ボタンを選ぶ・非表示検証するメソッド
+          await page.getByRole("link", { // roleと名前で要素を選ぶメソッド
+            name: "対象月の管理一覧を開く",
+            exact: true
+          }).click(); // 再保存を伴わない一覧リンクを選ぶ・操作するメソッド
+          await expect(page).toHaveURL(batch.session.appOrigin + batch.path("events", "?month=2028-02&status=ALL", "a", true)); // 期待値生成関数 / 所有パス生成関数 / 対象月一覧への遷移検証メソッド
+          expect(calls).toBe(1); // 期待値生成関数 / 一覧へ戻っても保存要求が増えないことを検証するメソッド
+          await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // 保存件数・完了記録の非増加を検証する関数
+        } finally {
+          await page.unroute(match); // 当該要求捕捉だけを解除するメソッド
+        }
+      });
+  });

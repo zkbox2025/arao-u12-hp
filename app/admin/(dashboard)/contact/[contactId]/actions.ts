@@ -5,7 +5,7 @@
 
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
-import { requireAdmin } from "@/lib/auth/admin";
+import { requireWebsiteAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/src/infrastructure/prisma/client";
 import {
   ADMIN_MEMO_MAX_LENGTH,
@@ -54,7 +54,7 @@ export async function updateContactStatus(
   state: ContactStatusActionState,
   formData: FormData
 ): Promise<ContactStatusActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const values = buildContactStatusActionValues(formData, state.values);
   const status = values?.status ?? "PENDING";
@@ -105,7 +105,7 @@ export async function updateContactMemo(
   state: ContactMemoActionState,
   formData: FormData
 ): Promise<ContactMemoActionState> {
-  await requireAdmin();
+  await requireWebsiteAdmin();
 
   const values = buildContactMemoActionValues(formData, state.values);
   const adminMemo = values?.adminMemo ?? "";
