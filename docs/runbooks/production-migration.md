@@ -2210,3 +2210,37 @@ WHERE "slug" = 'arao-u12' AND "planType" = 'STANDARD';
 - **確認（変更の直後）：** (1) 既存HPの `/admin` に、既存の管理者でログインできる。(2) `/club-login` に、OWNERでログインできる（STARTERのため、アプリは開けない旨の挙動は、第18章のとおり）。
 - **戻し：** 変更前の値に戻す。
 - 独自ドメインの変更（第15.4節）の後で、新しいオリジンを、同じ形で追加する。
+
+### 19.10 F-1 の実施記録（利用者が操作・報告、2026-11-18）
+
+**【追加：2026-11-18】** Claudeは本番へ接続していない。URL・個人情報は記録していない。
+
+| 項目 | 結果 |
+| --- | --- |
+| `APP_BASE_URL`（Vercel Production） | `https://arao-u12-basketballclub.com`（パス・末尾スラッシュなし）であることを確認 |
+| Authの Site URL | `http://localhost:3000` → `https://arao-u12-basketballclub.com` に変更済み |
+| Redirect URLs | 2件を追加済み（`https://arao-u12-basketballclub.com`、`https://arao-u12-basketballclub.com/**`） |
+| 既存HP `/admin` のログイン | 既存の管理者で、ログインできた |
+| `/club-login` のOWNERのログイン | ログインできたが、「アプリを利用できるクラブがありません／所属クラブのプランまたは利用状態を確認してください」と表示され、アプリの画面には入れなかった |
+
+**OWNERの表示の照合：** 想定どおり。`app/(club-app)/club/select/page.tsx` で、所属（ACTIVE）はあるが、`CLUB_APP` を使えるクラブが0件のときに、この文言を表示する（クラブ `arao-u12` は STARTER で、`getAppEnabledMemberships` に含まれない）。ログイン自体は成功し、アプリの画面へは入れない、という設計どおり。
+
+**未確認：** Redirect URLsの `/**` が、クエリ文字列付きの戻り先（`/welcome?clubSlug=…&token=…`）に一致するか（Supabaseの画面に、クエリの扱いの説明なし）。**MEMBERの招待テスト（F-4）で確認する。** 招待のリンクが、`/welcome` ではなく、トップページ（Site URL）へ戻る場合は、Redirect URLsと、実装の戻り先（`<オリジン>/welcome?clubSlug=…&token=…`、第19.8節）を照合し、必要なら、クエリ付きの形を追加する。
+
+**F-1の判定：** 合格（設定の変更と、HP管理者ログインの確認。クエリの一致は、F-4で確認）。
+
+### 19.11 LINEの方針と、資格情報の取り扱いの事故（2026-11-18）
+
+**【追加：2026-11-18】** 値は、一切、記録していない。
+
+**方針（利用者）：** 既存HPと新アプリは、同じ「ARAO U-12 CLUB」のMessaging APIチャネルを共用する。既存HPの体験・見学申込み・問い合わせの通知は、**現在の運営者用グループへの通知を維持**する。アプリのお知らせ・イベント通知は、アプリ側の通知先（`ClubLineTarget`）へ送り分ける。テストには、開発者だけの別グループを使う。
+
+**事故（記録）：** 2026-11-18、LINEの**Channel Secret と Channel Access Token（長期）の実値が、チャットに貼られた**（AGENTSの「トークン・資格情報をチャット・成果物へ出さない」に反する。意図せず）。会話の記録は、利用者のMacと、AIの処理系に残る。**この2つは、漏えいした資格情報として扱い、F-2より前に、再発行する**（Channel IDは秘密ではない）。今後、値は、チャットに貼らず、`read -rs` で、ターミナルに、直接入力する。
+
+**再発行の影響（LINEの公式資料の範囲。管理画面の挙動は、実施時に、画面で確認）：**
+- 長期トークンの再発行は、現在有効な長期トークンを無効にする（再発行の際に、旧トークンを最大24時間残すオプションが、APIにはあるとされる。管理画面で選べるかは、未確認）。**既存HPのLINE通知（`LINE_CHANNEL_ACCESS_TOKEN`）は、Vercelの値を新トークンへ更新して、再デプロイするまで、失敗する**（その間の体験・問い合わせの通知は、運営者へ届かない）。
+- Channel Secretの再発行は、旧Secretを無効にする。旧Webhook（`LINE_CHANNEL_SECRET` で署名を検証）は、Vercelの値を更新するまで、署名検証が失敗して401を返す（旧Webhookは、何も処理しないため、業務への影響はない。LINEのエラー統計はオフ）。新Webhookへ切り替えれば、旧Webhookは使われなくなる。
+- **順序の案：** (1) 低トラフィックの時間帯に、承認を取る。(2) LINE Developersで、Secretとトークンを再発行する。(3) 直ちに、Vercel Productionの `LINE_CHANNEL_ACCESS_TOKEN`（と `LINE_CHANNEL_SECRET`）を更新し、再デプロイする。`.env.prod` も更新する。(4) 新しい値で、Bot情報取得API（読取り）を呼び、トークンが有効なことと、Bot User IDを確認する。(5) F-2へ。
+- 長期トークンは、チャネルあたり、1つのみ有効。既存HPとアプリで、同じトークンを共用する（DBには、暗号化して保存する）。
+
+**Bot User ID：** LINE公式のBot情報取得（`GET https://api.line.me/v2/bot/info`、`Authorization: Bearer <チャネルアクセストークン>`）の応答の `userId`（`U` に16進数32桁）。`basicId`（ベーシックID、`@` から始まる）や、LINE Developersの「あなたのユーザーID」とは別の値。Webhookの `destination`（受信するBotのユーザーID）と一致する。F-2の入力の手順の中で、ターミナル内で取得して、画面にもチャットにも出さずに使う（利用者が、トークンを `read -rs` で入力）。
