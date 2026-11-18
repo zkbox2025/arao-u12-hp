@@ -1797,3 +1797,60 @@ DELETE FROM "PlatformAdmin" WHERE "id" = '<platformAdmin の user.id>';
 - `package.json` へ、`club:prod:init` と `test:club-prod-init:local` の2つのスクリプトを追加した（利用者の承認あり）。パッケージ・ロックファイルは変更していない。
 - `PGOPTIONS`（読取り専用）をdry-runで併用できるかは、未確認。**applyは、`PGOPTIONS` を設定していないターミナルで実行する。**
 
+
+### 16.9 承認D：本番のdry-runの実施記録（利用者が実行・報告、2026-11-18）
+
+| 項目 | 内容 |
+| --- | --- |
+| 実施者・中止判断者・承認者 | 右田和也 |
+| 承認 | 2026-11-18 8:15 |
+| 実施 | 2026-11-18 9:47 頃 |
+| 入力ファイル | `~/f13-input/initial.json`（権限600、リポジトリ外。`owner` と `platformAdmin` の各 `authUserId`・`email`・`name`、UUID形式を確認） |
+| 事前確認 | `PG` 変数なし／DBはループバックではない（false）・ポート5432 |
+| 実行 | `--target production --dry-run`（1回のみ） |
+| 結果 | Club・AppUser・ClubMembership・PlatformAdmin・ClubEmailSetting の5テーブルとも `CREATE`。`CONFLICT`・エラーなし。終了コード0。DB・Authへの書込みなし |
+| 判定 | **合格**（本番Authとの user.id・メールの照合も通過） |
+
+**逸脱・注意（記録）：**
+
+- `git switch main` が `.claude/settings.json` の未コミット変更で失敗し、`feat/g5-production-club-init` のまま実行した。続く `git pull origin main` で、このブランチは origin/main（`3ba5ae7`、PR #22）まで進んでおり、**実行したコードは main と同一**（`git log` で `HEAD` と `origin/main` が同じコミットを指すことを確認）。
+- 接続先の指紋（12文字）が、チャットへ貼られた。ホスト名ではなく縮めた値であり、この手順書には書かない。承認Eの `--expect-fingerprint` には、利用者のメモの値を使う。
+- 入力ファイルは、承認Eまで残す。Eの後、または中止する場合に削除する。
+
+### 16.10 承認E：本番のapplyの実施記録（利用者が実行・報告、2026-11-18）
+
+| 項目 | 内容 |
+| --- | --- |
+| 実施者・中止判断者・承認者 | 右田和也 |
+| 承認・実施 | 2026-11-18 9:54 |
+| 事前確認 | `HEAD` 3ba5ae7（origin/main と同一）。`PG` 変数なし（`PGOPTIONS` を含む）。入力ファイルは権限600。未コミットの変更は `.claude/settings.json` と手順書のみ |
+| 実行 | `--target production --apply --expect-fingerprint <承認Dと同じ12文字>`（1回のみ）。指紋は一致 |
+| apply の結果 | Club・AppUser・ClubMembership・PlatformAdmin・ClubEmailSetting の5テーブルとも `CREATE`。終了コード0 |
+| 直後の dry-run | 5テーブルとも `UNCHANGED`。`CONFLICT`・エラーなし。終了コード0 |
+| 判定 | applyと再dry-runは、**合格**。第16.5節の読取り確認は、第16.11節に記録 |
+
+**備考：**
+
+- applyの出力に、承認Dにあった「DRY-RUN」の行はない。完了を示す専用の行は、出ていない。成功の判断は、終了コード0と、直後のdry-runの `UNCHANGED` による。
+- 承認文の「承認」欄の山括弧は、記入時に残った。記録上の承認は、右田和也・9:54。
+- 入力ファイルは、第16.5節の確認の後に削除した（第16.11節）。
+
+### 16.11 適用後の読取り確認と後片付け（利用者が実行・報告、2026-11-18）
+
+**【追加：2026-11-18】** 読取り専用の接続（`PGOPTIONS=-c default_transaction_read_only=on`、ポート5432、poolerなし）で、SELECTのみを実行した。個人情報・接続先は記録していない。
+
+| 項目 | 結果 |
+| --- | --- |
+| 5テーブルの件数 | `Club` 1・`AppUser` 1・`ClubMembership` 1・`PlatformAdmin` 1・`ClubEmailSetting` 1 |
+| 属性 | `planType` = `STARTER`、`ClubMembership` = OWNER・ACTIVE・`canManageWebsite` = true |
+| RLS | `public` の34テーブルすべてで有効（34/34）。テーブルが増えていない（G5で作ったのは既存の5テーブルの行のみ） |
+| `anon`・`authenticated` の権限 | 0件（結果が空） |
+| 後片付け | 接続用の環境変数を `unset`。入力ファイル `~/f13-input/initial.json` を削除。`~/f13-input` は空 |
+
+**判定：** 第16.5節は合格。**G5は完了。**
+
+**備考：**
+
+- 最初の `psql` は、新しいターミナルにPATHが入っておらず `command not found`（本番へは未接続）。`export PATH="$(brew --prefix libpq)/bin:$PATH"` で、`psql` 18.6 が使えた。
+- 既存HPのテーブルの件数は、適用前の控えがないため、比べていない。G5は既存テーブルを更新しない設計（作成のみ）であり、テーブル数34/34が不変であることを確認した。
+- `ClubLineSetting` はG7、プランの切替（STANDARD）はG8の手順に従う。このクラブは、現在 STARTER（公開前）。
