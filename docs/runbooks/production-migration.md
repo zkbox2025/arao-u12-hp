@@ -1983,3 +1983,90 @@ select id, public, file_size_limit, allowed_mime_types from storage.buckets orde
 **第17.4節の決定2（古いログの削除）の補足：** 現時点で、30日を超えたログは存在しなかった。旧パスの期間の削除漏れは、確認できなかった（`FormSubmissionLog` は空）。
 
 **G6の判定：** 確認1・2・4・5は合格。確認3は未判定で、**2026-11-25 の朝以降に再確認**する（G6は、その1件を残して完了。G7・G8・G9の進行は止めない）。
+
+## 18. G8：プラン切替（STARTER ↔ STANDARD）の手順（2026-11-18、Claudeが作成。**手順書のみ。切替は未実施・未承認**）
+
+**【追加：2026-11-18】** この章は、手順の案である。プランの変更は、本番DBへの書込みなので、**操作ごとに、承認地点Gとして、右田和也の明示承認を得てから行う**。Claudeは、本番へ接続しない。
+
+### 18.1 プランが、何を切り替えるか（コードの読取り）
+
+| 項目 | 内容 |
+| --- | --- |
+| 機能表 | `domain/club/plan-features.ts`：`STARTER` は `WEBSITE` のみ、`STANDARD` は `WEBSITE`・`CLUB_APP`、`PRO` は空（現在は使わない） |
+| STARTERのとき | クラブ運営アプリの画面・操作（`/club/...`）は、`requireClubFeature` が `ClubFeatureUnavailableError` を投げて使えない（`club-app-authorization.ts`、各Repositoryの `hasClubFeature`）。ログイン後の遷移先も、アプリが使えるクラブだけを数える（`club-login-destination.ts`）。**既存HP（`WEBSITE`）は、どちらのプランでも使える** |
+| 反映のタイミング | プランは、リクエストごとに `Club.planType` をDBから読む。キャッシュは見つかっていない。DBを更新すれば、次のリクエストから反映される（再デプロイ不要） |
+| 切替の手段 | **プランを変更する画面・スクリプトはない**（`planType` を更新するコードは、G5の初期化と、ローカルのseedのみ）。本番では、**手動のSQL**で行う |
+| 他のデータ | プランを変えても、アプリで作ったデータ（予定・出欠・お知らせ等）は、消えない。STARTERへ戻すと、見えなくなるだけ |
+
+### 18.2 いつ、どちらにするか
+
+| 時期 | プラン | 理由 |
+| --- | --- | --- |
+| G5の直後〜G7の前（現在） | `STARTER` | 公開前。OWNER・MEMBERは、アプリを開けない |
+| G7（本番のsmoke test）の間 | **一時的に `STANDARD`** | OWNER・MEMBER・PlatformAdminの最小smokeが、アプリを開く必要がある。**smokeの前に切り替え、終わったらすぐ `STARTER` へ戻す**（公開判断までは、STARTERで待つ） |
+| G9（公開時） | `STANDARD` | 公開判断（承認地点H）の後に、承認Gで切り替える。以後は、STANDARDのまま運用 |
+
+- G7の間は、アプリを使える利用者を、**OWNER（クラブ代表）・PlatformAdmin（開発者）の2人だけ**にする。招待メールは、まだ送らない。クラブ代表には、smokeの時間帯を、事前に伝える。
+- `ClubLineSetting`（LINE）は、G7の手順で扱う。STANDARDの間に、LINEの実送信が起きないように、**G7の手順書で、LINE設定の有効・無効の順序を決める**（G8の範囲外）。
+
+### 18.3 切替の前に確認する（読取り。第16.5節と同じ、読取り専用の接続）
+
+```sql
+select slug, "planType", "updatedAt" from "Club" where slug = 'arao-u12';
+select count(*) from "ClubMembership" m join "Club" c on c.id = m."clubId" where c.slug = 'arao-u12' and m.status = 'ACTIVE';
+```
+- 現在の `planType` が、想定どおり（切替前は `STARTER`）であること。
+- ACTIVEな会員が、想定どおりの人数であること（現在は、OWNERのみで 1）。想定外の会員がいれば、**切替を中止**して、確認する（STANDARDにすると、その人がアプリを使えるようになる）。
+
+### 18.4 切替（承認Gの後に実行。書込みのため、`PGOPTIONS` を設定しない接続で）
+
+**STARTER → STANDARD：**
+
+```sql
+BEGIN;
+UPDATE "Club"
+SET "planType" = 'STANDARD', "updatedAt" = timezone('UTC', now())
+WHERE "slug" = 'arao-u12' AND "planType" = 'STARTER';
+-- 「UPDATE 1」と出ること。0なら、ROLLBACKして報告（想定外の状態）。
+SELECT slug, "planType" FROM "Club" WHERE slug = 'arao-u12';
+-- 想定どおりなら COMMIT; 想定外なら ROLLBACK;
+```
+
+- `"updatedAt"` は、Prismaが付ける列で、DBには既定値がないため、SQLで**明示的に更新する**（時刻はUTC）。
+- `WHERE` に、**現在のプランを条件に入れる**ことで、二重の実行や、想定外の状態での更新を、0件にして防ぐ。
+- 対象は、`slug = 'arao-u12'` の1行だけ。他のクラブ・他のテーブルには触れない。
+
+### 18.5 戻し（STANDARD → STARTER）
+
+```sql
+BEGIN;
+UPDATE "Club"
+SET "planType" = 'STARTER', "updatedAt" = timezone('UTC', now())
+WHERE "slug" = 'arao-u12' AND "planType" = 'STANDARD';
+-- 「UPDATE 1」を確認してから COMMIT;
+```
+
+- 戻しは、**承認Gの範囲に含める**（切替の承認と一緒に、戻しの実行も、承認する。戻しが必要になった時に、承認を取り直さなくてよい）。
+- 戻した後も、アプリで作ったデータは、消えない。STANDARDへ再び切り替えれば、元のとおり使える。
+- 戻した直後は、すでにアプリを開いている人が、次の操作で「使えない」状態になる（画面は、アプリが使えない旨の扱い）。
+
+### 18.6 切替の後に確認する
+
+- 読取り：`planType` が、期待どおり。`updatedAt` が、切替の時刻。他のクラブの `planType` が、変わっていないこと。
+- 画面：OWNERでログインして、アプリのトップが開く（STANDARD）／開かない（STARTER）こと。HPの管理画面が、どちらでも開くこと。
+
+### 18.7 承認Gの依頼文（雛形）
+
+- 目的：`<G7のsmoke test／公開>` のために、クラブ `arao-u12` のプランを、`<STARTER→STANDARD／STANDARD→STARTER>` へ切り替える。
+- 対象環境：本番のSupabase（DB）。書込み：`Club` の1行の `planType` と `updatedAt` のみ。
+- 事前確認：第18.3節（現在のプラン、ACTIVEな会員数）。結果：`<記入>`。
+- 戻し：第18.5節。この承認に含める。
+- 中止条件：事前確認が想定と違う、`UPDATE` が1件でない。
+- 承認の範囲外：`ClubLineSetting`、招待メール、環境変数、デプロイ。
+- 実施者・中止判断者・承認者：右田和也。実施日時／承認：`<記入>`。
+
+### 18.8 要判断
+
+1. **手動SQLで足りるか：** 切替は、公開前後の数回のみ。専用のスクリプト（G5と同じ形）を作ると、安全だが、作業が増える。**推奨：現在の規模では、手動SQL（`WHERE` に現在のプランを条件に入れる）で十分**。回数が増えれば、別の粒度で、スクリプト化を検討する。
+2. **G7の間のSTANDARDの時間：** できるだけ短くする（smokeの直前に切替、直後に戻す）。
+3. **PRO：** 現在は使わない（機能表が空）。`STARTER`・`STANDARD` 以外へは、切り替えない。
