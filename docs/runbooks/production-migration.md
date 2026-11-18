@@ -2169,3 +2169,44 @@ WHERE "slug" = 'arao-u12' AND "planType" = 'STANDARD';
 3. **テスト用のLINEグループ：** 用意できない場合、LINEの実送信（手順8）は、公開判断の後（最初の本物の配信）へ回し、手順7までにする案もある。
 4. **登録コードの有効期限：** 実施前に、コード（`line-registration-code` 周辺）で確認する。
 5. 旧Webhook（`LINE_CHANNEL_SECRET`）の削除は、G9の後の環境変数の整理（第15.3節）。
+
+### 19.8 利用者の回答の反映と、追加で確認したこと（2026-11-18）
+
+**利用者の回答（報告。Claudeは確認していない）：**
+- 本番のURLは、既存HPと同じ独自ドメイン（`https://arao-u12-basketballclub.com`）。アプリのログインは `/club-login`。`*.vercel.app` は、本番URLとして使わない。
+- Resendの Domains で、このドメインが `Verified`（2026-11-18）。`MAIL_FROM_ADDRESS` のドメインと一致。送信・配送の成功は、未確認。
+- LINE：Messaging APIチャネル「ARAO U-12 CLUB」（既存HPと同じ公式アカウントを、アプリでも使う）。現在のWebhook URLは `https://arao-u12-hp.vercel.app/api/line/webhook`（旧URL。利用：オン、再送：オン、エラー統計：オフ）。**設定の変更・検証ボタン・実送信は、行っていない。**
+- テスト用グループ「ARAO アプリ送信テスト用」を作成（参加者は、右田と公式アカウントのみ）。
+- MEMBERの確認：確認用のアドレスへ、OWNERから、MEMBERとして招待する案を採用。招待の送信・本番設定の変更は、実施手順の確認後。
+- Authの Site URL を、`http://localhost:3000` → `https://arao-u12-basketballclub.com` へ変更する方針を**承認**（操作は、右田が行う）。
+
+**コードで確認したこと：**
+
+| 項目 | 内容 |
+| --- | --- |
+| OWNERの招待権限 | 招待の送信・再送・取消は、`requireClubAppOwnerAccess`（OWNERで、かつSTANDARD）が必要（`admin/members/invitation-actions.ts`）。招待できる役割は、`COACH`・`OFFICER`・`MEMBER`（OWNERは招待できない）。**STARTERの間は、OWNERでも招待できない**ため、手順4（STANDARD）の後に行う |
+| 招待メールのリンク | 招待ページ：`<オリジン>/club-invitations/accept?clubSlug=…&token=…`。Authの戻り先（`redirectTo`）：`<オリジン>/welcome?clubSlug=…&token=…`。`<オリジン>` は、`Club.appBaseUrl`（G5では未設定）が無ければ、**環境変数 `APP_BASE_URL`**（本番はhttpsが必須）。したがって、**`APP_BASE_URL` が `https://arao-u12-basketballclub.com`（パス・末尾スラッシュなし）であること**を、実施前に確認する |
+| パスワード再設定 | `redirectTo` は、`APP_BASE_URL` のオリジンそのもの（末尾スラッシュなし。`forgot-password/actions.ts`） |
+| メールの送信元 | `MAIL_FROM_ADDRESS`（本番は必須。未設定なら招待は設定エラーになる）。送信はResendのAPI（冪等キー付き）。**アプリの「送信した」は、Resendが受け付けた（受付成功）という意味。受信箱への到着が、配送完了** |
+| 旧Webhook | `app/api/line/webhook/route.ts`：`LINE_CHANNEL_SECRET` で署名を検証し、**イベントがあっても何もせず、200を返す**（確認用のgroupId等のログは、粒度5で削除済み）。したがって、**旧URLに、いま、維持すべき業務処理はない**。維持すべきなのは、「**Webhook URLが、常に200を返す（LINE側のWebhook利用・再送がオンでも、エラーを積まない）**」ことだけ |
+| 既存HPからのLINE送信 | Webhook URLとは別（`LINE_CHANNEL_ACCESS_TOKEN` と `LINE_ADMIN_GROUP_ID` で、push送信）。**Webhook URLを切り替えても、既存HPの通知送信には影響しない**（コードで、Webhookに依存する箇所は見つかっていない）。LIFF（`NEXT_PUBLIC_LIFF_ID`）も、Webhook URLとは別の設定 |
+| 新Webhookの条件 | URLの `webhookKey` でDBの設定を引き、**DBの `lineBotUserId` が、リクエストの `destination` と一致しないと403**。Channel Secretは、DBの暗号化済みの値で署名を検証（不正は401、キー不明は404、DB障害・設定不足は503＝LINEが再送）。**登録コード：グループへ、そのまま投稿（前後に空白・改行・説明文を付けない）、有効期限は発行から10分、一度だけ使える** |
+| 新Webhookと、再送オン | 503はLINEが再送する。登録コードの消費は条件付きで、再送されても二重に登録されない。401・403・404は、再送されない |
+| 通知先の登録と有効化 | 登録コードで登録された通知先は、**必ず無効（`isEnabled=false`）**。OWNERが、設定画面で、名前・対象の役割（`targetRoles`）を設定してから、有効化する。**お知らせの対象の役割が、通知先の役割をすべて含むときだけ**、そのグループへ送る（役割が未設定の通知先は、送らない） |
+| グループIDの扱い | 登録コードの方式では、**グループIDを、人が調べて入力する必要はない**（Webhookのイベントから、アプリが取得して保存する。ログには、完全なIDを出さない）。LINE Developersの画面にも、グループIDは出ない |
+
+**手順書（`docs/ops2.md`）との食い違い：** `docs/ops2.md` の本番の手順は、クラブの `slug` を `arao-u-12` としているが、**本番に作成した `slug` は `arao-u12`**（G5）。`ops2.md` のコマンドを、そのまま使わない。また、`ops2.md` に、「`CLUB_LINE_INIT_BOT_USER_ID` は、LINE Developersの画面には書いておらず、ターミナルのコマンドで取得する」との注記がある（LINEの公式APIの、Botの情報を取得するエンドポイント。**実施前に、LINEの最新の公式資料で、手順を確認する**）。
+
+### 19.9 F-1：Supabase Authの URL設定（右田が操作。承認済みの方針）
+
+- **変更前（控える）：** Site URL = `http://localhost:3000`、Redirect URLs = 登録なし。
+- **変更後：**
+  - Site URL = `https://arao-u12-basketballclub.com`
+  - Redirect URLs に、次の2件を追加する：
+    - `https://arao-u12-basketballclub.com`（パスワード再設定の戻り先。末尾スラッシュなしの、オリジンそのもの）
+    - `https://arao-u12-basketballclub.com/**`（招待の戻り先 `/welcome?clubSlug=…&token=…` を含む、このドメイン配下）
+  - 既存の項目は、削除しない。`localhost` は追加しない（本番のAuthに、ローカルの戻り先は、不要）。
+- **注意：** ワイルドカード `**` の扱い（クエリ文字列を含めて一致するか）は、Supabaseの管理画面の説明で、確認する。`/**` で一致しない場合は、招待のリンクで、Site URLへ戻される（確認4で分かる）。
+- **確認（変更の直後）：** (1) 既存HPの `/admin` に、既存の管理者でログインできる。(2) `/club-login` に、OWNERでログインできる（STARTERのため、アプリは開けない旨の挙動は、第18章のとおり）。
+- **戻し：** 変更前の値に戻す。
+- 独自ドメインの変更（第15.4節）の後で、新しいオリジンを、同じ形で追加する。
