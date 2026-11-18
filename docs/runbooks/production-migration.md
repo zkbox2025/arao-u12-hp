@@ -1854,3 +1854,132 @@ DELETE FROM "PlatformAdmin" WHERE "id" = '<platformAdmin の user.id>';
 - 最初の `psql` は、新しいターミナルにPATHが入っておらず `command not found`（本番へは未接続）。`export PATH="$(brew --prefix libpq)/bin:$PATH"` で、`psql` 18.6 が使えた。
 - 既存HPのテーブルの件数は、適用前の控えがないため、比べていない。G5は既存テーブルを更新しない設計（作成のみ）であり、テーブル数34/34が不変であることを確認した。
 - `ClubLineSetting` はG7、プランの切替（STANDARD）はG8の手順に従う。このクラブは、現在 STARTER（公開前）。
+
+## 17. G6：Storage・環境変数・Cron・Resendの確認（2026-11-18、Claudeがコードを読み取りで調査。本番へは未接続）
+
+**【追加：2026-11-18】** この章は、読取りだけの調査と、利用者が行う確認の手順（案）である。本番への書込み、Cronの手動起動、環境変数の変更は含まない。**確認の実行は、利用者の承認（G6の承認）を得てから行う。**
+
+### 17.1 コードから分かったこと（読取り）
+
+| 項目 | 内容 |
+| --- | --- |
+| Cronの認証 | 3つのCron（`delete-old-security-logs`・`club-line-deliveries`・`storage-deletions`）とも、`isAuthorizedCronRequest`（`src/application/cron/cron-authorization.ts`）を最初に呼ぶ。`Authorization: Bearer <CRON_SECRET>` を、長さの確認の後に `timingSafeEqual` で比べる。**`CRON_SECRET` が未設定・空なら、常に拒否（401）**。3つとも `GET` のみ。認証前に、DB・外部への処理はしない |
+| 認証なしの応答 | `delete-old-security-logs`・`storage-deletions`：401 `{ok:false,message:"Unauthorized"}`。`club-line-deliveries`：401 `{error:"Unauthorized"}`（形が少し違うが、ともに401） |
+| `proxy.ts` | matcher は `/admin`・`/club-login`・`/platform`・`/platform-login`・`/club`・`/auth`・`/welcome`・`/club-invitations/accept` 系。**`/api/cron/*` は対象外**で、Cronはセッション処理を通らない |
+| Vercel Cron | `vercel.json` は `/api/cron/delete-old-security-logs`（`0 18 * * *` UTC＝毎日 03:00 JST）の1件のみ。Vercelは、`CRON_SECRET` が設定されていると、同じ値を `Authorization: Bearer` で自動付与する。`club-line-deliveries`・`storage-deletions` は、`vercel.json` に追加しない（Supabase Cronが呼ぶ） |
+| ログ削除の保持期間 | `FormSubmissionLog`・`LoginSubmissionLog` とも**30日**（`lib/security/submission-log-cleanup.ts`）。`createdAt` が30日より前の行を、`deleteMany` で削除する |
+| 削除ジョブの上限 | `club-line-deliveries` は1回20件、`storage-deletions` は1回20件 |
+| Storage（新アプリ） | 新アプリが使うバケットは `club-app-attachments` のみ（`club-attachment-storage-constants.ts`）。アプリ側で、PDFのみ・1ファイル3 MiB・合計3 MiB を検証（`pdf-file-validation.ts`）。バケットの作成・更新のコードはなく、バケットは Supabase 側で作る |
+| Storage（既存HP） | `club-documents`（月間練習計画PDF）・`club-images`（スタッフ・ページ画像）は、既存HPが使う。今回のリリースで、これらの扱いは変えていない |
+
+**気づき（変更しない）：** `delete-old-security-logs` のエラー処理は、`console.error` に、エラーオブジェクトをそのまま渡している（`app/api/cron/delete-old-security-logs/route.ts`）。AGENTSの「生のエラー詳細をログへ出さない」に照らすと、本来は名前だけにするのが望ましい。ただし、計画（G6）の「既存HPのCronの仕様は変えない」に従い、今回は変更しない。必要なら、別の粒度で扱う。
+
+### 17.2 環境変数の一覧（変数名・用途・設定先・有無。値は書かない）
+
+「有無」は、**利用者の報告**（2026-11-16〜17）による。Claudeは、本番の値も有無も、直接は確認していない。
+
+| 変数名 | 用途 | 必須 | 設定先 | 有無（報告） |
+| --- | --- | --- | --- | --- |
+| `DATABASE_URL` | DB接続（Prisma） | 必須 | Vercel・`.env.prod` | 設定あり |
+| `DIRECT_URL` | 直接接続（任意） | 任意 | — | 未設定（問題なし） |
+| `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabaseの接続（ブラウザ・サーバー） | 必須 | Vercel | 設定あり |
+| `SUPABASE_SERVICE_ROLE_KEY` | Storage・Authの管理操作（サーバーのみ） | 必須 | Vercel | 設定あり |
+| `APP_BASE_URL` | 招待メール等のURL（本番はhttps） | 必須 | Vercel | 設定あり（変更なし） |
+| `WEBSITE_ADMIN_USER_IDS` | 既存HPの管理者（F13では維持） | 必須 | Vercel | 設定あり |
+| `FORM_LOG_HASH_SALT` | フォームログのハッシュ（32文字以上） | 必須 | Vercel | 設定あり |
+| `LINE_CREDENTIAL_ENCRYPTION_KEY` | クラブのLINE資格情報の暗号鍵（32バイトbase64） | 必須 | Vercel・`.env.prod`・パスワードマネージャ | **本番用を新規に発行して設定（2026-11-17）** |
+| `CRON_SECRET` | Cronの認証（32文字以上） | 本番で必須 | Vercel。**Supabase Cronのジョブにも同じ値**（17.4参照） | Vercelは設定あり。Supabase側との一致は**未確認** |
+| `RESEND_API_KEY` / `MAIL_FROM_ADDRESS` | メール送信 | 本番で必須 | Vercel | 設定あり（共通ドメインへの切替は第15.4節） |
+| `ADMIN_EMAIL` | HPの問い合わせ通知の宛先（フォールバック） | 任意 | Vercel | **未確認** |
+| `LINE_CHANNEL_ACCESS_TOKEN` / `LINE_ADMIN_GROUP_ID` | 既存HPの管理者LINE通知 | 任意（両方セット） | Vercel | **未確認** |
+| `LINE_CHANNEL_SECRET` | 既存の単一クラブ用Webhookの署名検証（移行期間のみ） | 任意 | Vercel | **未確認**（G7でWebhook切替時に扱う） |
+| `NEXT_PUBLIC_LIFF_ID` / `LINE_LIFF_URL` | 既存HPのLIFF（両方セット） | 任意 | Vercel | **未確認** |
+| `NEXT_PUBLIC_LIFF_DEBUG` | LIFFのデバッグ表示 | 任意 | — | 未設定 |
+| `AXIOM_TOKEN` / `AXIOM_DATASET` | ログ送信（両方セット） | 任意 | Vercel | **未確認** |
+
+- 開発専用の変数（`SEED_DEV_*`・`WEBSITE_ADMIN_SEED_*`）は、本番に設定しない。
+- 「未確認」の変数は、Vercelの Production の**変数名一覧だけ**で、有無を確認する（値は開かない）。整理（削除）は、G9の後（第15.3節）。
+
+### 17.3 利用者が行う確認（案。G6の承認の後。すべて読取り）
+
+**【確認1】Cronの認証なし拒否（本番へのGETのみ。ジョブは動かない）**
+
+```bash
+cd ~/Documents/arao-u12-hp
+npx dotenv-cli -e .env.prod -- sh -c 'for p in delete-old-security-logs club-line-deliveries storage-deletions; do printf "%s " "$p"; curl -s -o /dev/null -w "%{http_code}\n" "$APP_BASE_URL/api/cron/$p"; done'
+```
+- 期待：3つとも `401`。値（URL・本文）は表示しない。`CRON_SECRET` は送らない。
+- 404 が出たら、そのルートが本番に無い（デプロイ内容の確認が必要）。200 が出たら、**認証が効いていない**ため、直ちに中止して報告する（`CRON_SECRET` が空の場合は401になる設計）。
+
+**【確認2】Supabase Cronの実行結果（読取り専用の接続で。SQLの定義文は出さない）**
+
+```sql
+select j.jobname, d.status, d.start_time
+from cron.job_run_details d join cron.job j on j.jobid = d.jobid
+order by d.start_time desc limit 10;
+select status_code, created from net._http_response order by created desc limit 10;
+```
+- 期待：`status` が `succeeded`、`status_code` が `200`（`401` なら、Supabase側の `CRON_SECRET` と Vercelの値が合っていない。`404` なら、本番に未デプロイ）。
+- `net._http_response` の本文（`content`）の列、`cron.job.command`（認証ヘッダーを含み得る）は、**選ばない・貼らない**。`net._http_response` が無い、または空の場合は、「確認できなかった」として報告する。
+- 新アプリのデプロイは 2026-11-17 11:30 頃。それ以前の `404` は、旧アプリに該当ルートが無かったためで、異常ではない。
+
+**【確認3】ログ削除Cronの効果（読取りで代替）**
+
+Vercel（無料プラン）のログは直近1時間分しか見えず、**2026-11-18 03:00 JST の初回実行の結果は、消えていて確認できない**（利用者の報告）。代わりに、効果を数える。
+
+```sql
+select 'FormSubmissionLog', count(*) filter (where "createdAt" < now() - interval '30 days'), min("createdAt") from "FormSubmissionLog"
+union all
+select 'LoginSubmissionLog', count(*) filter (where "createdAt" < now() - interval '30 days'), min("createdAt") from "LoginSubmissionLog";
+```
+- 日時は、実行した日と、03:00の実行の前か後かを、記録する。
+- **03:00の実行より後（2026-11-19の朝以降）に、30日より古い行が0件**なら、Cronは動いている。0件でなければ、動いていない可能性がある（原因は、Vercelの Cron一覧の登録・`CRON_SECRET`・ルートのHTTP応答のいずれか）。
+- 2026-11-18 の今の時点で、30日より古い行が残っていれば、「初回実行の前の状態」として記録する。
+
+**【確認4】Vercelの Cron一覧（画面）**
+
+- Settings → Cron Jobs で、`/api/cron/delete-old-security-logs` のみが有効で、旧 `delete-old-submission-logs` が残っていないこと。
+
+**【確認5】バケット（読取り）**
+
+```sql
+select id, public, file_size_limit, allowed_mime_types from storage.buckets order by 1;
+```
+- 期待：`club-app-attachments` は `public=false`、`file_size_limit=3145728`、`allowed_mime_types={application/pdf}`。`club-documents`・`club-images` は、既存のまま（公開・制限なし）。
+
+### 17.4 要判断・未確認
+
+1. **`club-documents`・`club-images` のバケット側の制限（サイズ・形式）：** 現状は、アプリ側の検証のみ。バケット側に制限を設けると、既存HPのアップロードが拒否されるおそれがあり、本番の書込みにもなる。**推奨：今回は変更しない。** 設ける場合は、既存HPの実際の使い方（形式・サイズ）を調べてから、別の承認で行う。
+2. **`CRON_SECRET` の一致：** Vercel（Production）と、Supabase Cronのジョブが保持する値が、同じであることは、確認2の `status_code` が200かどうかで間接的に分かる。値そのものは、比べない・貼らない。
+3. **旧パスの期間の削除漏れ：** 旧パス（`delete-old-submission-logs`）が動いていなかった期間に、30日を超えるログが残った可能性がある。初回の実行（新パス）が、まとめて削除する。個人情報ではなくハッシュだが、**削除してよいか**は、利用者の判断（現状は、実行されれば削除される設計）。
+4. **Resend：** 共通ドメインへの切替は、第15.4節（G9・ドメイン切替の後）。G6では、変数の有無の確認のみ。
+5. **§11 の15・16（シーケンスの既定権限、他のDataAPIクライアント）：** 未確認のまま。G6の範囲外。
+
+### 17.5 G6の承認と決定（利用者、2026-11-18）
+
+- **G6の承認：** 第17.3節の確認1〜5（すべて読取り）の実行を、右田和也が承認した。承認の範囲は、第17.3節に書いたものに限る（書込み・Cronの手動起動・環境変数の変更・バケットの変更は含まない）。
+- **決定1：** `club-documents`・`club-images` のバケット側の制限は、**今回は変更しない**（第17.4節の1の推奨のとおり）。
+- **決定2：** 旧パスの期間に残った30日超のログ（ハッシュのみ）は、次のCron実行で**まとめて削除されてよい**（第17.4節の3）。
+
+### 17.6 G6の確認の実施記録（利用者が実行・報告、2026-11-18 10:22 頃）
+
+**【追加：2026-11-18】** Claudeは本番へ接続していない。確認1は本番へのGET（認証なし）、確認2・3・5は読取り専用の接続（ポート5432、poolerなし、`PGOPTIONS` で読取り専用）のSELECTのみ。接続先・認証情報・本文は記録していない。
+
+| 確認 | 結果 | 判定 |
+| --- | --- | --- |
+| 1 Cronの認証なし拒否 | `delete-old-security-logs`・`club-line-deliveries`・`storage-deletions` の3つとも `401` | 合格 |
+| 2 Supabase Cronの実行 | `club-line-deliveries-every-5-minutes`（毎時00分起点）と `storage-deletions-every-5-minutes`（毎時02分起点）が、直近10件（UTC 01:00〜01:22、日本時間 10:00〜10:22）とも `succeeded`。`net._http_response` の直近10件が、すべて `200` | 合格（認証付きの呼び出しが成功。Supabase側と Vercel（Production）の `CRON_SECRET` は一致していると判断できる）。ただし、直近約22分の範囲のみ |
+| 3 ログ削除の効果 | `FormSubmissionLog`：30日より古い行0件・最古の行なし（空）。`LoginSubmissionLog`：30日より古い行0件・最古 2026-10-25 11:38（約24日前） | **未判定**（下記） |
+| 4 Vercelの Cron一覧 | `/api/cron/delete-old-security-logs` のみが有効 | 合格 |
+| 5 バケット | `club-app-attachments`：非公開・`3145728`・`{application/pdf}`。`club-documents`・`club-images`：公開・サイズ上限なし・形式制限なし | 合格（想定どおり。2つの既存バケットは変更しない決定） |
+| 環境変数（Productionの有無） | `ADMIN_EMAIL`・`LINE_CHANNEL_ACCESS_TOKEN`・`LINE_ADMIN_GROUP_ID`・`LINE_CHANNEL_SECRET`・`NEXT_PUBLIC_LIFF_ID`・`LINE_LIFF_URL`・`AXIOM_TOKEN`・`AXIOM_DATASET` は、すべて**あり**（値は未確認・未変更） | 第17.2節の「未確認」を「あり」に更新 |
+
+**確認3が未判定の理由：** 最古の行が約24日前で、30日の保持期間に達していない。30日より古い行が0件なのは、「削除された」からではなく、「まだ該当する行がない」からかもしれない。`FormSubmissionLog` が空なのも、「過去30日に送信が無かった」ためか、「削除された」ためかを、この確認では区別できない。**したがって、ログ削除Cronが動いているかは、まだ確認できていない。** 2026-11-18 03:00 JST の初回実行は、Vercelの無料プランのログが約1時間のため、確認できなかった。
+
+**確認3の再実施（読取り）：** `LoginSubmissionLog` の最古の行（2026-10-25 11:38）は、約 **2026-11-24 11:38** に30日を超える。その次の定刻（**2026-11-25 03:00 JST**）の実行の後（**11月25日の朝以降**）に、確認3のSQLを再実行する。
+- 30日より古い行が **0件**で、最古の行の日時が「実行時刻の30日前」より新しい → Cronが動いている。
+- 30日より古い行が残っている → 動いていない。Vercelの Cron一覧・`CRON_SECRET`・ルートの応答を調べる（その場合は、新たな読取りの承認を取る）。
+
+**第17.4節の決定2（古いログの削除）の補足：** 現時点で、30日を超えたログは存在しなかった。旧パスの期間の削除漏れは、確認できなかった（`FormSubmissionLog` は空）。
+
+**G6の判定：** 確認1・2・4・5は合格。確認3は未判定で、**2026-11-25 の朝以降に再確認**する（G6は、その1件を残して完了。G7・G8・G9の進行は止めない）。
