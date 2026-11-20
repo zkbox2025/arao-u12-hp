@@ -887,3 +887,184 @@ test("F11 保存済みneedsReload応答では保存ボタンを消し、月別�
         }
       });
   });
+
+/**
+ * 【追加】F11の保存Action用に、拒否後の生成行・完了記録がともに0件であることを確認する。
+ */
+async function untouchedF11( // 【追加】DB非更新の検証関数
+  batch: BatchScenario, // 【追加】所有シナリオ型
+): Promise<void> { // 【追加】非同期完了型
+  expect((await batch.generated()).length).toBe(0); // 【追加】期待値生成関数 / 生成行の取得関数 / DB非作成の検証メソッド
+  const receipts = await batch.database.clubEventBatchOperation.count({ // 【追加】所有範囲の完了記録件数を取得するメソッド
+    where: {
+      clubId: batch.data.clubs.a.id,
+      targetMonth: batch.month,
+      operation: "CREATE_PRACTICE_BATCH",
+    },
+  });
+  expect(receipts).toBe(0); // 【追加】期待値生成関数 / 完了記録も増えないことを検証するメソッド
+}
+
+/**
+ * 【追加】公開判断の残件1：M02・H02。権限のない本人・他クラブの管理者・失効所属の本人が、
+ * 正規画面の保存Actionを直接再送しても、拒否されてDBが変わらない。最後に正規の再送で成功を確認する。
+ */
+test("【追加】F11 会員・他クラブの管理者・失効所属の保存Action再送は拒否され、DBを変えない", // 【追加】M02・H02の実HTTPケースを登録する関数
+  /**
+   * 【追加】OWNERの保存要求を捕捉し、別のCookieと失効後のCookieで再送する。
+   */
+  async ({ content }) => { // 【追加】所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // 【追加】ケース専用の準備・回収関数
+      /**
+       * 【追加】拒否の各段階でDB非更新を確認し、最後に本人の再送で一件だけ保存されることを確認する。
+       */
+      async (batch) => { // 【追加】所有シナリオの検証コールバック
+        await openPractice(batch); // 【追加】入力画面を準備する関数
+        await preview(batch); // 【追加】正規previewを表示する関数
+        const page = batch.admin;
+        const action = await captureAction(page, // 【追加】実UIの保存要求を、送信前に捕捉する関数
+          /**
+           * 【追加】正規の保存ボタンだけを押す。
+           */
+          () => page.getByRole("button", { // 【追加】ボタン操作のコールバック / roleと名前で要素を選ぶメソッド
+            name: "選択した予定を下書き作成",
+            exact: true
+          }).click(), // 【追加】保存ボタンを操作するメソッド
+        );
+        await untouchedF11(batch); // 【追加】送信前のDB非更新を検証する関数
+        await batch.member.goto(batch.path("events")); // 【追加】会員の画面を開き、同じOriginのCookieで送る準備をするメソッド / 所有パス生成関数
+        await batch.foreignAdmin.goto(batch.path("events", "", "b")); // 【追加】他クラブ管理者の画面を開くメソッド / 所有パス生成関数
+        for (const other of [batch.member, batch.foreignAdmin]) {
+          const denied = await postAction(other, action); // 【追加】別の本人のCookieで直接再送する関数
+          expect(denied.redirected).toBe(false); // 【追加】期待値生成関数 / 成功遷移がないことを検証するメソッド
+          await untouchedF11(batch); // 【追加】拒否後のDB非更新を検証する関数
+        }
+        const membershipId = batch.data.actors.aOwner.membershipId;
+        const original = await batch.database.clubMembership.findUniqueOrThrow({ // 【追加】復元用の所属状態を取得するメソッド
+          where: { id: membershipId },
+          select: {
+            status: true,
+            updatedAt: true
+          },
+        });
+        try {
+          await batch.database.clubMembership.update({ // 【追加】所属を休部中へ変える所有行の更新メソッド
+            where: { id: membershipId },
+            data: { status: "SUSPENDED" },
+          });
+          const revoked = await postAction(page, action); // 【追加】失効後の本人のCookieで再送する関数
+          expect(revoked.redirected).toBe(false); // 【追加】期待値生成関数 / 成功遷移がないことを検証するメソッド
+          await untouchedF11(batch); // 【追加】失効後のDB非更新を検証する関数
+        } finally {
+          await batch.database.clubMembership.update({ // 【追加】所属状態と更新日時を元へ戻す所有行の更新メソッド
+            where: { id: membershipId },
+            data: original,
+          });
+        }
+        const control = await postAction(page, action); // 【追加】復元後の本人が同じ要求を再送する関数（対照）
+        expect(control.status < 400).toBe(true); // 【追加】期待値生成関数 / 正規の本人では拒否されないことを検証するメソッド
+        expect(control.redirected).toBe(true); // 【追加】期待値生成関数 / 保存成功の遷移を検証するメソッド
+        await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // 【追加】生成行・完了記録が一件だけであることを検証する関数
+      });
+  });
+
+/**
+ * 【追加】公開判断の残件2：M01。COACH・OFFICERの本人も、実画面で定期練習をDRAFTで作成できる。
+ * 所有するMEMBERの所属のroleを一時的に変え、必ず元へ戻して、作成した完了記録も回収する。
+ */
+for (const role of ["COACH", "OFFICER"] as const) { // 【追加】検証するロールのリテラル型アサーション
+  test(`【追加】F11 ${role}も定期練習をDRAFTで作成できる`, // 【追加】M01のロール別ケースを登録する関数
+    /**
+     * 【追加】roleを変えた本人のCookieで、入力から保存までを操作し、実行者がその本人であることを確認する。
+     */
+    async ({ content }) => { // 【追加】所有content fixtureを受け取る非同期コールバック
+      await scenario(content, "2028-02", // 【追加】ケース専用の準備・回収関数
+        /**
+         * 【追加】保存後の生成行と完了記録の実行者が、roleを変えた本人であることを検証する。
+         */
+        async (batch) => { // 【追加】所有シナリオの検証コールバック
+          const membershipId = batch.data.actors.aMember.membershipId;
+          const original = await batch.database.clubMembership.findUniqueOrThrow({ // 【追加】復元用のroleと更新日時を取得するメソッド
+            where: { id: membershipId },
+            select: {
+              role: true,
+              updatedAt: true
+            },
+          });
+          const as = { ...batch, admin: batch.member }; // 【追加】会員のpageを操作主体にした所有シナリオ
+          try {
+            await batch.database.clubMembership.update({ // 【追加】所属のroleを変える所有行の更新メソッド
+              where: { id: membershipId },
+              data: { role },
+            });
+            await openPractice(as); // 【追加】入力画面を準備する関数
+            await preview(as); // 【追加】正規previewを表示する関数
+        await as.admin.getByRole("button", { // 【追加】roleと名前で要素を選ぶメソッド
+              name: "選択した予定を下書き作成",
+              exact: true
+            }).click(); // 【追加】保存ボタンを操作するメソッド
+            await expect(as.admin).toHaveURL(/\/admin\/events\?month=2028-02&status=ALL&toast=/u); // 【追加】期待値生成関数 / 固定管理一覧への遷移を検証するメソッド
+            const rows = await batch.generated(); // 【追加】生成イベントの取得関数
+            expect(rows.length).toBe(1); // 【追加】期待値生成関数 / 一件の生成を検証するメソッド
+            expect(rows[0].status).toBe("DRAFT"); // 【追加】期待値生成関数 / 下書き固定を検証するメソッド
+            expect(rows[0].createdByMembershipId).toBe(membershipId); // 【追加】期待値生成関数 / 実行者がrole変更した本人であることを検証するメソッド
+            const receipts = await batch.database.clubEventBatchOperation.count({ // 【追加】実行者の完了記録件数を取得するメソッド
+              where: {
+                clubId: batch.data.clubs.a.id,
+                targetMonth: batch.month,
+                executedByMembershipId: membershipId,
+                operation: "CREATE_PRACTICE_BATCH",
+              },
+            });
+            expect(receipts).toBe(1); // 【追加】期待値生成関数 / 完了記録の一件性を検証するメソッド
+          } finally {
+            await batch.database.clubEventBatchOperation.deleteMany({ // 【追加】このケースで増えた当該所属の完了記録だけを回収するメソッド
+              where: {
+                clubId: batch.data.clubs.a.id,
+                targetMonth: batch.month,
+                executedByMembershipId: membershipId,
+                operation: "CREATE_PRACTICE_BATCH",
+              },
+            });
+            await batch.database.clubMembership.update({ // 【追加】roleと更新日時を元へ戻す所有行の更新メソッド
+              where: { id: membershipId },
+              data: original,
+            });
+          }
+        });
+    });
+}
+
+/**
+ * 【追加】公開判断の残件5：F11運用書M10の上限。31日の月で全曜日を選び、31件が全件・一体で保存される。
+ * 32件の改変はE2Eでは作れないため、DB試験（上限超過の拒否）に任せる。
+ */
+test("【追加】F11 31日の月の全曜日を指定すると31件がDRAFTで保存される", // 【追加】M10の上限のE2Eケースを登録する関数
+  /**
+   * 【追加】対象月の全日を候補にし、選択件数・保存件数・完了記録が31件で一致することを検証する。
+   */
+  async ({ content }) => { // 【追加】所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-01", // 【追加】31日の月を対象にするケース専用の準備・回収関数
+      /**
+       * 【追加】全曜日を選んでpreviewし、31件をそのまま保存する。
+       */
+      async (batch) => { // 【追加】所有シナリオの検証コールバック
+        await openPractice(batch, { end: "2028-01-31", weekday: "月曜日" }); // 【追加】月全体を期間にして入力を準備する関数
+        const page = batch.admin;
+        for (const weekday of ["火曜日", "水曜日", "木曜日", "金曜日", "土曜日", "日曜日"]) {
+          await page.getByRole("checkbox", { // 【追加】roleと名前で要素を選ぶメソッド
+            name: weekday,
+            exact: true
+          }).check(); // 【追加】残りの曜日を選ぶメソッド
+        }
+        await preview(batch); // 【追加】正規previewを表示する関数
+        await expect(page.getByText("候補件数: 31 / 選択可能: 31", { exact: true })).toBeVisible(); // 【追加】期待値生成関数 / 候補件数の表示を検証するメソッド
+        await expect(page.getByText("選択件数: 31", { exact: true })).toBeVisible(); // 【追加】期待値生成関数 / 初期選択件数の表示を検証するメソッド
+        await page.getByRole("button", { // 【追加】roleと名前で要素を選ぶメソッド
+          name: "選択した予定を下書き作成",
+          exact: true
+        }).click(); // 【追加】保存ボタンを操作するメソッド
+        await expect(page).toHaveURL(/\/admin\/events\?month=2028-01&status=ALL&toast=event-practice-batch-created&toastId=[0-9a-f-]+$/u); // 【追加】期待値生成関数 / 固定管理一覧への遷移を検証するメソッド
+        await saved(batch, 31, "CREATE_PRACTICE_BATCH"); // 【追加】31件・完了記録・関連行なしを検証する関数
+      });
+  });
