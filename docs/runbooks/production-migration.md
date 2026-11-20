@@ -2775,3 +2775,397 @@ runnerは固定表示だけを出し、Playwrightの個々の失敗メッセー�
 | 5 | データ整合性（M10相当） | F11の31件は、E2Eで確認済み。F10のpreview変更検出も、E2Eで確認済み。**F11の32件の拒否は、E2Eで作れないため、DB試験のみ**（このまま） |
 
 - 手動確認（M01〜M14・H01・H02・M15の残り）は、未実施のまま。保留の条件は §19.35.1・§19.35.6 のとおり。
+
+### 19.37 G9：公開判断の準備（2026-11-20、利用者の方針に基づき、Claudeが作成。**手順書のみ。本番は未操作・すべて未承認**）
+
+**【追加：2026-11-20】** Claudeは本番へ接続していない。値（メール・UID・URL・トークン・グループID）は記録しない。本番の読取りも、操作ごとに承認を取る（第3章）。
+
+#### 19.37.1 利用者の方針（段階1の決定）
+
+1. コーチ3人は **B**（既存AuthのUIDに対応する `AppUser` だけを作成して招待）。**C**（招待コードの対応）は、将来の導入改善として残す。
+2. Outlookの迷惑メールは、当面は受信側への案内で対応。現行ドメインのDNS確認（SPF・DKIM・DMARC）と、将来の共通ドメイン取得後の設定を分ける。DNS変更が必要なら、確認結果と変更案を先に示す。
+3. H03の本番確認は、具体案を確認してから、実施を判断する。
+4. 公開の直前に、新しい手動バックアップを取る。
+5. Cronの正常動作と、トークン再発行後の既存HPのLINE通知を、公開前の確認条件にする。
+6. 不要なテストデータは整理する。開発者用LINEグループは残し、テスト通知先は無効のまま。Authユーザーの削除は、別に判断する。
+
+#### 19.37.2 全体の順序（案）
+
+| # | 内容 | 本番への作用 | 承認 |
+| --- | --- | --- | --- |
+| 1 | 読取り確認：Cron（Supabase側の直近の実行）、テストデータの件数、コーチ3人のAuth UIDと `AppUser` の有無 | 読取り | 読取りの承認 |
+| 2 | DNSの確認（公開DNSへの問い合わせ。本番システムに触れない） | なし | 不要（結果は、先に提示） |
+| 3 | テストデータの整理 | 書込み（削除） | 個別承認 |
+| 4 | コーチ3人の `AppUser` の作成（B） | 書込み（3行） | 個別承認 |
+| 5 | 既存HPのLINE通知の確認（19.37.7） | 実送信・書込み | 個別承認 |
+| 6 | H03の本番確認（19.37.5。実施するなら） | 本番への通信 | 個別承認 |
+| 7 | **新しい手動バックアップ**（19.37.6） | 読取り（手元に複製ができる） | 承認B-1 |
+| 8 | 2026-11-25 朝以降：ログ削除Cronの確認（19.37.7） | 読取り | 読取りの承認 |
+| 9 | **承認H（公開判断）** | なし | 右田和也 |
+| 10 | **承認G：STARTER→STANDARD**（第18章） | 書込み（1行） | 個別承認 |
+| 11 | コーチ3人の招待（実メール）。LINEの本番グループの登録 | 書込み・実送信 | 個別承認 |
+| 12 | 初回の実利用の前の手動確認（§19.35.6）。その後、安定確認、バックアップの削除 | ― | 右田和也 |
+
+- 7（バックアップ）は、3・4（本番への準備の書込み）の**後**、9（承認H）の**前**に行う（バックアップの時点より後の書込みは、復元で失われ得る。第9.6節）。
+- 8は、日付に依存する。2026-11-25 より前に、6までを済ませてよい。
+
+#### 19.37.3 コーチ3人：Bの手順（`AppUser` だけを作成する。既存HPの認可・データは変えない）
+
+**コードの読取り（`send-club-invitation.ts`）：** `AppUser` があると、招待の準備は、`AppUser.id` を既知のAuth IDとして、Authで照合する（`getClubInvitationAuthUserById`）。照合が通り、メールが確認済みなら、「既存ユーザー向け」のメール（Authのリンクを作らない）で送られる。1回目の失敗は、`AppUser` がなく、既存のAuthのメールに `generateLink`（`invite`）を呼んだことによる（§19.19）。**したがって、`AppUser` を先に作れば、この失敗を避けられる見込み。ただし、本番での招待は、未実施。** 条件：`AppUser.id` ＝ Authの `user.id`、`AppUser.email` ＝ Authのメール（正規化＝小文字、`normalizeEmail`）。
+
+**触れないもの：** Authのテーブル・設定、`WEBSITE_ADMIN_USER_IDS`、既存HPのテーブル、`ClubMembership`（招待の受諾で作られる）、プラン。
+
+**手順1（読取り。承認の後）：** 各コーチの `user.id` とメールを、Supabaseの管理画面（Authentication → Users）で控える（チャットには貼らない）。読取り用ターミナルで、次を確認する（`<uid>`・`<email>` は、各自の値）。
+
+```sql
+select count(*) from auth.users where id = '<uid>' and lower(email) = lower('<email>');
+select count(*) from "AppUser" where id = '<uid>' or lower(email) = lower('<email>');
+select count(*) from "PlatformAdmin" where id = '<uid>';
+```
+- 期待：1行目が1、2行目が0。3行目は、参考（コーチがPlatformAdminでないこと。1なら、報告）。
+- 2行目が1以上なら、**作成しない**。内容（IDとメールの一致）を確認する。
+
+**手順2（書込み。個別承認の後。`PGOPTIONS` のない書込み用接続で）：** 3人を、1つのトランザクションで。1人分の例（`<name>` は、表示名。不要なら `NULL`）。
+
+```sql
+BEGIN;
+INSERT INTO "AppUser" ("id", "email", "name", "createdAt", "updatedAt")
+SELECT u.id, lower(u.email), '<name>', timezone('UTC', now()), timezone('UTC', now())
+FROM auth.users u
+WHERE u.id = '<uid>'
+  AND lower(u.email) = lower('<email>')
+  AND NOT EXISTS (
+    SELECT 1 FROM "AppUser" a WHERE a.id = u.id OR a.email = lower(u.email)
+  );
+```
+- 各 `INSERT` が **`INSERT 0 1`** であること（3人とも）。1つでも `INSERT 0 0` なら、`ROLLBACK;`（想定外の状態）。3つとも1なら、`COMMIT;`。
+- 確認（読取り）：`select count(*) from "AppUser";`（作成前の人数＋3）。
+- **戻し：** 招待の前なら、`DELETE FROM "AppUser" WHERE id IN ('<uid1>','<uid2>','<uid3>') AND NOT EXISTS (SELECT 1 FROM "ClubMembership" m WHERE m."userId" = "AppUser".id);`（`DELETE 3`）。`ClubMembership` ができた後は、戻さない。
+- 本番での書込み前に、**ローカルで、同じ状態（Authに既存、`AppUser` 作成済み）の招待を、一度、再現して確認する案**（別の粒度。希望があれば）。
+
+**招待（本番、承認Gの後）：** アプリの「招待」から、各コーチのメールへ、COACHまたは指定のロールで。受信側は、既存のHP管理者のパスワードで、ログインする。HP管理者の認可（`WEBSITE_ADMIN_USER_IDS`）は、変わらない。
+
+#### 19.37.4 Outlookの迷惑メール：DNSの確認（現行ドメイン）と、将来の設定の分離
+
+**現行ドメイン（確認だけ。変更は、結果を見てから提案）：** Resendで「Verified」は、利用者が確認済み。SPF・DKIM・DMARCの実際のレコードを、公開DNSに問い合わせる（本番システムには触れない）。`D` は、`MAIL_FROM_ADDRESS` のドメイン。Resendの標準の配置（DKIM：`resend._domainkey`、SPF・MX：`send` サブドメイン）を想定する。**実際のレコード名は、Resendの画面（Domains → DNS Records）と照合する。**
+
+```bash
+D="<ドメイン>"
+dig +short TXT "resend._domainkey.$D"
+dig +short MX "send.$D"
+dig +short TXT "send.$D"
+dig +short TXT "$D"
+dig +short TXT "_dmarc.$D"
+```
+- 結果（レコードの有無と種類）を教えてほしい。DKIMの鍵そのものは、貼らなくてよい（有無と、`v=DKIM1` で始まるか）。
+- 判定の目安：DKIM・SPFがあれば、Resendの認証は成立。**DMARCがない場合**は、迷惑メール判定に影響し得る（特に大手の受信側）。その場合の変更案（先に提示）：`_dmarc.<D>` に、TXT `v=DMARC1; p=none; rua=mailto:<受信先>`（監視のみ）。**DNSの変更は、確認結果を見て、承認の上で、右田が行う。**
+
+**将来の共通ドメイン取得後（§15.4）：** 別の作業として、①ドメイン取得 ②Resendへ登録 ③DNS（DKIM・SPF・DMARC）④テスト送信 ⑤`RESEND_API_KEY` と `MAIL_FROM_ADDRESS` を同時に切替 ⑥`APP_BASE_URL`・`Club.appBaseUrl`・AuthのURLの更新。今回は、実施しない。
+
+**当面の対応：** 招待を受ける人へ、「迷惑メールフォルダーの確認」と「送信元の許可登録」を、案内する（文案は、別に作る）。
+
+#### 19.37.5 H03：本番確認の具体案（**実施するかは、右田が判断。手順の確認だけ**）
+
+**目的：** Vercel前段・Proxyを通る本番の条件で、外部Originの Server Action 要求が、Next.jsの検査で拒否されることを確認する。ローカル（E2E 97件）では、確認済み。
+
+**考え方：**
+- **対象：** `/club-login` のログイン（Server Action）。ログイン前の画面で、STARTERでも使える。**実在するアカウントを使わず**、存在しない確認用メール（例：`h03-check@example.invalid`）と、無作為のパスワードを使う。
+- **想定外に、外部Originの要求が通っても：** ログイン失敗になるだけ（存在しないアカウント）。業務データは変わらない。外部送信（メール・LINE）もない。**書込みは、ログイン試行の記録（`LoginSubmissionLog`、ハッシュのみ。30日で自動削除）が、1件増えるだけ。**
+- **拒否と他のエラーの区別：** 同じ要求を、**Originだけ**変えて、2回送る。
+  1. **対照（正しいOrigin）：** アプリが動き、ログイン失敗の表示を返す（アプリ側のエラー）。要求の形式・Action IDが有効なことを示す。**この対照が、`LoginSubmissionLog` を1件増やす（唯一の書込み）。**
+  2. **外部Origin：** Next.jsが、アプリを呼ぶ前に拒否する（アプリ側のエラーの表示が、返らない）。対照と違う応答であれば、「Originによる拒否」と判断できる。
+- 判定は、HTTPの状態番号だけで行わない（Nextの応答番号は、推測しない）。**応答の本文に、アプリのログイン失敗の表示が含まれるか**で区別する。Vercelのログ（約1時間の保持）に、Nextの拒否のメッセージが出れば、補強になる。
+
+**手順（案。承認の後）：**
+1. ブラウザー（ログアウト状態）で、`/club-login` を開き、開発者ツールの Network を開く。確認用メールと無作為のパスワードで、送信する（**対照の1回目。`LoginSubmissionLog` が1件増える**）。
+2. Networkの、ページと同じパスへのPOSTを、右クリック → Copy → **Copy as cURL (bash)**。
+3. ターミナルで（コピーした内容は、Cookie・Action IDを含み得る。ファイルは、終わったら削除）。
+
+```bash
+umask 077
+H03_DIR="$(mktemp -d /private/tmp/h03.XXXXXX)"
+pbpaste > "$H03_DIR/control.sh"
+sed -E "s#-H '[Oo]rigin: [^']*'#-H 'origin: https://attacker.invalid'#" "$H03_DIR/control.sh" > "$H03_DIR/foreign.sh"
+grep -c "attacker.invalid" "$H03_DIR/foreign.sh"
+```
+- 期待：最後が `1`（外部Originへ置換できている）。
+
+```bash
+bash "$H03_DIR/control.sh" -s -o "$H03_DIR/control.out" -w 'control status=%{http_code}\n'
+bash "$H03_DIR/foreign.sh" -s -o "$H03_DIR/foreign.out" -w 'foreign status=%{http_code}\n'
+wc -c "$H03_DIR/control.out" "$H03_DIR/foreign.out"
+grep -c "<ログイン失敗の表示の一部>" "$H03_DIR/control.out" "$H03_DIR/foreign.out"
+```
+- `<ログイン失敗の表示の一部>` は、画面に表示される失敗メッセージの一部（1の画面で確認）。
+- **期待：** control は一致あり（1以上）、foreign は一致なし（0）。応答の中身は、貼らない（状態番号と、一致の件数だけを報告）。
+
+```bash
+rm -rf "$H03_DIR"
+unset H03_DIR
+```
+- **注意：** 手順1の対照の1回目と、3の対照の再送で、`LoginSubmissionLog` が合計2件（FAILED）になる。**ログインの失敗回数による制限（ブロック）が、同じメール・同じIPに働くか**は、未確認。回数は、最小（2回）に抑える。
+- **別案（書込みなし）：** 承認Gの後（STANDARD）に、F11のpreview（DBを書き換えない読取り経路）の要求で、同じ手順を行う。ただし、承認Hの後になる。
+
+> **【訂正：2026-11-20】** 上のH03の手順は、§19.38.2 で置き換える。`/club-login` のログイン（`loginAction`）は、`LoginSubmissionLog` へ書込まない（Supabase Authの `signInWithPassword` を呼ぶだけ。`LoginSubmissionLog` に書くのはHP管理者のログイン）。「ログイン試行の記録が2件増える」「`LoginSubmissionLog` の制限」の記述は、誤り。また、手順3の `bash foo.sh -s ...` は、curlへ引数が渡らない誤りで、§19.38.2 で直す。
+
+#### 19.37.6 新しい手動バックアップ（公開の直前）：既存手順（第6章）からの差分
+
+**そのまま使う：** 第6.2〜6.5節（取得前の記録、`pg_dump` 3本、Storage本体、取得後の確認、SHA-256）。承認B-1を、新たに取る。
+
+**差分（今回、変わること・追加すること）：**
+
+| 項目 | 前回（2026-11-12・16） | 今回 |
+| --- | --- | --- |
+| 保管先 | `~/f13-backups/<日時>/` | **新しい日時のフォルダー**（前回のものは、上書き・削除しない）。権限700、Git管理外・クラウド同期外 |
+| 取得の時期 | migration前 | **本番への準備の書込み（19.37.2の3・4・5）の後、承認Hの前** |
+| DBの内容 | アプリのテーブルは、ほぼ空 | OWNER・開発者・テスト用の行、`ClubLineSetting`（暗号化済みの資格情報）、通知先などを含む。件数は、6.2の `counts-before.tsv` で記録される |
+| Storage | 15件（`club-app-attachments` は0） | **件数が変わっている可能性**。6.2の直前の集計で確認し、6.4の突き合わせ（欠け・余り・サイズ違いが0）を、必ず行う |
+| 暗号鍵 | `LINE_CREDENTIAL_ENCRYPTION_KEY` の保全を確認 | **再確認**：鍵が、パスワード管理ツールにあり、`.env.prod`・Vercelと同じであること（値は、貼らない）。**再発行したLINEのChannel Secret・Access Token（新しい値）も、パスワード管理ツールへ保全されていること**（バックアップのDBには、暗号化された形で入る） |
+| Authの設定 | 控えた | **F-1で変更したSite URL・Redirect URLsを、画面で、控え直す**（スクリーンショットに、秘密が写らないよう注意） |
+| 環境変数 | 変数名と用途の一覧 | 一覧を更新（G6・G7の確認後の状態）。値は、パスワード管理ツール |
+| Cron | 名前とスケジュールを控えた | 再確認（Supabase側の2本、Vercelの1本）。**コマンド文は、保存しない** |
+| 復元リハーサル（B-2） | 実施済み（2026-11-13） | **全体の再リハーサルは、スキーマが変わっていなければ、不要**（案。右田が判断）。ただし、6.5の通過条件（`pg_restore --list`、チェックサム、前後の件数の差0）は、必ず行う |
+| 取得中の書込み | ― | **取得中に、Cron（`storage-deletions`、毎時02分起点）と、LINE配信が動き得る**。6.4の注意に従い、時刻を避ける。6.5の「取得前後の差0」で確認 |
+| 保持 | G9の安定確認まで | **前回・今回の両方**を、G9の安定確認まで保持。削除候補日（2026-12-17）は、公開日に合わせて、見直す |
+
+#### 19.37.7 公開前の確認条件：Cron と 既存HPのLINE通知
+
+**Cron（3本）の状態：**
+
+| Cron | 確認済み | 未確認 | いつ・どう確認するか |
+| --- | --- | --- | --- |
+| Supabase側 `club-line-deliveries`・`storage-deletions`（5分間隔） | 2026-11-18：直近10件とも成功・200（約22分の範囲）。認証なしは401 | 長期の安定 | **いつでも**、読取りで、直近の実行を確認できる（第17.3節の確認2と同じSQL）。公開の直前に、再確認する |
+| Vercel `/api/cron/delete-old-security-logs`（毎日 03:00 JST） | Cron一覧に登録済み。認証なしは401 | **実行して、削除が働くこと**（未判定） | 下記 |
+
+**11月25日以降とする理由（記録から）：** このCronは、**30日より古い行を削除する**。`LoginSubmissionLog` の最古の行は、2026-10-25 11:38 で、**30日を超えるのは 2026-11-24 11:38 頃**。その次の定刻（**2026-11-25 03:00 JST**）の実行の後に、「30日より古い行が0件」であれば、削除が働いたと言える。それ以前は、30日より古い行が、もともと0件のため、**「動いていない」のと「動いて削除した」のを、区別できない**（`FormSubmissionLog` は空）。また、2026-11-18 の初回の実行は、Vercelの無料プランのログ（約1時間）が消えており、確認できなかった。
+
+**11月25日より前に、確認できる範囲：**
+1. **Supabase側のCron（2本）の、直近の実行**：読取りで確認できる（いつでも）。
+2. **Vercel側の、ルートと認証**：認証なしの401は、確認済み。**認証付きの呼び出しが、200を返すか**は、未確認。Vercelの管理画面（Cron Jobs）から、**手動で実行**すると、認証付きの呼び出しになる。ただし、**これは本番への操作（承認が必要）**。実行すると、30日より古い行を削除する（**現在は、該当する行が0件のため、実質、何も削除しない**）。実行直後に、Vercelのログ（約1時間）で、応答（200）を確認できる。**これで、「ルートが動き、認証が通る」までは、25日より前に確認できる。「削除が働く」の確認は、25日以降。**
+3. **2026-11-25 03:00 JST の実行を、直接、見る：** 実行から約1時間以内に、Vercelのログを見れば、定刻の実行と応答を確認できる（早朝のため、現実的でなければ、読取りの方法で代替）。
+
+**判定条件（案）：** 公開の前提は、「Supabase側が、直近で成功」かつ「Vercel側が、2026-11-25 以降の読取りで、削除が働いている」。**公開日が11月25日より前になる場合の扱い**（上の2までで足りるとするか）は、右田が決める。
+
+**既存HPのLINE通知（トークン再発行後）：**
+- 現状：`lib/line/send-line-message.ts` が、環境変数 `LINE_CHANNEL_ACCESS_TOKEN`・`LINE_ADMIN_GROUP_ID` で、管理者グループへ送る（問い合わせ・体験申込みのフォームの通知）。再発行後（2026-11-18、§19.12）、Vercelの値を更新し、再デプロイ済みだが、**実際の通知は、未確認**（§19.31.6）。トークンが無効なら、失敗しても、フォーム自体は、成功扱い（通知の失敗は、握りつぶされ得る）。
+- 確認の方法（案）：
+  - **A（推奨）：** 本番のHPの問い合わせフォームから、確認用の送信を、1件行う。**副作用：** `Contact` の行が1件増える（管理画面で、削除できる）、`FormSubmissionLog` が増える、**運営向けのメール（現在4人）と、LINEの管理者グループに通知が届く**。実施前に、受信者へ「確認用の送信」と、予告する。
+  - **B（書込みなし、有効性のみ）：** LINEのBot情報取得API（読取り）で、トークンの有効性を確認する。F-2aで、再発行後に実施済みの可能性がある。**ただし、Vercelの環境変数が新しい値であること、`LINE_ADMIN_GROUP_ID` へ届くことまでは、確認できない。**
+- **判定：** Aで、LINEの管理者グループに、通知が表示されれば合格。届かなければ、Vercelの環境変数（有無・更新時刻）と、再デプロイの時刻を確認する（値は見ない）。
+
+#### 19.37.8 テストデータの整理：削除候補と依存関係
+
+**記録（§19.19〜§19.28）から把握できる、本番のテストデータ。** 実在と件数は、**読取りの確認が先**（下のSQL。件数と状態だけを出す）。削除は、個別承認の後。
+
+| 対象 | 由来 | 依存（外部キー） | 扱い（案） |
+| --- | --- | --- | --- |
+| `ClubInvitation`（1回目、PREPARING→期限で自動失効の見込み） | F-4（§19.19） | 参照する行なし（`membershipId`・`authUserId` が null） | **削除候補**（先に、状態を読取りで確認） |
+| `ClubInvitation`（再、ACCEPTED） | F-4（再、§19.22） | `membershipId` → テスト用 `ClubMembership`（削除時は SetNull）。この行を消しても、他の行に影響なし | **削除候補**（`ClubMembership` の前でも後でも可） |
+| `ClubMembership`（テスト用MEMBER、WITHDRAWN） | §19.22 | `ChildClubMembership`（親の所属、Cascade）、`ClubEventMemo`・`ClubEventRead`・`ClubNoticeRead`（Cascade）、`ClubEvent`・`ClubNotice` の作成者・更新者（SetNull）、`SupportReport`（SetNull）、`ClubLineDelivery` の依頼者（SetNull）、`ClubInvitation.membershipId`（SetNull）、`ClubEventBatchOperation` の実行者（SetNull）。**このMEMBERが作成した行が、あれば、作成者がnullになる** | **削除候補**（先に、依存する行の件数を、読取りで確認） |
+| `AppUser`（テスト用MEMBER） | §19.22 | `Child`（親、Cascade）、`ClubMembership`（Cascade）。**`AppUser` を消すと、所属・子どもも消える** | **削除候補**（`ClubMembership` の後） |
+| Authのユーザー（テスト用MEMBER） | §19.22 | `AppUser.id` と同じID。Authを消すと、そのメールで、再度、招待できる（HP管理者として登録済みの別人には、無関係） | **別途判断**（今回は、削除しない） |
+| `ClubLineRegistrationToken`（使用済み・期限切れ） | F-5（§19.24） | `ClubLineSetting`・作成者の `ClubMembership`（Cascade。削除しても、他へ影響なし） | **削除候補**（使用済み・期限切れのみ） |
+| `ClubLineDelivery`（テストの配信、SENT） | F-6（§19.28） | 通知先は、Restrict（**配信行を消しても、通知先は残る**）。お知らせは削除済みで、`noticeId` は null | **削除候補**（本文のスナップショットが残るため）。通知先は、削除しない |
+| `ClubLineTarget`（開発者用のテスト用グループ） | F-5・F-6 | 配信行（Restrict） | **残す（利用者の方針）。無効（`isEnabled = false`）のまま**（現在、無効に戻し済み。読取りで再確認） |
+| `ClubNotice`（テスト用のお知らせ） | F-6 | 添付・既読・配信行 | **削除済み**（アプリで削除、§19.28）。残りがないか、読取りで確認 |
+| `StorageDeletionJob`（添付の削除の記録） | お知らせに添付があった場合のみ | なし | 件数を確認。完了済みなら、削除候補 |
+| `LoginSubmissionLog`・`FormSubmissionLog`（テストのログイン等） | テストの操作 | なし | **Cronが、30日で自動削除**。手動の削除は、しない |
+| `ClubLineSetting`・`Club.appBaseUrl`・`PlatformAdmin`・OWNERの `AppUser`・`ClubMembership` | 実運用の設定 | ― | **残す** |
+
+**読取りSQL（件数と状態だけ。承認の後）：**
+
+```sql
+select status, count(*) from "ClubInvitation" group by status order by status;
+select role, status, count(*) from "ClubMembership" group by role, status order by role, status;
+select count(*) from "AppUser";
+select count(*) filter (where "usedAt" is not null) as used, count(*) filter (where "usedAt" is null and "expiresAt" < now()) as expired, count(*) filter (where "usedAt" is null and "expiresAt" >= now()) as active from "ClubLineRegistrationToken";
+select status, count(*) from "ClubLineDelivery" group by status order by status;
+select "isEnabled", count(*) from "ClubLineTarget" group by "isEnabled";
+select status, count(*) from "ClubNotice" group by status order by status;
+select status, count(*) from "ClubEvent" group by status order by status;
+select status, count(*) from "StorageDeletionJob" group by status order by status;
+select count(*) from "Child";
+select count(*) from "SupportReport";
+```
+- 期待：OWNER 1（ACTIVE）、テスト用MEMBER 1（WITHDRAWN）、通知先1（無効）、お知らせ・予定・子どもは0 など。**想定外の行があれば、削除の前に、内容を確認する。**
+- 削除の順序（案）：`ClubLineDelivery` → `ClubLineRegistrationToken` → `ClubInvitation` → `ClubMembership`（テスト用MEMBER、`id` と `status = 'WITHDRAWN'` を条件に）→ `AppUser`（テスト用MEMBER）。1つのトランザクションで、各 `DELETE` の件数が、想定どおりであること（`WHERE` に、`id` と状態を入れ、他の行を巻き込まない）。個別の `DELETE` 文は、読取りの結果を見て、承認の際に提示する。
+
+#### 19.37.9 次に決めること・承認
+
+- 19.37.5 のH03：実施するか（実施する場合は、ログイン試行の記録2件の副作用を承知するか）。
+- 19.37.7：公開日が2026-11-25より前になる場合の、Cron の判定条件。既存HPのLINE通知の確認は、A・Bのどちらか。
+- 19.37.6：B-2の再リハーサルの要否（案：スキーマが変わっていなければ不要）。
+- 19.37.2の各操作の承認（1つずつ、承認の依頼文を、出す）。
+
+### 19.38 G9：段階1の判断（第2回）と、手順の確定案（2026-11-20、Claudeが記録・作成。**本番は未操作・すべて未承認。実施日時は未定**）
+
+**【追加：2026-11-20】** 値（メール・UID・URL・トークン・グループID・応答の本文）は、記録しない。
+
+#### 19.38.1 利用者の判断（2026-11-20）
+
+1. **H03：** `/club-login` のServer Actionによる試験を実施する。**正しいOriginと外部Originを各1回、合計2回に限定。** 実施日時と手順を確定してから実行する。ログイン試行記録の増加数は、必ず2件とはせず実測する。**Origin拒否・認証失敗・レート制限を区別し、判定できない場合は、繰り返さず、報告する。**
+2. **既存HPのLINE通知：A**。通知を受ける運営者へ事前に予告し、「開発者による通知テスト・対応不要」と分かる問い合わせを、右田が1件送信する。メールとLINEの到着を確認し、テストの `Contact` の後始末も記録する。
+3. **25日より前のCron判定：** 公開前は、必要な各ジョブの**呼出し先・認証・正常応答**を確認する。定刻の実行の証拠で足りなければ、手動実行の対象と影響を提示する。削除対象がないことは、**実行直前に、対象テーブルごとに再確認**する。**期限到来による実削除は、未確認として、担当者・確認日時を残し、公開後の確認項目にする。**
+4. **B-2：** 前回の復元検証が成功しており、スキーマ・取得範囲・形式・復元手順に変更がなければ、全面再実施は不要。新しいバックアップは、既存手順で取得・検証し、前回の復元検証の根拠と今回の取得記録を対応付ける。変更点があれば、必要な追加検証だけを提示する。
+
+#### 19.38.2 H03（改訂）：実測する項目と、判定の区別
+
+**コードの読取り（`app/(club-app)/club-login/actions.ts`）：**
+- `loginAction` は、`requestId` が前の状態と一致しなければ、「フォームの有効期限が切れました。…」を返す。形式の誤りは「入力内容を確認してください。」。
+- その後、`supabase.auth.signInWithPassword` を呼ぶ。**失敗（誤った認証情報）も、Authのレート制限による失敗も、同じ表示「メールアドレスまたはパスワードが正しくありません。」になる**（`error` を区別しない）。**つまり、画面の表示だけでは、認証失敗とレート制限を区別できない。**
+- アプリのDBへは書込まない（`LoginSubmissionLog`・`FormSubmissionLog` は、HPのフォーム・HP管理者ログイン用）。副作用は、**Supabase Auth側のログイン試行**（Authのログに記録され、IP単位のレート制限の計数に入る）だけ。
+
+**実測する項目（読取り。承認の後。前後で、同じSQLを実行）：**
+
+```sql
+select 'LoginSubmissionLog' as t, count(*) from "LoginSubmissionLog"
+union all select 'FormSubmissionLog', count(*) from "FormSubmissionLog"
+union all select 'AppUser', count(*) from "AppUser"
+union all select 'ClubMembership', count(*) from "ClubMembership";
+```
+- 期待：前後で**差0**（アプリのDBへ書込まない設計）。**差があれば、そのまま報告する**（想定外の書込み。繰り返さない）。
+- Supabase Auth側の記録は、管理画面（Logs → Auth）で、試験の時刻の前後を、目視で確認する（**HTTP 429／`over_request_rate_limit` の有無**、ログイン失敗のイベントが、何件か）。件数は、実測値を記録する。
+
+**判定の区別（応答と、ログから）：**
+
+| 観察 | 判断 |
+| --- | --- |
+| 正しいOrigin（ブラウザーの送信）で、画面に「メールアドレスまたはパスワードが正しくありません。」。Authのログに、429なし | **アプリが動き、認証失敗**（対照が成立。要求の形式・Action IDは有効） |
+| 同じ画面表示で、Authのログに **429（レート制限）** | **レート制限**（対照が、認証失敗と区別できない）。**試験を中止し、繰り返さず、報告** |
+| 外部Originの再送の応答に、上の失敗表示の文字列が**含まれない**。Vercelのログ（約1時間）に、NextのOrigin不一致のメッセージ | **Originによる拒否**（アプリが呼ばれていない） |
+| 外部Originの再送の応答に、上の失敗表示が**含まれる** | **Origin保護が、効いていない可能性**。**繰り返さず、報告**（本番の条件の対策が必要） |
+| 外部Originの応答に、失敗表示も、拒否の根拠（ログ）もない | **判定できない**。**繰り返さず、報告**（HTTPの状態番号だけで判断しない） |
+
+**手順（案。承認と、実施日時の確定の後）：** 確認用メールは、実在しないアドレス（例：`h03-check@example.invalid`）、パスワードは、無作為の文字列。
+
+1. 読取りで、前の件数を取る（上のSQL）。Supabase Authのログを開いておく。
+2. ブラウザー（ログアウト状態）で、`/club-login` を開き、開発者ツールの Network を開き、確認用のメールとパスワードで、送信する。**これが、「正しいOriginの1回」**。画面の表示を記録する。
+3. Networkの、ページと同じパスへのPOSTを、右クリック → Copy → **Copy as cURL (bash)**。
+4. ターミナルで、外部Originへ置換し、**1回だけ**送る（コピーした内容は、Cookie等を含み得るため、終わったらファイルを削除）。
+
+```bash
+umask 077
+H03_DIR="$(mktemp -d /private/tmp/h03.XXXXXX)"
+pbpaste > "$H03_DIR/control.sh"
+sed -E "s#-H '[Oo]rigin: [^']*'#-H 'origin: https://attacker.invalid'#" "$H03_DIR/control.sh" > "$H03_DIR/foreign0.sh"
+sed -E "1s#^curl #curl -s -o $H03_DIR/foreign.out -w 'foreign status=%{http_code}\\\\n' #" "$H03_DIR/foreign0.sh" > "$H03_DIR/foreign.sh"
+grep -c "attacker.invalid" "$H03_DIR/foreign.sh"
+head -c 80 "$H03_DIR/foreign.sh" | cut -c1-60
+```
+- 期待：`grep -c` が `1`（外部Originへ置換できている）。先頭が `curl -s -o …` で始まる。**ここまでは、送信しない。**
+
+```bash
+bash "$H03_DIR/foreign.sh"
+wc -c < "$H03_DIR/foreign.out"
+grep -c 'メールアドレスまたはパスワードが正しくありません' "$H03_DIR/foreign.out"
+rm -rf "$H03_DIR"
+unset H03_DIR
+```
+- 報告するもの：`foreign status=…`、応答の大きさ、一致の件数（0か1以上か）だけ。**応答の中身は、貼らない。**
+5. 読取りで、後の件数を取り、前後の差と、Authのログ（429の有無、失敗の件数）を、実測値として報告する。
+- **回数の上限：** ブラウザー1回＋再送1回の、合計2回。**結果が曖昧でも、繰り返さない。**
+- **別案（書込みなし）：** 承認Gの後、F11のpreview（DBを書き換えない読取り経路）で行う。承認Hの後になる。
+
+#### 19.38.3 既存HPのLINE通知：A（確認用の問い合わせを、1件送信）
+
+**コードの読取り：** 問い合わせの送信後、`lib/line/admin-line-notifications.ts` が、`sendLineMessage`（`LINE_CHANNEL_ACCESS_TOKEN`・`LINE_ADMIN_GROUP_ID`）で、管理者グループへ送る。通知先メール（`FormNotificationSetting`・`ADMIN_EMAIL`）へも、メールが届く。**問い合わせの削除機能は、アプリ・管理画面のコードに、見つからなかった**（`contact.delete` の呼出しなし）。そのため、後始末は、**管理画面で状態を「対応済み」にし、メモに「テスト」と書く**（書込み。アプリの機能）か、**承認を得て、SQLで1行を削除**する。
+
+**事前の予告（運営者へ。文案）：**
+> 【お知らせ】○月○日 ○時ごろ、開発者が、ホームページの問い合わせフォームの通知テストを1件送信します。メールとLINEの管理者グループに、「開発者による通知テスト・対応不要」という通知が届きます。対応は不要です。
+
+**送信する問い合わせ（右田が、ホームページの問い合わせフォームから、1件）：**
+- 名前：`開発者通知テスト`、カナ：`カイハツシャツウチテスト`、メール：開発者本人のアドレス、電話：空欄。
+- 内容の先頭に、`【開発者による通知テスト・対応不要】`、日時を入れる。
+
+**確認（記録する）：** 送信の日時／フォームの完了表示／メールの到着（受信者、日時。本文は、記録しない）／LINEの管理者グループの表示（日時）／**受付成功と、配送完了を、別々に記録**。
+**判定：** LINEのグループに表示されれば合格。届かない場合：Vercelの環境変数（`LINE_CHANNEL_ACCESS_TOKEN`・`LINE_ADMIN_GROUP_ID`）の有無と、更新時刻、再デプロイの時刻を確認する（値は見ない）。**通知の失敗は、フォームの成功を妨げない設計のため、フォームの完了だけでは、LINEの成功を判断しない。**
+
+**後始末（記録する）：**
+1. **読取り**で、テストの `Contact` を特定する：`select id, "createdAt", status from "Contact" where "createdAt" > now() - interval '1 day' order by "createdAt" desc;`（件数と時刻で、テストの1行を、特定）。
+2. **【利用者の決定：2026-11-20】SQLで削除する**（承認の上、書込み用接続で。`PGOPTIONS` なし）。`BEGIN; DELETE FROM "Contact" WHERE id = '<特定したid>'; ` が **`DELETE 1`** であることを確認してから `COMMIT;`（0または2以上なら `ROLLBACK;` して報告）。削除の前に、読取りで、その1行が、テストの問い合わせ（内容の先頭の印・作成時刻）であることを、再確認する。管理画面の「対応済み」にする方法は、使わない。
+3. `FormSubmissionLog` の1件は、Cronが30日で自動削除する（手動では削除しない）。
+4. 実施者・日時・結果を、運用書へ記録する。
+
+#### 19.38.4 Cron：公開前に確認する範囲と、手動実行の案
+
+**3本の呼出し先・認証・正常応答：**
+
+| ジョブ | 呼出し先 | 認証 | 正常応答 | 現在の証拠 | 公開前の確認 |
+| --- | --- | --- | --- | --- | --- |
+| `club-line-deliveries`（Supabase Cron、5分間隔） | `/api/cron/club-line-deliveries` | `CRON_SECRET`（Bearer） | 200 | 2026-11-18：直近10件、`succeeded`・200。認証なしは401 | **公開の直前に、第17.3節の確認2と同じ読取りを、再実行**（新しい実行の範囲） |
+| `storage-deletions`（Supabase Cron、5分間隔） | `/api/cron/storage-deletions` | 同上 | 200 | 同上 | 同上 |
+| `delete-old-security-logs`（Vercel Cron、毎日 03:00 JST） | `/api/cron/delete-old-security-logs` | 同上 | 200、`{ ok: true, formSubmissionLogs: {deletedCount, cutoffDate, retentionDays}, loginSubmissionLogs: {…} }` | 認証なしは401（確認済み）。**認証付きの200は、未確認** | 手動実行（下記）、または、2026-11-21 03:00 JST の実行の直後（約1時間以内）に、Vercelのログで確認 |
+
+**手動実行の対象と影響（提示。承認の後）：**
+- **対象：** Vercelの管理画面（Settings → Cron Jobs）で、`/api/cron/delete-old-security-logs` を、手動で実行する。Vercelが、認証付き（`CRON_SECRET`）で、本番の関数を呼ぶ。
+- **影響（コードの読取り）：** `FormSubmissionLog` と `LoginSubmissionLog` の、**30日より古い行を削除**する（`deleteOldSecurityLogs`）。他のテーブルには、触れない。
+- **実行直前の再確認（対象テーブルごと、読取り）：**
+
+```sql
+select 'FormSubmissionLog' as t, count(*) filter (where "createdAt" < now() - interval '30 days') as old, min("createdAt") from "FormSubmissionLog"
+union all
+select 'LoginSubmissionLog', count(*) filter (where "createdAt" < now() - interval '30 days'), min("createdAt") from "LoginSubmissionLog";
+```
+- **実行してよい条件：** 両テーブルとも `old` が **0**（削除対象がない）。**1以上なら、実行しない**（想定外の削除になる。内容を、先に確認）。実行の日時は、`LoginSubmissionLog` の最古の行（2026-10-25 11:38）が、30日を超える **2026-11-24 11:38 より前**であること。
+- **期待する応答：** `ok: true`、両方の `deletedCount: 0`、`retentionDays` が、30。Vercelのログ（約1時間）で、確認する。
+- **判定できること・できないこと：** 「ルートが動き、認証が通り、200を返す」までは、確認できる。**「期限を過ぎた行が、実際に削除される」は、確認できない**（対象がないため）。
+
+**期限到来による実削除（公開後の確認項目として、残す）：**
+
+| 項目 | 内容 |
+| --- | --- |
+| 確認内容 | 2026-11-25 03:00 JST の実行の後、`LoginSubmissionLog` の30日より古い行が0件で、最古の行が、実行時刻の30日前より新しい（第17.6節の確認3のSQL） |
+| 確認日時 | 2026-11-25 の朝以降（担当者が、日時を記録） |
+| 担当者 | 右田和也（確認の実施・記録）。結果は、運用書へ追記 |
+| 公開前の扱い | **未確認として残す。公開前の条件には、含めない**（利用者の判断）。結果が「削除されていない」場合は、Vercelの Cron一覧・`CRON_SECRET`・ルートの応答を調べる（新たな読取りの承認が必要） |
+
+#### 19.38.5 新しい手動バックアップと、前回の復元検証の対応付け（B-2の再実施は、不要とする条件）
+
+**変更の有無の確認（コード・リポジトリの読取り）：**
+
+| 観点 | 前回（B-1 2026-11-12／② 2026-11-16／B-2 2026-11-13） | 今回（2026-11-20時点） | 変更 |
+| --- | --- | --- | --- |
+| マイグレーション | 26件（履歴26件、`migration_lock.toml` を除く）。③（C）で適用済み（2026-11-16） | `prisma/migrations` は、26件のまま（2026-11-16 以降、追加の提出なし） | なし |
+| スキーマ（`prisma/schema.prisma`） | ― | 2026-11-18 の1件（e8067c3）は、**コメント1行のみ**（`FormNotificationSetting` の説明）。モデル・列・制約の変更なし | コメントのみ（DBへは影響しない） |
+| 取得範囲 | `public`（スキーマ＋データ）、`auth`・`storage`（データのみ）、スキーマ参照、Storage3バケット | 同じ（第6.3・6.4節を、そのまま使う） | なし |
+| 形式 | `pg_dump` custom形式3本（サーバー17.6、`pg_dump` 18.6） | 同じ。**サーバー・`pg_dump` の版は、取得前に確認**（6.2の `server-version.txt`） | 版の確認が必要 |
+| 復元手順 | 第7章（B-2） | 変更なし | なし |
+| Storageのバケット | 3バケット（`club-app-attachments` は非公開・3MiB・PDF。G6で確認） | 変更なし（G6以降、バケットの変更なし） | なし（件数は、取得前に再集計） |
+
+**前回の復元検証の根拠（記録）：** B-2（2026-11-13 07:05:54）：`public.dump` の復元（終了1・エラー4件は、環境差。件数・履歴は一致）、リハーサルの `migrate deploy` 終了0・`migrate status` 26件・`migrate diff` 空、戻しSQL動作、Storage本体の復元確認（5/10/0、失敗0）。**今回、同じ形式・同じスキーマなら、この根拠を引き継ぐ。**
+
+**今回の取得記録との対応付け（取得後に、台帳へ記録）：**
+
+| 前回の根拠 | 今回の取得で確認すること | 合格条件 |
+| --- | --- | --- |
+| サーバー17.6・`pg_dump` 18.6 | `server-version.txt`・`pg_dump --version` | 同じ版（違えば、下の追加検証） |
+| 履歴26件・すべて完了 | `migrations-before.txt` | 26件・すべて完了（前回の②と、一致） |
+| `public.dump` が復元できる | `pg_restore --list` が成功し、項目数が、前回と大きく違わない | 成功 |
+| スキーマ参照 | 前回（②）と今回の `schema-reference.sql` を `diff` | 差0（権限・環境差を除く） |
+| Storage本体 | 6.4の突き合わせ（NFC正規化、欠け・余り・サイズ違い） | すべて0 |
+| 取得中に書込みなし | 6.5の前後の件数の差 | すべて0 |
+| 破損なし | `SHA256SUMS.txt` の `shasum -a 256 -c` | 不一致0 |
+
+```bash
+ls -1 "$HOME/f13-backups"
+PREV="$HOME/f13-backups/<前回(②)のフォルダー名>"
+diff "$PREV/schema-reference.sql" "$F13_BACKUP/schema-reference.sql" | wc -l
+diff "$PREV/server-version.txt" "$F13_BACKUP/server-version.txt" | wc -l
+diff "$PREV/migrations-before.txt" "$F13_BACKUP/migrations-before.txt" | wc -l
+```
+- 期待：すべて `0`。
+
+**追加検証が必要になる条件（必要なものだけ）：**
+
+| 変更 | 追加検証（最小） |
+| --- | --- |
+| `schema-reference.sql` の差が、1以上 | 差の内容（どのオブジェクトか）を確認。スキーマの変更なら、`public.dump` の**復元リハーサル**（使い捨てのDBへ。第7章）と、`migrate status`・`migrate diff` |
+| サーバー・`pg_dump` の版が違う | 新しい版で、`pg_restore --list` と、使い捨てのDBへの `public.dump` の復元（第7章の手順1〜3） |
+| 履歴の件数が違う | 取得を中断し、原因（予期しないmigration）を確認 |
+| Storageのバケットの設定が違う | バケットの設定の復元手順（第6.4節の1）を、記録で確認 |
+| 暗号鍵・Authの設定を、更新した | 6.1の保全の再確認（値は貼らない） |
+
+#### 19.38.6 実施日時・承認（未定）
+
+- **H03・既存HPのLINE通知（A）の、実施日時：** 未定（利用者の報告、2026-11-20）。確定してから、承認の依頼文を出す。LINE通知（A）は、運営者への事前の予告の後。H03は、読取りの承認（前後の件数）と、本番への通信の承認が、別々に要る。
+- **次に、承認を取る操作（順）：** ①読取り（Cron直近の実行、テストデータの件数、コーチの `AppUser` の有無、H03の前の件数）。
