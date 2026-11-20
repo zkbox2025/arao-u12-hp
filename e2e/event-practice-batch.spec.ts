@@ -16,6 +16,10 @@ import type {
   ContentScenario, // 独立contextでcontentを操作する契約型
 } from "./content-fixtures";
 import {
+  captureAction, // 【追加】実UIが送る保存Actionを、送信前に捕捉する関数
+  postAction, // 【追加】本人のCookieで、Originだけを変えて同じ入口へ再送する関数
+} from "./action-requests";
+import {
   parseEventPracticeBatchFormData as parseSaveForm, // 保存FormDataの構造と値を検証する関数
 } from "../domain/club/event/event-practice-batch-form";
 
@@ -778,6 +782,55 @@ test("F11 連打を抑止し、応答喪失後も同payload・requestIdだけを
         } finally {
           await page.unroute(match); // 所有する要求捕捉だけを解除するメソッド
         }
+      });
+  });
+
+/**
+ * 【追加】F11運用書H03：同じ要求を、外部Originと正規Originで比べ、Originだけで拒否される。
+ */
+test("F11 外部OriginのAction POSTだけを拒否し、同じ要求は正規Originで保存される", // 【追加】H03の実HTTPケースを登録する関数
+  /**
+   * 【追加】先に外部Originで送ってDB非更新を確認し、同一要求を正規Originで送って成功を確認する。
+   * 認証・Action ID・入力の不正が原因ではないことを、後の成功で示す。
+   */
+  async ({ content }) => { // 【追加】所有content fixtureを受け取る非同期コールバック
+    await scenario(content, "2028-02", // 【追加】ケース専用の準備・回収関数
+      /**
+       * 【追加】捕捉した保存要求を同一セッション・同一payloadで2回送る。
+       */
+      async (batch) => { // 【追加】所有シナリオの検証コールバック
+        await openPractice(batch); // 【追加】単一日の共通入力を準備する関数
+        await preview(batch); // 【追加】正規previewを表示する関数
+        const page = batch.admin;
+        const action = await captureAction(page, // 【追加】実UIの保存要求を、送信前に捕捉する関数
+          /**
+           * 【追加】正規の保存ボタンだけを押す。
+           */
+          () => page.getByRole("button", { // 【追加】ボタン操作のコールバック / roleと名前で要素を選ぶメソッド
+            name: "選択した予定を下書き作成",
+            exact: true
+          }).click(), // 【追加】保存ボタンを操作するメソッド
+        );
+        expect((await batch.generated()).length).toBe(0); // 【追加】期待値生成関数 / 生成行の取得関数 / 送信前の0件を検証するメソッド
+        const foreign = await postAction(page, action, { // 【追加】Originだけを変えて直接再送する関数
+          origin: "https://attacker.invalid",
+        });
+        expect(foreign.status >= 400).toBe(true); // 【追加】期待値生成関数 / frameworkのHTTP拒否を検証するメソッド
+        expect(foreign.redirected).toBe(false); // 【追加】期待値生成関数 / 成功遷移がないことを検証するメソッド
+        expect((await batch.generated()).length).toBe(0); // 【追加】期待値生成関数 / 生成行の取得関数 / 拒否後のDB非作成を検証するメソッド
+        const receipts = await batch.database.clubEventBatchOperation.count({ // 【追加】所有範囲の完了記録件数を取得するメソッド
+          where: {
+            clubId: batch.data.clubs.a.id,
+            targetMonth: batch.month,
+            executedByMembershipId: batch.data.actors.aOwner.membershipId,
+            operation: "CREATE_PRACTICE_BATCH",
+          },
+        });
+        expect(receipts).toBe(0); // 【追加】期待値生成関数 / 完了記録も増えないことを検証するメソッド
+        const control = await postAction(page, action); // 【追加】同じ要求を正規Originのまま再送する関数
+        expect(control.status < 400).toBe(true); // 【追加】期待値生成関数 / 正規Originでは拒否されないことを検証するメソッド
+        expect(control.redirected).toBe(true); // 【追加】期待値生成関数 / 保存成功の遷移を検証するメソッド
+        await saved(batch, 1, "CREATE_PRACTICE_BATCH"); // 【追加】生成行・完了記録が一件だけであることを検証する関数
       });
   });
 

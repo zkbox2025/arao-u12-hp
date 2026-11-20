@@ -457,15 +457,22 @@ function SelectionForm({ // 選択・保存を扱うComponent
         <p role="alert">結果が不明です。新しい操作を作らず、同じ選択・操作IDで再確認してください。</p>
       ) : null}
       {!attempted || canRestart ? (
-        <button
-          type="button"
-          disabled={pending}
-          onClick={restartPreview /* 保存状態を確認してpreviewを破棄する関数 */}
-        >
-          入力を変更してpreviewを作成し直す
-        </button>
+        <div>
+          <button
+            type="button"
+            disabled={pending}
+            onClick={restartPreview /* 保存状態を確認してpreviewを破棄する関数 */}
+          >
+            入力を変更してpreviewを作成し直す
+          </button>
+        </div>
       ) : null}
-      {!attempted ? <a href={cancelHref}>月別管理ページへ戻る</a> : null}
+      {/* 【修正】ボタンと別の行に表示する戻りリンクの囲み */}
+      {!attempted ? (
+        <div>
+          <a href={cancelHref}>月別管理ページへ戻る</a>
+        </div>
+      ) : null}
     </form>
   );
 }
@@ -633,7 +640,12 @@ export function EventPracticeBatchForm({ // 定期練習の共通入力・previe
           onRestart={restart /* 新しいpreviewを作成できる状態へ戻す関数 */}
         />
       ) : null}
-      {!locked ? <a href={cancelHref}>月別管理ページへ戻る</a> : null}
+      {/* 【修正】ボタンと別の行に表示する戻りリンクの囲み */}
+      {!locked ? (
+        <div>
+          <a href={cancelHref}>月別管理ページへ戻る</a>
+        </div>
+      ) : null}
     </div>
   );
 }

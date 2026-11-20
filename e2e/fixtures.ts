@@ -106,7 +106,7 @@ export type AuthorizationOverrides = { // 認可シナリオの準備入力型
  * 秘密を公開せず、同じテストのpageと所有seedに限定して操作する認可試験API。
  */
 export type AuthorizationScenario = { // 一件の認可試験で使用する操作契約型
-  path: (club: typeof CLUBS[number], section?: "events" | "events/list" | "admin/events" | "admin/members") => string; // 所有クラブキーから同クラブのパスを返す関数型
+  path: (club: typeof CLUBS[number], section?: "events" | "events/list" | "admin/events" | "admin/members" | "admin/events/copy-previous-month" | "admin/events/create-practice-batch") => string; // 【修正】F10・F11の入力画面を加えた、所有クラブキーから同クラブのパスを返す関数型
   configure: (input: AuthorizationOverrides) => Promise<void>; // 所有行だけを変更する関数型 / 準備入力型 / 非同期結果型
   login: ( // 実passwordフォームからログインする関数型
     user: AuthorizationUser, // 既存fixtureの本人キー型

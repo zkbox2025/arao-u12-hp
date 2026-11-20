@@ -388,3 +388,128 @@ test("クラブ所属のない独立運営者はクラブ用ログイン後も�
     await authorization.deny(authorization.missingPath); // 未知slugの拒否を確認する関数
   },
 );
+
+/**
+ * 【追加】G10・M02：F10（前月予定の複製）・F11（定期練習の一括作成）の入力画面。
+ * 見出しは、正規の管理者が開けたときだけ表示される保護画面の目印。
+ */
+const BATCH_PAGES = [
+  ["admin/events/copy-previous-month", "前月予定の複製"],
+  ["admin/events/create-practice-batch", "定期練習の一括作成"],
+] as const; // 【追加】相対パス・見出しの組のリテラル型アサーション
+
+test("【追加】F10・F11の入力画面は、OWNERが同じパスを開ける（拒否試験の対照）", // 【追加】M02の対照ケースを登録する関数
+  /**
+   * 【追加】拒否の原因が、パスの誤りではないことを、先に正規のOWNERで示す。
+   * aOwnerはA・Bの両方で利用可能な所属を持つため、ログイン後は選択画面へ移る。
+   */
+  async ({ page, authorization }) => { // 【追加】新規pageと所有fixtureを受け取るコールバック
+    await authorization.login("aOwner", "/club/select"); // 【追加】OWNER本人を実認証し、複数所属の選択画面へ戻る関数
+    for (const [path, heading] of BATCH_PAGES) {
+      const response = await page.goto(authorization.path("a", path) + "?month=2028-02"); // 【追加】入力画面を開くメソッド / 所有パス生成関数
+      expect(response?.status()).toBe(200); // 【追加】期待値生成関数 / HTTP状態取得メソッド / 正常応答の検証メソッド
+      await expect(page.getByRole("heading", { // 【追加】期待値生成関数 / 保護画面の見出しを選ぶメソッド
+        name: heading,
+        exact: true
+      })).toBeVisible(); // 【追加】表示の検証メソッド
+    }
+  },
+);
+
+test("【追加】未ログインでF10・F11の入力画面を開くと、ログイン画面へ戻る", // 【追加】M02の未ログインのケースを登録する関数
+  /**
+   * 【追加】空のbrowser contextから直接開き、ログイン入口への遷移を確認する。
+   */
+  async ({ page, authorization }) => { // 【追加】新規pageと所有fixtureを受け取るコールバック
+    for (const [path, heading] of BATCH_PAGES) {
+      await page.goto(authorization.path("a", path) + "?month=2028-02"); // 【追加】未認証の保護URLを開くメソッド / 所有パス生成関数
+      expect(new URL(page.url()).pathname).toBe("/club-login"); // 【追加】期待値生成関数 / URL解析コンストラクター / 現在URL取得メソッド / 入口の照合メソッド
+      await expect(page.getByRole("heading", { // 【追加】期待値生成関数 / 保護画面の見出しを選ぶメソッド
+        name: heading,
+        exact: true
+      })).toHaveCount(0); // 【追加】非表示の検証メソッド
+    }
+  },
+);
+
+test("【追加】MEMBERはF10・F11の入力画面へ入れない", // 【追加】M02のMEMBERのケースを登録する関数
+  /**
+   * 【追加】会員の権限では、管理者向けの入力画面を、直接開いても拒否される。
+   */
+  async ({ page, authorization }) => { // 【追加】新規pageと所有fixtureを受け取るコールバック
+    await authorization.login("aMember", authorization.path("a")); // 【追加】MEMBER本人を実認証する関数 / 所有パス生成関数
+    for (const [path, heading] of BATCH_PAGES) {
+      await authorization.deny(authorization.path("a", path) + "?month=2028-02"); // 【追加】拒否の検証関数 / 所有パス生成関数
+      await expect(page.getByRole("heading", { // 【追加】期待値生成関数 / 保護画面の見出しを選ぶメソッド
+        name: heading,
+        exact: true
+      })).toHaveCount(0); // 【追加】非表示の検証メソッド
+    }
+  },
+);
+
+for (const status of INACTIVE) {
+  test(`【追加】既存Cookieがあっても、最新DBの${status}ではF10・F11の入力画面へ入れない`, // 【追加】M02の所属失効のケースを登録する関数
+    /**
+     * 【追加】ACTIVEで実認証した後、同じCookieのまま所属を失効させて、直接開く。
+     */
+    async ({ page, authorization }) => { // 【追加】新規pageと所有fixtureを受け取るコールバック
+      await authorization.login("aCoach", authorization.path("a")); // 【追加】ACTIVEの本人を実ログインさせる関数 / 所有パス生成関数
+      await authorization.configure({ // 【追加】当該本人の最新DB状態を変更する関数
+        memberships: {
+          aCoach: {
+            status
+          }
+        }
+      });
+      for (const [path, heading] of BATCH_PAGES) {
+        await authorization.deny(authorization.path("a", path) + "?month=2028-02"); // 【追加】拒否の検証関数 / 所有パス生成関数
+        await expect(page.getByRole("heading", { // 【追加】期待値生成関数 / 保護画面の見出しを選ぶメソッド
+          name: heading,
+          exact: true
+        })).toHaveCount(0); // 【追加】非表示の検証メソッド
+      }
+    },
+  );
+}
+
+test("【追加】Bの管理者は、AのF10・F11の入力画面へ入れない", // 【追加】M02の他クラブのケースを登録する関数
+  /**
+   * 【追加】Bで管理権限を持つ本人でも、所属のないAの入力画面は拒否される。
+   */
+  async ({ page, authorization }) => { // 【追加】新規pageと所有fixtureを受け取るコールバック
+    await authorization.login("bOwner", authorization.path("b")); // 【追加】B OWNERを実認証する関数 / 所有パス生成関数
+    for (const [path, heading] of BATCH_PAGES) {
+      await authorization.deny(authorization.path("a", path) + "?month=2028-02"); // 【追加】拒否の検証関数 / 所有パス生成関数
+      await expect(page.getByRole("heading", { // 【追加】期待値生成関数 / 保護画面の見出しを選ぶメソッド
+        name: heading,
+        exact: true
+      })).toHaveCount(0); // 【追加】非表示の検証メソッド
+    }
+  },
+);
+
+for (const planType of ["STARTER", "PRO"] as const) { // 【追加】利用不可プランのリテラル型アサーション
+  test(`【追加】${planType}ではOWNERでもF10・F11の入力画面へ入れない`, // 【追加】M02のプランのケースを登録する関数
+    /**
+     * 【追加】アプリを使えないプランでは、OWNERの直接アクセスも拒否される。
+     * Bは利用可能のまま残し、Aのプランだけが拒否の原因であることを示す。
+     * aOwnerは利用可能なクラブがBの一件だけになるため、ログイン後はBへ直接移る。
+     */
+    async ({ page, authorization }) => { // 【追加】新規pageと所有fixtureを受け取るコールバック
+      await authorization.configure({ // 【追加】所有クラブのプランを準備する関数
+        plans: {
+          a: planType
+        }
+      });
+      await authorization.login("aOwner", authorization.path("b")); // 【追加】OWNER本人を実認証し、利用可能な一件のBへ移る関数 / 所有パス生成関数
+      for (const [path, heading] of BATCH_PAGES) {
+        await authorization.deny(authorization.path("a", path) + "?month=2028-02"); // 【追加】拒否の検証関数 / 所有パス生成関数
+        await expect(page.getByRole("heading", { // 【追加】期待値生成関数 / 保護画面の見出しを選ぶメソッド
+          name: heading,
+          exact: true
+        })).toHaveCount(0); // 【追加】非表示の検証メソッド
+      }
+    },
+  );
+}
