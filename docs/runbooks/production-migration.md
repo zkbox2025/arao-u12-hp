@@ -2825,17 +2825,19 @@ select count(*) from "PlatformAdmin" where id = '<uid>';
 - 期待：1行目が1、2行目が0。3行目は、参考（コーチがPlatformAdminでないこと。1なら、報告）。
 - 2行目が1以上なら、**作成しない**。内容（IDとメールの一致）を確認する。
 
+**【訂正：2026-11-21】** 下の `INSERT` は、`AppUser.id` が text、`auth.users.id` が uuid のため、`u.id` を `u.id::text` にしないと、`text = uuid` のエラーになる（本番での最初の実行で判明。トランザクションは中断し、書込みはなかった。§19.42）。以下は、訂正後。
+
 **手順2（書込み。個別承認の後。`PGOPTIONS` のない書込み用接続で）：** 3人を、1つのトランザクションで。1人分の例（`<name>` は、表示名。不要なら `NULL`）。
 
 ```sql
 BEGIN;
 INSERT INTO "AppUser" ("id", "email", "name", "createdAt", "updatedAt")
-SELECT u.id, lower(u.email), '<name>', timezone('UTC', now()), timezone('UTC', now())
+SELECT u.id::text, lower(u.email), '<name>', timezone('UTC', now()), timezone('UTC', now())
 FROM auth.users u
 WHERE u.id = '<uid>'
   AND lower(u.email) = lower('<email>')
   AND NOT EXISTS (
-    SELECT 1 FROM "AppUser" a WHERE a.id = u.id OR a.email = lower(u.email)
+    SELECT 1 FROM "AppUser" a WHERE a.id = u.id::text OR a.email = lower(u.email)
   );
 ```
 - 各 `INSERT` が **`INSERT 0 1`** であること（3人とも）。1つでも `INSERT 0 0` なら、`ROLLBACK;`（想定外の状態）。3つとも1なら、`COMMIT;`。
@@ -3169,3 +3171,160 @@ diff "$PREV/migrations-before.txt" "$F13_BACKUP/migrations-before.txt" | wc -l
 
 - **H03・既存HPのLINE通知（A）の、実施日時：** 未定（利用者の報告、2026-11-20）。確定してから、承認の依頼文を出す。LINE通知（A）は、運営者への事前の予告の後。H03は、読取りの承認（前後の件数）と、本番への通信の承認が、別々に要る。
 - **次に、承認を取る操作（順）：** ①読取り（Cron直近の実行、テストデータの件数、コーチの `AppUser` の有無、H03の前の件数）。
+
+### 19.39 G9：読取りの実施記録（利用者が実行・報告、2026-11-21 朝。Claudeは本番へ接続していない）
+
+**【追加：2026-11-21】** 承認：右田和也、2026-11-21 7:53（範囲＝Cron直近の実行、テストデータの件数、コーチ3人のAuth UIDと `AppUser` の有無。すべて読取り）。接続：ポート5432、poolerなし、`PGOPTIONS` で読取り専用（利用者の報告）。実行したのはSELECTのみ。値（UID・メール・接続先）は記録していない。
+
+**経過（記録）：**
+- 新しいターミナルで、`f13_prod_env`（関数）の未定義と、`psql` のPATH未設定により、最初の2回は、コマンドが失敗した（本番へは未接続）。関数を定義し直し、`export PATH="$(brew --prefix libpq)/bin:$PATH"` で解消。
+- コーチの確認は、最初の2人で `auth_match` が0だった。入力のずれ（前後の空白と見られる）が原因。空白を除く入力に直し、切り分けのSQL（`auth_total`・`id_match`・`email_match`・`both_match`）を実行。**この間の `appuser_exists`・`platform_admin` の0は、入力のずれた状態のものなので、無効**とし、空白を除いた入力で再実行した。
+
+**結果1：Supabase Cron（直近10件ずつ。時刻はUTC。JSTは+9時間）**
+
+| 項目 | 結果 | 期待との一致 |
+| --- | --- | --- |
+| `club-line-deliveries-every-5-minutes` | `succeeded` 5件。2026-11-20 23:00〜23:20 UTC（JST 2026-11-21 08:00〜08:20） | 一致 |
+| `storage-deletions-every-5-minutes` | `succeeded` 5件。2026-11-20 22:57〜23:17 UTC（JST 07:57〜08:17） | 一致 |
+| HTTP応答（`net._http_response`） | `status_code` 200 が10件。22:57〜23:20 UTC | 一致（401・404なし） |
+
+- 判定：Supabase側のCron2本は、直近約23分間で、成功・200。長期の安定は、未確認のまま。**公開の直前に、再確認する**（§19.37.7）。
+
+**結果2：テストデータの件数**
+
+| 対象 | 結果 | 想定との差 |
+| --- | --- | --- |
+| `ClubInvitation` | `PREPARING` 1、`ACCEPTED` 1 | 想定どおり。`PREPARING` は、自動失効していない（削除候補の1回目） |
+| `ClubMembership` | OWNER・ACTIVE 1、MEMBER・WITHDRAWN 1 | 想定どおり |
+| `AppUser` | 2 | 想定どおり（OWNERとテスト用MEMBER。**どちらが、どちらかは、次の読取りで確認**） |
+| `ClubLineRegistrationToken` | used 1、expired 0、active 0 | 想定どおり（使用済み1） |
+| `ClubLineDelivery` | `SENT` 3 | **件数は、記録（§19.28）で、3件の配信を確認できていない。次の読取りで、通知先・時刻・作成元を確認する** |
+| `ClubLineTarget` | 無効（`isEnabled = false`）1 | 想定どおり |
+| `ClubNotice`・`ClubEvent`・`StorageDeletionJob` | 0（行なし） | 想定どおり |
+| `Child`・`SupportReport` | 0 | 想定どおり |
+
+**結果3：コーチ3人（件数のみ。3人とも同じ）**
+
+| `auth_match` | `appuser_exists` | `platform_admin` | 判定 |
+| --- | --- | --- | --- |
+| 1 | 0 | 0 | Authのユーザーと一致。`AppUser` は未作成。PlatformAdminではない。**Bの作成（§19.37.3 手順2）へ進める** |
+
+- 切り分けの結果（3人とも）：UID長36、`auth_total` 6、`id_match`・`email_match`・`both_match` が1。
+- **まだ確認していないこと：** 3人のメールの綴りが、Authと、招待時に使う綴りで同じか（`lower` で比較済み）。`AppUser` の作成後に、招待の準備が通るか（本番は未実施）。
+
+**次の読取り（案、承認が要る）：** テストデータの削除の前の特定。①`ClubLineDelivery` 3件の通知先・状態・作成時刻（本文は選ばない）、②2つの `AppUser` と `ClubMembership` の対応（ID・状態・作成時刻。メールは選ばない）、③テスト用MEMBERの所属に依存する行の件数、④`ClubInvitation` 2件の状態と時刻。
+
+### 19.40 G9：読取り（2回目）の実施記録と、テストデータの削除案（利用者が実行・報告、2026-11-21 8:28 承認。Claudeは本番へ接続していない）
+
+**【追加：2026-11-21】** 承認：右田和也、2026-11-21 8:28（範囲＝削除する行の特定。SELECTのみ）。接続：ポート5432、poolerなし、読取り専用、`psql` 18.6（利用者の報告）。内部ID（UUID）は記録する。メール・氏名・Auth UID・本文・トークンは、選んでいない・記録していない。時刻はDBの値（UTC）。JSTは+9時間。
+
+**経過：** 最初の実行は、前回の `unset` により `PG*` 変数が消えていたため、ソケット接続のエラー（本番へは未接続）。`f13_prod_env` の再実行で解消。
+
+**結果1：`ClubLineDelivery`（3件、すべて `SENT`・`NOTICE`・`attemptCount` 1）**
+
+| id | requestedAt（UTC） | JST | sentAt（UTC） | 通知先 | 予定・お知らせ | 依頼者 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `c887be02-7f00-4719-bfe5-51d1bafab049` | 2026-11-19 02:42:42 | 11:42 | 02:42:48 | 唯一の通知先（開発者用） | どちらも null（お知らせは削除済み） | あり（OWNERの所属。テスト用MEMBERではない） |
+| `33594fbf-8db9-43fa-a51a-16b61b07293a` | 2026-11-19 02:45:58 | 11:45 | 02:46:02 | 同上 | 同上 | 同上 |
+| `df7ff322-d31f-4c1a-b9a7-c4587ea1497e` | 2026-11-19 02:55:17 | 11:55 | 02:55:22 | 同上 | 同上 | 同上 |
+
+- **記録との差（未解消）：** §19.28 の記録は、「お知らせの作成 11:35、配信状態が `SENT` 11:36」。DB上の3件は、11:42・11:45・11:55（JST）で、時刻が合わない。F-6の試験の途中の、再送・追加の送信と見られる（推定）。**利用者に、3件がF-6の試験の送信であることの確認を求める。**
+
+**結果2：`AppUser` と `ClubMembership`**
+
+| `AppUser`（IDの先頭8文字） | 作成（UTC） | 所属ID | role | status |
+| --- | --- | --- | --- | --- |
+| `113b33b1` | 2026-11-18 00:56 | `81a04541-f17b-48ba-86af-87cc4002a034` | OWNER | ACTIVE（**残す**） |
+| `cdd4c46a` | 2026-11-19 01:28 | `3f09ad39-5bd5-4f33-b786-adce88b66ca8` | MEMBER | WITHDRAWN（テスト用。削除候補） |
+
+**結果3：テスト用MEMBERの所属に依存する行（`target_memberships` 1）**
+
+- `ChildClubMembership`・`ClubEventMemo`・`ClubEventRead`・`ClubNoticeRead`・送った招待・依頼した配信・LINE登録トークン・一括操作：**すべて0**。
+- 受諾した招待（`membershipId` がこの所属）：1（`SetNull`。削除する招待）。
+- 判定：削除で、巻き込まれる行は、ない。
+
+**結果4：`ClubInvitation`（2件）**
+
+| id | status | 作成（UTC） | 期限（UTC） | 受諾 | 所属 | Auth ID | 送信エラー |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `2faba898-d173-4e7d-b894-43b22179eb19` | PREPARING | 2026-11-19 00:34 | 2026-11-20 00:34 | なし | なし | なし | なし |
+| `9fc52a45-a6c9-4d61-8603-f08eb89f1bf2` | ACCEPTED | 2026-11-19 01:28 | 2026-11-20 01:28 | 2026-11-19 01:36 | あり | あり | なし |
+
+- 観察：1つ目は、期限（2026-11-20 00:34 UTC）を過ぎても、`PREPARING` のまま（期限での自動の状態変更は、ない設計と見られる。受諾は、期限で拒否される）。F-4の失敗（§19.19）の残り。
+
+**削除案（書込み。個別承認の後。`PGOPTIONS` のない書込み用接続の、対話の `psql` で、貼り付ける）：**
+
+```sql
+BEGIN;
+DELETE FROM "ClubLineDelivery"
+WHERE id IN (
+  'c887be02-7f00-4719-bfe5-51d1bafab049',
+  '33594fbf-8db9-43fa-a51a-16b61b07293a',
+  'df7ff322-d31f-4c1a-b9a7-c4587ea1497e'
+) AND status = 'SENT';
+DELETE FROM "ClubLineRegistrationToken" WHERE "usedAt" IS NOT NULL;
+DELETE FROM "ClubInvitation"
+WHERE id IN (
+  '2faba898-d173-4e7d-b894-43b22179eb19',
+  '9fc52a45-a6c9-4d61-8603-f08eb89f1bf2'
+) AND status IN ('PREPARING', 'ACCEPTED');
+DELETE FROM "AppUser" a
+WHERE a.id IN (
+  SELECT "userId" FROM "ClubMembership"
+  WHERE id = '3f09ad39-5bd5-4f33-b786-adce88b66ca8'
+    AND role = 'MEMBER' AND status = 'WITHDRAWN'
+);
+```
+- 期待：`DELETE 3`、`DELETE 1`（トークンは全体で1件。結果の件数＝使用済み1・期限切れ0・有効0）、`DELETE 2`、`DELETE 1`（所属は、`AppUser` の削除で、Cascade により、同時に消える）。**1つでも違えば、`ROLLBACK;` して報告。**
+- `COMMIT;` の前に、同じトランザクションで確認：
+
+```sql
+SELECT (SELECT count(*) FROM "ClubLineDelivery") AS deliveries,
+  (SELECT count(*) FROM "ClubLineRegistrationToken") AS tokens,
+  (SELECT count(*) FROM "ClubInvitation") AS invitations,
+  (SELECT count(*) FROM "ClubMembership") AS memberships,
+  (SELECT count(*) FROM "AppUser") AS app_users,
+  (SELECT count(*) FROM "ClubLineTarget") AS targets;
+```
+- 期待：0・0・0・1・1・1。一致すれば `COMMIT;`。
+- **削除しないもの：** `ClubLineTarget`（無効のまま）、OWNERの `AppUser`・所属、`ClubLineSetting`、`Club`、Authのユーザー（別に判断）。
+- **戻し：** 削除は、戻せない。ただし、いずれもテストデータで、実運用の情報ではない。バックアップ（§19.37.6）は、削除の後に取る。
+
+### 19.41 G9：テストデータの削除の実施記録（利用者が実行・報告、2026-11-21 10:34 承認。Claudeは本番へ接続していない）
+
+**【追加：2026-11-21】** 承認：右田和也、2026-11-21 10:34（範囲＝§19.40 の削除案の4種類。確認事項「配信3件は、11月19日のF-6の試験で、右田が送ったもの」＝はい）。接続：書込み用（ポート5432、poolerなし、`PGOPTIONS` なし。サーバー17.6、`psql` 18.6）。値（接続先・認証情報）は記録していない。
+
+| 段階 | 結果 | 期待との一致 |
+| --- | --- | --- |
+| 削除前の件数（配信・トークン・招待・所属・AppUser・通知先） | 3・1・2・2・2・1 | 一致 |
+| `DELETE`（配信・使用済みトークン・招待・`AppUser`） | `DELETE 3`・`DELETE 1`・`DELETE 2`・`DELETE 1` | 一致 |
+| `COMMIT` の前の確認 | 0・0・0・1・1・1 | 一致 |
+| `COMMIT` | `COMMIT` | ― |
+| `COMMIT` の後の確認 | 0・0・0・1・1・1 | 一致（確定を確認） |
+
+- **削除した行：** `ClubLineDelivery` 3件、使用済みの `ClubLineRegistrationToken` 1件、`ClubInvitation` 2件、`AppUser` 1件（テスト用MEMBER。所属1件は Cascade で同時に削除）。
+- **残した行：** `ClubLineTarget` 1件（無効のまま）、OWNERの `AppUser`・`ClubMembership`、`ClubLineSetting`、`Club`、Authのユーザー（テスト用MEMBERのAuthは、別に判断）。
+- **経過（記録）：** ①新しいターミナルで、`f13_prod_env` が未定義だったため、関数を定義し直した（本番へは未接続）。②確認の後、`COMMIT` の代わりに、後始末の `unset …` を、`psql` の中へ貼った。トランザクションは開いたままで、確定していなかった。`\r`（バッファの消去）の後に、`COMMIT;` を実行して確定した。`unset` は、SQLとして実行されていない（本番への影響なし）。③`COMMIT` の後にも、同じ貼り付けの誤りが1回あった（バッファのみ。無害）。**以後、`psql` の中では、SQLと `\` コマンドだけを入力し、`unset` は、`\q` の後のシェルで行う。**
+- **戻し：** 戻せない（テストデータ）。バックアップは、AppUser作成の後、承認Hの前に、取る（§19.37.2 の7）。
+- **次：** コーチ3人の `AppUser` 作成（§19.37.3 手順2。書込みの個別承認が要る）。
+
+### 19.42 G9：コーチ3人の `AppUser` 作成（方針B）の実施記録（利用者が実行・報告、2026-11-21 10:52 承認。Claudeは本番へ接続していない）
+
+**【追加：2026-11-21】** 承認：右田和也、2026-11-21 10:52（範囲＝`AppUser` 3件の作成のみ。表示名は、利用者が端末へ直接入力した）。接続：書込み用（ポート5432、poolerなし、`PGOPTIONS` なし。サーバー17.6、`psql` 18.6）。UID・メール・表示名は、記録していない。
+
+| 段階 | 結果 | 期待との一致 |
+| --- | --- | --- |
+| 入力の長さ（UID・メール） | UID 36・36・36、メール 18・20・22 | 一致（前回の確認と同じ並び） |
+| 作成前の件数（`AppUser`） | 1（OWNERのみ） | 一致 |
+| 1回目の `INSERT`（§19.37.3 の訂正前の SQL） | `ERROR: operator does not exist: text = uuid`。トランザクションは中断。`ROLLBACK` | 書込みなし（作成前の件数1のまま） |
+| 2回目の `INSERT`（`u.id::text` に訂正） | `INSERT 0 1` ×3 | 一致 |
+| `COMMIT` の前の確認 | `AppUser` 4、作成した3人 3、`name` が空 0、`ClubMembership` 1 | 一致 |
+| `COMMIT` | `COMMIT` | ― |
+| 後始末 | 入力変数・`PG*` を `unset`。`env \| grep -c '^PG'` が 0 | 一致 |
+
+- **経過（記録）：** 1回目は、運用書の SQL の型の誤り（`AppUser.id` が text、`auth.users.id` が uuid）により、エラー。Claudeが §19.37.3 に書いた誤り。`ROLLBACK` の後、`u.id::text` に訂正した SQL で、やり直した。§19.37.3 も、同日に訂正した。
+- **作成した行：** `AppUser` 3件（`id`＝Authのユーザーid、`email`＝Authのメール（小文字）、`name`＝利用者が入力した表示名）。
+- **触れていないもの：** Authのテーブル・設定、`WEBSITE_ADMIN_USER_IDS`、既存HPのデータ、`ClubMembership`（1件のまま）、プラン（STARTER）。
+- **COMMIT後の確認（読取り）は、`COMMIT` の直前のものと同じ内容で、`COMMIT` の後の独立した確認は、未実施。** `COMMIT` が正常に返った（プロンプトが `postgres=>` に戻った）ことで、確定とみなす。公開の直前の読取りで、`AppUser` が4件であることを、再確認する。
+- **戻し：** 招待の前なら、`DELETE FROM "AppUser" WHERE id IN ('<uid1>','<uid2>','<uid3>') AND NOT EXISTS (SELECT 1 FROM "ClubMembership" m WHERE m."userId" = "AppUser".id);`（`DELETE 3`）。`ClubMembership` ができた後は、戻さない。
+- **未確認：** 本番での招待（承認Gの後）。`AppUser` を先に作ることで、F-4 の「準備中で止まる」失敗（§19.19）を避けられる見込みだが、本番では未実施。
