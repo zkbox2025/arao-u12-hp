@@ -3615,3 +3615,31 @@ SELECT (SELECT count(*) FROM "ClubLineDelivery") AS deliveries,
 **後始末：** 一時ファイルを削除、クリップボードを空にした、`PG*` の環境変数は0。
 
 **次の作業（未実施）：** 承認H → 承認G（STARTER→STANDARD。§18.4）。2026-11-25 朝以降のCronの削除確認（読取り）。公開後の項目（コーチへの招待、LINEの実グループの登録、環境変数の整理、ドメイン切替）。
+
+### 19.53 G9：ログ削除Cronの確認（読取り）の方法の訂正と、実行前の状態（2026-11-24、利用者の報告）
+
+**確認の方法の訂正（Claudeの提案）：** 確認のSQLを `now() - interval '30 days'` の基準で、**午後に**見ると、Cronの基準（実行時刻03:00 JSTの30日前）より、基準が新しくなり、**Cronが正常でも「30日より古い行が0件でない」と出る**（03:00〜見た時刻の間の行が入るため）。**基準の時刻を、固定する。** 2026-11-25 03:00 JST の実行の基準は、**2026-10-26 03:00 JST ＝ UTC 2026-10-25 18:00**。`createdAt` はUTC保存（記録のとおり）。
+
+```sql
+select 'LoginSubmissionLog' as t,
+  count(*) filter (where "createdAt" < timestamp '2026-10-25 18:00:00') as older_than_cutoff,
+  min("createdAt") as oldest,
+  count(*) as total
+from "LoginSubmissionLog"
+union all
+select 'FormSubmissionLog',
+  count(*) filter (where "createdAt" < timestamp '2026-10-25 18:00:00'),
+  min("createdAt"),
+  count(*)
+from "FormSubmissionLog";
+```
+
+**実行前の状態（利用者の報告。2026-11-24。Cron（2026-11-25 03:00 JST）の実行の前）：** `LoginSubmissionLog` の `older_than_cutoff` ＝ **1**、`FormSubmissionLog` ＝ **0**。`oldest`・`total` は、報告されていない（未記録）。**この「1」は、実行前の状態として、想定どおり**（基準より古い行が、まだ削除されていない）。
+
+**承認の記録（正直な記録）：** この読取りについて、**承認依頼文は、この会話では受け取っていない**（運用書 §3 は、本番の読取りにも、操作ごとの承認を求める）。読取り（SELECT）のみで、書込みはない。**以後は、承認依頼文の後に、実行する。**
+
+**2026-11-25 の確認（読取り。承認の後）：**
+- **見る時刻：** 利用者の予定はない。**2026-11-25 04:00 JST 以降なら、いつでもよい**（固定の基準のため、時刻に左右されない。Vercel Cronが、指定の時刻から1時間の範囲で動く可能性を、04:00以降で避ける。要確認）。
+- **期待：** `LoginSubmissionLog` の `older_than_cutoff` が **0**（実行前は1）、`oldest` が基準（UTC 2026-10-25 18:00）より新しい、`total` が実行前の値より少なくとも1減る（実行前の `total` が未記録のため、**この点は、確認できない**。減少の確認は、`older_than_cutoff` の 1→0 で行う）。`FormSubmissionLog` は 0 のまま。
+- **判定：** `older_than_cutoff` が 1→0 なら、**Cronが基準より古い行を削除した**と判断できる（実行前に1件があり、実行後に0件）。0のままでない場合は、Vercelの Cron一覧・`CRON_SECRET`・ルートの応答を調べる（新たな読取りの承認が必要）。
+- **注意：** 26日 03:00 以降に見ると、25日の実行と26日の実行を区別できない。25日のうちに見る。
