@@ -2,31 +2,43 @@
 // スタッフ紹介管理ページ
 
 import Link from "next/link";
-import { ToastMessage } from "@/components/admin/ToastMessage";
+import { ToastMessage } from "@/components/admin/ToastMessage"; // 【追加】完了・エラーの通知(トースト)を表示するComponent
 import {
-  findAdminStaffs,
-  findStaffPageSetting,
+  findAdminStaffs, // 【追加】下書き・公開を問わず、すべてのスタッフ情報を取得するRepository関数
+  findStaffPageSetting, // 【追加】トップと個別ページの導入部分に使うスタッフ紹介の設定を取得するRepository関数
 } from "@/lib/repositories/staff";
-import { StaffPageSettingForm } from "./StaffPageSettingForm";
-import { StaffCreateForm } from "./StaffCreateForm";
-import { StaffList } from "./StaffList";
+import { StaffPageSettingForm } from "./StaffPageSettingForm"; // 【追加】スタッフ紹介ページの導入文などを設定するフォームComponent
+import { StaffCreateForm } from "./StaffCreateForm"; // 【追加】スタッフを新規登録するフォームComponent
+import { StaffList } from "./StaffList"; // 【追加】登録済みスタッフの一覧Component
+import { requireWebsiteAdmin } from "@/lib/auth/admin"; // 【追加】HP管理者かを確認する関数(未ログインはログイン画面へ、非管理者は404)
 
+/**
+ * 【追加】スタッフ紹介管理ページが受け取るPropsの型。
+ * searchParamsは、保存結果の表示(saved・error)と、トースト再生成用IDを持つ。
+ */
 type AdminStaffPageProps = {
-  searchParams: Promise<{
+  searchParams: Promise<{ // 【追加】URLのクエリを非同期で受け取るPromise型
     saved?: string;
     error?: string;
     toastId?: string;
   }>;
 };
 
+/**
+ * 【追加】スタッフ紹介管理ページを表示するページ関数。
+ * 引数は、URLのクエリを持つPropsで、戻り値は画面のJSX。
+ * スタッフ情報を取得する前に、ページ単体でHP管理者かを確認する。
+ */
 export default async function AdminStaffPage({
   searchParams,
 }: AdminStaffPageProps) {
-  const params = await searchParams;
+  await requireWebsiteAdmin(); // 【追加】データ取得より先にHP管理者かを確認する関数(失敗時は例外で中断)
 
-  const [setting, staffs] = await Promise.all([
-    findStaffPageSetting(),
-    findAdminStaffs(),
+  const params = await searchParams; // 【追加】Promise型のクエリを解決して取り出す
+
+  const [setting, staffs] = await Promise.all([ // 【追加】2件の取得を並行して待つ標準関数
+    findStaffPageSetting(), // 【追加】スタッフ紹介の設定を取得する関数
+    findAdminStaffs(), // 【追加】全スタッフ情報を取得する関数
   ]);
 
   const toastMessage =
@@ -41,7 +53,7 @@ export default async function AdminStaffPage({
   return (
     <div id="top">
       {toastMessage ? (
-        <ToastMessage
+        <ToastMessage /* 【追加】トースト表示Component */
           key={`${params.saved}-${params.error}-${params.toastId}`}
           message={toastMessage}
           variant={toastVariant}
@@ -60,7 +72,7 @@ export default async function AdminStaffPage({
         </p>
 
         <div className="mt-5 flex flex-col items-start gap-3">
-  <Link
+  <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
     href="/explore#staff-summary"
     target="_blank"
     rel="noreferrer"
@@ -69,7 +81,7 @@ export default async function AdminStaffPage({
     トップページで確認
   </Link>
 
-  <Link
+  <Link /* 【追加】スタッフ紹介ページへのリンクComponent */
     href="/staff#top"
     target="_blank"
     rel="noreferrer"
@@ -81,11 +93,11 @@ export default async function AdminStaffPage({
 
       </div>
 
-      <StaffPageSettingForm setting={setting} />
+      <StaffPageSettingForm setting={setting} /* 【追加】導入文などの設定フォームComponent */ />
 
-      <StaffCreateForm />
+      <StaffCreateForm /* 【追加】スタッフの新規登録フォームComponent */ />
 
-      <StaffList staffs={staffs} />
+      <StaffList staffs={staffs} /* 【追加】スタッフ一覧Component */ />
     </div>
   );
 }

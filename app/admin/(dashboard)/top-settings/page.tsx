@@ -2,15 +2,20 @@
 // トップページ設定ページ（管理者用）
 
 import Link from "next/link";
-import { ToastMessage } from "@/components/admin/ToastMessage";
+import { ToastMessage } from "@/components/admin/ToastMessage"; // 【追加】完了・エラーの通知(トースト)を表示するComponent
 import {
-  findPageContentsByPageKey,
-  toContentMap,
+  findPageContentsByPageKey, // 【追加】指定ページの文章・画像データを取得するRepository関数
+  toContentMap, // 【追加】文章データの配列を、ブロック名で引ける辞書へ変換する関数
 } from "@/lib/repositories/page-content";
-import { TopSummaryImageSettings } from "./TopSummaryImageSettings";
+import { TopSummaryImageSettings } from "./TopSummaryImageSettings"; // 【追加】トップページ要約写真の設定Component
+import { requireWebsiteAdmin } from "@/lib/auth/admin"; // 【追加】HP管理者かを確認する関数(未ログインはログイン画面へ、非管理者は404)
 
+/**
+ * 【追加】トップページ設定ページが受け取るPropsの型。
+ * searchParamsは、操作結果の表示(saved・deleted・error)と、トースト再生成用IDを持つ。
+ */
 type AdminTopSettingsPageProps = {
-  searchParams: Promise<{
+  searchParams: Promise<{ // 【追加】URLのクエリを非同期で受け取るPromise型
     saved?: string;
     deleted?: string;
     error?: string;
@@ -18,14 +23,21 @@ type AdminTopSettingsPageProps = {
   }>;
 };
 
+/**
+ * 【追加】トップページ設定ページ(管理者用)を表示するページ関数。
+ * 引数は、URLのクエリを持つPropsで、戻り値は画面のJSX。
+ * 設定データを取得する前に、ページ単体でHP管理者かを確認する。
+ */
 export default async function AdminTopSettingsPage({
   searchParams,
 }: AdminTopSettingsPageProps) {
-  const params = await searchParams;
+  await requireWebsiteAdmin(); // 【追加】データ取得より先にHP管理者かを確認する関数(失敗時は例外で中断)
 
-const contents = await findPageContentsByPageKey("TOP");
+  const params = await searchParams; // 【追加】Promise型のクエリを解決して取り出す
 
-  const contentMap = toContentMap(contents);
+const contents = await findPageContentsByPageKey("TOP"); // 【追加】トップページの文章・画像データを取得する関数
+
+  const contentMap = toContentMap(contents); // 【追加】配列をブロック名の辞書へ変換する関数
 
 const toastMessage =
   params.deleted === "1"
@@ -41,7 +53,7 @@ const toastVariant = params.error === "1" ? "error" : "success";
   return (
     <div id="top">
       {toastMessage ? (
-        <ToastMessage
+        <ToastMessage /* 【追加】トースト表示Component */
   key={`${params.saved}-${params.deleted}-${params.error}-${params.toastId}`}
   message={toastMessage}
   variant={toastVariant}
@@ -62,7 +74,7 @@ const toastVariant = params.error === "1" ? "error" : "success";
 </p>
 
         <div className="mt-5 flex flex-col items-start gap-3">
-          <Link
+          <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
             href="/explore#top"
             target="_blank"
             rel="noreferrer"
@@ -71,7 +83,7 @@ const toastVariant = params.error === "1" ? "error" : "success";
             公開ページで確認
           </Link>
 
-          <Link
+          <Link /* 【追加】サイト内文章設定へのリンクComponent */
             href="/admin/pagecontent?pageKey=TOP#top"
             className="inline-flex rounded-lg border border-green-700 bg-white px-5 py-3 text-sm font-bold text-green-700 transition hover:bg-green-50"
           >
@@ -83,7 +95,7 @@ const toastVariant = params.error === "1" ? "error" : "success";
 
 <section>
 
-  <TopSummaryImageSettings contentMap={contentMap} />
+  <TopSummaryImageSettings contentMap={contentMap} /* 【追加】要約写真の設定Component */ />
 </section>
     </div>
   );
