@@ -3,34 +3,46 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { findAdminNoticeById } from "@/lib/repositories/admin-notice";
-import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge";
-import { ToastMessage } from "@/components/admin/ToastMessage";
-import { WebsiteNoticeEditModal } from "./WebsiteNoticeEditModal";
-import { WebsiteNoticeDeleteButton } from "./WebsiteNoticeDeleteButton";
-import { formatJapaneseDate } from "@/lib/utils/date";
+import { findAdminNoticeById } from "@/lib/repositories/admin-notice"; // 【追加】IDから練習スケ変更1件を取得するRepository関数(詳細ページ用)
+import { ContentStatusBadge } from "@/components/admin/status/ContentStatusBadge"; // 【追加】公開状態(下書き・公開)を表示するComponent
+import { ToastMessage } from "@/components/admin/ToastMessage"; // 【追加】完了・エラーの通知(トースト)を表示するComponent
+import { WebsiteNoticeEditModal } from "./WebsiteNoticeEditModal"; // 【追加】練習スケ変更の編集モーダルComponent
+import { WebsiteNoticeDeleteButton } from "./WebsiteNoticeDeleteButton"; // 【追加】練習スケ変更の削除ボタンComponent
+import { formatJapaneseDate } from "@/lib/utils/date"; // 【追加】日付を「2026年6月7日（日）」の形へ整える関数
+import { requireWebsiteAdmin } from "@/lib/auth/admin"; // 【追加】HP管理者かを確認する関数(未ログインはログイン画面へ、非管理者は404)
 
+/**
+ * 【追加】練習スケ変更の詳細ページが受け取るPropsの型。
+ * paramsはURLのnoticeId、searchParamsは更新完了の表示と、トースト再生成用IDを持つ。
+ */
 type AdminNoticeDetailPageProps = {
-  params: Promise<{
+  params: Promise<{ // 【追加】URLの動的パラメータを非同期で受け取るPromise型
     noticeId: string;
   }>;
-  searchParams: Promise<{
+  searchParams: Promise<{ // 【追加】URLのクエリを非同期で受け取るPromise型
     updated?: string;
     toastId?: string;
   }>;
 };
 
+/**
+ * 【追加】練習スケ変更の詳細ページを表示するページ関数。
+ * 引数は、URLのパラメータとクエリを持つPropsで、戻り値は画面のJSX。
+ * データを取得する前に、ページ単体でHP管理者かを確認する。
+ */
 export default async function AdminNoticeDetailPage({
   params,
   searchParams,
 }: AdminNoticeDetailPageProps) {
-  const { noticeId } = await params;
-  const query = await searchParams;
+  await requireWebsiteAdmin(); // 【追加】データ取得より先にHP管理者かを確認する関数(失敗時は例外で中断)
 
-  const notice = await findAdminNoticeById(noticeId);
+  const { noticeId } = await params; // 【追加】Promise型のURLパラメータを解決してIDを取り出す
+  const query = await searchParams; // 【追加】Promise型のクエリを解決して取り出す
+
+  const notice = await findAdminNoticeById(noticeId); // 【追加】IDから練習スケ変更1件を取得する関数
 
   if (!notice) {
-    notFound();
+    notFound(); // 【追加】該当がなければ404を表示する関数
   }
 
   const toastMessage =
@@ -41,7 +53,7 @@ export default async function AdminNoticeDetailPage({
   return (
   <div id="top">
     {toastMessage ? (
-  <ToastMessage
+  <ToastMessage /* 【追加】トースト表示Component */
     key={`${toastMessage}-${query.toastId ?? ""}`}
     message={toastMessage}
   />
@@ -58,14 +70,14 @@ export default async function AdminNoticeDetailPage({
 
           <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
             <p className="text-sm text-neutral-600">
-              更新日：{formatJapaneseDate(notice.updatedAt)}
+              更新日：{formatJapaneseDate(notice.updatedAt) /* 【追加】更新日を日本語表記の日付へ整える関数 */}
             </p>
 
-            <ContentStatusBadge status={notice.status} />
+            <ContentStatusBadge status={notice.status} /* 【追加】公開状態の表示Component */ />
           </div>
         </div>
 
-        <Link
+        <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
           href={`/notice/${notice.id}#top`}
           target="_blank"
           rel="noreferrer"
@@ -85,18 +97,18 @@ export default async function AdminNoticeDetailPage({
 
     <section className="py-6">
       <div className="flex flex-col gap-3 sm:flex-row">
-       <WebsiteNoticeEditModal
+       <WebsiteNoticeEditModal /* 【追加】編集モーダルComponent */
   noticeId={notice.id}
   defaultTitle={notice.title}
   defaultContent={notice.content}
   defaultStatus={notice.status}
 />
 
-        <WebsiteNoticeDeleteButton noticeId={notice.id} />
+        <WebsiteNoticeDeleteButton noticeId={notice.id} /* 【追加】削除ボタンComponent */ />
       </div>
 
       <div className="mt-5">
-        <Link
+        <Link /* 【追加】一覧へ戻るリンクComponent */
           href="/admin/notice#top"
           className="inline-flex rounded-lg border border-neutral-300 bg-white px-5 py-3 text-sm font-bold text-neutral-800 transition hover:bg-neutral-100"
         >

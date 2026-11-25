@@ -2,31 +2,43 @@
 // 月別練習計画PDFの管理ページ
 
 import Link from "next/link";
-import { ToastMessage } from "@/components/admin/ToastMessage";
+import { ToastMessage } from "@/components/admin/ToastMessage"; // 【追加】完了・エラーの通知(トースト)を表示するComponent
 import {
-  findAdminMonthlyPracticePlans,
-  findLatestPublishedMonthlyPracticePlans,
+  findAdminMonthlyPracticePlans, // 【追加】管理画面用に月別練習計画PDFの一覧を取得するRepository関数
+  findLatestPublishedMonthlyPracticePlans, // 【追加】公開中の最新の月別練習計画PDFを取得するRepository関数
 } from "@/lib/repositories/monthly-practice-plan";
-import { CurrentMonthlyPracticePlanCard } from "./CurrentMonthlyPracticePlanCard";
-import { MonthlyPracticePlanUploadForm } from "./MonthlyPracticePlanUploadForm";
-import { MonthlyPracticePlanList } from "./MonthlyPracticePlanList";
+import { CurrentMonthlyPracticePlanCard } from "./CurrentMonthlyPracticePlanCard"; // 【追加】現在公開中の月別練習計画を表示するカードComponent
+import { MonthlyPracticePlanUploadForm } from "./MonthlyPracticePlanUploadForm"; // 【追加】月別練習計画PDFのアップロードフォームComponent
+import { MonthlyPracticePlanList } from "./MonthlyPracticePlanList"; // 【追加】月別練習計画PDFの一覧Component
+import { requireWebsiteAdmin } from "@/lib/auth/admin"; // 【追加】HP管理者かを確認する関数(未ログインはログイン画面へ、非管理者は404)
 
+/**
+ * 【追加】月別練習計画の管理ページが受け取るPropsの型。
+ * searchParamsは、保存結果の表示(saved・error)と、トースト再生成用IDを持つ。
+ */
 type AdminMonthlyPracticePlansPageProps = {
-  searchParams: Promise<{
+  searchParams: Promise<{ // 【追加】URLのクエリを非同期で受け取るPromise型
     saved?: string;
     error?: string;
     toastId?: string;
   }>;
 };
 
+/**
+ * 【追加】月別練習計画PDFの管理ページを表示するページ関数。
+ * 引数は、URLのクエリを持つPropsで、戻り値は画面のJSX。
+ * 一覧を取得する前に、ページ単体でHP管理者かを確認する。
+ */
 export default async function AdminMonthlyPracticePlansPage({
   searchParams,
 }: AdminMonthlyPracticePlansPageProps) {
-  const params = await searchParams;
+  await requireWebsiteAdmin(); // 【追加】データ取得より先にHP管理者かを確認する関数(失敗時は例外で中断)
 
-const [latestPublishedPlans, plans] = await Promise.all([
-  findLatestPublishedMonthlyPracticePlans(2),
-  findAdminMonthlyPracticePlans(),
+  const params = await searchParams; // 【追加】Promise型のクエリを解決して取り出す
+
+const [latestPublishedPlans, plans] = await Promise.all([ // 【追加】2件の取得を並行して待つ標準関数
+  findLatestPublishedMonthlyPracticePlans(2), // 【追加】公開中の最新2件を取得する関数
+  findAdminMonthlyPracticePlans(), // 【追加】管理用の一覧を取得する関数
 ]);
 
   const toastMessage =
@@ -41,7 +53,7 @@ const [latestPublishedPlans, plans] = await Promise.all([
   return (
     <div id="top">
       {toastMessage ? (
-        <ToastMessage
+        <ToastMessage /* 【追加】トースト表示Component */
           key={`${params.saved}-${params.error}-${params.toastId}`}
           message={toastMessage}
           variant={toastVariant}
@@ -61,7 +73,7 @@ const [latestPublishedPlans, plans] = await Promise.all([
 </p>
 
         <div className="mt-5">
-          <Link
+          <Link /* 【追加】Next.jsのページ遷移用リンクComponent */
             href="/explore#top"
             target="_blank"
             rel="noreferrer"
@@ -72,13 +84,13 @@ const [latestPublishedPlans, plans] = await Promise.all([
         </div>
       </div>
 
-      <CurrentMonthlyPracticePlanCard
+      <CurrentMonthlyPracticePlanCard /* 【追加】公開中の計画のカードComponent */
   latestPublishedPlans={latestPublishedPlans}
 />
 
-      <MonthlyPracticePlanUploadForm />
+      <MonthlyPracticePlanUploadForm /* 【追加】PDFアップロードフォームComponent */ />
 
-      <MonthlyPracticePlanList plans={plans} />
+      <MonthlyPracticePlanList plans={plans} /* 【追加】PDF一覧Component */ />
     </div>
   );
 }
