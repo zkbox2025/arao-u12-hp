@@ -377,7 +377,11 @@ export async function applyManage(
 
       return entries;
     },
-    { isolationLevel: "Serializable" }, // 同時実行の競合を防ぐ分離レベル
+    {
+      isolationLevel: "Serializable", // 同時実行の競合を防ぐ分離レベル
+      maxWait: 15_000, // 【追加】本番のpooler経由で接続の確保に時間がかかっても、P2028にしない待ち時間(ミリ秒)
+      timeout: 30_000, // 【追加】トランザクション全体の制限時間(既定5秒では足りない場合がある。ミリ秒)
+    },
   );
 }
 
