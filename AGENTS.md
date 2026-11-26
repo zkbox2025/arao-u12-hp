@@ -23,6 +23,7 @@
 - 本番DB・Auth・Storageへの書き込み、migration適用、実メール・LINE送信、deploy、外部設定やプランの変更、release tagは、操作ごとの明示承認を得るまで実行しない。過去のローカル操作の許可を本番操作へ流用しない。
 - 本番操作の承認前に、対象環境、変更内容、バックアップ・復元確認、書き込みや実送信をしないdry-runの結果、戻し方をレビューできる形で示す。
 - F13では、既存HPの WEBSITE_ADMIN_USER_IDS を維持し、DB方式のHP管理認可へ切り替えない。ローカルseedと本番初期化を分け、本番Authの user.id・emailとの一致を確認してから初期化する。初期化は再実行可能にし、意図しない既存データ変更を拒否する。ARAOは公開前 STARTER、公開時 STANDARD とする運用を維持する。詳細はF13の仕様・粒度別計画・運用書に従う。
+- 【例外】HP管理認可のDB化は、F13の範囲外の別粒度として、操作ごとの承認のうえ実施する。範囲はDB化に必要な分に限り、F13の上記方針（WEBSITE_ADMIN_USER_IDSの維持）は、DB化が承認・実施されるまで残す。詳細は docs/implementation/phases/website-admin-db-plan.md に従う。
 5. コードの書き方
 - 1行に複数の型プロパティや処理を詰め込まない。import、型定義、オブジェクト、引数、複合条件は読みやすく改行し、1行100文字を目安にする。既存のPrettier・ESLint設定を優先する。
 - ソース・テストの先頭に、構文上安全な位置でリポジトリ相対パスを記す（例：`// src/infrastructure/prisma/repositories/club-invitation-repository.ts`）。shebangなど、先頭が必須の記述は動かさない。
