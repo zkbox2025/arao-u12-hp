@@ -4162,3 +4162,162 @@ Claudeは本番へ接続していない。値（ドメイン）は、既存の�
 - **M02 の完了（承認H 条件1）：** A（未ログイン）、B（会員でない人）、C（MEMBER ACTIVE、SUSPENDED、WITHDRAWN）が、本番で完了。**本番で確認した範囲は、画面の閲覧のみ。** 保存Actionの直接の再送は、本番では行っていない（ローカルE2Eで確認、§19.36）。COACH・OFFICERの本番での確認は、していない。
 - **残る不具合（権限ではない）：** MEMBERが管理者のURLで拒否されたとき、ヘッダーのリンクと戻るボタンが、`admin/events` へ移動する（§19.71.1）。別の粒度で扱う。
 - **本番に残るテストデータ：** テスト用MEMBERの `AppUser`、Authユーザー、`ClubMembership`（WITHDRAWN）、`ClubInvitation`（受諾済み）、準備中の `ClubInvitation` 1行（2026-11-26 10:42 JST に失効）。削除は、別の承認（削除は、テストデータに限る）。
+
+## 19.72 テスト用MEMBERの最終状態の確認（Table Editor、読取りのみ。利用者の報告、2026-11-25）
+
+- **確認日時：** 2026-11-25 12:28。**確認者：** 右田和也（利用者）。**方法：** Supabase の Table Editor の閲覧のみ（SQL・書込みなし）。
+- **報告：** `ClubMembership` の、テスト用MEMBERの行の `status` が `WITHDRAWN`。
+- **§19.71.3・§19.71.4 の「DBでの最終状態の確認は、未実施」への対応：** 最終状態（`WITHDRAWN`）は、本確認で、DBの画面で確認された。途中の状態（`SUSPENDED`）のDB上の確認は、行っていない（画面の拒否で確認、§19.71.3）。
+- **確認していないこと：** `ClubMembership` の他の列（`canManageWebsite`、`role`、更新時刻）、他のテーブル。
+
+## 19.73 P0（HP管理画面の各ページ単位の認可）のマージとデプロイ（利用者の報告、2026-11-25）
+
+- **報告：** ブランチ `fix/website-admin-page-guard` の、コミット・プッシュ・マージ・デプロイが完了した（利用者が実施）。
+- **内容（Claude が作成。コミットの対象）：** `app/admin/(dashboard)` の14ページが、最初の `await` で `requireWebsiteAdmin()` を呼ぶ。テスト2件（`tests/website-admin-authorization.test.ts`：認可関数の6ケース、`tests/website-admin-page-guard.test.ts`：全ページ・全Actionの認可の存在の構造検査）と、計画文書（`docs/implementation/phases/website-admin-db-plan.md`）を追加。
+- **ローカルでの確認（Claude、マージ前）：** 新しい2つのテスト 33件成功。`tsc --noEmit` エラー0。変更範囲のESLint エラー0。全体のユニットテスト 4,598件成功（DB統合の4ファイルは、`DATABASE_URL` 未設定のため失敗。変更とは無関係）。
+- **確認できていないこと（未確認）：**
+  - マージのコミット番号、PR番号、デプロイの時刻、デプロイされたコミットが、マージ後のものと一致すること（§19.64 と同じ照合は、未実施）。
+  - デプロイ後の本番で、HP管理者が、HP管理の画面を、従来どおり開けること。非管理者・未ログインが拒否されること（本番の画面確認は、別の承認）。
+  - `next build` と、E2E（`verify:mvp`）は、未実行。
+  - レイアウトを迂回してページのデータへ到達できるか（P0 の前の状態での悪用可能性）は、試験していない（推定のまま）。
+
+## 19.74 HP管理者の一覧とAuth・AppUserの照合（本番の読取りのみ。利用者が実施・報告、2026-11-25）
+
+### 19.74.1 承認と範囲
+
+- **承認日時：** 2026-11-25 14:43。**実施時刻（報告）：** 14:43（承認と同じ分）。**承認者・実施者：** 右田和也。
+- **範囲：** 本番DBの読取りのみ（`auth.users`、`AppUser`、`PlatformAdmin`、`ClubMembership`、`Club` の ARAO の ID）。接続は Session pooler（ポート 5432）。出力は、真偽値・件数・役割・状態・日付のみ（ID・メール・名前は出さない）。書込み、migration、Auth・Storage の変更、メール・LINE の送信は、なし。
+- **手順：** `docs/implementation/phases/website-admin-db-plan.md` 付録A（A.2）。接続の準備（手順1〜3）を含む。
+
+### 19.74.2 接続の確認（報告）
+
+- ref長 20、直接接続の形式「はい」。ポート 5432、poolerを含む「はい」、ユーザー長 29。`psql` 18.6。`select current_user = 'postgres'` が `t`。
+- 照合のSQLの先頭で、`default_transaction_read_only` が `on`（`SET`）。SQLは、エラーなく完了した。
+- 解除後の `env | grep -c` が `0`。
+
+### 19.74.3 管理者の一覧の入力元（重要）
+
+- **入力した値の出どころ：** `.env.prod` の `WEBSITE_ADMIN_USER_IDS`。Vercel の本番の値は、Secret 形式で、保存後に再表示できないため、コピーできなかった。
+- **したがって、今回の照合は、「`.env.prod` の一覧」と DB との一致の確認。Vercel の本番の値と一致することは、確認していない（未確認）。**
+- 入力は `read -rs`（画面に出さない）。エントリ数は 5。Claude は、`.env.prod` を読んでいない。
+
+### 19.74.4 結果（報告された真偽値・件数）
+
+| 項目 | 値 |
+| --- | --- |
+| Authのユーザー | 7 |
+| AppUser | 5 |
+| PlatformAdmin | 1 |
+| ClubMembership | 2 |
+| 一覧のエントリ | 5 |
+| AppUserでAuthにいない行 | 0 |
+| PlatformAdminでAuthにいない行 | 0 |
+| AppUserのメールの重複 | 0 |
+
+**一覧の5人（`list_no`。全員、Authにいて、メール確認済み）：**
+
+| list_no | AppUser | AppUserとAuthのメール一致 | PlatformAdmin | ARAOの所属 |
+| --- | --- | --- | --- | --- |
+| 1 | あり | 一致 | なし | **なし** |
+| 2 | あり | 一致 | なし | **なし** |
+| 3 | **なし** | （該当なし） | **あり** | **なし** |
+| 4 | あり | 一致 | なし | **なし** |
+| 5 | あり | 一致 | なし | OWNER・ACTIVE・`canManageWebsite` 真 |
+
+**Authの全員（作成日順の7人）：**
+- 一覧にいる人は5人（全員、確認済み）。一覧にいない2人は、(a) 2026-11-19 作成・確認済み・AppUserなし・所属なし、(b) 2026-11-25 作成・確認済み・AppUserあり・所属あり（テスト用MEMBERと、日付・状態が整合）。
+- 所属を持つのは2人（OWNERと、テスト用MEMBER）。
+
+### 19.74.5 読み取れること（確認済み）と、読み取れないこと（未確認）
+
+- **確認済み（`.env.prod` の一覧に対して）：**
+  1. 一覧の5人は、すべてAuthにいる（確認済み）。
+  2. 一覧のうち、OWNER以外の4人には、`canManageWebsite` が真のARAOの所属がない。**このまま DB方式（`db`）へ切り替えると、この4人はHP管理に入れない。** 事前整備（所属の作成、1人はAppUserの作成）が必要。
+  3. 一覧のうち、PlatformAdminの1人は、AppUserがない。
+  4. 一覧にいない人で、ARAOの `canManageWebsite` が真の人はいない（所属を持つのは、OWNERとテスト用MEMBERのみ。テスト用MEMBERは `WITHDRAWN`）。
+  5. 「Authにいて、AppUserがない」人が、実際に存在する（一覧の1人と、一覧にいない1人）。招待の課題（§19.69）の対象になる。
+- **未確認：**
+  1. Vercel の本番の `WEBSITE_ADMIN_USER_IDS` が、今回の一覧と同じか（上記）。
+  2. `list_no` の各人が、どの人か（`list_no` は入力順。実施者のみが対応を知る）。
+  3. 一覧にいない2人のうち、2026-11-19 作成の1人が、誰のアカウントか（確認していない。個人の特定はしない）。
+  4. 一覧のOWNER（`list_no` 5）が、§19.59 の OWNER と同一人物か（結果は整合するが、ID照合はしていない）。
+  5. `ClubMembership` が2件である点と、本番の他のクラブ・他の所属は、この読取りの範囲外。
+- **本番の変更：** なし（読取りのみ）。
+
+## 19.75 利用者の決定（HP管理権限のDB化・招待の課題。2026-11-25、記録のみ）
+
+- **決定（HP管理権限のDB化、`website-admin-db-plan.md` §6）：** (1) F13 の既存方針を残し、AGENTS.md に、DB化を別粒度（承認のうえ実施）とする例外を明記する。(2) 段階1は今すぐ着手（規則更新・事前整備・実装・ローカル試験）。本番データの整備、デプロイ、認可モードの切替は、対象と手順を確認したうえで、それぞれ別に実施する。(3) 旧一覧の削除は、`db` への切替後 7日間を目安に、3条件（問題なし、取消し後の拒否の確認、戻し手順の確認）を満たしてから。(4) 付与・取消しは、当面スクリプトのみ。(5) 案A（ACTIVE かつ `canManageWebsite`）。STARTER でも、HP管理者を追加・取消しできる手段を、アプリの招待に依存せず確保する。
+- **決定（招待の課題）：** HP管理のDB化とは別の実装単位で、既存のAuth IDに紐づけて招待・受諾できるようにする。設計は `docs/implementation/phases/invitation-existing-auth-plan.md`。検索方法は `auth.users` の読取り。実装は、検索関数1つと準備の分岐のみ。
+- **状態（2026-11-25〜26、Claude の作業。いずれも、未コミット・未デプロイ・本番への変更なし）：** AGENTS.md の例外の追記、計画文書の更新、招待の修正の実装（`club-invitation-repository.ts`、`send-club-invitation.ts`）、ユニットテスト（151件成功）、ローカルDBの統合試験（招待まわり6ファイル、順に実行して206件成功）。
+- **注意：** DB統合試験を、ファイルを並列に実行すると、共有DBの競合で失敗する（変更前にも1件の失敗を確認）。順に実行する（`--no-file-parallelism`）。
+- **未実施（それぞれ別の承認）：** DBの事前整備（所属・AppUserの作成）、招待の修正のデプロイと実招待、認可モードの切替、旧一覧の削除、Auth の2026-11-19 作成のユーザーの扱い。
+
+## 19.76 DB事前整備（HP管理者3人の所属）の承認I-1：バックアップとdry-run（2026-11-26、利用者の報告）
+
+- **承認：** 承認I-1（本番の読取りのみ）、承認日時・実施日時 2026-11-26 9:09。範囲：バックアップ（`pg_dump`）、件数の記録、`scripts/prepare-website-admins.ts` の dry-run。書込み・送信は含まない。
+- **対象：** 本番DB（Session pooler、ポート5432）、本番Authの照会（読取りのみ）。対象の人物は、一覧の1・2・4番の3人（COACH）。
+- **結果（利用者の貼付による）：**
+
+| 項目 | 結果 |
+| --- | --- |
+| 接続の確認 | ref長 20、直接接続の形式、pooler形式OK、ポート5432、ユーザー長 29、`current_user = 'postgres'` が真 |
+| バックアップ | `pg_dump` 終了コード 0。`AppUser` と `ClubMembership` のデータのみ。権限600。保管先は利用者の端末（内容・パスは記録しない） |
+| 件数（書込み前） | `AppUser` 5、`ClubMembership` 2（§19.74 と一致） |
+| dry-run（1回目） | 失敗（`P1011`：TLS接続）。原因は、Claude が案内した `DATABASE_URL` に `sslmode` がなかったこと |
+| dry-run（2回目） | 失敗（`P1011`）。`sslmode=require` は、現行の `pg` で証明書の検証つきとして扱われ、検証に失敗したと推定（切り分けは、未確認） |
+| dry-run（3回目） | 成功、終了コード 0。URLに `uselibpqcompat=true&sslmode=require`（暗号化あり・サーバー証明書の検証なし。これまでの `psql` の `PGSSLMODE=require` と同じ強度）。接続先の指紋を表示（この手順書には書かない）。メンバー1〜3 がすべて `CREATE`、`CONFLICT` なし。「DBへは何も書き込んでいません」 |
+| 解除 | 環境変数の残りは 0 |
+
+- **スクリプトの変更（Claude）：** 汎用エラー時に、原因の種別（名前・コードのみ。メッセージ・接続先・入力値は出さない）を表示する `describeErrorKind` を追加した。
+- **入力ファイル：** 利用者の端末の `~/f13-input/website-admins.json`（リポジトリ外、権限600、3人分）。手順の途中で、メールアドレスが、画面とチャットへ出た（個人情報。ここには記録しない）。
+- **本番の変更：** なし（読取りのみ。失敗した2回も、接続の段階で停止）。
+- **未実施：** 承認I-2（`--apply`、`ClubMembership` 3行の作成）、承認I-3（付録Aの再実施）。
+- **未確認：** 2回目の失敗が、証明書の検証であること。サーバー証明書を検証する接続（Supabase の CA 証明書）は、未検討。
+
+## 19.77 DB事前整備（HP管理者3人の所属）の実施：承認I-2・I-3（2026-11-26、利用者の報告）
+
+- **承認：** 承認I-2（`ClubMembership` 3行の作成）と承認I-3（書込み後の件数の確認、読取りのみ）。承認日時・実施日時 2026-11-26 9:37。
+- **対象：** 本番DB（Session pooler、ポート5432）。書込みは `ClubMembership` のみ。
+- **結果（利用者の貼付による）：**
+
+| 項目 | 結果 |
+| --- | --- |
+| `--apply` 1回目 | 失敗（`P1011`：TLS接続）。`DATABASE_URL` に `uselibpqcompat=true&sslmode=require` が付かない形で実行されたため（古い手順6の形）。接続の段階で停止し、DBへの書込みなし |
+| `--apply` 2回目 | 成功、終了コード 0。モード `apply` / 環境 `production`。接続先の指紋は一致（値は書かない）。メンバー1〜3 がすべて `CREATE` |
+| 件数（書込み後） | `AppUser` 5（変化なし）、`ClubMembership` 5（2→5）、`ClubMembership` の ACTIVE かつ `canManageWebsite` 真が 4（OWNER 1 + 新規 3） |
+| 解除 | 環境変数の残りは 0 |
+
+- **本番の変更：** `ClubMembership` を3行作成（クラブ `arao-u12`、役割 COACH、状態 ACTIVE、`canManageWebsite` 真）。`AppUser`、Auth、`PlatformAdmin`、環境変数、既存のOWNERの所属、一覧の3番は、変更していない。
+- **接続の方法（記録）：** Prisma（`pg`）の接続には、`uselibpqcompat=true&sslmode=require` が必要。単純な `sslmode=require` は、証明書の検証で失敗する（`P1011`）。暗号化はあり、サーバー証明書の検証はない（`psql` の `PGSSLMODE=require` と同じ強度）。
+- **確認できていない点：**
+  1. 作成した3行が、意図した3人（一覧1・2・4番）の行であること（件数と dry-run の `CREATE` から整合するが、行の内容は、付録A の再実施で確認する）。
+  2. 3人の COACH としての、アプリの初回表示、通知の対象、COACH の管理画面の見え方。
+  3. 入力ファイルの削除（利用者の端末。実施は、未報告）。
+- **次の作業（それぞれ別の承認）：** 付録A の再実施（所属3行の内容の確認）、認可モードの実装（`env` / `union` / `db`）、本番での切替、一覧の3番の除外、旧一覧の削除。
+
+## 19.78 DB事前整備の書込み後の照合（付録Aの再実施。承認I-4。2026-11-26、利用者の報告）
+
+- **承認：** 承認I-4（本番の読取りのみ）、承認日時・実施日時 2026-11-26 9:45。付録A.2のSQL（`SELECT` のみ、`default_transaction_read_only = on`）。
+- **結果（利用者の貼付による。ID・メール・名前は出ていない）：**
+
+| 項目 | 結果 |
+| --- | --- |
+| 件数 | Auth 7、`AppUser` 5、`PlatformAdmin` 1、`ClubMembership` 5、一覧のエントリ数 5 |
+| 一覧1番 | Auth・`AppUser`・メール一致が真。PlatformAdminでない。COACH、ACTIVE、`canManageWebsite` 真 |
+| 一覧2番 | 同上（COACH、ACTIVE、真） |
+| 一覧3番 | Auth あり（確認済み）、`AppUser` なし、PlatformAdmin。所属なし（決定B：HP管理者から外す対象。この作業では変更していない） |
+| 一覧4番 | 一覧1番と同じ（COACH、ACTIVE、真） |
+| 一覧5番 | OWNER、ACTIVE、`canManageWebsite` 真（変化なし） |
+| Authの全員（7人） | 所属ありは5人（一覧の1・2・4・5番と、テスト用のMEMBER）。一覧にいない2人のうち、2026-11-19作成の1人は、`AppUser`・所属なし（変化なし） |
+| 孤立・重複 | `app_users_without_auth` 0、`platform_admins_without_auth` 0、`app_user_email_duplicates` 0 |
+| 解除 | 環境変数の残りは 0 |
+
+- **確認できたこと：** §19.77 で作成した3行は、一覧1・2・4番の3人の行で、COACH・ACTIVE・`canManageWebsite` 真。OWNER の所属は変化なし。一覧3番と、2026-11-19作成のユーザーは、変更されていない。
+- **本番の変更：** なし（読取りのみ）。
+- **コードの確認（Claude、ローカルの読取りのみ。本番へは接続していない）：**
+  - COACH は、会員向け画面と、管理画面のお知らせ・予定（`requireClubAppAdminAccess`）を使える。会員管理・招待・LINE設定は OWNER のみ（`requireClubAppOwnerAccess`）。アカウント画面の管理メニューは、COACH に表示される。
+  - どちらも、クラブのプランが STANDARD であることが条件（`CLUB_APP`）。
+  - お知らせ・予定は、公開対象のロール（`targetRoles`）に、現在のロールが含まれるものだけが表示される。
+  - LINE の通知は、個人ではなく、LINE グループごとの対象ロール設定。所属の作成だけで、個別の通知の設定は変わらない。メール通知は、招待メールのみ。
+  - HP管理（`/admin`）は、認可モードの実装・切替までは、環境変数の一覧が根拠（`canManageWebsite` は、まだ効かない）。
+- **未確認：** ARAO の本番のプラン（STANDARD か）。3人のログイン可否（パスワードの状態）。COACH 向けのお知らせ・予定の設定。COACH の実機での表示（本番のログインは Auth の書込みのため、別の承認）。入力ファイルの削除（利用者の端末）。
