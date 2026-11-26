@@ -229,6 +229,19 @@ const envSchema =
       WEBSITE_ADMIN_USER_IDS:
         websiteAdminUserIdsSchema,
 
+      // 【追加】HP管理者の認可方式(未設定はenv)と、DB方式で使う対象クラブ
+      WEBSITE_ADMIN_AUTH_MODE:
+        z
+          .enum(["env", "union", "db"])
+          .optional(),
+
+      WEBSITE_ADMIN_CLUB_SLUG:
+        z
+          .string()
+          .trim()
+          .min(1)
+          .optional(),
+
       // セキュリティ
       FORM_LOG_HASH_SALT:
         z
