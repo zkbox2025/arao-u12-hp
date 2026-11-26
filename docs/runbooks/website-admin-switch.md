@@ -152,3 +152,9 @@
 - 2026-11-26 に、認可層の統合試験を追加した（`tests/website-admin-authorization.integration.test.ts`）。使い捨てのローカルDBと実物のDB確認を使い、ブラウザ・Next本体・実Authのクッキーは使わない。
 - 実ブラウザのE2Eは、F12のE2E基盤（専用checkout・本番ビルド・ローカルSupabase・必須suiteの一覧と件数の照合）の拡張が要る。拡張の内容：E2Eのサーバーに `WEBSITE_ADMIN_AUTH_MODE`・`WEBSITE_ADMIN_CLUB_SLUG` を渡す、fixtureに `canManageWebsite` の所属を足す、`/admin/login` のログイン入口を足す、新しいspecを必須suiteの一覧に登録する。変更が大きいため、実施するかは、利用者の判断。
 - 実ブラウザのE2Eを行わない場合の代替：切替日の S2・S3（本番での実ログインと、拒否の確認）を、ブラウザでの確認とする。
+
+## 9. 実施の記録（2026-11-26）
+
+- 切替日（R1・S1〜S4）は、2026-11-26 に実施し、すべて合格した（運用書 §19.82〜§19.84）。`db` 方式で稼働中。
+- 観察期間：2026-11-26 から7日間を目安（最短 2026-12-03）。§5 の3条件を満たしてから、旧一覧を削除する。
+- 実施中の差分：(1) `WEBSITE_ADMIN_USER_IDS` は Production と Preview にまたがる1変数のため、更新が Preview にも及んだ（権限を減らす方向）。(2) `union` の確認は、表示のみ（更新は行っていない）。
