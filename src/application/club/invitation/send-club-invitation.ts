@@ -19,6 +19,7 @@ import type {
 } from "@/lib/mail/club-invitation-mail";
 import {
   claimClubInvitationResend,//すでに過去に一度送信した（または送信エラーなどで眠っている）招待状データに対して、オーナーが再送信ボタンを押した際に、招待状データのステータスを準備中に変更する関数
+  findClubInvitationAuthUserByEmail,//【追加】Authに登録済みのユーザーを、メールの完全一致で探すRepository関数(読取りのみ)
   completeClubInvitationPreparation,//オーナーがクラブ招待の処理権(クレーム)を保持している状態で、招待メール送信の準備を完了させる関数
   markClubInvitationEmailFailed,//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、サーバーからRESENDへのメール送信依頼の失敗をDBに記録する関数
   markClubInvitationEmailSent,//クラブ招待の処理権(クレーム:5分間の招待中)を保持している状態から、サーバーからRESENDへのメール送信依頼の完了をDBに記録する関数
@@ -304,12 +305,17 @@ async function prepareAndSend(
     }
 
     // AppUserの有無だけで初回設定済みと判断せず、実際のAuth確認状態を使う。
+    // 【修正】既知のIDがなくても、Authに同じメールの人がいれば、その既存のIDを使う(Authは作り直さない)。
+    const found = knownAuthUserId
+      ? null
+      : await findClubInvitationAuthUserByEmail(invitation.email); // 【追加】メールでAuthの既存ユーザーを探す関数
     const existing = knownAuthUserId
       ? await getClubInvitationAuthUserById({// 既知のAuth IDをAuthで照合し、アカウントの有無と本人確認をする関数。
           authUserId: knownAuthUserId,
           email: invitation.email,
         })
-      : null;
+      : found; // 【修正】既知のIDがない場合は、メールで見つけた既存ユーザーを使う
+    const expectedAuthUserId = knownAuthUserId ?? found?.id; // 【追加】生成するリンクが指すべきAuthのID(なければ新規)
 
     if (
       knownAuthUserId &&//ユーザーIDはあるが
@@ -332,9 +338,9 @@ async function prepareAndSend(
         await generateClubInvitationAuthLink({// 招待メールのURLリンクだけを生成し、メール配送はResend側へ委ねる。
           email: invitation.email,
           redirectTo: attempt.links.authRedirectTo,
-          ...(knownAuthUserId//ユーザーIDがあるなら
+          ...(expectedAuthUserId//【修正】既知のID、またはメールで見つけたIDがあるなら
             ? {
-                expectedAuthUserId: knownAuthUserId,
+                expectedAuthUserId,
               }
             : {}),
         });

@@ -1156,6 +1156,59 @@ async function matchesAuthUser(
   );
 }
 
+/**
+ * 【追加】Authに登録済みのユーザーを、正規化したメールの完全一致で1件探す関数(読取りのみ)。
+ * 引数は招待先のメール。戻り値は、見つからなければnull、あればID・メール・確認済みか。
+ * 同じメールが複数件ある場合や、読取りに失敗した場合は、固定メッセージのDomainErrorにする。
+ */
+export async function findClubInvitationAuthUserByEmail(
+  rawEmail: string,
+): Promise<{
+  id: string;
+  email: string;
+  isEmailConfirmed: boolean;
+} | null> {
+  const email = normalizeEmail(rawEmail); // 【追加】メールを正規化する関数
+
+  try {
+    const rows = await prisma.$queryRaw< // 【追加】auth.usersを読取りのみで検索するPrismaの生SQL関数
+      {
+        id: string;
+        email: string | null;
+        confirmed: boolean;
+      }[] // 【追加】検索結果の行の型
+    >`SELECT id::text AS id, email, (email_confirmed_at IS NOT NULL) AS confirmed
+      FROM auth.users
+      WHERE lower(email) = ${email}
+      LIMIT 2`;
+
+    if (rows.length === 0) {
+      return null; // 【追加】Authに登録がない
+    }
+
+    const [row] = rows;
+
+    if (
+      rows.length !== 1 || // 【追加】同じメールが複数件ある
+      !row.email ||
+      normalizeEmail(row.email) !== email // 【追加】メールを正規化する関数
+    ) {
+      throw new Error("Auth user lookup mismatch");
+    }
+
+    return {
+      id: row.id,
+      email,
+      isEmailConfirmed: row.confirmed,
+    };
+  } catch {
+    throw new DomainError( // 【追加】画面表示可能なエラーを作るクラス
+      "EXTERNAL_SERVICE",
+      "招待対象の認証ユーザーを確認できませんでした。",
+    );
+  }
+}
+
 //DBのクラブ招待テーブルの認証済みユーザーIDを更新する関数
 export async function recordClubInvitationAuthUser(
   input:

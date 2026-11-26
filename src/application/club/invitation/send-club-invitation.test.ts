@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   markFailed: vi.fn(),
   release: vi.fn(),
   getAuth: vi.fn(),
+  findByEmail: vi.fn(),
   generateLink: vi.fn(),
   sendEmail: vi.fn(),
   createToken: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock(
     markClubInvitationEmailSent: mocks.markSent,
     markClubInvitationEmailFailed: mocks.markFailed,
     releaseClubInvitationClaim: mocks.release,
+    findClubInvitationAuthUserByEmail: mocks.findByEmail,
   }),
 );
 vi.mock(
@@ -285,6 +287,7 @@ beforeEach(() => {
       outcome: "UPDATED",
     };
   });
+  mocks.findByEmail.mockResolvedValue(null);
   mocks.getAuth.mockResolvedValue({
     id: USER_ID,
     email: "member@example.test",
@@ -438,6 +441,88 @@ describe("inviteClubMember / resendClubInvitation", () => {
     expect(mocks.sendEmail.mock.calls[0][0].kind).toBe(
       "NEW_USER",
     );
+  });
+
+  it("Authに確認済みで登録済み・AppUserなしの人は、既存のAuth IDで招待URLだけを送る", async () => {
+    mocks.findByEmail.mockResolvedValue({
+      id: USER_ID,
+      email: "member@example.test",
+      isEmailConfirmed: true,
+    });
+
+    expect((await invite()).outcome).toBe("SENT");
+    expect(mocks.findByEmail).toHaveBeenCalledWith(
+      "member@example.test",
+    );
+    expect(mocks.generateLink).not.toHaveBeenCalled();
+    expect(mocks.recordAuth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        verifiedAuthUser: expect.objectContaining({
+          id: USER_ID,
+        }),
+      }),
+    );
+    expect(mocks.sendEmail.mock.calls[0][0].kind).toBe(
+      "EXISTING_USER",
+    );
+  });
+
+  it("Authに未確認で登録済み・AppUserなしの人は、同じAuth IDで認証リンクを再生成する", async () => {
+    mocks.findByEmail.mockResolvedValue({
+      id: USER_ID,
+      email: "member@example.test",
+      isEmailConfirmed: false,
+    });
+
+    expect((await invite()).outcome).toBe("SENT");
+    expect(mocks.generateLink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedAuthUserId: USER_ID,
+      }),
+    );
+    expect(mocks.sendEmail.mock.calls[0][0].kind).toBe(
+      "NEW_USER",
+    );
+  });
+
+  it("Authに登録がない人は、従来どおり、IDを指定せずに認証リンクを作る", async () => {
+    expect((await invite()).outcome).toBe("SENT");
+    expect(mocks.findByEmail).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.generateLink.mock.calls[0][0],
+    ).not.toHaveProperty("expectedAuthUserId");
+  });
+
+  it("既知のAuth IDがある招待では、メール検索をしない", async () => {
+    mocks.reserve.mockImplementationOnce(async () => {
+      saved = processing({ existingUserId: USER_ID });
+
+      return {
+        outcome: "RESERVED",
+        invitation: { ...saved },
+      };
+    });
+
+    expect((await invite()).outcome).toBe("SENT");
+    expect(mocks.findByEmail).not.toHaveBeenCalled();
+  });
+
+  it("Authの検索に失敗したら、何も作らず、手動対応で止める", async () => {
+    mocks.findByEmail.mockRejectedValue(
+      new Error(PRIVATE_ERROR),
+    );
+
+    const result = await invite();
+
+    expect(result).toMatchObject({
+      outcome: "PREPARATION_FAILED",
+      stage: "AUTH",
+      recovery: "MANUAL",
+    });
+    expect(mocks.generateLink).not.toHaveBeenCalled();
+    expect(mocks.recordAuth).not.toHaveBeenCalled();
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expectSafeResult(result);
   });
 
   it("再送は同じ招待ID・現在のroleを使い、tokenと試行番号を変える", async () => {
