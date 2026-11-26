@@ -45,8 +45,9 @@ import {
 
 //招待承諾のルール違反のメッセージの型
 const UNAVAILABLE_MESSAGES: Record<ClubInvitationAcceptanceViolation, string> = {//クラブ招待承諾処理のルール違反一覧を読み取る
+  //【修正】別のアカウントでログイン中の場合も同じ表示になる(招待の存在を漏らさないため)。次の行動を案内する
   INVALID_INVITATION:
-    "招待を確認できません。招待メールのリンクから開き直してください。",
+    "招待を確認できません。招待されたアカウントでログインしているかを確認し、招待メールのリンクから開き直してください。",
   RECIPIENT_MISMATCH:
     "招待されたアカウントでログインし直してください。",
   INVITATION_EMAIL_MISMATCH:
