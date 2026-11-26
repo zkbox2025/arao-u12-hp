@@ -3,12 +3,12 @@
 
 "use server";
 
-import { isWebsiteAdminUserId } from "@/lib/auth/admin";
+import { isWebsiteAdminUserId } from "@/lib/auth/admin"; // 【追加】認可方式(env/union/db)に従い、HP管理者かを非同期で判定する関数
 import { redirect } from "next/navigation";
-import { createClient } from "@/src/infrastructure/supabase/server";
-import { getRequestMeta } from "@/lib/security/request";
-import { checkLoginRateLimit } from "@/lib/security/login-rate-limit";
-import { saveLoginSubmissionLog } from "@/lib/security/login-submission-log";
+import { createClient } from "@/src/infrastructure/supabase/server"; // 【追加】Supabaseのサーバー用クライアントを作る関数
+import { getRequestMeta } from "@/lib/security/request"; // 【追加】リクエストのIPとUser-Agentを取得する関数
+import { checkLoginRateLimit } from "@/lib/security/login-rate-limit"; // 【追加】ログイン試行の回数制限を判定する関数
+import { saveLoginSubmissionLog } from "@/lib/security/login-submission-log"; // 【追加】ログイン試行の結果を記録する関数
 
 type LoginAdminState = {
   error?: string;
@@ -93,7 +93,7 @@ if (signInError || !signInData.user) {
 }
 
 // 認証には成功したが、HP管理権限がない場合
-if (!isWebsiteAdminUserId(signInData.user.id)) {
+if (!(await isWebsiteAdminUserId(signInData.user.id))) { // 【修正】認可方式に従う非同期の判定
   // 管理者ログインとして作られたセッションを破棄する
   await supabase.auth.signOut();
 
