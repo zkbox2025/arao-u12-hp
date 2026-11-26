@@ -266,7 +266,7 @@ describe.each([
   });
 
   it.each([
-    ["INVALID_INVITATION", "招待を確認できません"],
+    ["INVALID_INVITATION", "招待されたアカウントでログインしているかを確認し"], // 【修正】案Bの新しい固定文
     ["RECIPIENT_MISMATCH", "招待されたアカウント"],
     ["INVITATION_EMAIL_MISMATCH", "メールアドレスと一致しません"],
     ["INVITATION_ALREADY_ACCEPTED", "承諾済み"],
