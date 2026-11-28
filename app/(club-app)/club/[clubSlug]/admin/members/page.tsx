@@ -5,7 +5,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import {
-  FormErrorAlert,
+  FormErrorAlert,// フォーム全体のエラーをアラートで表示するコンポーネント
 } from "@/app/(club-app)/club/admin/_components/FormErrorAlert";
 
 import {
@@ -35,6 +35,9 @@ import {
   formatClubDateTime,//DBから取得したUTCをタイムゾーン（日本）に合わせて2026年8月19日（水） 18:30のように変換する関数
 } from "@/domain/shared/date-time/club-date-time";
 import {
+  findActiveClubJoinLinkForOwner,//【追加】OWNER向けに、いま使える参加リンクの有無と期限を取得する関数
+} from "@/src/infrastructure/prisma/repositories/club-join-repository";
+import {
   getClubMemberManagement,//有効期限切れのデータを取得してクラブ招待テーブルのステータスをEXPIRED（期限切れ）にした上で、OWNER用メンバーシップ一覧へ表示する最小限のデータを返す。
 } from "@/src/application/club/invitation/get-club-member-management";
 
@@ -44,8 +47,14 @@ import {
 import {
   ClubMemberEditDialog,//メンバーシップ変更のモーダル関数
 } from "./ClubMemberEditDialog";
+import { ClubJoinLinkPanel } from "./ClubJoinLinkPanel";//【追加】参加リンク(URL・QRコード)の発行・無効化のエリア
 import { ClubMemberInviteForm } from "./ClubMemberInviteForm";//クラブ招待フォーム（招待メールを送信するためのフォーム）
 import { ClubInvitationOperations } from "./ClubInvitationOperations";//招待キャンセル（ダイアログつき）と招待再送のボタン操作を一括管理するUIコンポーネント
+import {
+  issueClubJoinLinkAction,//【追加】参加リンクを発行するアクション関数
+  revokeClubJoinLinkAction,//【追加】参加リンクを無効化するアクション関数
+  type ClubJoinLinkActionState,//【追加】参加リンク操作のアクションステイト
+} from "./join-link-actions";
 import {
   cancelClubInvitationAction,//クラブ招待をキャンセルするアクション関数
   inviteClubMemberAction,//クラブメンバー招待アクション関数（本丸）
@@ -106,6 +115,21 @@ export default async function ClubMembersPage({
       </section>
     );
   }
+
+  // 【追加】参加リンクの有無と期限。OWNERの再確認は、Repositoryでも行う。
+  const joinLink =
+    await findActiveClubJoinLinkForOwner({//【追加】いま使える参加リンクを取得する関数
+      clubId: access.club.id,
+      actorMembershipId: access.membership.id,
+    });
+
+  if (joinLink.outcome === "ACTOR_NOT_ACTIVE_OWNER") {
+    notFound();
+  }
+
+  const joinLinkInitialState: ClubJoinLinkActionState = createInitialActionState({});//【追加】参加リンク操作の初期状態
+  const issueJoinLinkAction = issueClubJoinLinkAction.bind(null, access.club.slug);//【追加】クラブを束縛した発行アクション
+  const revokeJoinLinkAction = revokeClubJoinLinkAction.bind(null, access.club.slug);//【追加】クラブを束縛した無効化アクション
 
   const members = management.memberships;
   const invitations = management.invitations;
@@ -175,6 +199,34 @@ export default async function ClubMembersPage({
           {toastMessage}
         </p>
       ) : null}
+
+      <section
+        aria-labelledby="member-join-link-heading"
+        className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+      >
+        <h2
+          id="member-join-link-heading"
+          className="mb-5 text-xl font-bold text-slate-900"
+        >
+          参加リンク(URL・QRコード)
+        </h2>
+        <ClubJoinLinkPanel
+          activeLink={
+            joinLink.link
+              ? {
+                  expiresAtLabel: formatClubDateTime(//日時をクラブのタイムゾーンの表示にする関数
+                    joinLink.link.expiresAt,
+                    access.club.timezone,
+                  ),
+                }
+              : null
+          }
+          issueInitialState={joinLinkInitialState}
+          revokeInitialState={joinLinkInitialState}
+          issueAction={issueJoinLinkAction}
+          revokeAction={revokeJoinLinkAction}
+        />
+      </section>
 
       <section
         aria-labelledby="member-invite-heading"
