@@ -129,6 +129,14 @@ export type ListAwaitingClubJoinRequestsResult =
   | { outcome: "LISTED"; requests: AwaitingClubJoinRequest[] } // 一覧を取得できた
   | ActorFailure;
 
+/** OWNER向けに表示する、現在の参加リンクの状態の結果。 */
+export type ActiveClubJoinLinkSummaryResult =
+  | {
+      outcome: "FOUND"; // 取得できた
+      link: { createdAt: Date; expiresAt: Date } | null; // 使えるリンク(なければnull)。生トークンは、保存していない
+    }
+  | ActorFailure;
+
 /**
  * 同時実行の衝突(シリアライズ失敗)のとき、やり直すトランザクション。
  * @param operation トランザクションの中で行う処理。
@@ -225,7 +233,7 @@ function assertUuid(value: string): void {
 }
 
 /**
- * 参加リンクを発行する。既存のクラブの有効なリンクは、同じトランザクションで、無効化する(1クラブに1つ)。
+ * 参加リンクをDBに作成する。既存のクラブの有効なリンクは、同じトランザクションで、無効化する(1クラブに1つ)。
  * 生のトークンは受け取らず、ハッシュだけを保存する。
  * @param input クラブid・OWNERの所属id・トークンのハッシュ(・現在日時)。
  * @returns 発行したリンクのidと有効期限。OWNERでなければ ACTOR_NOT_ACTIVE_OWNER。
@@ -246,7 +254,7 @@ export async function createClubJoinLink(
       data: { revokedAt: now }, // 有効なリンクを、すべて無効化する
     });
 
-    const link = await tx.clubJoinLink.create({ // 参加リンクを1件作るPrismaのメソッド
+    const link = await tx.clubJoinLink.create({ // 参加リンクを1件DBに作るPrismaのメソッド
       data: {
         clubId: input.clubId,
         tokenHash: input.tokenHash,
@@ -261,7 +269,7 @@ export async function createClubJoinLink(
 }
 
 /**
- * クラブの有効な参加リンクを、無効化する。
+ * DB内のクラブの有効な参加リンクを、無効化する。
  * @param input クラブid・OWNERの所属id(・現在日時)。
  * @returns 無効化した件数(有効なリンクがなければ0)。OWNERでなければ ACTOR_NOT_ACTIVE_OWNER。
  */
@@ -598,5 +606,34 @@ export async function listAwaitingClubJoinRequests(
         codeExpiresAt: row.codeExpiresAt as Date, // 承認待ちなら、必ず期限がある(SQL CHECK)
       })),
     };
+  });
+}
+
+/**
+ * OWNER向けに、いま使える参加リンクの有無と期限を取得する。読取りのみ。
+ * 生トークンは保存していないため、URLは返さない(再表示はできない)。
+ * @param input クラブid・OWNERの所属id(・現在日時)。
+ * @returns 使えるリンクの発行日時と期限(なければnull)。OWNERでなければ ACTOR_NOT_ACTIVE_OWNER。
+ */
+export async function findActiveClubJoinLinkForOwner(
+  input: OwnerInput, // OWNERの入力の型
+): Promise<ActiveClubJoinLinkSummaryResult> {
+  const now = resolveNow(input); // 現在日時を決める関数
+
+  return prisma.$transaction(async (tx) => { // 読取りを、同じ時点で行うトランザクション
+    if (!(await isActiveOwner(tx, input))) { // OWNERかを確認する関数
+      return { outcome: "ACTOR_NOT_ACTIVE_OWNER" as const };
+    }
+
+    const link = await tx.clubJoinLink.findFirst({ // 条件に合うリンクを1件探すPrismaのメソッド
+      where: {
+        clubId: input.clubId, // 認可済みのクラブだけに絞る
+        revokedAt: null,//失効がnull
+        expiresAt: { gt: now }, // 期限内のものだけ
+      },
+      select: { createdAt: true, expiresAt: true }, // 返すのは、日時だけ
+    });
+
+    return { outcome: "FOUND" as const, link };
   });
 }

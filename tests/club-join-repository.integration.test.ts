@@ -165,6 +165,50 @@ describeDatabase("参加リンク・申請のRepository", () => { // DB結合テ
       expect(await db.clubJoinLink.count({ where: { clubId: { in: [club.clubId, coach.clubId] } } })).toBe(0);
     });
 
+    it("【追加】OWNERは、使えるリンクの有無と期限だけを取得できる(生トークンは含まない)", async () => { // 一覧表示用の読取り
+      const club = await createClub();
+      const owner = { clubId: club.clubId, actorMembershipId: club.membershipId };
+      expect(await repository.findActiveClubJoinLinkForOwner({ ...owner, now })).toEqual({
+        outcome: "FOUND",
+        link: null,
+      });
+
+      await createLink(club);
+      const found = await repository.findActiveClubJoinLinkForOwner({ ...owner, now });
+      expect(found).toEqual({
+        outcome: "FOUND",
+        link: { createdAt: expect.any(Date), expiresAt: later(30 * DAY) }, // 作成日時はDBの時刻
+      });
+      expect(JSON.stringify(found)).not.toMatch(/[0-9a-f]{64}/u); // ハッシュも返さない
+
+      expect(await repository.findActiveClubJoinLinkForOwner({ ...owner, now: later(30 * DAY) })).toEqual({
+        outcome: "FOUND",
+        link: null,
+      }); // 期限ちょうどは、使えない
+
+      await repository.revokeClubJoinLink({ ...owner, now });
+      expect(await repository.findActiveClubJoinLinkForOwner({ ...owner, now })).toEqual({
+        outcome: "FOUND",
+        link: null,
+      }); // 無効化後は、ない
+    });
+
+    it("【追加】OWNERでない人・他のクラブのOWNERは、リンクの状態を取得できない", async () => { // 認可
+      const club = await createClub();
+      const coach = await createClub("COACH");
+      const other = await createClub();
+      await createLink(club);
+      for (const actor of [
+        { clubId: club.clubId, actorMembershipId: coach.membershipId },
+        { clubId: club.clubId, actorMembershipId: other.membershipId },
+        { clubId: coach.clubId, actorMembershipId: coach.membershipId },
+      ]) {
+        expect(await repository.findActiveClubJoinLinkForOwner({ ...actor, now })).toEqual({
+          outcome: "ACTOR_NOT_ACTIVE_OWNER",
+        });
+      }
+    });
+
     it("トークンのハッシュの形式が不正なら、例外にする", async () => { // 入力の検証
       const club = await createClub();
       await expect(
