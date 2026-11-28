@@ -209,6 +209,10 @@ model Club {
   invitations         ClubInvitation[]
   storageDeletionJobs StorageDeletionJob[]
 
+  //【追加】参加リンク(共有URL)と、参加リンクからの申請
+  joinLinks    ClubJoinLink[]
+  joinRequests ClubJoinRequest[]
+
   lineSetting            ClubLineSetting?
   lineTargets            ClubLineTarget[]
   lineRegistrationTokens ClubLineRegistrationToken[]
@@ -287,6 +291,11 @@ model ClubMembership {
 
   invitation ClubInvitation? @relation("ClubInvitationMembership") //承諾した招メンバー加入招待状のデータ
 
+  //【追加】参加リンクを発行した履歴、申請を承認・却下した履歴、申請の承認で作られた所属
+  createdJoinLinks    ClubJoinLink[]    @relation("ClubJoinLinkCreatedBy")
+  decidedJoinRequests ClubJoinRequest[] @relation("ClubJoinRequestDecidedBy")
+  joinRequest         ClubJoinRequest?  @relation("ClubJoinRequestMembership")
+
   requestedLineDeliveries ClubLineDelivery[] @relation("ClubLineDeliveryRequester")
 
   @@unique([id, clubId])
@@ -363,6 +372,72 @@ model ClubInvitation {
   @@index([clubId, email])
   @@index([expiresAt])
   @@index([acceptedAt])
+}
+
+//【追加】会員が自分で申請するための、参加リンク(共有URL・QRコード)。クラブに有効なリンクは1つだけ
+model ClubJoinLink {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  tokenHash String    @unique //生のトークンは保存しない(SHA-256の小文字16進。SQL CHECKで形式を限定する)
+  expiresAt DateTime //有効期限(発行から30日)
+  revokedAt DateTime? //無効化の日時。nullの行は、クラブにつき1件だけ(部分一意索引。SQLで定義する)
+
+  //発行したOWNERの履歴参照。所属の削除後だけnullを許す。同じクラブの所属であることは、SQLのtriggerで保証する
+  createdByMembershipId String?
+  createdByMembership   ClubMembership? @relation("ClubJoinLinkCreatedBy", fields: [createdByMembershipId], references: [id], onDelete: SetNull)
+
+  requests ClubJoinRequest[]
+
+  @@unique([id, clubId]) //申請から、同じクラブのリンクだけを結べるようにする
+  @@index([clubId, revokedAt, expiresAt])
+  @@index([createdByMembershipId])
+}
+
+//【追加】参加リンクからの申請。パスワードは保存しない(Supabase Authだけが持つ)
+model ClubJoinRequest {
+  id        String   @id @default(uuid())
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  clubId String
+  club   Club   @relation(fields: [clubId], references: [id], onDelete: Cascade)
+
+  linkId String
+  link   ClubJoinLink @relation(fields: [linkId, clubId], references: [id, clubId], onDelete: Cascade)
+
+  authUserId String //作成した(確認前の)Authユーザーのid
+  email      String //正規化済みのメール(SQL CHECKで形式を限定する)
+  name       String //保護者の名前
+
+  status ClubJoinRequestStatus @default(AWAITING_EMAIL_CONFIRMATION)
+
+  confirmationExpiresAt DateTime //メール確認の期限(申請から24時間)
+  emailConfirmedAt      DateTime? //メール確認の日時
+
+  verificationCode String? //6桁の数字。照合用。承認待ちの間だけ。承認待ちの中で、クラブごとに重複しない(部分一意索引)
+  codeIssuedAt     DateTime? //数字を発行した日時
+  codeExpiresAt    DateTime? //数字の期限(発行から7日)
+
+  decidedAt DateTime? //承認・却下の日時
+
+  //承認・却下したOWNERの履歴参照。所属の削除後だけnullを許す
+  decidedByMembershipId String?
+  decidedByMembership   ClubMembership? @relation("ClubJoinRequestDecidedBy", fields: [decidedByMembershipId], references: [id], onDelete: SetNull)
+
+  //承認で作られた所属。所属の削除後は、nullになる
+  membershipId String?         @unique
+  membership   ClubMembership? @relation("ClubJoinRequestMembership", fields: [membershipId], references: [id], onDelete: SetNull)
+
+  @@index([clubId, status, createdAt])
+  @@index([authUserId])
+  @@index([status, confirmationExpiresAt])
+  @@index([status, codeExpiresAt])
+  @@index([linkId])
+  @@index([decidedByMembershipId])
 }
 
 // クラブイベント
@@ -973,6 +1048,15 @@ enum ClubInvitationStatus {
   ACCEPTED//承諾済み
   CANCELLED//キャンセル
   EXPIRED//期限切れ
+}
+
+//【追加】参加リンクからの申請の状態
+enum ClubJoinRequestStatus {
+  AWAITING_EMAIL_CONFIRMATION //メール確認待ち(確認メールのリンクを、まだ押していない)
+  AWAITING_APPROVAL //承認待ち(メール確認済み。数字を発行済み)
+  APPROVED //承認済み(会員になった)
+  REJECTED //却下
+  EXPIRED //期限切れ
 }
 
 enum StorageDeletionSourceType {
