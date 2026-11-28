@@ -21,6 +21,8 @@ export type {
   Child,
   ChildClubMembership,
   ClubInvitation,
+  ClubJoinLink, // 【追加】参加リンクのテーブルの型
+  ClubJoinRequest, // 【追加】参加リンクからの申請のテーブルの型
   ClubEvent,
   ClubEventAttachment,
   ClubEventMemo,
@@ -60,6 +62,7 @@ export type {
   LineDeliveryStatus,
   LineDeliveryContentType,
   ClubInvitationStatus,
+  ClubJoinRequestStatus, // 【追加】申請の状態のenumの型
   SupportReportCategory,
   SupportReportStatus,
   StorageDeletionSourceType,
